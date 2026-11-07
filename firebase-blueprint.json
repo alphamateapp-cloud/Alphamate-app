@@ -1,0 +1,79 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User profile and account information",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uniqueId": { "type": "string", "maxLength": 64 },
+        "username": { "type": "string", "maxLength": 64 },
+        "displayName": { "type": "string", "maxLength": 64 },
+        "email": { "type": "string", "format": "email", "maxLength": 128 },
+        "avatar": { "type": "string", "maxLength": 1024 },
+        "bio": { "type": "string", "maxLength": 512 },
+        "followersCount": { "type": "number" },
+        "followingCount": { "type": "number" },
+        "likesCount": { "type": "number" },
+        "level": { "type": "number" },
+        "xp": { "type": "number" },
+        "nextLevelXp": { "type": "number" },
+        "vipTier": { "type": "number" },
+        "coins": { "type": "number" },
+        "diamonds": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "displayName", "level", "vipTier", "coins", "diamonds"]
+    },
+    "PartyRoom": {
+      "title": "PartyRoom",
+      "description": "Real-time Audio Party Room details and seat layout",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 128 },
+        "hostId": { "type": "string", "maxLength": 128 },
+        "hostName": { "type": "string", "maxLength": 64 },
+        "hostAvatar": { "type": "string", "maxLength": 1024 },
+        "category": { "type": "string", "maxLength": 64 },
+        "level": { "type": "number" },
+        "activeViewers": { "type": "number" },
+        "totalGiftCoins": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "hostId", "category", "level"]
+    },
+    "RoomMessage": {
+      "title": "RoomMessage",
+      "description": "Chat and gift message within a Party Room",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "roomId": { "type": "string", "maxLength": 128 },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 64 },
+        "senderAvatar": { "type": "string", "maxLength": 1024 },
+        "text": { "type": "string", "maxLength": 500 },
+        "type": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "roomId", "senderId", "senderName", "text"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile documents keyed by Firebase auth UID"
+    },
+    "/partyRooms/{roomId}": {
+      "schema": "PartyRoom",
+      "description": "Active audio party rooms"
+    },
+    "/partyRooms/{roomId}/messages/{messageId}": {
+      "schema": "RoomMessage",
+      "description": "Chat messages inside a party room"
+    }
+  }
+}

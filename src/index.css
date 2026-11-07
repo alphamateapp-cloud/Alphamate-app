@@ -1,0 +1,94 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --color-brand-primary: #7928CA;
+  --color-brand-neon: #A855F7;
+  --color-brand-pink: #EC4899;
+  --color-brand-bg: #09070F;
+  --color-brand-card: #140F24;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #09070F;
+  color: #FFFFFF;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+/* Custom subtle scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(168, 85, 247, 0.25);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(168, 85, 247, 0.45);
+}
+
+/* Glassmorphism and Neon Glow Utilities */
+.glass-panel {
+  background: rgba(20, 15, 36, 0.72);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(168, 85, 247, 0.15);
+}
+
+.glass-panel-elevated {
+  background: rgba(28, 20, 52, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(236, 72, 153, 0.22);
+  box-shadow: 0 10px 30px -10px rgba(121, 40, 202, 0.3);
+}
+
+.purple-glow {
+  box-shadow: 0 0 25px rgba(168, 85, 247, 0.35);
+}
+
+.pink-glow {
+  box-shadow: 0 0 25px rgba(236, 72, 153, 0.4);
+}
+
+/* Floating animation for live stream hearts */
+@keyframes floatUp {
+  0% {
+    opacity: 1;
+    transform: translateY(0) scale(0.8) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-80px) scale(1.1) rotate(15deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-180px) scale(1.3) rotate(-15deg);
+  }
+}
+
+.animate-float-heart {
+  animation: floatUp 1.8s cubic-bezier(0.25, 1, 0.5, 1) forwards;
+}
+
+/* Pulsing voice wave animation */
+@keyframes voicePulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.6;
+  }
+  50% {
+    transform: scale(1.18);
+    opacity: 1;
+  }
+}
+
+.animate-voice-pulse {
+  animation: voicePulse 1.4s ease-in-out infinite;
+}

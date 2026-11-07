@@ -1,0 +1,22 @@
+{
+  "short_name": "Alpha Mate",
+  "name": "Alpha Mate — Live • Party • Social",
+  "description": "Premium social entertainment platform featuring live streaming, PK battles, audio party rooms, 1-on-1 chat, and VIP honors.",
+  "icons": [
+    {
+      "src": "/alpha-mate-logo-emblem.png",
+      "type": "image/png",
+      "sizes": "192x192"
+    },
+    {
+      "src": "/alpha-mate-logo-emblem.png",
+      "type": "image/png",
+      "sizes": "512x512"
+    }
+  ],
+  "start_url": "/",
+  "background_color": "#09070F",
+  "theme_color": "#09070F",
+  "display": "standalone",
+  "orientation": "portrait"
+}
