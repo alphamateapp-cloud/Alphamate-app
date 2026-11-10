@@ -10,6 +10,15 @@ import {
   VideoPost,
   WalletTransaction,
   NotificationItem,
+  StoryItem,
+  FriendStory,
+  AgencyOrder,
+  AgencyTransaction,
+  CoinSellerAgencyProfile,
+  HostAgencyProfile,
+  HostMember,
+  HostJoinRequest,
+  AgencyApplication,
 } from '../types';
 import {
   CURRENT_USER,
@@ -20,6 +29,7 @@ import {
   MOCK_NOTIFICATIONS,
   MOCK_TRANSACTIONS,
   VIRTUAL_GIFTS,
+  MOCK_FRIEND_STORIES,
 } from '../data/mockData';
 import {
   auth,
@@ -125,11 +135,35 @@ interface AppContextType {
   addVideoPost: (video: Omit<VideoPost, 'id' | 'likes' | 'commentsCount' | 'sharesCount' | 'timestamp'>) => void;
   toggleLikeVideo: (videoId: string) => void;
 
+  // Stories & Friends System
+  friendStories: FriendStory[];
+  myStories: StoryItem[];
+  addMyStory: (story: {
+    mediaUrl: string;
+    caption?: string;
+    musicTitle?: string;
+    backgroundColor?: string;
+    stickers?: string[];
+  }) => void;
+  toggleLikeStory: (friendId: string, storyId: string) => void;
+  reactToStory: (friendId: string, storyId: string, emoji: string) => void;
+  markStorySeen: (friendId: string) => void;
+
   // Wallet & Economy
   coins: number;
   diamonds: number;
   transactions: WalletTransaction[];
+  addCoins: (amount: number, reason: string) => void;
+  addDiamonds: (amount: number, reason: string) => void;
   rechargeCoins: (amount: number, priceUSD: number, paymentMethod: string) => Promise<boolean>;
+  withdrawDiamonds: (
+    amountUSD: number,
+    method: string,
+    accountDetails: { title: string; number: string; bankName?: string }
+  ) => { success: boolean; message: string };
+  exchangeDiamondsToCoins: (
+    diamondsAmount: number
+  ) => { success: boolean; message: string };
   purchaseStoreItem: (cost: number, currency: 'coins' | 'diamonds', itemTitle: string) => boolean;
 
   // Daily Check-In & Rewards
@@ -159,6 +193,79 @@ interface AppContextType {
   // Original Logo Asset
   customLogoUrl: string | null;
   setCustomLogoUrl: (url: string | null) => void;
+
+  // Agency Center & Coin Seller Agency Management
+  agencyProfile: CoinSellerAgencyProfile;
+  agencyOrders: AgencyOrder[];
+  agencyTransactions: AgencyTransaction[];
+  sendAgencyCoins: (
+    recipientQuery: string,
+    amount: number,
+    pin: string
+  ) => { success: boolean; message: string; tx?: AgencyTransaction };
+  deliverAgencyOrder: (
+    orderId: string,
+    pin: string
+  ) => { success: boolean; message: string };
+  rejectAgencyOrder: (
+    orderId: string,
+    reason?: string
+  ) => { success: boolean; message: string };
+  updateAgencyProfile: (updates: Partial<CoinSellerAgencyProfile>) => void;
+  setAgencySecurityPin: (
+    oldPin: string,
+    newPin: string
+  ) => { success: boolean; message: string };
+  createBuyerCoinOrder: (
+    order: Omit<AgencyOrder, 'id' | 'orderNo' | 'createdAt' | 'status'>
+  ) => AgencyOrder;
+  findUserByIdOrUsername: (query: string) => User | null;
+
+  // Host Agency Management
+  hostAgencyProfile: HostAgencyProfile;
+  agencyHosts: HostMember[];
+  hostJoinRequests: HostJoinRequest[];
+  agencyApplications: AgencyApplication[];
+  allHostAgencies: HostAgencyProfile[];
+  updateHostAgencyProfile: (updates: Partial<HostAgencyProfile>) => void;
+  setHostWeeklyTarget: (
+    hostId: string,
+    targetDiamonds: number,
+    targetHours?: number
+  ) => void;
+  updateHostCommission: (hostId: string, commissionRate: number) => void;
+  toggleHostLiveStatus: (hostId: string) => void;
+  approveHostJoinRequest: (
+    requestId: string,
+    targetDiamonds?: number,
+    commissionRate?: number,
+    targetHours?: number
+  ) => { success: boolean; message: string };
+  updateHostContract: (
+    hostId: string,
+    targetDiamonds: number,
+    targetHours: number,
+    commissionRate: number
+  ) => void;
+  rejectHostJoinRequest: (requestId: string) => { success: boolean; message: string };
+  removeHostFromAgency: (
+    hostId: string,
+    reason?: string
+  ) => { success: boolean; message: string };
+  requestHostResignation: (reason: string) => { success: boolean; message: string };
+  submitHostJoinRequest: (
+    agencyId: string,
+    whatsapp: string,
+    experience: string,
+    expectedHours: number
+  ) => { success: boolean; message: string };
+  submitAgencyApplication: (
+    data: Omit<AgencyApplication, 'id' | 'status' | 'submittedAt'>
+  ) => { success: boolean; message: string };
+  reviewAgencyApplication: (
+    applicationId: string,
+    action: 'approve' | 'reject'
+  ) => { success: boolean; message: string };
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -194,12 +301,94 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       diamonds: 2000,
       isVerified: true,
     },
+    {
+      id: 'user_sophia_demo',
+      uniqueId: 'AM_664129',
+      username: 'sophia',
+      displayName: 'Sophia Taylor',
+      email: 'sophia@alphamate.com',
+      avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+      bio: 'Music & Vibes | Alpha Diamond VIP ✨',
+      followersCount: 8400,
+      followingCount: 190,
+      likesCount: 92000,
+      level: 22,
+      xp: 11200,
+      nextLevelXp: 15000,
+      vipTier: 2,
+      coins: 14200,
+      diamonds: 1500,
+      isVerified: true,
+    },
+    {
+      id: 'user_liam_demo',
+      uniqueId: 'AM_552109',
+      username: 'liam',
+      displayName: 'Liam Carter',
+      email: 'liam@alphamate.com',
+      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
+      bio: 'Gaming streamer & Top Gifter 🎮',
+      followersCount: 14500,
+      followingCount: 420,
+      likesCount: 180000,
+      level: 35,
+      xp: 24500,
+      nextLevelXp: 30000,
+      vipTier: 4,
+      coins: 38000,
+      diamonds: 8900,
+      isVerified: true,
+    },
+    {
+      id: 'user_elena_demo',
+      uniqueId: 'AM_441908',
+      username: 'elena',
+      displayName: 'Elena Rostova',
+      email: 'elena@alphamate.com',
+      avatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
+      bio: 'Singer & Party Host 🎤 Welcome to my room!',
+      followersCount: 22000,
+      followingCount: 510,
+      likesCount: 310000,
+      level: 42,
+      xp: 41000,
+      nextLevelXp: 50000,
+      vipTier: 5,
+      coins: 65000,
+      diamonds: 12000,
+      isVerified: true,
+    },
+    {
+      id: 'user_zara_demo',
+      uniqueId: 'AM_331820',
+      username: 'zara',
+      displayName: 'Zara Khan',
+      email: 'zara@alphamate.com',
+      avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=400&q=80',
+      bio: 'Alpha Mate Rising Star 🌟 Love from Lahore',
+      followersCount: 6500,
+      followingCount: 180,
+      likesCount: 45000,
+      level: 18,
+      xp: 7800,
+      nextLevelXp: 10000,
+      vipTier: 1,
+      coins: 9500,
+      diamonds: 850,
+      isVerified: true,
+    },
   ];
 
   const [registeredUsers, setRegisteredUsers] = useState<User[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_registered_users');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // Ensure new sample community users are included
+        const existingIds = new Set(parsed.map((u: User) => u.id));
+        const missing = INITIAL_REGISTERED_USERS.filter((u) => !existingIds.has(u.id));
+        return [...parsed, ...missing];
+      }
     } catch {
       // ignore
     }
@@ -317,6 +506,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Videos
   const [videos, setVideos] = useState<VideoPost[]>(MOCK_VIDEOS);
+
+  // Stories & Friends
+  const [friendStories, setFriendStories] = useState<FriendStory[]>(MOCK_FRIEND_STORIES);
+  const [myStories, setMyStories] = useState<StoryItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_my_stories');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return [
+      {
+        id: 'story_me_default',
+        mediaUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=800&q=80',
+        caption: 'Alpha Mate Live vibe! Streaming chill music tonight 🎶💜',
+        createdAt: '40m ago',
+        likes: 64,
+        isLiked: false,
+        viewsCount: 240,
+        musicTitle: 'Cyber Wave - Neon Sunset',
+      },
+    ];
+  });
 
   // Economy
   const [coins, setCoins] = useState<number>(CURRENT_USER.coins);
@@ -487,6 +699,1050 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } catch {
       // ignore storage error
     }
+  };
+
+  // =========================================================================
+  // AGENCY MANAGEMENT (COIN SELLER AGENCY & HOST AGENCY)
+  // =========================================================================
+  const INITIAL_AGENCY_PROFILE: CoinSellerAgencyProfile = {
+    agencyId: 'agency_alpha_official',
+    agencyName: 'Alpha Mate Official Exchange',
+    agencyCode: 'AM-EX-001',
+    badge: 'Diamond Certified Official',
+    ownerUserId: currentUser?.id || 'current_user',
+    agencyBalance: 2500000, // 2,500,000 Coins initial agency balance
+    pin: '1234', // Default 4-digit security PIN
+    isPinSet: true,
+    whatsappNumber: '+923001234567',
+    whatsappDisplay: '+92 300 1234567',
+    isOfficial: true,
+    slogan: 'Get coins from official agency direct with instant verified delivery.',
+  };
+
+  const [agencyProfile, setAgencyProfile] = useState<CoinSellerAgencyProfile>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_agency_profile');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return INITIAL_AGENCY_PROFILE;
+  });
+
+  const INITIAL_AGENCY_ORDERS: AgencyOrder[] = [
+    {
+      id: 'order_101',
+      orderNo: 'ORD-9842',
+      buyerId: 'user_sophia_demo',
+      buyerUniqueId: 'AM_664129',
+      buyerName: 'Sophia Taylor',
+      buyerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+      coins: 50000,
+      bonusCoins: 8000,
+      price: 'Rs. 11,900',
+      paymentMethod: 'JazzCash',
+      receiptUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=600&q=80',
+      status: 'pending',
+      createdAt: '12 mins ago',
+      note: 'Payment done via JazzCash from 0300-XXXXXXX. Please deliver coins.',
+    },
+    {
+      id: 'order_102',
+      orderNo: 'ORD-9843',
+      buyerId: 'user_liam_demo',
+      buyerUniqueId: 'AM_552109',
+      buyerName: 'Liam Carter',
+      buyerAvatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
+      coins: 100000,
+      bonusCoins: 18000,
+      price: 'Rs. 22,500',
+      paymentMethod: 'EasyPaisa',
+      receiptUrl: 'https://images.unsplash.com/photo-1554224154-26032ffc0d07?auto=format&fit=crop&w=600&q=80',
+      status: 'pending',
+      createdAt: '35 mins ago',
+      note: 'EasyPaisa TID: 994820124. Need coins for PK battle support.',
+    },
+    {
+      id: 'order_100',
+      orderNo: 'ORD-9830',
+      buyerId: 'user_elena_demo',
+      buyerUniqueId: 'AM_441908',
+      buyerName: 'Elena Rostova',
+      buyerAvatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
+      coins: 20000,
+      bonusCoins: 3000,
+      price: 'Rs. 4,800',
+      paymentMethod: 'Bank Transfer',
+      receiptUrl: 'https://images.unsplash.com/photo-1554224155-6726b3ff858f?auto=format&fit=crop&w=600&q=80',
+      status: 'delivered',
+      createdAt: '2 hours ago',
+      deliveredAt: '1 hour ago',
+      note: 'Verified and delivered.',
+    },
+  ];
+
+  const [agencyOrders, setAgencyOrders] = useState<AgencyOrder[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_agency_orders');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return INITIAL_AGENCY_ORDERS;
+  });
+
+  const INITIAL_AGENCY_TRANSACTIONS: AgencyTransaction[] = [
+    {
+      id: 'atx_201',
+      type: 'order_delivery',
+      recipientId: 'user_elena_demo',
+      recipientUniqueId: 'AM_441908',
+      recipientName: 'Elena Rostova',
+      recipientAvatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
+      coins: 20000,
+      remainingBalance: 2500000,
+      timestamp: 'Today, 01:15 PM',
+      referenceId: 'ORD-9830',
+    },
+    {
+      id: 'atx_200',
+      type: 'direct_send',
+      recipientId: 'user_alex_demo',
+      recipientUniqueId: 'AM_992104',
+      recipientName: 'Alex Rider',
+      recipientAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
+      coins: 10000,
+      remainingBalance: 2520000,
+      timestamp: 'Yesterday, 09:30 PM',
+      referenceId: 'TX-DIRECT-8812',
+    },
+  ];
+
+  const [agencyTransactions, setAgencyTransactions] = useState<AgencyTransaction[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_agency_transactions');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return INITIAL_AGENCY_TRANSACTIONS;
+  });
+
+  const saveAgencyProfile = (profile: CoinSellerAgencyProfile) => {
+    setAgencyProfile(profile);
+    try {
+      localStorage.setItem('alphamate_agency_profile', JSON.stringify(profile));
+    } catch {
+      // ignore
+    }
+  };
+
+  const saveAgencyOrders = (orders: AgencyOrder[]) => {
+    setAgencyOrders(orders);
+    try {
+      localStorage.setItem('alphamate_agency_orders', JSON.stringify(orders));
+    } catch {
+      // ignore
+    }
+  };
+
+  const saveAgencyTransactions = (txs: AgencyTransaction[]) => {
+    setAgencyTransactions(txs);
+    try {
+      localStorage.setItem('alphamate_agency_transactions', JSON.stringify(txs));
+    } catch {
+      // ignore
+    }
+  };
+
+  const findUserByIdOrUsername = (query: string): User | null => {
+    if (!query || !query.trim()) return null;
+    const clean = query.trim().toLowerCase();
+
+    // Check registered users
+    const matched = registeredUsers.find(
+      (u) =>
+        u.uniqueId.toLowerCase() === clean ||
+        u.username.toLowerCase() === clean ||
+        u.displayName.toLowerCase() === clean ||
+        u.id.toLowerCase() === clean
+    );
+    if (matched) return matched;
+
+    // Check current user
+    if (
+      currentUser.uniqueId.toLowerCase() === clean ||
+      currentUser.username.toLowerCase() === clean ||
+      currentUser.displayName.toLowerCase() === clean
+    ) {
+      return currentUser;
+    }
+
+    // If matches format AM_XXXXXX or alphanumeric, generate dynamic verified preview
+    if (clean.length >= 3) {
+      const cleanId = clean.toUpperCase().startsWith('AM_') ? clean.toUpperCase() : `AM_${Math.floor(100000 + Math.random() * 900000)}`;
+      return {
+        id: `user_${clean}`,
+        uniqueId: cleanId,
+        username: clean.replace(/[^a-z0-9_]/gi, '').toLowerCase() || 'user',
+        displayName: query.trim(),
+        avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
+        bio: 'Alpha Mate Active Member',
+        followersCount: 520,
+        followingCount: 88,
+        likesCount: 1400,
+        level: 12,
+        xp: 3200,
+        nextLevelXp: 5000,
+        vipTier: 1,
+        coins: 1200,
+        diamonds: 150,
+        isVerified: true,
+      };
+    }
+
+    return null;
+  };
+
+  const sendAgencyCoins = (
+    recipientQuery: string,
+    amount: number,
+    pin: string
+  ): { success: boolean; message: string; tx?: AgencyTransaction } => {
+    // 1. PIN Check
+    if (pin !== agencyProfile.pin) {
+      return { success: false, message: 'Invalid 4-digit security PIN. Please try again.' };
+    }
+
+    // 2. Validate Amount
+    if (!amount || amount <= 0) {
+      return { success: false, message: 'Please enter a valid coin amount.' };
+    }
+
+    // 3. Balance Check
+    if (amount > agencyProfile.agencyBalance) {
+      return {
+        success: false,
+        message: `Insufficient agency balance. You currently have ${agencyProfile.agencyBalance.toLocaleString()} Coins.`,
+      };
+    }
+
+    // 4. Resolve recipient
+    const recipient = findUserByIdOrUsername(recipientQuery);
+    if (!recipient) {
+      return { success: false, message: 'Recipient not found. Please check User ID or username.' };
+    }
+
+    // 5. Deduct agency balance
+    const newAgencyBalance = agencyProfile.agencyBalance - amount;
+    const updatedProfile = {
+      ...agencyProfile,
+      agencyBalance: newAgencyBalance,
+    };
+    saveAgencyProfile(updatedProfile);
+
+    // 6. Credit recipient if current user
+    if (recipient.id === currentUser.id || recipient.uniqueId === currentUser.uniqueId) {
+      setCoins((c) => c + amount);
+      setCurrentUser((prev) => {
+        const updated = { ...prev, coins: prev.coins + amount };
+        saveUserSession(updated);
+        return updated;
+      });
+    }
+
+    // 7. Record transaction
+    const newTx: AgencyTransaction = {
+      id: `atx_${Date.now()}`,
+      type: 'direct_send',
+      recipientId: recipient.id,
+      recipientUniqueId: recipient.uniqueId,
+      recipientName: recipient.displayName,
+      recipientAvatar: recipient.avatar,
+      coins: amount,
+      remainingBalance: newAgencyBalance,
+      timestamp: 'Just now',
+      referenceId: `TX-DIR-${Math.floor(1000 + Math.random() * 9000)}`,
+    };
+    const updatedTxs = [newTx, ...agencyTransactions];
+    saveAgencyTransactions(updatedTxs);
+
+    // 8. Push notification to inbox
+    const newNotif: NotificationItem = {
+      id: `notif_agency_${Date.now()}`,
+      type: 'system',
+      title: `💎 ${amount.toLocaleString()} Coins Received from ${agencyProfile.agencyName}`,
+      message: `Official Agency transfer confirmed! ${amount.toLocaleString()} coins have been delivered to ID ${recipient.uniqueId}.`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [newNotif, ...prev]);
+
+    return {
+      success: true,
+      message: `Successfully sent ${amount.toLocaleString()} Coins to ${recipient.displayName} (${recipient.uniqueId})!`,
+      tx: newTx,
+    };
+  };
+
+  const deliverAgencyOrder = (orderId: string, pin: string): { success: boolean; message: string } => {
+    // 1. PIN Check
+    if (pin !== agencyProfile.pin) {
+      return { success: false, message: 'Invalid 4-digit security PIN. Please try again.' };
+    }
+
+    const order = agencyOrders.find((o) => o.id === orderId);
+    if (!order) {
+      return { success: false, message: 'Order not found.' };
+    }
+
+    if (order.status === 'delivered') {
+      return { success: false, message: 'This order has already been delivered.' };
+    }
+
+    const totalCoinsToCredit = order.coins + (order.bonusCoins || 0);
+
+    // Balance check
+    if (totalCoinsToCredit > agencyProfile.agencyBalance) {
+      return {
+        success: false,
+        message: `Insufficient agency balance to fulfill order. You need ${totalCoinsToCredit.toLocaleString()} Coins.`,
+      };
+    }
+
+    // Deduct agency balance
+    const newAgencyBalance = agencyProfile.agencyBalance - totalCoinsToCredit;
+    const updatedProfile = {
+      ...agencyProfile,
+      agencyBalance: newAgencyBalance,
+    };
+    saveAgencyProfile(updatedProfile);
+
+    // If order was for current user, credit current user
+    if (order.buyerId === currentUser.id || order.buyerUniqueId === currentUser.uniqueId) {
+      setCoins((c) => c + totalCoinsToCredit);
+      setCurrentUser((prev) => {
+        const updated = { ...prev, coins: prev.coins + totalCoinsToCredit };
+        saveUserSession(updated);
+        return updated;
+      });
+    }
+
+    // Update order status
+    const updatedOrders = agencyOrders.map((o) =>
+      o.id === orderId
+        ? {
+            ...o,
+            status: 'delivered' as const,
+            deliveredAt: 'Just now',
+          }
+        : o
+    );
+    saveAgencyOrders(updatedOrders);
+
+    // Record transaction
+    const newTx: AgencyTransaction = {
+      id: `atx_${Date.now()}`,
+      type: 'order_delivery',
+      recipientId: order.buyerId,
+      recipientUniqueId: order.buyerUniqueId,
+      recipientName: order.buyerName,
+      recipientAvatar: order.buyerAvatar,
+      coins: totalCoinsToCredit,
+      remainingBalance: newAgencyBalance,
+      timestamp: 'Just now',
+      referenceId: order.orderNo,
+    };
+    saveAgencyTransactions([newTx, ...agencyTransactions]);
+
+    // Send Buyer confirmation notification
+    const buyerNotif: NotificationItem = {
+      id: `notif_order_${Date.now()}`,
+      type: 'system',
+      title: `🎉 Coins Delivered! Order ${order.orderNo}`,
+      message: `Your payment was verified. ${totalCoinsToCredit.toLocaleString()} Coins have been credited to your Alpha Mate account by ${agencyProfile.agencyName}.`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [buyerNotif, ...prev]);
+
+    return {
+      success: true,
+      message: `Order ${order.orderNo} fulfilled! ${totalCoinsToCredit.toLocaleString()} Coins delivered to ${order.buyerName}.`,
+    };
+  };
+
+  const rejectAgencyOrder = (orderId: string, reason?: string): { success: boolean; message: string } => {
+    const updatedOrders = agencyOrders.map((o) =>
+      o.id === orderId ? { ...o, status: 'rejected' as const, note: reason || 'Receipt verification rejected' } : o
+    );
+    saveAgencyOrders(updatedOrders);
+    return { success: true, message: 'Order has been marked as rejected.' };
+  };
+
+  const updateAgencyProfile = (updates: Partial<CoinSellerAgencyProfile>) => {
+    const updated = { ...agencyProfile, ...updates };
+    saveAgencyProfile(updated);
+  };
+
+  const setAgencySecurityPin = (oldPin: string, newPin: string): { success: boolean; message: string } => {
+    if (agencyProfile.isPinSet && oldPin !== agencyProfile.pin) {
+      return { success: false, message: 'Current PIN is incorrect.' };
+    }
+    if (!/^\d{4}$/.test(newPin)) {
+      return { success: false, message: 'New PIN must be exactly 4 digits (0-9).' };
+    }
+    const updated = { ...agencyProfile, pin: newPin, isPinSet: true };
+    saveAgencyProfile(updated);
+    return { success: true, message: '4-digit Security PIN updated successfully.' };
+  };
+
+  const createBuyerCoinOrder = (
+    orderData: Omit<AgencyOrder, 'id' | 'orderNo' | 'createdAt' | 'status'>
+  ): AgencyOrder => {
+    const newOrder: AgencyOrder = {
+      ...orderData,
+      id: `order_${Date.now()}`,
+      orderNo: `ORD-${Math.floor(1000 + Math.random() * 9000)}`,
+      status: 'pending',
+      createdAt: 'Just now',
+    };
+    const updated = [newOrder, ...agencyOrders];
+    saveAgencyOrders(updated);
+
+    // Notification for agency
+    const agencyNotif: NotificationItem = {
+      id: `notif_new_order_${Date.now()}`,
+      type: 'system',
+      title: `📬 New Coin Order from ${newOrder.buyerName}`,
+      message: `Order #${newOrder.orderNo} for ${newOrder.coins.toLocaleString()} Coins (${newOrder.price}) has been placed. Review receipt to deliver.`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [agencyNotif, ...prev]);
+
+    return newOrder;
+  };
+
+  // =========================================================================
+  // HOST AGENCY STATE & MANAGEMENT
+  // =========================================================================
+  const ALL_HOST_AGENCIES: HostAgencyProfile[] = [
+    {
+      agencyId: 'agency_royal_talent',
+      agencyName: 'Alpha Royal Talent Agency',
+      agencyCode: 'AM-HT-001',
+      agencyTag: 'ROYAL',
+      tagColor: '#F59E0B',
+      badge: 'Diamond Certified Host Agency',
+      ownerUserId: currentUser?.id || 'current_user',
+      whatsappNumber: '+923008899111',
+      whatsappDisplay: '+92 300 8899111',
+      defaultCommissionRate: 15,
+      minWeeklyHours: 15,
+      slogan: 'Elite live streaming, party room hosting & VIP creator development.',
+      isOfficial: true,
+      activeHostsCount: 3,
+    },
+    {
+      agencyId: 'agency_star_hosts',
+      agencyName: 'Star Nova Agency',
+      agencyCode: 'AM-HT-002',
+      agencyTag: 'NOVA',
+      tagColor: '#EC4899',
+      badge: 'Crown Partner Agency',
+      ownerUserId: 'user_nova_admin',
+      whatsappNumber: '+923017766555',
+      whatsappDisplay: '+92 301 7766555',
+      defaultCommissionRate: 12,
+      minWeeklyHours: 20,
+      slogan: 'Top gaming streamers and party entertainment hosts worldwide.',
+      isOfficial: true,
+      activeHostsCount: 12,
+    },
+    {
+      agencyId: 'agency_phoenix_crew',
+      agencyName: 'Phoenix Live Crew',
+      agencyCode: 'AM-HT-003',
+      agencyTag: 'PHOENIX',
+      tagColor: '#38BDF8',
+      badge: 'Gold Official Agency',
+      ownerUserId: 'user_phoenix_admin',
+      whatsappNumber: '+971508822334',
+      whatsappDisplay: '+971 50 8822334',
+      defaultCommissionRate: 18,
+      minWeeklyHours: 12,
+      slogan: 'International PK battle champions and live concert broadcasters.',
+      isOfficial: true,
+      activeHostsCount: 8,
+    },
+  ];
+
+  const [allHostAgencies, setAllHostAgencies] = useState<HostAgencyProfile[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_all_host_agencies');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return ALL_HOST_AGENCIES;
+  });
+
+  const [hostAgencyProfile, setHostAgencyProfile] = useState<HostAgencyProfile>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_host_agency_profile');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return ALL_HOST_AGENCIES[0];
+  });
+
+  const INITIAL_AGENCY_HOSTS: HostMember[] = [
+    {
+      id: 'host_member_sophia',
+      userId: 'user_sophia_demo',
+      uniqueId: 'AM_664129',
+      displayName: 'Sophia Taylor',
+      username: 'sophia',
+      avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+      level: 22,
+      agencyId: 'agency_royal_talent',
+      agencyName: 'Alpha Royal Talent Agency',
+      agencyTag: 'ROYAL',
+      weeklyTargetDiamonds: 500000,
+      currentProgressDiamonds: 385000,
+      targetStatus: 'pending',
+      weeklyHoursStreamed: 18.5,
+      weeklyTargetHours: 20,
+      weeklyEarnings: 320000,
+      commissionRate: 15,
+      isLive: true,
+      joinedDate: 'Joined 2 weeks ago',
+    },
+    {
+      id: 'host_member_liam',
+      userId: 'user_liam_demo',
+      uniqueId: 'AM_552109',
+      displayName: 'Liam Carter',
+      username: 'liam',
+      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
+      level: 35,
+      agencyId: 'agency_royal_talent',
+      agencyName: 'Alpha Royal Talent Agency',
+      agencyTag: 'ROYAL',
+      weeklyTargetDiamonds: 1000000,
+      currentProgressDiamonds: 1120000,
+      targetStatus: 'achieved',
+      weeklyHoursStreamed: 24.0,
+      weeklyTargetHours: 20,
+      weeklyEarnings: 950000,
+      commissionRate: 15,
+      isLive: false,
+      joinedDate: 'Joined 1 month ago',
+    },
+    {
+      id: 'host_member_elena',
+      userId: 'user_elena_demo',
+      uniqueId: 'AM_441908',
+      displayName: 'Elena Rostova',
+      username: 'elena',
+      avatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
+      level: 42,
+      agencyId: 'agency_royal_talent',
+      agencyName: 'Alpha Royal Talent Agency',
+      agencyTag: 'ROYAL',
+      weeklyTargetDiamonds: 250000,
+      currentProgressDiamonds: 210000,
+      targetStatus: 'pending',
+      weeklyHoursStreamed: 12.0,
+      weeklyTargetHours: 15,
+      weeklyEarnings: 180000,
+      commissionRate: 15,
+      isLive: false,
+      joinedDate: 'Joined 3 weeks ago',
+    },
+  ];
+
+  const [agencyHosts, setAgencyHosts] = useState<HostMember[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_agency_hosts');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return INITIAL_AGENCY_HOSTS;
+  });
+
+  const INITIAL_HOST_REQUESTS: HostJoinRequest[] = [
+    {
+      id: 'hreq_zara',
+      userId: 'user_zara_demo',
+      uniqueId: 'AM_331820',
+      displayName: 'Zara Khan',
+      username: 'zara',
+      avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=400&q=80',
+      level: 18,
+      agencyId: 'agency_royal_talent',
+      whatsapp: '+92 321 4455667',
+      experience: 'Acoustic singing & live party chat host for 1+ year. Eager to achieve weekly 500k targets.',
+      expectedHours: 18,
+      appliedDate: 'Today, 10:20 AM',
+      status: 'pending',
+    },
+  ];
+
+  const [hostJoinRequests, setHostJoinRequests] = useState<HostJoinRequest[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_host_join_requests');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return INITIAL_HOST_REQUESTS;
+  });
+
+  const INITIAL_AGENCY_APPLICATIONS: AgencyApplication[] = [
+    {
+      id: 'app_agency_01',
+      type: 'host_agency',
+      applicantUserId: 'user_alex_demo',
+      applicantName: 'Alex Rider',
+      applicantUniqueId: 'AM_992104',
+      agencyName: 'Alex Rising Stars',
+      agencyTag: 'RIDER',
+      whatsapp: '+92 301 9922110',
+      phoneNumber: '+92 301 9922110',
+      idCardNumber: '35201-XXXXXXX-1',
+      experience: 'Experienced VIP streamer with 10+ recruited talent hosts.',
+      status: 'pending',
+      submittedAt: 'Yesterday, 04:30 PM',
+    },
+  ];
+
+  const [agencyApplications, setAgencyApplications] = useState<AgencyApplication[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_agency_applications');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return INITIAL_AGENCY_APPLICATIONS;
+  });
+
+  const saveAgencyHosts = (hosts: HostMember[]) => {
+    setAgencyHosts(hosts);
+    try {
+      localStorage.setItem('alphamate_agency_hosts', JSON.stringify(hosts));
+    } catch {
+      // ignore
+    }
+  };
+
+  const saveHostJoinRequests = (reqs: HostJoinRequest[]) => {
+    setHostJoinRequests(reqs);
+    try {
+      localStorage.setItem('alphamate_host_join_requests', JSON.stringify(reqs));
+    } catch {
+      // ignore
+    }
+  };
+
+  const saveAgencyApplications = (apps: AgencyApplication[]) => {
+    setAgencyApplications(apps);
+    try {
+      localStorage.setItem('alphamate_agency_applications', JSON.stringify(apps));
+    } catch {
+      // ignore
+    }
+  };
+
+  const updateHostAgencyProfile = (updates: Partial<HostAgencyProfile>) => {
+    const updated = { ...hostAgencyProfile, ...updates };
+    setHostAgencyProfile(updated);
+    try {
+      localStorage.setItem('alphamate_host_agency_profile', JSON.stringify(updated));
+    } catch {
+      // ignore
+    }
+  };
+
+  const setHostWeeklyTarget = (hostId: string, targetDiamonds: number, targetHours?: number) => {
+    const updated = agencyHosts.map((h) => {
+      if (h.id === hostId || h.userId === hostId) {
+        const nextStatus: 'achieved' | 'pending' | 'expired' =
+          h.currentProgressDiamonds >= targetDiamonds ? 'achieved' : 'pending';
+        return {
+          ...h,
+          weeklyTargetDiamonds: targetDiamonds,
+          weeklyTargetHours: targetHours || h.weeklyTargetHours,
+          targetStatus: nextStatus,
+        };
+      }
+      return h;
+    });
+    saveAgencyHosts(updated);
+
+    const targetHost = agencyHosts.find((h) => h.id === hostId || h.userId === hostId);
+    if (targetHost) {
+      const newNotif: NotificationItem = {
+        id: `notif_target_${Date.now()}`,
+        type: 'system',
+        title: `🎯 Weekly Target Set by ${hostAgencyProfile.agencyName}`,
+        message: `Your new weekly target is ${targetDiamonds.toLocaleString()} Diamonds. Stream live and achieve bonus rewards!`,
+        timestamp: 'Just now',
+        isRead: false,
+      };
+      setNotifications((prev) => [newNotif, ...prev]);
+    }
+  };
+
+  const updateHostCommission = (hostId: string, commissionRate: number) => {
+    const updated = agencyHosts.map((h) =>
+      h.id === hostId || h.userId === hostId ? { ...h, commissionRate } : h
+    );
+    saveAgencyHosts(updated);
+  };
+
+  const updateHostContract = (
+    hostId: string,
+    targetDiamonds: number,
+    targetHours: number,
+    commissionRate: number
+  ) => {
+    const updated = agencyHosts.map((h) => {
+      if (h.id === hostId || h.userId === hostId) {
+        const nextStatus =
+          h.currentProgressDiamonds >= targetDiamonds
+            ? ('achieved' as const)
+            : ('pending' as const);
+        return {
+          ...h,
+          weeklyTargetDiamonds: targetDiamonds,
+          weeklyTargetHours: targetHours,
+          commissionRate,
+          targetStatus: nextStatus,
+        };
+      }
+      return h;
+    });
+    saveAgencyHosts(updated);
+
+    const targetHost = agencyHosts.find((h) => h.id === hostId || h.userId === hostId);
+    if (targetHost) {
+      const updateNotif: NotificationItem = {
+        id: `notif_contract_${Date.now()}`,
+        type: 'system',
+        title: `📝 Contract Terms Updated by ${hostAgencyProfile.agencyName}`,
+        message: `Your contract has been updated: Target ${targetDiamonds.toLocaleString()} Diamonds, ${targetHours} hrs/week, Commission ${commissionRate}%.`,
+        timestamp: 'Just now',
+        isRead: false,
+      };
+      setNotifications((prev) => [updateNotif, ...prev]);
+    }
+  };
+
+  const toggleHostLiveStatus = (hostId: string) => {
+    const updated = agencyHosts.map((h) => {
+      if (h.id === hostId || h.userId === hostId) {
+        const nextLive = !h.isLive;
+        return {
+          ...h,
+          isLive: nextLive,
+        };
+      }
+      return h;
+    });
+    saveAgencyHosts(updated);
+  };
+
+  const approveHostJoinRequest = (
+    requestId: string,
+    targetDiamonds = 500000,
+    commissionRate = 15,
+    targetHours?: number
+  ): { success: boolean; message: string } => {
+    const req = hostJoinRequests.find((r) => r.id === requestId);
+    if (!req) return { success: false, message: 'Request not found' };
+
+    // Prevent duplicate joining
+    const alreadyBound = agencyHosts.some((h) => h.userId === req.userId);
+    if (alreadyBound) {
+      return { success: false, message: 'This host is already bound to an agency!' };
+    }
+
+    const newHost: HostMember = {
+      id: `host_member_${Date.now()}`,
+      userId: req.userId,
+      uniqueId: req.uniqueId,
+      displayName: req.displayName,
+      username: req.username,
+      avatar: req.avatar,
+      level: req.level,
+      agencyId: hostAgencyProfile.agencyId,
+      agencyName: hostAgencyProfile.agencyName,
+      agencyTag: hostAgencyProfile.agencyTag,
+      weeklyTargetDiamonds: targetDiamonds,
+      currentProgressDiamonds: 0,
+      targetStatus: 'pending',
+      weeklyHoursStreamed: 0,
+      weeklyTargetHours: targetHours || req.expectedHours || hostAgencyProfile.minWeeklyHours,
+      weeklyEarnings: 0,
+      commissionRate,
+      isLive: false,
+      joinedDate: 'Joined just now',
+    };
+
+    const updatedHosts = [newHost, ...agencyHosts];
+    saveAgencyHosts(updatedHosts);
+
+    // Update candidate's user profile with official agency tag
+    if (currentUser.id === req.userId || currentUser.uniqueId === req.uniqueId) {
+      updateUserProfile({
+        agencyId: hostAgencyProfile.agencyId,
+        agencyName: hostAgencyProfile.agencyName,
+        agencyTag: hostAgencyProfile.agencyTag,
+        isAgencyHost: true,
+      });
+    }
+
+    setRegisteredUsers((prev) =>
+      prev.map((u) =>
+        u.id === req.userId || u.uniqueId === req.uniqueId
+          ? {
+              ...u,
+              agencyId: hostAgencyProfile.agencyId,
+              agencyName: hostAgencyProfile.agencyName,
+              agencyTag: hostAgencyProfile.agencyTag,
+              isAgencyHost: true,
+            }
+          : u
+      )
+    );
+
+    // Update request status
+    const updatedReqs = hostJoinRequests.map((r) =>
+      r.id === requestId ? { ...r, status: 'approved' as const } : r
+    );
+    saveHostJoinRequests(updatedReqs);
+
+    // Notification to host
+    const joinNotif: NotificationItem = {
+      id: `notif_host_joined_${Date.now()}`,
+      type: 'system',
+      title: `🎉 Welcome to ${hostAgencyProfile.agencyName}!`,
+      message: `Your host application was approved! Official Agency Tag [${hostAgencyProfile.agencyTag}] is now assigned to your profile.`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [joinNotif, ...prev]);
+
+    return {
+      success: true,
+      message: `${req.displayName} approved and bound to [${hostAgencyProfile.agencyTag}] successfully!`,
+    };
+  };
+
+  const rejectHostJoinRequest = (requestId: string): { success: boolean; message: string } => {
+    const updatedReqs = hostJoinRequests.map((r) =>
+      r.id === requestId ? { ...r, status: 'rejected' as const } : r
+    );
+    saveHostJoinRequests(updatedReqs);
+    return { success: true, message: 'Host application has been rejected.' };
+  };
+
+  const removeHostFromAgency = (
+    hostId: string,
+    reason?: string
+  ): { success: boolean; message: string } => {
+    const target = agencyHosts.find((h) => h.id === hostId || h.userId === hostId);
+    if (!target) return { success: false, message: 'Host not found' };
+
+    const updatedHosts = agencyHosts.filter((h) => h.id !== hostId && h.userId !== hostId);
+    saveAgencyHosts(updatedHosts);
+
+    // Remove agency tag from user
+    if (currentUser.id === target.userId || currentUser.uniqueId === target.uniqueId) {
+      updateUserProfile({
+        agencyId: undefined,
+        agencyName: undefined,
+        agencyTag: undefined,
+        isAgencyHost: false,
+      });
+    }
+
+    setRegisteredUsers((prev) =>
+      prev.map((u) =>
+        u.id === target.userId || u.uniqueId === target.uniqueId
+          ? {
+              ...u,
+              agencyId: undefined,
+              agencyName: undefined,
+              agencyTag: undefined,
+              isAgencyHost: false,
+            }
+          : u
+      )
+    );
+
+    const removalNotif: NotificationItem = {
+      id: `notif_host_released_${Date.now()}`,
+      type: 'system',
+      title: `Agency Release Notice`,
+      message: `You have been released from ${target.agencyName}. ${reason ? `Reason: ${reason}` : ''}`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [removalNotif, ...prev]);
+
+    return { success: true, message: `${target.displayName} has been released from the agency.` };
+  };
+
+  const requestHostResignation = (reason: string): { success: boolean; message: string } => {
+    const updatedHosts = agencyHosts.map((h) =>
+      h.userId === currentUser.id || h.uniqueId === currentUser.uniqueId
+        ? {
+            ...h,
+            resignationRequested: true,
+            resignationReason: reason,
+          }
+        : h
+    );
+    saveAgencyHosts(updatedHosts);
+
+    const agencyNotif: NotificationItem = {
+      id: `notif_resign_${Date.now()}`,
+      type: 'system',
+      title: `⚠️ Resignation Request from ${currentUser.displayName}`,
+      message: `Host ${currentUser.displayName} (${currentUser.uniqueId}) has requested resignation. Reason: ${reason}`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [agencyNotif, ...prev]);
+
+    return {
+      success: true,
+      message: 'Your resignation request has been submitted to your agency admin for review.',
+    };
+  };
+
+  const submitHostJoinRequest = (
+    agencyId: string,
+    whatsapp: string,
+    experience: string,
+    expectedHours: number
+  ): { success: boolean; message: string } => {
+    // 1. Check if user already bound to an agency
+    if (currentUser.agencyId || currentUser.agencyTag) {
+      return {
+        success: false,
+        message: `You are already bound to ${currentUser.agencyName || 'an agency'} [${currentUser.agencyTag}]. A host cannot join multiple agencies. Please submit resignation first.`,
+      };
+    }
+
+    const targetAgency = allHostAgencies.find((a) => a.agencyId === agencyId) || hostAgencyProfile;
+
+    const newReq: HostJoinRequest = {
+      id: `hreq_${Date.now()}`,
+      userId: currentUser.id,
+      uniqueId: currentUser.uniqueId,
+      displayName: currentUser.displayName,
+      username: currentUser.username,
+      avatar: currentUser.avatar,
+      level: currentUser.level,
+      agencyId: targetAgency.agencyId,
+      whatsapp,
+      experience,
+      expectedHours,
+      appliedDate: 'Just now',
+      status: 'pending',
+    };
+
+    const updated = [newReq, ...hostJoinRequests];
+    saveHostJoinRequests(updated);
+
+    const notif: NotificationItem = {
+      id: `notif_new_host_req_${Date.now()}`,
+      type: 'system',
+      title: `📬 New Host Application: ${currentUser.displayName}`,
+      message: `${currentUser.displayName} applied to join ${targetAgency.agencyName}. WhatsApp: ${whatsapp}`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [notif, ...prev]);
+
+    return {
+      success: true,
+      message: `Application submitted to ${targetAgency.agencyName}! The agency owner will review and contact you on WhatsApp.`,
+    };
+  };
+
+  const submitAgencyApplication = (
+    data: Omit<AgencyApplication, 'id' | 'status' | 'submittedAt'>
+  ): { success: boolean; message: string } => {
+    const newApp: AgencyApplication = {
+      ...data,
+      id: `app_${Date.now()}`,
+      status: 'pending',
+      submittedAt: 'Just now',
+    };
+    const updated = [newApp, ...agencyApplications];
+    saveAgencyApplications(updated);
+
+    const notif: NotificationItem = {
+      id: `notif_agency_app_${Date.now()}`,
+      type: 'system',
+      title: `🏢 Agency Application Received`,
+      message: `Your application to launch "${data.agencyName}" as an official ${data.type === 'coin_seller' ? 'Coin Seller' : 'Host'} Agency has been submitted for official review.`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [notif, ...prev]);
+
+    return {
+      success: true,
+      message: 'Agency application submitted successfully! Our official team will review your credentials and contact you.',
+    };
+  };
+
+  const reviewAgencyApplication = (
+    applicationId: string,
+    action: 'approve' | 'reject'
+  ): { success: boolean; message: string } => {
+    const app = agencyApplications.find((a) => a.id === applicationId);
+    if (!app) return { success: false, message: 'Application not found' };
+
+    const updated = agencyApplications.map((a) =>
+      a.id === applicationId ? { ...a, status: action === 'approve' ? ('approved' as const) : ('rejected' as const) } : a
+    );
+    saveAgencyApplications(updated);
+
+    if (action === 'approve') {
+      if (app.type === 'host_agency') {
+        const newAgency: HostAgencyProfile = {
+          agencyId: `agency_${Date.now()}`,
+          agencyName: app.agencyName,
+          agencyCode: `AM-HT-${Math.floor(100 + Math.random() * 900)}`,
+          agencyTag: app.agencyTag || 'VIP',
+          badge: 'Diamond Certified Host Agency',
+          ownerUserId: app.applicantUserId,
+          whatsappNumber: app.whatsapp,
+          whatsappDisplay: app.whatsapp,
+          defaultCommissionRate: 15,
+          minWeeklyHours: 15,
+          slogan: 'Official livestreaming agency.',
+          isOfficial: true,
+          activeHostsCount: 0,
+        };
+        setAllHostAgencies((prev) => [newAgency, ...prev]);
+        setHostAgencyProfile(newAgency);
+      }
+    }
+
+    return {
+      success: true,
+      message: `Agency application #${applicationId} ${action === 'approve' ? 'approved' : 'rejected'}.`,
+    };
   };
 
   const setCurrentScreen = (screen: ScreenType) => {
@@ -854,7 +2110,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const sendLiveGift = (gift: Gift, recipientHostId?: string) => {
     if (coins < gift.coins) {
-      alert(`Insufficient coins! You need ${gift.coins} coins to send ${gift.name}. Recharge in Wallet.`);
       return;
     }
 
@@ -1054,10 +2309,162 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
   };
 
+  const addMyStory = (storyData: {
+    mediaUrl: string;
+    caption?: string;
+    musicTitle?: string;
+    backgroundColor?: string;
+    stickers?: string[];
+  }) => {
+    const newStory: StoryItem = {
+      id: `story_me_${Date.now()}`,
+      mediaUrl: storyData.mediaUrl,
+      caption: storyData.caption,
+      musicTitle: storyData.musicTitle,
+      backgroundColor: storyData.backgroundColor,
+      stickers: storyData.stickers,
+      createdAt: 'Just now',
+      likes: 0,
+      isLiked: false,
+      viewsCount: 1,
+    };
+    setMyStories((prev) => {
+      const updated = [newStory, ...prev];
+      try {
+        localStorage.setItem('alphamate_my_stories', JSON.stringify(updated));
+      } catch {
+        // ignore
+      }
+      return updated;
+    });
+  };
+
+  const toggleLikeStory = (friendId: string, storyId: string) => {
+    if (friendId === 'me' || friendId === currentUser.id) {
+      setMyStories((prev) =>
+        prev.map((s) => {
+          if (s.id === storyId) {
+            const isLiked = !s.isLiked;
+            return {
+              ...s,
+              isLiked,
+              likes: isLiked ? s.likes + 1 : Math.max(0, s.likes - 1),
+            };
+          }
+          return s;
+        })
+      );
+      return;
+    }
+
+    setFriendStories((prev) =>
+      prev.map((f) => {
+        if (f.id === friendId || f.user.id === friendId) {
+          return {
+            ...f,
+            stories: f.stories.map((s) => {
+              if (s.id === storyId) {
+                const isLiked = !s.isLiked;
+                return {
+                  ...s,
+                  isLiked,
+                  likes: isLiked ? s.likes + 1 : Math.max(0, s.likes - 1),
+                };
+              }
+              return s;
+            }),
+          };
+        }
+        return f;
+      })
+    );
+  };
+
+  const reactToStory = (friendId: string, storyId: string, _emoji: string) => {
+    // Increment likes and flash reaction
+    setFriendStories((prev) =>
+      prev.map((f) => {
+        if (f.id === friendId || f.user.id === friendId) {
+          return {
+            ...f,
+            stories: f.stories.map((s) => {
+              if (s.id === storyId) {
+                return {
+                  ...s,
+                  likes: s.likes + 1,
+                  isLiked: true,
+                };
+              }
+              return s;
+            }),
+          };
+        }
+        return f;
+      })
+    );
+  };
+
+  const markStorySeen = (friendId: string) => {
+    setFriendStories((prev) =>
+      prev.map((f) => (f.id === friendId || f.user.id === friendId ? { ...f, isSeen: true } : f))
+    );
+  };
+
+  const addCoins = (amount: number, reason: string) => {
+    setCoins((prev) => prev + amount);
+    setCurrentUser((prev) => {
+      const updated = { ...prev, coins: (prev.coins || 0) + amount };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    const newTx: WalletTransaction = {
+      id: `tx_${Date.now()}`,
+      type: 'reward',
+      amount,
+      currency: 'coins',
+      title: reason || 'Coins Reward',
+      date: 'Just now',
+      status: 'completed',
+    };
+    setTransactions((prev) => [newTx, ...prev]);
+  };
+
+  const addDiamonds = (amount: number, reason: string) => {
+    setDiamonds((prev) => prev + amount);
+    setCurrentUser((prev) => {
+      const updated = { ...prev, diamonds: (prev.diamonds || 0) + amount };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    const newTx: WalletTransaction = {
+      id: `tx_${Date.now()}`,
+      type: 'gift_received',
+      amount,
+      currency: 'diamonds',
+      title: reason || 'Gift Received / Stream Earnings',
+      date: 'Just now',
+      status: 'completed',
+    };
+    setTransactions((prev) => [newTx, ...prev]);
+  };
+
   const rechargeCoins = async (amount: number, priceUSD: number, paymentMethod: string): Promise<boolean> => {
     // realistic checkout delay
     await new Promise((res) => setTimeout(res, 800));
     setCoins((prev) => prev + amount);
+    setCurrentUser((prev) => {
+      const updated = { ...prev, coins: (prev.coins || 0) + amount };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
 
     const newTx: WalletTransaction = {
       id: `tx_${Date.now()}`,
@@ -1070,6 +2477,100 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setTransactions((prev) => [newTx, ...prev]);
     return true;
+  };
+
+  const withdrawDiamonds = (
+    amountUSD: number,
+    method: string,
+    accountDetails: { title: string; number: string; bankName?: string }
+  ): { success: boolean; message: string } => {
+    if (amountUSD < 10) {
+      return { success: false, message: 'Minimum withdrawal amount is $10.00 (100,000 Diamonds)' };
+    }
+    const diamondsNeeded = Math.round(amountUSD * 10000);
+    if (diamonds < diamondsNeeded) {
+      return {
+        success: false,
+        message: `Insufficient diamonds! You need ${diamondsNeeded.toLocaleString()} Diamonds for a $${amountUSD.toFixed(2)} withdrawal.`,
+      };
+    }
+
+    setDiamonds((prev) => prev - diamondsNeeded);
+    setCurrentUser((prev) => {
+      const updated = { ...prev, diamonds: Math.max(0, (prev.diamonds || 0) - diamondsNeeded) };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    const newTx: WalletTransaction = {
+      id: `tx_withdraw_${Date.now()}`,
+      type: 'withdrawal',
+      amount: amountUSD,
+      currency: 'USD',
+      title: `Withdrawal via ${method} ($${amountUSD.toFixed(2)} - ${accountDetails.title})`,
+      date: 'Just now',
+      status: 'pending',
+    };
+    setTransactions((prev) => [newTx, ...prev]);
+
+    const withdrawNotif: NotificationItem = {
+      id: `notif_withdraw_${Date.now()}`,
+      type: 'system',
+      title: '💸 Withdrawal Request Submitted',
+      message: `Your withdrawal of $${amountUSD.toFixed(2)} (${diamondsNeeded.toLocaleString()} Diamonds) via ${method} has been received. Processing time: 12-24 hours.`,
+      timestamp: 'Just now',
+      isRead: false,
+    };
+    setNotifications((prev) => [withdrawNotif, ...prev]);
+
+    return {
+      success: true,
+      message: `Withdrawal request for $${amountUSD.toFixed(2)} (${diamondsNeeded.toLocaleString()} Diamonds) submitted successfully!`,
+    };
+  };
+
+  const exchangeDiamondsToCoins = (
+    diamondsAmount: number
+  ): { success: boolean; message: string } => {
+    if (diamondsAmount <= 0) {
+      return { success: false, message: 'Please enter a valid amount of diamonds to exchange' };
+    }
+    if (diamonds < diamondsAmount) {
+      return { success: false, message: 'Insufficient diamonds balance' };
+    }
+
+    setDiamonds((prev) => prev - diamondsAmount);
+    setCoins((prev) => prev + diamondsAmount);
+
+    setCurrentUser((prev) => {
+      const updated = {
+        ...prev,
+        diamonds: Math.max(0, (prev.diamonds || 0) - diamondsAmount),
+        coins: (prev.coins || 0) + diamondsAmount,
+      };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    const newTx: WalletTransaction = {
+      id: `tx_exchange_${Date.now()}`,
+      type: 'reward',
+      amount: diamondsAmount,
+      currency: 'coins',
+      title: `Converted ${diamondsAmount.toLocaleString()} Diamonds to Coins`,
+      date: 'Just now',
+      status: 'completed',
+    };
+    setTransactions((prev) => [newTx, ...prev]);
+
+    return {
+      success: true,
+      message: `Successfully converted ${diamondsAmount.toLocaleString()} Diamonds into ${diamondsAmount.toLocaleString()} Coins!`,
+    };
   };
 
   const purchaseStoreItem = (cost: number, currency: 'coins' | 'diamonds', itemTitle: string): boolean => {
@@ -1155,10 +2656,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         videos,
         addVideoPost,
         toggleLikeVideo,
+        friendStories,
+        myStories,
+        addMyStory,
+        toggleLikeStory,
+        reactToStory,
+        markStorySeen,
         coins,
         diamonds,
         transactions,
+        addCoins,
+        addDiamonds,
         rechargeCoins,
+        withdrawDiamonds,
+        exchangeDiamondsToCoins,
         purchaseStoreItem,
         dailyCheckInState,
         claimDailyReward,
@@ -1173,6 +2684,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setDeviceMode,
         customLogoUrl,
         setCustomLogoUrl,
+        agencyProfile,
+        agencyOrders,
+        agencyTransactions,
+        sendAgencyCoins,
+        deliverAgencyOrder,
+        rejectAgencyOrder,
+        updateAgencyProfile,
+        setAgencySecurityPin,
+        createBuyerCoinOrder,
+        findUserByIdOrUsername,
+        hostAgencyProfile,
+        agencyHosts,
+        hostJoinRequests,
+        agencyApplications,
+        allHostAgencies,
+        updateHostAgencyProfile,
+        setHostWeeklyTarget,
+        updateHostCommission,
+        updateHostContract,
+        toggleHostLiveStatus,
+        approveHostJoinRequest,
+        rejectHostJoinRequest,
+        removeHostFromAgency,
+        requestHostResignation,
+        submitHostJoinRequest,
+        submitAgencyApplication,
+        reviewAgencyApplication,
       }}
     >
       {children}

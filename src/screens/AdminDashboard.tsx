@@ -16,10 +16,20 @@ import {
   Search,
   Server,
   Zap,
+  Building2,
+  CheckCircle2,
+  XCircle,
 } from 'lucide-react';
 
 export const AdminDashboard: React.FC = () => {
-  const { liveStreams, setDeviceMode, customLogoUrl, openLiveStream } = useApp();
+  const {
+    liveStreams,
+    setDeviceMode,
+    customLogoUrl,
+    openLiveStream,
+    agencyApplications,
+    reviewAgencyApplication,
+  } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStreamId, setSelectedStreamId] = useState<string>(liveStreams[0]?.id || '');
@@ -278,6 +288,101 @@ export const AdminDashboard: React.FC = () => {
             >
               Open Full Stream In-App
             </button>
+          </div>
+        </div>
+
+        {/* Agency License Applications Review Section */}
+        <div className="rounded-3xl bg-[#120A24] border border-[#A855F7]/20 p-5 shadow-xl space-y-4">
+          <div className="flex items-center justify-between border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2">
+              <Building2 className="w-5 h-5 text-amber-400" />
+              <div>
+                <h3 className="text-sm font-black text-white">Official Agency License Applications</h3>
+                <p className="text-[11px] text-zinc-400">Review creator KYC & approve official Coin Seller or Host Agency licenses</p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-amber-400/20 text-amber-300 text-xs font-bold border border-amber-400/30">
+              {agencyApplications.filter((a) => a.status === 'pending').length} Pending Review
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr className="border-b border-white/10 text-zinc-400 uppercase text-[10px] tracking-wider">
+                  <th className="pb-2">Applicant</th>
+                  <th className="pb-2">Agency Type</th>
+                  <th className="pb-2">Agency Name & Tag</th>
+                  <th className="pb-2">WhatsApp / Phone</th>
+                  <th className="pb-2">CNIC / ID</th>
+                  <th className="pb-2">Status</th>
+                  <th className="pb-2 text-right">Official Decision</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-white/5">
+                {agencyApplications.map((app) => (
+                  <tr key={app.id} className="hover:bg-white/5">
+                    <td className="py-3 font-bold text-white">
+                      <div>{app.applicantName}</div>
+                      <div className="text-[10px] text-zinc-500 font-mono">ID: {app.applicantUniqueId}</div>
+                    </td>
+                    <td className="py-3">
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                        app.type === 'coin_seller'
+                          ? 'bg-amber-400/20 text-amber-300'
+                          : 'bg-purple-500/20 text-purple-300'
+                      }`}>
+                        {app.type === 'coin_seller' ? 'Coin Seller' : 'Host Agency'}
+                      </span>
+                    </td>
+                    <td className="py-3">
+                      <div className="font-bold text-zinc-200">{app.agencyName}</div>
+                      {app.agencyTag && (
+                        <span className="text-[9.5px] font-mono text-amber-400">[{app.agencyTag}]</span>
+                      )}
+                    </td>
+                    <td className="py-3 font-mono text-zinc-300">
+                      <div>{app.whatsapp}</div>
+                      <div className="text-[10px] text-zinc-500">{app.phoneNumber}</div>
+                    </td>
+                    <td className="py-3 font-mono text-zinc-400">
+                      {app.idCardNumber || 'N/A (Exempt)'}
+                    </td>
+                    <td className="py-3">
+                      <span className={`px-2 py-0.5 rounded-full text-[9.5px] font-bold uppercase ${
+                        app.status === 'approved'
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : app.status === 'rejected'
+                          ? 'bg-rose-500/20 text-rose-300'
+                          : 'bg-amber-400/20 text-amber-300'
+                      }`}>
+                        {app.status}
+                      </span>
+                    </td>
+                    <td className="py-3 text-right">
+                      {app.status === 'pending' ? (
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            onClick={() => reviewAgencyApplication(app.id, 'reject')}
+                            className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10.5px] font-bold cursor-pointer"
+                          >
+                            Reject
+                          </button>
+                          <button
+                            onClick={() => reviewAgencyApplication(app.id, 'approve')}
+                            className="px-3 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[10.5px] font-bold cursor-pointer border border-emerald-500/30"
+                          >
+                            Approve License
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[10px] text-zinc-500 font-mono">Processed</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </div>
       </div>

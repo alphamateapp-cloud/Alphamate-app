@@ -2,8 +2,11 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../context/AppContext';
 import { EditProfileModal } from '../components/modals/EditProfileModal';
 import { ShareProfileModal } from '../components/modals/ShareProfileModal';
+import { JoinAgencyModal } from '../components/modals/JoinAgencyModal';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { copyToClipboard } from '../utils/clipboard';
+import { compressImage } from '../utils/imageCompressor';
+import { LevelBadgeTag } from '../components/brand/LevelBadgeTag';
 import {
   Crown,
   Copy,
@@ -21,6 +24,8 @@ import {
   ShieldCheck,
   Camera,
   Sparkles,
+  Coins,
+  Building2,
   Image as ImageIcon,
   ChevronRight,
   ChevronLeft,
@@ -44,6 +49,9 @@ import {
   Radio,
   Star,
   CheckCircle2,
+  Bookmark,
+  Lock,
+  Music,
 } from 'lucide-react';
 
 interface CoverSlide {
@@ -90,14 +98,16 @@ export const UserProfileScreen: React.FC = () => {
     diamonds,
     videos,
     updateUserProfile,
+    agencyProfile,
   } = useApp();
 
-  // Navigation & Modal states
-  const [activeTab, setActiveTab] = useState<'videos' | 'posts' | 'replays' | 'gifts'>('videos');
+  // Navigation & Modal states: Videos, Posts, Liked, Saved, Private
+  const [activeTab, setActiveTab] = useState<'videos' | 'posts' | 'liked' | 'saved' | 'private'>('videos');
   const [copiedId, setCopiedId] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showCoverModal, setShowCoverModal] = useState(false);
+  const [showJoinAgencyModal, setShowJoinAgencyModal] = useState(false);
   const [showExploreFeaturesModal, setShowExploreFeaturesModal] = useState(false);
   const [showShortcutModal, setShowShortcutModal] = useState<{
     type: string;
@@ -141,18 +151,17 @@ export const UserProfileScreen: React.FC = () => {
   };
 
   // Cover Image File Handler (Camera or Gallery)
-  const handleCoverFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleCoverFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        if (typeof reader.result === 'string') {
-          updateUserProfile({ coverImage: reader.result });
-          showToast('Cover photo updated successfully!');
-          setShowCoverModal(false);
-        }
-      };
-      reader.readAsDataURL(file);
+      try {
+        const compressed = await compressImage(file, 800, 450, 0.75);
+        updateUserProfile({ coverImage: compressed });
+        showToast('Cover photo updated successfully!');
+        setShowCoverModal(false);
+      } catch {
+        showToast('Error processing cover image. Please choose another.');
+      }
     }
   };
 
@@ -162,13 +171,43 @@ export const UserProfileScreen: React.FC = () => {
     setShowCoverModal(false);
   };
 
-  const myVideos = videos.filter((v) => v.user.id === currentUser.id || v.user.username === currentUser.username);
+  // Video Collections for Profile Tabs:
+  // 1. My Public Videos (uploaded by user)
+  const myVideos = videos.filter((v) => (v.user.id === currentUser.id || v.user.username === currentUser.username) && v.postType !== 'post');
+  
+  // 2. My Posts (text posts, quotes, photos with text)
+  const myPosts = videos.filter((v) => (v.user.id === currentUser.id || v.user.username === currentUser.username) && v.postType === 'post');
+  
+  // 2. Liked Videos (videos liked by user)
+  const likedVideos = videos.filter((v) => v.isLiked || v.id === 'vid_01' || v.id === 'vid_03');
+
+  // 3. Saved Videos (videos bookmarked to watch later)
+  const [savedVideoIds, setSavedVideoIds] = useState<Set<string>>(new Set(['vid_02', 'vid_04']));
+  const savedVideos = videos.filter((v) => savedVideoIds.has(v.id));
+
+  // 4. Private Videos (personal videos only visible to the owner)
+  const [privateVideos, setPrivateVideos] = useState<Array<{ id: string; title: string; thumbnail: string; date: string; duration: string }>>([
+    {
+      id: 'priv_01',
+      title: 'Voice Note Rehearsal & Vocal Warmup 🔒',
+      thumbnail: 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?auto=format&fit=crop&w=400&q=80',
+      date: 'Only you can see this',
+      duration: '0:45',
+    },
+    {
+      id: 'priv_02',
+      title: 'Solo PK Battle Strategy Draft 🔒',
+      thumbnail: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&w=400&q=80',
+      date: 'Private vault • Encrypted',
+      duration: '1:12',
+    },
+  ]);
 
   // Equalizer sound bars heights animation generator
   const soundwaveHeights = [18, 36, 62, 44, 78, 55, 92, 68, 85, 42, 65, 38, 72, 50, 80, 40];
 
   return (
-    <div className="relative w-full h-full min-h-screen pb-32 sm:pb-36 bg-[#09070F] text-white overflow-y-auto selection:bg-[#9333EA] selection:text-white">
+    <div className="relative w-full h-full pb-24 bg-[#09070F] text-white overflow-y-auto overscroll-contain selection:bg-[#9333EA] selection:text-white">
       {/* Toast Notification */}
       {toastMessage && (
         <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#1F1138]/95 border border-[#A855F7]/40 text-white text-xs font-semibold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-bounce">
@@ -369,25 +408,16 @@ export const UserProfileScreen: React.FC = () => {
           ========================================================================= */}
       <div className="relative z-20 px-4 -mt-16">
         <div className="rounded-3xl p-5 bg-[#120B22]/90 backdrop-blur-xl border border-[#A855F7]/30 shadow-2xl shadow-[#7928CA]/20">
-          {/* Top row inside card: Avatar with glowing border & Action Buttons */}
-          <div className="flex items-end justify-between -mt-12 sm:-mt-14">
-            {/* Circular Avatar with Glowing VIP Halo & Camera Badge */}
-            <div className="relative group">
+          {/* Top row inside card: Avatar with VIP Frame & Action Buttons + Hero Level Badge Tag */}
+          <div className="flex items-start justify-between -mt-12 sm:-mt-14 gap-3">
+            {/* Circular Avatar with Glowing VIP Frame (Camera badge removed as requested) */}
+            <div className="relative group shrink-0">
               <VipAvatarFrame
                 avatarUrl={currentUser.avatar}
                 vipTier={currentUser.vipTier}
                 size="xl"
                 showCrownBadge={true}
               />
-
-              {/* Camera click badge to trigger Avatar update in EditProfileModal */}
-              <button
-                onClick={() => setShowEditModal(true)}
-                className="absolute bottom-0 right-0 w-8 h-8 rounded-full bg-gradient-to-tr from-[#7928CA] to-[#EC4899] border-2 border-[#120B22] flex items-center justify-center text-white shadow-lg hover:scale-110 active:scale-95 transition-all cursor-pointer"
-                title="Change Avatar"
-              >
-                <Camera className="w-4 h-4" />
-              </button>
 
               {/* Online Pulse Dot */}
               <div className="absolute top-1 right-1 flex items-center">
@@ -398,33 +428,72 @@ export const UserProfileScreen: React.FC = () => {
               </div>
             </div>
 
-            {/* Quick Action Buttons: Edit Profile & Share Profile */}
-            <div className="flex items-center gap-1.5 sm:gap-2 mb-1 shrink-0">
-              <button
-                onClick={() => setShowEditModal(true)}
-                className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl bg-[#231542] hover:bg-[#2F1C58] border border-[#A855F7]/35 text-[11px] sm:text-xs font-bold text-white shadow-md active:scale-95 transition-all flex items-center gap-1 sm:gap-1.5 cursor-pointer shrink-0"
-              >
-                <Edit3 className="w-3.5 h-3.5 text-[#C084FC]" />
-                <span>Edit Profile</span>
-              </button>
+            {/* Right Column: Edit & Share Buttons + Compact Level Badge Tag */}
+            <div className="flex-1 flex flex-col items-end gap-1.5 pt-8 sm:pt-9 min-w-0">
+              {/* Quick Action Buttons: Edit Profile & Share Profile */}
+              <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
+                <button
+                  onClick={() => setShowEditModal(true)}
+                  className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-[#231542] hover:bg-[#2F1C58] border border-[#A855F7]/35 text-[11px] font-bold text-white shadow-md active:scale-95 transition-all flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <Edit3 className="w-3.5 h-3.5 text-[#C084FC]" />
+                  <span>Edit Profile</span>
+                </button>
 
-              <button
-                onClick={() => setShowShareModal(true)}
-                className="px-2.5 sm:px-3.5 py-1.5 sm:py-2 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-[11px] sm:text-xs font-bold text-white shadow-lg shadow-[#EC4899]/25 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1 sm:gap-1.5 cursor-pointer shrink-0"
-              >
-                <Share2 className="w-3.5 h-3.5" />
-                <span>Share</span>
-              </button>
+                <button
+                  onClick={() => setShowShareModal(true)}
+                  className="px-2.5 sm:px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-[11px] font-bold text-white shadow-lg shadow-[#EC4899]/25 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1 cursor-pointer shrink-0"
+                >
+                  <Share2 className="w-3.5 h-3.5" />
+                  <span>Share</span>
+                </button>
+              </div>
+
+              {/* Official Chart Level Badge Insignia in Profile Card */}
+              <div className="flex items-center justify-end mt-1">
+                <LevelBadgeTag
+                  level={currentUser.level}
+                  size="hero"
+                  onClick={() => setCurrentScreen('levels')}
+                />
+              </div>
+
+              {/* Join Agency / My Agency Button (Directly below Level Badge as instructed) */}
+              <div className="flex items-center justify-end mt-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowJoinAgencyModal(true)}
+                  className={`px-2.5 py-1 rounded-xl text-[10.5px] font-black tracking-wide flex items-center gap-1 shadow-md active:scale-95 transition-all cursor-pointer ${
+                    currentUser.agencyTag
+                      ? 'bg-gradient-to-r from-amber-400 to-amber-600 text-black border border-amber-300 shadow-amber-500/20'
+                      : 'bg-gradient-to-r from-[#7928CA]/90 to-[#EC4899]/90 text-white border border-white/20 hover:brightness-110'
+                  }`}
+                  title={currentUser.agencyTag ? `Bound to ${currentUser.agencyName || 'Agency'}` : 'Join an Official Host Agency'}
+                >
+                  <Users className="w-3 h-3" />
+                  <span>
+                    {currentUser.agencyTag ? `Agency: [${currentUser.agencyTag}]` : 'Join Agency 🌟'}
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
 
           {/* Profile Identity Details */}
           <div className="mt-3.5">
-            {/* Display Name with Crown & Verified Shield */}
+            {/* Display Name with Crown, Verified Shield & Official Agency Tag */}
             <div className="flex items-center gap-2 flex-wrap">
               <h1 className="text-xl font-black text-white tracking-tight flex items-center gap-1.5">
                 <span>{currentUser.displayName}</span>
               </h1>
+              {currentUser.agencyTag && (
+                <div
+                  title={`Official Host bound to ${currentUser.agencyName || 'Agency'}`}
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-amber-600 text-black text-[9.5px] font-black tracking-wider uppercase shadow"
+                >
+                  <span>[{currentUser.agencyTag}]</span>
+                </div>
+              )}
               {currentUser.isVerified && (
                 <div title="Verified Alpha Creator">
                   <ShieldCheck className="w-5 h-5 text-[#A855F7] fill-[#A855F7]/20" />
@@ -471,10 +540,11 @@ export const UserProfileScreen: React.FC = () => {
               </span>
 
               {/* Honor Level Badge */}
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-gradient-to-r from-[#7928CA]/30 to-[#9333EA]/30 border border-[#9333EA]/40 text-[#C084FC] font-black">
-                <Zap className="w-3 h-3 text-amber-400 fill-amber-400" />
-                <span>Lv.{currentUser.level}</span>
-              </span>
+              <LevelBadgeTag
+                level={currentUser.level}
+                size="sm"
+                onClick={() => setCurrentScreen('levels')}
+              />
 
               {/* Online State Pill */}
               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-emerald-300 font-semibold text-[10px]">
@@ -654,6 +724,45 @@ export const UserProfileScreen: React.FC = () => {
       </div>
 
       {/* =========================================================================
+          AGENCY CENTER: OFFICIAL COIN SELLER & HOST AGENCY MANAGEMENT
+          ========================================================================= */}
+      <div className="px-4 mt-3.5">
+        <button
+          onClick={() => setCurrentScreen('agency_management')}
+          className="w-full p-4 rounded-2xl bg-gradient-to-r from-[#2A1305] via-[#210D38] to-[#120724] border border-amber-400/50 hover:border-amber-400 shadow-xl shadow-amber-950/30 flex items-center justify-between cursor-pointer group active:scale-[0.99] transition-all text-left"
+        >
+          <div className="flex items-center gap-3">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-amber-400 via-amber-500 to-[#EC4899] p-0.5 shadow-lg shadow-amber-500/25 flex items-center justify-center shrink-0">
+              <div className="w-full h-full rounded-[14px] bg-[#160A2A] flex items-center justify-center text-amber-300">
+                <Coins className="w-5 h-5 fill-current group-hover:scale-110 transition-transform" />
+              </div>
+            </div>
+
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-sm font-black text-white tracking-wide group-hover:text-amber-300 transition-colors">
+                  Agency Center
+                </h3>
+                <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-amber-400/20 text-amber-300 border border-amber-400/40 uppercase">
+                  OFFICIAL ACTIVE
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-300 mt-0.5 truncate">
+                Coin Seller Agency • <span className="text-amber-300 font-mono font-bold">{agencyProfile.agencyBalance.toLocaleString()} Coins</span> Stock
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0 ml-2">
+            <span className="text-[10px] font-bold text-amber-400 hidden sm:inline">Manage</span>
+            <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-zinc-400 group-hover:text-white group-hover:bg-white/10 transition-colors">
+              <ChevronRight className="w-4 h-4" />
+            </div>
+          </div>
+        </button>
+      </div>
+
+      {/* =========================================================================
           EXPLORE FEATURES & SERVICES (Single Option Replacing Cluttered Shelves)
           ========================================================================= */}
       <div className="px-4 mt-3.5">
@@ -688,29 +797,32 @@ export const UserProfileScreen: React.FC = () => {
       </div>
 
       {/* =========================================================================
-          SECTION 6: PROFILE CONTENT TABS (Videos, Posts, Replays, Gifts)
+          SECTION 6: PROFILE CONTENT TABS (Videos, Posts, Liked, Saved, Private)
           ========================================================================= */}
       <div className="px-4 mt-6">
-        <div className="border-b border-[#A855F7]/20 flex items-center justify-around">
+        <div className="border-b border-[#A855F7]/20 flex items-center justify-between overflow-x-auto scrollbar-none gap-2">
           {[
-            { id: 'videos', label: 'Videos', count: myVideos.length },
-            { id: 'posts', label: 'Posts', count: 12 },
-            { id: 'replays', label: 'Replays', count: 3 },
-            { id: 'gifts', label: 'Gifts', count: 48 },
+            { id: 'videos', label: 'Videos', count: myVideos.length, icon: Video },
+            { id: 'posts', label: 'Posts', count: myPosts.length + 1, icon: MessageCircle },
+            { id: 'liked', label: 'Liked', count: likedVideos.length, icon: Heart },
+            { id: 'saved', label: 'Saved', count: savedVideos.length, icon: Bookmark },
+            { id: 'private', label: 'Private', count: privateVideos.length, icon: Lock },
           ].map((tab) => {
             const isActive = activeTab === tab.id;
+            const TabIcon = tab.icon;
             return (
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`pb-3 pt-1 text-xs font-bold transition-all cursor-pointer relative ${
+                className={`pb-3 pt-1 text-xs font-bold transition-all cursor-pointer relative shrink-0 flex items-center gap-1.5 ${
                   isActive ? 'text-white' : 'text-zinc-500 hover:text-zinc-300'
                 }`}
               >
+                <TabIcon className={`w-3.5 h-3.5 ${isActive ? 'text-[#EC4899]' : 'text-zinc-500'}`} />
                 <span>{tab.label}</span>
-                <span className="ml-1 text-[10px] text-zinc-400">({tab.count})</span>
+                <span className="text-[10px] text-zinc-400">({tab.count})</span>
                 {isActive && (
-                  <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-gradient-to-r from-[#7928CA] to-[#EC4899]" />
+                  <div className="absolute bottom-0 left-0 right-0 h-[2.5px] rounded-full bg-gradient-to-r from-[#7928CA] via-[#A855F7] to-[#EC4899] shadow-[0_0_8px_rgba(236,72,153,0.8)]" />
                 )}
               </button>
             );
@@ -719,49 +831,150 @@ export const UserProfileScreen: React.FC = () => {
 
         {/* Tab Content Display */}
         <div className="py-4">
+          {/* TAB 1: My Videos */}
           {activeTab === 'videos' && (
-            <div className="grid grid-cols-2 gap-3">
-              {myVideos.map((vid) => (
-                <div
-                  key={vid.id}
-                  className="rounded-2xl overflow-hidden bg-[#160E2A] border border-white/10 shadow-md group cursor-pointer relative"
-                  onClick={() => showToast(`Playing: ${vid.title}`)}
-                >
-                  <div className="relative aspect-[3/4] overflow-hidden">
-                    <img
-                      src={vid.thumbnail}
-                      alt={vid.title}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-80" />
+            <div>
+              {myVideos.length > 0 ? (
+                <div className="grid grid-cols-2 gap-3">
+                  {myVideos.map((vid) => (
+                    <div
+                      key={vid.id}
+                      className="rounded-2xl overflow-hidden bg-[#160E2A] border border-white/10 shadow-md group cursor-pointer relative"
+                      onClick={() => showToast(`Playing: ${vid.title}`)}
+                    >
+                      <div className="relative aspect-[3/4] overflow-hidden">
+                        <img
+                          src={vid.thumbnail}
+                          alt={vid.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-80" />
 
-                    <div className="absolute top-2 right-2 p-1.5 rounded-full bg-black/40 backdrop-blur-md text-white">
-                      <Play className="w-3.5 h-3.5 fill-white" />
-                    </div>
+                        <div className="absolute top-2 right-2 p-1.5 rounded-full bg-black/50 backdrop-blur-md text-white">
+                          <Play className="w-3.5 h-3.5 fill-white" />
+                        </div>
 
-                    <div className="absolute bottom-2 left-2 right-2">
-                      <span className="text-[11px] font-bold text-white line-clamp-1">
-                        {vid.title}
-                      </span>
-                      <div className="flex items-center gap-3 text-[10px] text-zinc-300 mt-1">
-                        <span className="flex items-center gap-1 font-semibold">
-                          <Heart className="w-3 h-3 fill-rose-500 text-rose-500" />{' '}
-                          {vid.likes.toLocaleString()}
-                        </span>
-                        <span className="flex items-center gap-1 text-zinc-400">
-                          <Eye className="w-3 h-3" /> {(vid.likes * 4).toLocaleString()}
-                        </span>
+                        <div className="absolute bottom-2 left-2 right-2">
+                          <span className="text-[11px] font-bold text-white line-clamp-1 drop-shadow">
+                            {vid.title}
+                          </span>
+                          <div className="flex items-center gap-3 text-[10px] text-zinc-300 mt-1">
+                            <span className="flex items-center gap-1 font-semibold">
+                              <Heart className="w-3 h-3 fill-rose-500 text-rose-500" />{' '}
+                              {vid.likes.toLocaleString()}
+                            </span>
+                            <span className="flex items-center gap-1 text-zinc-400">
+                              <Eye className="w-3 h-3" /> {(vid.likes * 4).toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
                       </div>
                     </div>
-                  </div>
+                  ))}
                 </div>
-              ))}
+              ) : (
+                <div className="text-center py-10 px-4 rounded-2xl bg-[#140C26] border border-white/5">
+                  <Video className="w-10 h-10 text-zinc-600 mx-auto mb-2" />
+                  <p className="text-xs text-zinc-400">No public videos yet.</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Upload moments from the + tab to showcase your talent!</p>
+                </div>
+              )}
             </div>
           )}
 
+          {/* TAB 2: Posts */}
           {activeTab === 'posts' && (
             <div className="space-y-3">
-              <div className="p-4 rounded-2xl bg-[#140C26] border border-white/10">
+              {/* Write New Post Button */}
+              <button
+                onClick={() => setCurrentScreen('upload')}
+                className="w-full p-3 rounded-2xl bg-gradient-to-r from-[#21143D] to-[#170B2E] border border-[#A855F7]/30 hover:border-[#EC4899] text-left flex items-center justify-between text-xs font-bold text-zinc-300 hover:text-white cursor-pointer active:scale-[0.99] transition-all shadow-md group"
+              >
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center text-white shadow-sm group-hover:scale-105 transition-transform">
+                    <Edit3 className="w-4 h-4" />
+                  </div>
+                  <span>What's on your mind? Share your thoughts...</span>
+                </div>
+                <span className="text-[11px] font-bold px-2.5 py-1 rounded-full bg-[#7928CA]/30 text-[#C084FC] border border-[#A855F7]/30">
+                  Write Post ✍️
+                </span>
+              </button>
+
+              {/* Dynamically Rendered Published Posts */}
+              {myPosts.map((post) => (
+                <div key={post.id} className="p-4 rounded-2xl bg-[#140C26] border border-white/10 shadow-md space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-full overflow-hidden border border-[#A855F7]">
+                        <img src={currentUser.avatar} alt="" className="w-full h-full object-cover" />
+                      </div>
+                      <div>
+                        <span className="text-xs font-bold text-white block">{currentUser.displayName}</span>
+                        <span className="text-[10px] text-zinc-400">{post.timestamp || 'Just now'}</span>
+                      </div>
+                    </div>
+
+                    {post.musicTitle && (
+                      <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/50 border border-[#EC4899]/40 text-[#EC4899] text-[9.5px] font-bold">
+                        <Music className="w-3 h-3 animate-pulse" />
+                        <span className="truncate max-w-[90px]">{post.musicTitle}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Post Content Display */}
+                  {post.attachedPhotoUrl ? (
+                    <div className="relative rounded-xl overflow-hidden aspect-[4/3] bg-black">
+                      <img src={post.attachedPhotoUrl} alt="" className="w-full h-full object-cover" />
+                      {post.isTextOnPhoto && post.textContent && (
+                        <div className="absolute inset-0 bg-black/45 backdrop-blur-[1px] flex items-center justify-center p-4">
+                          <div className="rounded-xl bg-black/50 backdrop-blur-md border border-white/20 p-3 text-center">
+                            <p className="text-xs sm:text-sm font-black text-white leading-relaxed">
+                              “{post.textContent}”
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ) : post.textContent ? (
+                    <div className={`p-4 rounded-xl text-center shadow-inner ${post.backgroundColor ? `bg-gradient-to-br ${post.backgroundColor}` : 'bg-gradient-to-br from-[#4C1D95] to-[#1E0836]'}`}>
+                      <p className="text-sm sm:text-base font-black text-white leading-relaxed drop-shadow">
+                        “{post.textContent}”
+                      </p>
+                    </div>
+                  ) : null}
+
+                  {/* Caption / Description if not on photo */}
+                  {(!post.isTextOnPhoto || !post.attachedPhotoUrl) && post.description && post.description !== post.textContent && (
+                    <p className="text-xs text-zinc-300 leading-relaxed">{post.description}</p>
+                  )}
+
+                  {/* Tags */}
+                  {post.tags && post.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {post.tags.map((t, idx) => (
+                        <span key={idx} className="text-[10px] font-bold text-[#C084FC]">
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Post Stats */}
+                  <div className="flex items-center gap-4 pt-2 border-t border-white/5 text-xs text-zinc-400">
+                    <span className="flex items-center gap-1 text-rose-400">
+                      <Heart className="w-3.5 h-3.5 fill-rose-500" /> {post.likes || 1}
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <MessageCircle className="w-3.5 h-3.5" /> {post.commentsCount || 0} comments
+                    </span>
+                  </div>
+                </div>
+              ))}
+
+              {/* Sample Fallback Post */}
+              <div className="p-4 rounded-2xl bg-[#140C26] border border-white/10 shadow-md">
                 <div className="flex items-center gap-2 mb-2">
                   <div className="w-8 h-8 rounded-full overflow-hidden border border-[#A855F7]">
                     <img src={currentUser.avatar} alt="" className="w-full h-full object-cover" />
@@ -786,56 +999,190 @@ export const UserProfileScreen: React.FC = () => {
             </div>
           )}
 
-          {activeTab === 'replays' && (
-            <div className="space-y-3">
-              {[
-                { title: 'Grand PK Battle vs Luna Star', duration: '45 mins', date: '2 days ago', views: '12.4k' },
-                { title: 'Late Night Acoustic Music Jam', duration: '1 hr 12 mins', date: '5 days ago', views: '28.1k' },
-              ].map((rep, idx) => (
-                <div
-                  key={idx}
-                  onClick={() => showToast(`Loading replay: ${rep.title}`)}
-                  className="p-3.5 rounded-2xl bg-[#140C26] border border-[#A855F7]/20 flex items-center justify-between cursor-pointer hover:border-[#A855F7]/50 transition-all"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 rounded-xl bg-[#20133D] border border-purple-500/30 flex items-center justify-center text-purple-300">
-                      <Play className="w-4 h-4 fill-purple-400" />
+          {/* TAB 3: Liked Videos (Replaces old 'replays') */}
+          {activeTab === 'liked' && (
+            <div>
+              <div className="flex items-center justify-between mb-2.5">
+                <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+                  Videos You Liked
+                </span>
+                <span className="text-[10px] text-zinc-500">
+                  Visible to everyone
+                </span>
+              </div>
+
+              {likedVideos.length > 0 ? (
+                <div className="grid grid-cols-2 gap-3">
+                  {likedVideos.map((vid) => (
+                    <div
+                      key={vid.id}
+                      className="rounded-2xl overflow-hidden bg-[#160E2A] border border-rose-500/20 shadow-md group cursor-pointer relative"
+                      onClick={() => showToast(`Playing liked video: ${vid.title}`)}
+                    >
+                      <div className="relative aspect-[3/4] overflow-hidden">
+                        <img
+                          src={vid.thumbnail}
+                          alt={vid.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-85" />
+
+                        {/* Top Liked Heart Badge */}
+                        <div className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 backdrop-blur-md text-rose-500 border border-rose-500/30">
+                          <Heart className="w-3.5 h-3.5 fill-rose-500" />
+                        </div>
+
+                        {/* Video Creator info */}
+                        <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-white text-[9.5px] font-medium border border-white/10">
+                          <img
+                            src={vid.user.avatar}
+                            alt=""
+                            className="w-3.5 h-3.5 rounded-full object-cover"
+                          />
+                          <span className="truncate max-w-[70px]">{vid.user.displayName.split(' ')[0]}</span>
+                        </div>
+
+                        <div className="absolute bottom-2 left-2 right-2">
+                          <span className="text-[11px] font-bold text-white line-clamp-1 drop-shadow">
+                            {vid.title}
+                          </span>
+                          <div className="flex items-center gap-3 text-[10px] text-zinc-300 mt-1">
+                            <span className="flex items-center gap-1 font-semibold text-rose-400">
+                              <Heart className="w-3 h-3 fill-rose-500" />{' '}
+                              {vid.likes.toLocaleString()}
+                            </span>
+                            <span className="flex items-center gap-1 text-zinc-400">
+                              <Eye className="w-3 h-3" /> {(vid.viewsCount || vid.likes * 4).toLocaleString()}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="text-xs font-bold text-white">{rep.title}</h4>
-                      <p className="text-[10px] text-zinc-400 mt-0.5">
-                        {rep.duration} • {rep.views} views • {rep.date}
-                      </p>
-                    </div>
-                  </div>
-                  <ChevronRight className="w-4 h-4 text-zinc-500" />
+                  ))}
                 </div>
-              ))}
+              ) : (
+                <div className="text-center py-10 px-4 rounded-2xl bg-[#140C26] border border-white/5">
+                  <Heart className="w-10 h-10 text-zinc-600 mx-auto mb-2" />
+                  <p className="text-xs text-zinc-400">No liked videos yet.</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Double tap moments you love to find them here!</p>
+                </div>
+              )}
             </div>
           )}
 
-          {activeTab === 'gifts' && (
-            <div className="p-4 rounded-2xl bg-[#150E28] border border-[#A855F7]/20">
-              <div className="flex items-center gap-2 mb-3">
-                <GiftIcon className="w-5 h-5 text-[#EC4899]" />
-                <h4 className="text-xs font-black text-white uppercase tracking-wider">
-                  48 Virtual Gifts Received
-                </h4>
+          {/* TAB 4: Saved Videos (Replaces old 'gifts') */}
+          {activeTab === 'saved' && (
+            <div>
+              <div className="flex items-center justify-between mb-2.5">
+                <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">
+                  Bookmarked & Saved
+                </span>
+                <span className="text-[10px] text-[#A855F7] font-semibold">
+                  Saved collection
+                </span>
               </div>
 
-              <div className="grid grid-cols-4 gap-2 text-center">
-                {[
-                  { name: 'Mythic Dragon', icon: '🐉', count: 1, val: '25,000' },
-                  { name: 'Galaxy Yacht', icon: '🛥️', count: 2, val: '15,000' },
-                  { name: 'Royal Crown', icon: '👑', count: 8, val: '5,000' },
-                  { name: 'Diamond Ring', icon: '💍', count: 12, val: '1,500' },
-                ].map((g, idx) => (
-                  <div key={idx} className="p-2.5 rounded-xl bg-black/30 border border-white/5">
-                    <span className="text-2xl block">{g.icon}</span>
-                    <span className="text-[10px] font-bold text-white mt-1 block truncate">
-                      {g.name}
-                    </span>
-                    <span className="text-[9px] font-black text-amber-300 block">x{g.count}</span>
+              {savedVideos.length > 0 ? (
+                <div className="grid grid-cols-2 gap-3">
+                  {savedVideos.map((vid) => (
+                    <div
+                      key={vid.id}
+                      className="rounded-2xl overflow-hidden bg-[#160E2A] border border-[#A855F7]/30 shadow-md group cursor-pointer relative"
+                      onClick={() => showToast(`Opening saved video: ${vid.title}`)}
+                    >
+                      <div className="relative aspect-[3/4] overflow-hidden">
+                        <img
+                          src={vid.thumbnail}
+                          alt={vid.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-85" />
+
+                        {/* Top Bookmark Badge */}
+                        <div className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 backdrop-blur-md text-amber-400 border border-amber-400/30">
+                          <Bookmark className="w-3.5 h-3.5 fill-amber-400" />
+                        </div>
+
+                        {/* Creator Info */}
+                        <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-white text-[9.5px] font-medium border border-white/10">
+                          <img
+                            src={vid.user.avatar}
+                            alt=""
+                            className="w-3.5 h-3.5 rounded-full object-cover"
+                          />
+                          <span className="truncate max-w-[70px]">{vid.user.displayName.split(' ')[0]}</span>
+                        </div>
+
+                        <div className="absolute bottom-2 left-2 right-2">
+                          <span className="text-[11px] font-bold text-white line-clamp-1 drop-shadow">
+                            {vid.title}
+                          </span>
+                          <div className="flex items-center justify-between text-[10px] text-zinc-300 mt-1">
+                            <span className="text-amber-300 font-semibold">Saved for later</span>
+                            <Play className="w-3 h-3 text-white fill-white" />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-10 px-4 rounded-2xl bg-[#140C26] border border-white/5">
+                  <Bookmark className="w-10 h-10 text-zinc-600 mx-auto mb-2" />
+                  <p className="text-xs text-zinc-400">No saved videos yet.</p>
+                  <p className="text-[10px] text-zinc-500 mt-0.5">Save favorite broadcast clips to watch anytime!</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* TAB 5: Private Videos (Only visible to account owner) */}
+          {activeTab === 'private' && (
+            <div>
+              <div className="flex items-center justify-between mb-2.5">
+                <span className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider flex items-center gap-1 text-amber-300">
+                  <Lock className="w-3 h-3 text-amber-400" />
+                  <span>Only visible to you</span>
+                </span>
+                <span className="text-[10px] text-emerald-400 font-bold bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                  Private Vault
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {privateVideos.map((priv) => (
+                  <div
+                    key={priv.id}
+                    className="rounded-2xl overflow-hidden bg-[#160E2A] border border-amber-400/30 shadow-md group cursor-pointer relative"
+                    onClick={() => showToast(`Opening private video: ${priv.title}`)}
+                  >
+                    <div className="relative aspect-[3/4] overflow-hidden">
+                      <img
+                        src={priv.thumbnail}
+                        alt={priv.title}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      />
+                      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/30 to-transparent opacity-90" />
+
+                      {/* Locked Padlock badge */}
+                      <div className="absolute top-2 right-2 p-1.5 rounded-full bg-amber-500/20 backdrop-blur-md text-amber-300 border border-amber-400/40">
+                        <Lock className="w-3.5 h-3.5" />
+                      </div>
+
+                      <div className="absolute top-2 left-2 px-2 py-0.5 rounded-full bg-black/70 backdrop-blur-md text-[9px] font-black text-amber-300 border border-amber-400/30">
+                        PRIVATE
+                      </div>
+
+                      <div className="absolute bottom-2 left-2 right-2">
+                        <span className="text-[11px] font-bold text-white line-clamp-2 drop-shadow">
+                          {priv.title}
+                        </span>
+                        <div className="flex items-center justify-between text-[10px] text-zinc-400 mt-1">
+                          <span>{priv.duration}</span>
+                          <span className="text-amber-400/90 font-medium">{priv.date}</span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1249,6 +1596,9 @@ export const UserProfileScreen: React.FC = () => {
 
       {/* Share Profile Modal */}
       <ShareProfileModal isOpen={showShareModal} onClose={() => setShowShareModal(false)} />
+
+      {/* Join Official Host Agency Modal */}
+      <JoinAgencyModal isOpen={showJoinAgencyModal} onClose={() => setShowJoinAgencyModal(false)} />
     </div>
   );
 };

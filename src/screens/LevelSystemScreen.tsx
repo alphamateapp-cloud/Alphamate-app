@@ -27,14 +27,32 @@ import {
   Coins,
   ArrowUpRight,
   Filter,
+  Image as ImageIcon,
+  X,
 } from 'lucide-react';
+import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 
 export const LevelSystemScreen: React.FC = () => {
   const { currentUser, navigateBack, setCurrentScreen, updateUserProfile } = useApp();
 
   const [selectedTab, setSelectedTab] = useState<'levels' | 'vips' | 'tiers' | 'leaderboard'>('levels');
-  const [tierFilter, setTierFilter] = useState<'ALL' | 'Bronze' | 'Silver' | 'Gold' | 'Platinum' | 'Diamond' | 'Master'>('ALL');
+  const [tierFilter, setTierFilter] = useState<
+    | 'ALL'
+    | 'Normal'
+    | 'Bronze'
+    | 'Silver'
+    | 'Gold'
+    | 'Platinum'
+    | 'Sapphire'
+    | 'Emerald'
+    | 'Ruby'
+    | 'Amethyst'
+    | 'Diamond'
+    | 'Master'
+    | 'Legend'
+  >('ALL');
   const [activeLeaderboard, setActiveLeaderboard] = useState<'Daily' | 'Weekly' | 'AllTime'>('Daily');
+  const [showChartModal, setShowChartModal] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const currentLevelRef = useRef<HTMLDivElement>(null);
@@ -102,7 +120,7 @@ export const LevelSystemScreen: React.FC = () => {
           </button>
           <div>
             <h1 className="text-base font-black text-white flex items-center gap-1.5">
-              <span>Levels 1 – 100 & 12 VIPs</span>
+              <span>Levels 0 – 100 & 12 VIPs</span>
             </h1>
             <p className="text-[10px] text-zinc-400">Official Coin Target & VIP Unlock Progression</p>
           </div>
@@ -222,7 +240,7 @@ export const LevelSystemScreen: React.FC = () => {
       </div>
 
       {/* =========================================================================
-          SECTION 2: SUB-NAVIGATION TABS (100 Levels | 12 VIPs | 6 Tiers | Hall of Fame)
+          SECTION 2: SUB-NAVIGATION TABS (100 Levels | 12 VIPs | 11 Tiers | Hall of Fame)
          ========================================================================= */}
       <div className="px-4 mb-3">
         <div className="grid grid-cols-4 gap-1 p-1 rounded-2xl bg-[#140A26] border border-white/5 text-center">
@@ -234,7 +252,7 @@ export const LevelSystemScreen: React.FC = () => {
                 : 'text-zinc-400 hover:text-white'
             }`}
           >
-            1 – 100 Roadmap
+            0 – 100 Roadmap
           </button>
           <button
             onClick={() => setSelectedTab('vips')}
@@ -254,7 +272,7 @@ export const LevelSystemScreen: React.FC = () => {
                 : 'text-zinc-400 hover:text-white'
             }`}
           >
-            6 Master Tiers
+            11 Honor Tiers
           </button>
           <button
             onClick={() => setSelectedTab('leaderboard')}
@@ -270,13 +288,29 @@ export const LevelSystemScreen: React.FC = () => {
       </div>
 
       {/* =========================================================================
-          TAB 1: COMPLETE 1 TO 100 LEVELS SCROLLABLE ROADMAP
+          TAB 1: COMPLETE 0 TO 100 LEVELS SCROLLABLE ROADMAP
          ========================================================================= */}
       {selectedTab === 'levels' && (
         <div className="px-4 space-y-3">
           {/* Tier Filter Pills */}
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
-            {(['ALL', 'Bronze', 'Silver', 'Gold', 'Platinum', 'Diamond', 'Master'] as const).map((tier) => (
+            {(
+              [
+                'ALL',
+                'Normal',
+                'Bronze',
+                'Silver',
+                'Gold',
+                'Platinum',
+                'Sapphire',
+                'Emerald',
+                'Ruby',
+                'Amethyst',
+                'Diamond',
+                'Master',
+                'Legend',
+              ] as const
+            ).map((tier) => (
               <button
                 key={tier}
                 onClick={() => setTierFilter(tier)}
@@ -286,14 +320,24 @@ export const LevelSystemScreen: React.FC = () => {
                     : 'bg-[#160D2A] text-zinc-400 hover:text-white border border-white/5'
                 }`}
               >
-                {tier === 'ALL' ? 'All (1–100)' : tier}
+                {tier === 'ALL' ? 'All (0–100)' : tier}
               </button>
             ))}
           </div>
 
           <div className="flex items-center justify-between text-xs text-zinc-400 px-1">
-            <span>Scrollable roadmap from Level 1 to 100</span>
-            <span className="text-amber-400 font-bold">Showing {filteredLevels.length} Levels</span>
+            <span>Scrollable roadmap from Level 0 to 100</span>
+            <div className="flex items-center gap-2">
+              <span className="text-amber-400 font-bold">Showing {filteredLevels.length} Levels</span>
+              <button
+                onClick={() => setShowChartModal(true)}
+                className="px-2.5 py-0.5 rounded-full bg-gradient-to-r from-amber-500/20 to-yellow-500/20 border border-amber-400/40 text-amber-300 text-[10px] font-bold flex items-center gap-1 cursor-pointer hover:bg-amber-500/30 active:scale-95 transition-all shadow-xs"
+                title="View Full Official Badge Chart"
+              >
+                <ImageIcon className="w-3 h-3 text-amber-300" />
+                <span>Chart</span>
+              </button>
+            </div>
           </div>
 
           {/* 1 to 100 Levels Scrollable List */}
@@ -319,17 +363,9 @@ export const LevelSystemScreen: React.FC = () => {
                   <div className="flex items-center justify-between gap-2">
                     {/* Level Number & Tier Badge */}
                     <div className="flex items-center gap-3">
-                      <div
-                        className={`w-11 h-11 rounded-2xl flex flex-col items-center justify-center font-black shadow-md border ${
-                          isCurrent
-                            ? 'bg-gradient-to-tr from-[#7928CA] to-[#EC4899] border-white/30 text-white'
-                            : isCompleted
-                            ? 'bg-[#1E1138] border-emerald-500/30 text-emerald-300'
-                            : 'bg-[#150D26] border-white/10 text-zinc-400'
-                        }`}
-                      >
-                        <span className="text-[9px] uppercase tracking-tighter opacity-80">LVL</span>
-                        <span className="text-sm leading-none">{lvl.level}</span>
+                      {/* Official Level Badge SVG Icon */}
+                      <div className="shrink-0">
+                        <LevelBadgeIcon level={lvl.level} size="md" />
                       </div>
 
                       <div>
@@ -356,7 +392,9 @@ export const LevelSystemScreen: React.FC = () => {
                           </span>
                           <span className="text-zinc-500">•</span>
                           <span className="text-zinc-400">
-                            +{lvl.additionalCoins.toLocaleString()} from Lv.{lvl.level - 1}
+                            {lvl.level === 0
+                              ? 'Starting Rank (0 Coins)'
+                              : `+${lvl.additionalCoins.toLocaleString()} from Lv.${lvl.level - 1}`}
                           </span>
                         </div>
                       </div>
@@ -522,13 +560,13 @@ export const LevelSystemScreen: React.FC = () => {
       )}
 
       {/* =========================================================================
-          TAB 3: 6 GRAND MASTERY TIERS (Bronze, Silver, Gold, Platinum, Diamond, Master)
+          TAB 3: 11 HONOR PRESTIGE TIERS (Levels 0 to 100)
          ========================================================================= */}
       {selectedTab === 'tiers' && (
         <div className="px-4 space-y-3">
           <div className="flex items-center justify-between text-xs text-zinc-400 px-1">
-            <span>Official 6 Master Prestige Tiers</span>
-            <span className="text-amber-400 font-bold">Max Cap: Lv.100</span>
+            <span>Official 11 Honor Prestige Tiers</span>
+            <span className="text-amber-400 font-bold">Cap: Lv.100 (2B Coins)</span>
           </div>
 
           <div className="space-y-3">
@@ -549,11 +587,13 @@ export const LevelSystemScreen: React.FC = () => {
                 >
                   <div className="flex items-center justify-between mb-2">
                     <div className="flex items-center gap-2.5">
-                      <span className="text-2xl">{tier.badge}</span>
+                      <div className="shrink-0">
+                        <LevelBadgeIcon level={tier.minLevel} size="md" />
+                      </div>
                       <div>
                         <h3 className="text-sm font-black text-white flex items-center gap-1.5">
                           <span>{tier.name}</span>
-                          <span className="text-xs text-zinc-400">({tier.urduName})</span>
+                          <span className="text-xs text-zinc-400">({tier.tagline})</span>
                         </h3>
                         <span className="text-[11px] text-[#C084FC] font-semibold">
                           Levels {tier.minLevel} – {tier.maxLevel}
@@ -647,6 +687,40 @@ export const LevelSystemScreen: React.FC = () => {
                 </span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          FULL OFFICIAL LEVEL BADGE CHART IMAGE MODAL (0 - 100)
+         ========================================================================= */}
+      {showChartModal && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-3 animate-in fade-in duration-200">
+          <div className="relative w-full max-w-2xl max-h-[92vh] rounded-3xl bg-[#120B24] border border-[#A855F7]/40 shadow-2xl flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="px-4 py-3 bg-[#1A1033] border-b border-white/10 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Crown className="w-4 h-4 text-amber-300" />
+                <h3 className="text-sm font-black text-white">
+                  Alpha Mate – Official Level Badge Chart (0 – 100)
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowChartModal(false)}
+                className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Scrollable Chart Graphic */}
+            <div className="p-3 overflow-auto max-h-[calc(92vh-60px)] flex items-center justify-center bg-black/60">
+              <img
+                src="/assets/aistudio/file_000000001ae482118972b47ae5eb383f_cf872efe.png"
+                alt="Alpha Mate Complete Level Badge System (0 - 100)"
+                className="w-full h-auto object-contain rounded-2xl shadow-2xl border border-white/10"
+              />
+            </div>
           </div>
         </div>
       )}

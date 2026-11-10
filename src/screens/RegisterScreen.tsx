@@ -427,7 +427,7 @@ export const RegisterScreen: React.FC = () => {
         </div>
       )}
 
-      {/* STEP 2: PROFILE & DATA COMPLETION (رجسٹریشن فارم) */}
+      {/* STEP 2: PROFILE & DATA COMPLETION */}
       {step === 'profile_details' && (
         <div className="relative z-10 py-2 max-w-sm w-full mx-auto">
           <div className="text-center mb-3">

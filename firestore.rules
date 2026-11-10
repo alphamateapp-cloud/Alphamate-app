@@ -36,13 +36,13 @@ service cloud.firestore {
     // Party rooms
     match /partyRooms/{roomId} {
       allow read: if true;
-      allow create: if isSignedIn() && isValidId(roomId);
-      allow update: if isSignedIn();
-      allow delete: if isSignedIn() && resource.data.hostId == request.auth.uid;
+      allow create: if isValidId(roomId);
+      allow update: if true;
+      allow delete: if isSignedIn() && (resource == null || resource.data.host.id == request.auth.uid);
 
       match /messages/{messageId} {
         allow read: if true;
-        allow create: if isSignedIn() && isValidId(messageId);
+        allow create: if isValidId(messageId);
         allow update, delete: if false;
       }
     }

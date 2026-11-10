@@ -146,12 +146,12 @@ export const ShareProfileModal: React.FC<ShareProfileModalProps> = ({ isOpen, on
         )}
 
         {/* ======================================================== */}
-        {/* 1. IN-APP SHARING (ان باکس میں شیئر کریں) */}
+        {/* 1. IN-APP SHARING */}
         {/* ======================================================== */}
         <div className="mb-3">
           <label className="text-[11px] font-bold text-purple-300 uppercase tracking-wider block mb-1.5 flex items-center gap-1.5">
             <MessageSquare className="w-3.5 h-3.5 text-purple-400" />
-            <span>Send to In-App Chats (ان باکس)</span>
+            <span>Send to In-App Chats</span>
           </label>
 
           <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">

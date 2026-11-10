@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { User } from '../../types';
 import { VipAvatarFrame } from '../brand/VipAvatarFrame';
+import { LevelBadgeIcon } from '../brand/LevelBadgeIcon';
 import { copyToClipboard } from '../../utils/clipboard';
 import {
   X,
@@ -183,10 +184,8 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
               </div>
 
               {/* Level & VIP Badges */}
-              <div className="flex items-center gap-1.5 mt-2 flex-wrap">
-                <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[9px] font-black border border-amber-500/40">
-                  Lv.{user.level || 1}
-                </span>
+              <div className="flex items-center gap-2 mt-2 flex-wrap">
+                <LevelBadgeIcon level={user.level || 1} size="sm" />
                 {user.vipTier && user.vipTier > 0 ? (
                   <span className="px-1.5 py-0.5 rounded bg-[#7928CA]/30 text-[#C084FC] text-[9px] font-black border border-[#A855F7]/30">
                     VIP {user.vipTier}
@@ -226,7 +225,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
 
           {/* Core Interactive Actions */}
           <div className="grid grid-cols-2 gap-2">
-            {/* 1. Send Gift (سینڈ گفٹ) */}
+            {/* 1. Send Gift */}
             <button
               onClick={() => {
                 onClose();
@@ -235,10 +234,10 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
               className="h-11 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
             >
               <Gift className="w-4 h-4 text-amber-300" />
-              <span>Send Gift (گفٹ بھیجیں)</span>
+              <span>Send Gift</span>
             </button>
 
-            {/* 2. Follow / Follow Back (فالو / فالو بیک) */}
+            {/* 2. Follow / Follow Back */}
             {!isMe ? (
               <button
                 onClick={() => onToggleFollow && onToggleFollow(user)}
@@ -251,12 +250,12 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                 {isFollowing ? (
                   <>
                     <UserCheck className="w-4 h-4 text-emerald-400" />
-                    <span>Following (فالوئنگ)</span>
+                    <span>Following</span>
                   </>
                 ) : (
                   <>
                     <UserPlus className="w-4 h-4" />
-                    <span>Follow Back (فالو بیک)</span>
+                    <span>Follow Back</span>
                   </>
                 )}
               </button>
@@ -266,7 +265,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
               </div>
             )}
 
-            {/* 3. Direct Message / Inbox (ان باکس میسج) */}
+            {/* 3. Direct Message / Inbox */}
             {!isMe && (
               <button
                 onClick={() => {
@@ -276,11 +275,11 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                 className="h-10 rounded-xl bg-[#1E1138] border border-white/10 hover:border-[#A855F7] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
               >
                 <MessageCircle className="w-4 h-4 text-[#C084FC]" />
-                <span>Inbox (ان باکس)</span>
+                <span>Inbox</span>
               </button>
             )}
 
-            {/* 4. Visit Profile (وزٹ پروفائل) */}
+            {/* 4. Visit Profile */}
             <button
               onClick={() => {
                 onClose();
@@ -291,7 +290,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
               }`}
             >
               <ExternalLink className="w-4 h-4 text-cyan-400" />
-              <span>Visit Profile (پروفائل)</span>
+              <span>Visit Profile</span>
             </button>
           </div>
 
@@ -329,7 +328,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                           : 'bg-rose-600 hover:bg-rose-500 text-white'
                       }`}
                     >
-                      {isSeatMuted ? 'Unmute Mic (ان میوٹ کریں)' : 'Mute Mic (میوٹ کریں)'}
+                      {isSeatMuted ? 'Unmute Mic' : 'Mute Mic'}
                     </button>
                   </div>
                   <p className="text-[9px] text-zinc-400">
@@ -357,8 +356,8 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                     <ShieldCheck className="w-4 h-4 text-cyan-400" />
                     <span>
                       {isTargetModerator
-                        ? 'Remove Moderator (ماڈریٹر ہٹائیں)'
-                        : `Make Moderator (ماڈریٹر بنائیں)`}
+                        ? 'Remove Moderator'
+                        : 'Make Moderator'}
                     </span>
                   </div>
                   <span className="text-[10px] text-zinc-400">
@@ -367,7 +366,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                 </button>
               )}
 
-              {/* C. Kick from Room / Broadcast (کک کریں) */}
+              {/* C. Kick from Room / Broadcast */}
               {onKickUser && (
                 <div>
                   {!showConfirmKick ? (
@@ -377,7 +376,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                     >
                       <div className="flex items-center gap-2">
                         <UserX className="w-4 h-4 text-amber-400" />
-                        <span>Kick from Room (کک کریں)</span>
+                        <span>Kick from Room</span>
                       </div>
                       <span className="text-[9.5px] text-zinc-400">Cannot rejoin this live</span>
                     </button>
@@ -412,7 +411,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                 </div>
               )}
 
-              {/* D. Permanent Block (پرماننٹ بلاک کریں) */}
+              {/* D. Permanent Block */}
               {onBlockUser && (
                 <div>
                   {!showConfirmBlock ? (
@@ -422,7 +421,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                     >
                       <div className="flex items-center gap-2">
                         <Ban className="w-4 h-4 text-rose-400" />
-                        <span>Block User Permanently (پرماننٹ بلاک)</span>
+                        <span>Block User Permanently</span>
                       </div>
                       <span className="text-[9.5px] text-zinc-400">Blocked forever</span>
                     </button>

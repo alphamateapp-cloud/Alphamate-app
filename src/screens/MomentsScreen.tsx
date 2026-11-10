@@ -1,8 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { VideoPost, Gift } from '../types';
+import { VideoPost, Gift, FriendStory } from '../types';
 import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
+import { CreateStoryModal } from '../components/story/CreateStoryModal';
+import { StoryViewerModal } from '../components/story/StoryViewerModal';
 import {
   Plus,
   Heart,
@@ -29,6 +31,7 @@ import {
   Music,
   ShieldCheck,
   Crown,
+  Edit3,
 } from 'lucide-react';
 
 export const MomentsScreen: React.FC = () => {
@@ -39,7 +42,18 @@ export const MomentsScreen: React.FC = () => {
     setCurrentScreen,
     sendLiveGift,
     coins,
+    friendStories,
+    myStories,
+    addMyStory,
+    toggleLikeStory,
+    reactToStory,
+    liveStreams,
+    openLiveStream,
   } = useApp();
+
+  const [showCreateStoryModal, setShowCreateStoryModal] = useState<boolean>(false);
+  const [viewingStoryFriend, setViewingStoryFriend] = useState<FriendStory | null>(null);
+  const [isViewingMyStory, setIsViewingMyStory] = useState<boolean>(false);
 
   // Active top navigation tab: FOR YOU | FOLLOWING | TRENDING | SAVED
   const [activeTab, setActiveTab] = useState<'FOR YOU' | 'FOLLOWING' | 'TRENDING' | 'SAVED'>('FOR YOU');
@@ -306,10 +320,31 @@ export const MomentsScreen: React.FC = () => {
             )}
           </button>
 
+          {/* Add Story Button */}
+          <button
+            onClick={() => setShowCreateStoryModal(true)}
+            className="px-2.5 py-1.5 rounded-full bg-gradient-to-r from-[#EC4899] to-[#06B6D4] text-white font-extrabold text-xs shadow-md shadow-[#EC4899]/30 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1 cursor-pointer"
+            title="Add 24h Story 📸"
+          >
+            <Sparkles className="w-3.5 h-3.5 text-white" />
+            <span className="text-[11px]">+ Story</span>
+          </button>
+
+          {/* Create Post Button */}
+          <button
+            onClick={() => setCurrentScreen('upload')}
+            className="px-2.5 py-1.5 rounded-full bg-[#1F1238] border border-[#EC4899]/50 text-white font-bold text-xs hover:bg-[#2B184F] active:scale-95 transition-all flex items-center gap-1 cursor-pointer shadow-md"
+            title="Write a Post ✍️"
+          >
+            <Edit3 className="w-3.5 h-3.5 text-[#EC4899]" />
+            <span className="text-[11px]">Post</span>
+          </button>
+
+          {/* Upload Video Button */}
           <button
             onClick={() => setCurrentScreen('upload')}
             className="px-2.5 py-1.5 rounded-full bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white font-bold text-xs shadow-md shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1 cursor-pointer"
-            title="Upload Video or Post"
+            title="Upload Video or Photo"
           >
             <Plus className="w-3.5 h-3.5 stroke-[3]" />
             <span className="text-[11px] hidden sm:inline">Upload</span>
@@ -392,15 +427,67 @@ export const MomentsScreen: React.FC = () => {
                   onClick={(e) => handleVideoAreaClick(e, video)}
                 >
                   {video.postType === 'post' ? (
-                    /* Photo / Image Moment Post with Ambient Backdrop */
-                    <div className="relative w-full h-full flex items-center justify-center bg-zinc-950">
-                      <img
-                        src={video.thumbnail}
-                        alt={video.title}
-                        className="w-full h-full object-cover"
-                      />
-                      {/* Ambient Neon Glow */}
-                      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/30 to-black/50" />
+                    /* Rich Text Post or Photo Moment Post with Ambient Backdrop */
+                    <div
+                      className={`relative w-full h-full flex items-center justify-center p-6 ${
+                        video.attachedPhotoUrl ? 'bg-black' : video.backgroundColor ? `bg-gradient-to-br ${video.backgroundColor}` : 'bg-gradient-to-br from-[#4C1D95] via-[#2E1065] to-[#1E0836]'
+                      }`}
+                    >
+                      {/* Attached Photo Background */}
+                      {video.attachedPhotoUrl && (
+                        <div className="absolute inset-0 z-0">
+                          <img
+                            src={video.attachedPhotoUrl}
+                            alt={video.title}
+                            className="w-full h-full object-cover"
+                          />
+                          <div className="absolute inset-0 bg-black/50 backdrop-blur-[1px]" />
+                        </div>
+                      )}
+
+                      {/* Text Over Photo Mode or Canvas Post Card */}
+                      {video.textContent && (
+                        <div
+                          className={`relative z-10 max-w-sm w-full p-6 rounded-3xl text-center shadow-2xl ${
+                            video.isTextOnPhoto
+                              ? 'bg-black/60 backdrop-blur-md border border-white/25 shadow-purple-950/50'
+                              : 'bg-transparent'
+                          }`}
+                        >
+                          <p
+                            className={`text-lg sm:text-2xl font-black text-white leading-relaxed drop-shadow-md ${
+                              video.fontStyle === 'serif'
+                                ? 'font-serif italic'
+                                : video.fontStyle === 'neon'
+                                ? 'font-mono text-[#F472B6] drop-shadow-[0_0_12px_#EC4899]'
+                                : video.fontStyle === 'script'
+                                ? 'font-serif tracking-wider'
+                                : 'font-sans'
+                            }`}
+                          >
+                            “{video.textContent}”
+                          </p>
+
+                          {/* Music Badge on Post Card */}
+                          {video.musicTitle && (
+                            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-black/60 backdrop-blur-md border border-[#EC4899]/40 text-amber-300 text-[11px] font-bold mt-4 shadow-md">
+                              <Music className="w-3.5 h-3.5 text-[#EC4899] animate-pulse" />
+                              <span>{video.musicTitle}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {!video.textContent && (
+                        <img
+                          src={video.thumbnail}
+                          alt={video.title}
+                          className="w-full h-full object-cover"
+                        />
+                      )}
+
+                      {/* Ambient Gradient Scrim */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-black/40 pointer-events-none" />
                     </div>
                   ) : (
                     /* Video Element */
@@ -629,7 +716,9 @@ export const MomentsScreen: React.FC = () => {
                   <div className="flex items-center gap-2 mt-1 text-[11px] text-zinc-300 font-medium bg-black/35 backdrop-blur-md px-2.5 py-1 rounded-full border border-white/10 w-fit max-w-[280px]">
                     <Music className="w-3.5 h-3.5 text-[#EC4899] animate-pulse" />
                     <span className="truncate">
-                      Original Audio • {video.user.displayName}
+                      {video.musicTitle
+                        ? `${video.musicTitle} • ${video.musicArtist || video.user.displayName}`
+                        : `Original Audio • ${video.user.displayName}`}
                     </span>
                   </div>
                 </div>
@@ -919,6 +1008,40 @@ export const MomentsScreen: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Story Viewer Modal */}
+      {(viewingStoryFriend || isViewingMyStory) && (
+        <StoryViewerModal
+          friend={viewingStoryFriend}
+          isMyStory={isViewingMyStory}
+          currentUser={currentUser}
+          myStories={myStories}
+          allFriends={friendStories}
+          onClose={() => {
+            setViewingStoryFriend(null);
+            setIsViewingMyStory(false);
+          }}
+          onOpenLiveStream={(streamId) => {
+            const stream = liveStreams.find((s) => s.id === streamId);
+            if (stream) openLiveStream(stream);
+          }}
+          onToggleLike={toggleLikeStory}
+          onReact={reactToStory}
+          onOpenCreateStory={() => setShowCreateStoryModal(true)}
+        />
+      )}
+
+      {/* Create Story Modal */}
+      {showCreateStoryModal && (
+        <CreateStoryModal
+          currentUser={currentUser}
+          onClose={() => setShowCreateStoryModal(false)}
+          onSubmit={(newStory) => {
+            addMyStory(newStory);
+            showToast('Story posted successfully! 🌟 (Active for 24h)');
+          }}
+        />
       )}
     </div>
   );

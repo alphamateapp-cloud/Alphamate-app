@@ -23,6 +23,7 @@ import {
   limit,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
+import { sanitizeAvatarString } from '../utils/imageCompressor';
 
 // Initialize Firebase App
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
@@ -177,8 +178,6 @@ export type { FirebaseUser };
 /**
  * Save / Update User Profile in Firestore
  */
-import { sanitizeAvatarString } from '../utils/imageCompressor';
-
 export async function syncUserProfileToFirestore(userData: any) {
   if (!userData?.id) return;
   const path = `users/${userData.id}`;

@@ -20,6 +20,7 @@ import { SettingsScreen } from './screens/SettingsScreen';
 import { MomentsScreen } from './screens/MomentsScreen';
 import { StoreScreen } from './screens/StoreScreen';
 import { AdminDashboard } from './screens/AdminDashboard';
+import { AgencyManagementScreen } from './screens/AgencyManagementScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 
 const AppContent: React.FC = () => {
@@ -64,6 +65,9 @@ const AppContent: React.FC = () => {
   if (currentScreen === 'settings') {
     return <SettingsScreen />;
   }
+  if (currentScreen === 'agency_management') {
+    return <AgencyManagementScreen />;
+  }
 
   // Inside party room full screen
   if (currentScreen === 'party_room' || activePartyRoom !== null) {
@@ -77,8 +81,8 @@ const AppContent: React.FC = () => {
 
   // Main navigation tab views with fixed bottom navigation
   return (
-    <div className="relative w-full h-full min-h-screen bg-[#09070F] flex flex-col">
-      <div className="flex-1 w-full">
+    <div className="relative w-full h-full max-h-[100dvh] bg-[#09070F] flex flex-col overflow-hidden">
+      <div className="flex-1 w-full overflow-y-auto overflow-x-hidden min-h-0 overscroll-contain">
         {currentScreen === 'home' && <HomeScreen />}
         {currentScreen === 'party' && <PartyRoomsScreen />}
         {currentScreen === 'moments' && <MomentsScreen />}

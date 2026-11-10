@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { User } from '../../types';
 import { VipAvatarFrame } from '../brand/VipAvatarFrame';
+import { LevelBadgeIcon } from '../brand/LevelBadgeIcon';
 import {
   X,
   Users,
@@ -212,9 +213,7 @@ export const RoomViewersModal: React.FC<RoomViewersModalProps> = ({
                         <span className="text-[9.5px] font-mono text-zinc-400">
                           ID: {viewer.uniqueId || viewer.id}
                         </span>
-                        <span className="text-[8.5px] px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 font-bold border border-amber-500/30">
-                          Lv.{viewer.level || 1}
-                        </span>
+                        <LevelBadgeIcon level={viewer.level || 1} size="xs" />
                         {viewer.vipTier && viewer.vipTier > 0 ? (
                           <span className="text-[8.5px] px-1 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] font-bold">
                             VIP {viewer.vipTier}
@@ -236,7 +235,7 @@ export const RoomViewersModal: React.FC<RoomViewersModalProps> = ({
                         title="Invite to an open seat"
                       >
                         <Mic className="w-2.5 h-2.5 text-pink-400" />
-                        <span>Invite (بلائیں)</span>
+                        <span>Invite</span>
                       </button>
                     )}
 

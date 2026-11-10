@@ -9,6 +9,7 @@ import {
 } from '../components/stream/CameraFilterOverlay';
 import { p2pStreamingEngine } from '../services/webrtcService';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
+import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 import { copyToClipboard } from '../utils/clipboard';
 import {
   X,
@@ -40,11 +41,16 @@ import {
   Trash2,
   UserX,
   Ban,
+  Flame,
+  Zap,
 } from 'lucide-react';
 import { User } from '../types';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
 import { MOCK_ROOM_VIEWERS } from '../data/mockData';
+import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
+import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
+import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
 
 interface FloatingHeart {
   id: number;
@@ -58,6 +64,7 @@ export const LiveStreamScreen: React.FC = () => {
     activeStream,
     closeLiveStream,
     coins,
+    addCoins,
     sendLiveGift,
     activeGiftBanner,
     clearActiveGiftBanner,
@@ -74,7 +81,7 @@ export const LiveStreamScreen: React.FC = () => {
 
   // Moderation & Audience state (Moderator limit: 10)
   const [moderatorIds, setModeratorIds] = useState<string[]>(
-    activeStream?.moderatorIds || ['viewer_01']
+    activeStream?.moderatorIds || []
   );
   const [kickedUserIds, setKickedUserIds] = useState<string[]>(
     activeStream?.kickedUserIds || []
@@ -85,7 +92,7 @@ export const LiveStreamScreen: React.FC = () => {
   const [selectedUserForActionSheet, setSelectedUserForActionSheet] = useState<User | null>(null);
   const [showUserActionSheet, setShowUserActionSheet] = useState(false);
   const [showViewersModal, setShowViewersModal] = useState(false);
-  const [followingUserIds, setFollowingUserIds] = useState<Set<string>>(new Set(['host_01', 'viewer_03']));
+  const [followingUserIds, setFollowingUserIds] = useState<Set<string>>(new Set());
   const [giftRecipientUser, setGiftRecipientUser] = useState<User | null>(null);
 
   // Host broadcast controls & hardware states
@@ -100,18 +107,34 @@ export const LiveStreamScreen: React.FC = () => {
 
   // Audience & Social interaction state
   const [isFollowing, setIsFollowing] = useState(false);
-  const [viewerCount, setViewerCount] = useState(activeStream?.viewerCount || 2480);
-  const [durationSecs, setDurationSecs] = useState(140);
+  const [viewerCount, setViewerCount] = useState(activeStream?.viewerCount || 0);
+  const [durationSecs, setDurationSecs] = useState(0);
   const [hearts, setHearts] = useState<FloatingHeart[]>([]);
-  const [comments, setComments] = useState<Array<{ id: string; user: string; text: string; vipLevel?: number }>>([
-    { id: '1', user: 'NeonRider', text: 'Amazing vibe tonight! 💜', vipLevel: 2 },
-    { id: '2', user: 'StarGazer', text: 'Sing that acoustic chorus again please!', vipLevel: 1 },
-    { id: '3', user: 'AlphaKing_99', text: 'Sent 100 roses! Let’s hit the level goal 👑', vipLevel: 5 },
-    { id: '4', user: 'VibingSam', text: 'Audio quality is so crisp!', vipLevel: 3 },
-  ]);
+  const [comments, setComments] = useState<
+    Array<{
+      id: string;
+      user: string;
+      text: string;
+      vipLevel?: number;
+      level?: number;
+      isGiftHighlight?: boolean;
+      isEntryNotice?: boolean;
+    }>
+  >([]);
   const [inputComment, setInputComment] = useState('');
   const [showGiftDrawer, setShowGiftDrawer] = useState(false);
+  const [showLuckyDrawModal, setShowLuckyDrawModal] = useState(false);
   const [selectedGift, setSelectedGift] = useState<Gift>(VIRTUAL_GIFTS[0]);
+
+  // Spectacular Visual Gift Animation & Combo states
+  const [activeGiftAnimation, setActiveGiftAnimation] = useState<ActiveGiftEvent | null>(null);
+  const [giftComboCount, setGiftComboCount] = useState<number>(1);
+  const [lastSentGiftId, setLastSentGiftId] = useState<string | null>(null);
+  const [lastGiftSentTime, setLastGiftSentTime] = useState<number>(0);
+  const [giftQuantityMultiplier, setGiftQuantityMultiplier] = useState<number>(1);
+
+  // Top Givers Leaderboard State for Current Broadcast Session
+  const [sessionGivers, setSessionGivers] = useState<SessionGiver[]>([]);
 
   // Host camera filters & settings
   const [activeFilterPreset, setActiveFilterPreset] = useState<FilterPresetId>('neon');
@@ -393,38 +416,14 @@ export const LiveStreamScreen: React.FC = () => {
     commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [comments]);
 
-  // Audience timers and simulated engagement
+  // Stream broadcast elapsed timer
   useEffect(() => {
     const timer = setInterval(() => {
       setDurationSecs((d) => d + 1);
     }, 1000);
 
-    const viewerTimer = setInterval(() => {
-      setViewerCount((v) => Math.max(10, v + Math.floor(Math.random() * 9) - 4));
-    }, 4000);
-
-    const chatTimer = setInterval(() => {
-      const sampleNames = ['KairoFan', 'CyberWolf', 'QueenBee', 'Electro_9', 'MateClub', 'RoyalStar', 'Zainab_Live'];
-      const sampleTexts = [
-        'Love this stream! 💜',
-        'Drop more gifts guys!',
-        'Host is legendary tonight 🔥',
-        'Alpha Mate on top! 👑',
-        'Can you play the next song?',
-        'Double tap to send hearts! ❤️',
-      ];
-      const randomName = sampleNames[Math.floor(Math.random() * sampleNames.length)];
-      const randomText = sampleTexts[Math.floor(Math.random() * sampleTexts.length)];
-      setComments((prev) => [
-        ...prev.slice(-14),
-        { id: String(Date.now()), user: randomName, text: randomText, vipLevel: Math.floor(Math.random() * 5) },
-      ]);
-    }, 3200);
-
     return () => {
       clearInterval(timer);
-      clearInterval(viewerTimer);
-      clearInterval(chatTimer);
     };
   }, []);
 
@@ -481,18 +480,123 @@ export const LiveStreamScreen: React.FC = () => {
         user: currentUser.displayName,
         text: inputComment.trim(),
         vipLevel: currentUser.vipTier,
+        level: currentUser.level,
       },
     ]);
     setInputComment('');
   };
 
-  const handleSendSelectedGift = () => {
+  // Sync incoming external gift banner to full visual animation
+  useEffect(() => {
+    if (activeGiftBanner && !activeGiftAnimation) {
+      setActiveGiftAnimation({
+        id: `ext_gift_${Date.now()}`,
+        gift: activeGiftBanner.gift,
+        senderName: activeGiftBanner.sender,
+        recipientName: activeGiftBanner.recipient,
+        comboCount: 1,
+        quantity: 1,
+        timestamp: Date.now(),
+      });
+      clearActiveGiftBanner();
+    }
+  }, [activeGiftBanner, activeGiftAnimation, clearActiveGiftBanner]);
+
+  // Enhanced Virtual Gift Sending Handler with Combos & Visual Animations
+  const handleSendSelectedGift = (customMultiplier?: number) => {
+    const qty = customMultiplier || giftQuantityMultiplier;
+    const requiredCoins = selectedGift.coins * qty;
+
+    if (coins < requiredCoins) {
+      showToast(
+        `Insufficient coins! You need ${requiredCoins.toLocaleString()} coins for ${qty}x ${selectedGift.name}. Recharge in Wallet 💰`
+      );
+      return;
+    }
+
     const recipientId = giftRecipientUser ? giftRecipientUser.id : (activeStream?.host.id || 'host_01');
+    const recipientName = giftRecipientUser
+      ? giftRecipientUser.displayName
+      : (activeStream?.host.displayName || 'Host');
+
+    // Deduct coins & record via AppContext
     sendLiveGift(selectedGift, recipientId);
+
+    // Calculate Combo Streaks (reset if > 4.2 seconds between sends)
+    const now = Date.now();
+    let nextCombo = 1;
+    if (lastSentGiftId === selectedGift.id && now - lastGiftSentTime < 4200) {
+      nextCombo = giftComboCount + 1;
+    }
+    setGiftComboCount(nextCombo);
+    setLastSentGiftId(selectedGift.id);
+    setLastGiftSentTime(now);
+
+    // Trigger Spectacular Screen Takeover Animation
+    setActiveGiftAnimation({
+      id: `gift_anim_${now}_${Math.random()}`,
+      gift: selectedGift,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipTier: currentUser.vipTier || 1,
+      recipientName,
+      comboCount: nextCombo,
+      quantity: qty,
+      timestamp: now,
+    });
+
+    // Add Highlighted Gift Notification into Live Chat Stream
+    setComments((prev) => [
+      ...prev,
+      {
+        id: `gift_msg_${now}`,
+        user: currentUser.displayName,
+        text: `sent ${selectedGift.name} ${qty > 1 ? `x${qty} ` : ''}to ${recipientName}! ${selectedGift.icon} (+${requiredCoins.toLocaleString()} 💰)`,
+        vipLevel: currentUser.vipTier,
+        isGiftHighlight: true,
+      },
+    ]);
+
+    // Spawn floating celebration hearts
     spawnHeart();
-    const recipientName = giftRecipientUser ? giftRecipientUser.displayName : (activeStream?.host.displayName || 'Host');
-    showToast(`Sent ${selectedGift.name} to ${recipientName}! 🎁`);
-    setGiftRecipientUser(null);
+    spawnHeart();
+
+    // Dynamically update Session Top Givers Leaderboard
+    setSessionGivers((prev) => {
+      const existingIdx = prev.findIndex((g) => g.user.id === currentUser.id);
+      let updated: SessionGiver[];
+      if (existingIdx !== -1) {
+        updated = prev.map((g, idx) =>
+          idx === existingIdx
+            ? {
+                ...g,
+                totalCoins: g.totalCoins + requiredCoins,
+                giftCount: g.giftCount + qty,
+                lastGiftName: selectedGift.name,
+                lastGiftIcon: selectedGift.icon,
+              }
+            : g
+        );
+      } else {
+        updated = [
+          ...prev,
+          {
+            user: currentUser,
+            totalCoins: requiredCoins,
+            giftCount: qty,
+            lastGiftName: selectedGift.name,
+            lastGiftIcon: selectedGift.icon,
+          },
+        ];
+      }
+      return updated.sort((a, b) => b.totalCoins - a.totalCoins);
+    });
+
+    showToast(
+      `Sent ${qty > 1 ? `${qty}x ` : ''}${selectedGift.name} to ${recipientName}! ${selectedGift.icon} ${
+        nextCombo > 1 ? `(Combo x${nextCombo} 🔥)` : ''
+      }`
+    );
   };
 
   // Share broadcast handler
@@ -521,7 +625,7 @@ export const LiveStreamScreen: React.FC = () => {
         spawnHeart(e.clientX + 10, e.clientY - 20);
       }}
       onTouchStart={handleScreenTouchOrClick}
-      className="relative w-full h-full min-h-screen bg-black text-white overflow-hidden flex flex-col justify-between select-none"
+      className="relative w-full h-full h-[100dvh] max-h-[100dvh] bg-black text-white overflow-hidden flex flex-col justify-between select-none"
     >
       {/* Toast Alert Feedback */}
       {toastMessage && (
@@ -587,7 +691,7 @@ export const LiveStreamScreen: React.FC = () => {
             {/* Subtle Off-Camera Indicator Badge */}
             <div className="absolute top-20 left-4 z-10 px-3 py-1.5 rounded-full bg-black/65 backdrop-blur-md border border-white/10 text-white text-[11px] font-semibold flex items-center gap-1.5 pointer-events-none shadow-lg">
               <VideoOff className="w-3.5 h-3.5 text-rose-400" />
-              <span>Host Camera is Off (کیمرہ آف ہے)</span>
+              <span>Host Camera is Off</span>
             </div>
 
             {/* In viewer mode, keep remote audio stream element attached so audio continues uninterrupted */}
@@ -628,103 +732,94 @@ export const LiveStreamScreen: React.FC = () => {
         ))}
       </div>
 
-      {/* Spectacular Screen Takeover Gift Banner */}
-      {activeGiftBanner && (
-        <div className="absolute top-20 left-4 right-4 z-40 pointer-events-none animate-bounce">
-          <div className="relative rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#EC4899] to-[#F59E0B] p-[2px] shadow-[0_0_35px_rgba(236,72,153,0.7)]">
-            <div className="rounded-[14px] bg-[#140A28]/95 backdrop-blur-xl px-4 py-3 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <span className="text-3xl animate-spin-slow">{activeGiftBanner.gift.icon}</span>
-                <div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-black text-amber-300">{activeGiftBanner.sender}</span>
-                    <span className="text-[11px] text-zinc-300">sent</span>
-                  </div>
-                  <div className="text-sm font-extrabold text-white tracking-wide">
-                    {activeGiftBanner.gift.name}
-                  </div>
-                </div>
-              </div>
-              <div className="text-right">
-                <span className="text-xs font-black text-[#F43F5E] px-2 py-1 rounded-full bg-[#EC4899]/20 border border-[#EC4899]/40">
-                  +{activeGiftBanner.gift.coins} Coins
-                </span>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Full-Screen Visual Animations & Spectacular Takeover for Virtual Gifts */}
+      <GiftAnimationOverlay
+        currentEvent={activeGiftAnimation}
+        onComplete={() => setActiveGiftAnimation(null)}
+      />
 
       {/* Top Overlay Bar: Host Profile, Level, VIP, Follow, Viewer Count, Perspective Switcher, Close */}
-      <div className="relative z-30 pt-3 px-2 sm:px-3 flex items-center justify-between gap-1.5 sm:gap-2">
-        {/* Host Capsule with VIP Avatar Frame, Name, Level & VIP */}
-        <div
-          onClick={() => {
-            if (activeRole === 'viewer') {
-              setSelectedUserForActionSheet(activeStream.host);
-              setShowUserActionSheet(true);
-            }
-          }}
-          className={`flex items-center gap-1.5 sm:gap-2 p-1 pl-1.5 pr-2 rounded-full bg-black/65 backdrop-blur-md border border-white/10 shadow-lg min-w-0 max-w-[55%] sm:max-w-none ${
-            activeRole === 'viewer' ? 'cursor-pointer hover:border-[#A855F7]/40' : ''
-          }`}
-        >
-          <VipAvatarFrame
-            avatarUrl={activeStream.host.avatar}
-            vipTier={hostVipTier}
-            size="sm"
-            showCrownBadge={true}
-          />
-          <div className="flex flex-col min-w-0">
-            <div className="flex items-center gap-1">
-              <span className="text-xs font-black text-white truncate max-w-[65px] sm:max-w-[85px]">
-                {activeStream.host.displayName}
-              </span>
-              <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[8px] font-black border border-amber-500/30 shrink-0">
-                Lv.{hostLevel}
-              </span>
-              <span className="hidden xs:inline px-1 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black shrink-0">
-                VIP {hostVipTier}
-              </span>
-            </div>
-            <div className="flex items-center gap-1 text-[10px] text-zinc-300">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>{formatTime(durationSecs)}</span>
-            </div>
-          </div>
-
-          {/* Follow Button */}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              setIsFollowing(!isFollowing);
+      <div className="relative z-30 pt-2.5 px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
+        {/* Left Column: Host Capsule on top + Top Givers Leaderboard line directly underneath it */}
+        <div className="flex flex-col items-start gap-1 min-w-0 max-w-[68%] pointer-events-auto">
+          {/* Host Capsule with VIP Avatar Frame, Name, Level & VIP */}
+          <div
+            onClick={() => {
+              if (activeRole === 'viewer') {
+                setSelectedUserForActionSheet(activeStream.host);
+                setShowUserActionSheet(true);
+              }
             }}
-            className={`ml-0.5 px-2 py-0.5 sm:px-2.5 sm:py-1 rounded-full text-[9px] sm:text-[10px] font-bold transition-all cursor-pointer shrink-0 ${
-              isFollowing
-                ? 'bg-zinc-700 text-zinc-300'
-                : 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow-sm'
+            className={`flex items-center gap-1.5 p-1 pl-1.5 pr-2 rounded-full bg-black/65 backdrop-blur-md border border-white/10 shadow-lg min-w-0 max-w-full ${
+              activeRole === 'viewer' ? 'cursor-pointer hover:border-[#A855F7]/40' : ''
             }`}
           >
-            {isFollowing ? 'Following' : '+ Follow'}
-          </button>
+            <VipAvatarFrame
+              avatarUrl={activeStream.host.avatar}
+              vipTier={hostVipTier}
+              size="sm"
+              showCrownBadge={true}
+            />
+            <div className="flex flex-col min-w-0">
+              <div className="flex items-center gap-1">
+                <span className="text-xs font-black text-white truncate max-w-[65px] sm:max-w-[85px]">
+                  {activeStream.host.displayName}
+                </span>
+                <LevelBadgeIcon level={hostLevel} size="xs" className="shrink-0" />
+                <span className="hidden xs:inline px-1 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black shrink-0">
+                  VIP {hostVipTier}
+                </span>
+              </div>
+              <div className="flex items-center gap-1 text-[9px] text-zinc-300">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span>{formatTime(durationSecs)}</span>
+              </div>
+            </div>
+
+            {/* Follow Button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsFollowing(!isFollowing);
+              }}
+              className={`ml-0.5 px-2 py-0.5 rounded-full text-[9px] font-bold transition-all cursor-pointer shrink-0 ${
+                isFollowing
+                  ? 'bg-zinc-700 text-zinc-300'
+                  : 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow-sm'
+              }`}
+            >
+              {isFollowing ? 'Following' : '+ Follow'}
+            </button>
+          </div>
+
+          {/* Top Givers Leaderboard Line (Directly Below Host Name on Left) */}
+          <TopGiversLeaderboard
+            givers={sessionGivers}
+            currentUser={currentUser}
+            onSelectUser={(targetUser) => {
+              setSelectedUserForActionSheet(targetUser);
+              setShowUserActionSheet(true);
+            }}
+            onOpenGiftDrawer={() => setShowGiftDrawer(true)}
+          />
         </div>
 
         {/* Right Top Actions: Viewer Count, Perspective Switcher (Host <-> Viewer), Close */}
-        <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+        <div className="flex items-center gap-1 shrink-0 pointer-events-auto">
           {/* Audience Rush / Viewers Count */}
           <button
             onClick={() => setShowViewersModal(true)}
-            className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-black/65 backdrop-blur-md border border-white/10 hover:border-[#A855F7]/40 text-[11px] sm:text-xs font-bold text-zinc-200 hover:text-white cursor-pointer transition-all"
+            className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-black/65 backdrop-blur-md border border-white/10 hover:border-[#A855F7]/40 text-[10px] font-bold text-zinc-200 hover:text-white cursor-pointer transition-all"
             title="View Live Audience"
           >
             <Users className="w-3 h-3 text-[#C084FC]" />
-            <span>رش {viewerCount.toLocaleString()}</span>
+            <span>{viewerCount.toLocaleString()}</span>
           </button>
 
           {/* Perspective Tester Toggle (Host Mode <-> Viewer Mode) */}
           <button
             onClick={handleToggleRolePerspective}
-            className="px-1.5 sm:px-2 py-1 rounded-full bg-[#180E2C]/90 border border-[#A855F7]/40 text-[9px] sm:text-[10px] font-bold text-[#C084FC] hover:text-white transition-colors cursor-pointer flex items-center gap-0.5"
+            className="px-1.5 py-1 rounded-full bg-[#180E2C]/90 border border-[#A855F7]/40 text-[9px] font-bold text-[#C084FC] hover:text-white transition-colors cursor-pointer flex items-center gap-0.5"
             title="Toggle between Host Controls and Viewer Mode"
           >
             {activeRole === 'host' ? <Radio className="w-3 h-3 text-emerald-400" /> : <Eye className="w-3 h-3 text-cyan-400" />}
@@ -734,36 +829,36 @@ export const LiveStreamScreen: React.FC = () => {
           {/* Close Live Button */}
           <button
             onClick={closeLiveStream}
-            className="w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-black/65 backdrop-blur-md border border-white/10 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer"
+            className="w-7 h-7 rounded-full bg-black/65 backdrop-blur-md border border-white/10 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer"
             title="Leave Stream"
           >
-            <X className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
+            <X className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
 
-      {/* Bottom Live Stream Section: Comments Feed + Bottom Controls HUD */}
-      <div className="relative z-30 px-3 pb-3 flex flex-col justify-end">
+      {/* Bottom Live Stream Section: Comments Feed + Bottom Controls HUD (Tight Mobile Fit) */}
+      <div className="relative z-30 px-2.5 pb-2 shrink-0 flex flex-col justify-end pointer-events-auto">
         {/* Live Chat Comments Header with Clear Chat for Host & Mod */}
         <div className="flex items-center justify-between mb-1 px-1">
-          <span className="text-[10px] text-purple-200 font-bold flex items-center gap-1">
+          <span className="text-[9.5px] text-purple-200 font-bold flex items-center gap-1">
             💬 Live Chat Feed
           </span>
           {canModerate && (
             <button
               onClick={handleClearChat}
-              className="flex items-center gap-1 text-[8.5px] font-bold text-rose-300 hover:text-white px-2 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/30 cursor-pointer transition-colors"
+              className="flex items-center gap-1 text-[8px] font-bold text-rose-300 hover:text-white px-1.5 py-0.5 rounded-full bg-rose-950/60 border border-rose-500/30 cursor-pointer transition-colors"
               title="Clear Comment History"
             >
               <Trash2 className="w-2.5 h-2.5 text-rose-400" />
-              <span>Clear Chat (کمنٹ صاف)</span>
+              <span>Clear Chat</span>
             </button>
           )}
         </div>
 
-        {/* Live Chat Comments Stream */}
-        <div className="max-h-48 overflow-y-auto space-y-1.5 pr-2 mb-2.5 scrollbar-none pointer-events-auto">
-          <div className="inline-block px-3 py-1 rounded-xl bg-purple-900/60 backdrop-blur-md border border-[#A855F7]/30 text-[11px] text-purple-200 font-medium">
+        {/* Live Chat Comments Stream — Compact height strictly preventing viewport spill */}
+        <div className="max-h-24 sm:max-h-28 overflow-y-auto space-y-1 pr-1.5 mb-1.5 scrollbar-none pointer-events-auto">
+          <div className="inline-block px-2.5 py-0.5 rounded-xl bg-purple-900/60 backdrop-blur-md border border-[#A855F7]/30 text-[10px] text-purple-200 font-medium">
             👋 Welcome to Alpha Mate Live! Tap any comment to view profile & actions! 💜
           </div>
 
@@ -771,16 +866,50 @@ export const LiveStreamScreen: React.FC = () => {
             <div
               key={msg.id}
               onClick={() => handleCommentClick(msg)}
-              className="inline-flex items-start gap-1.5 max-w-[85%] px-3 py-1.5 rounded-2xl bg-black/55 backdrop-blur-md border border-white/5 hover:border-[#A855F7]/40 hover:bg-black/75 text-xs text-white shadow-sm cursor-pointer transition-all"
+              className={`inline-flex items-center gap-1.5 max-w-[95%] px-2.5 py-1 rounded-xl backdrop-blur-md border text-[11px] text-white shadow-sm cursor-pointer transition-all ${
+                msg.isGiftHighlight
+                  ? 'bg-gradient-to-r from-amber-500/25 via-pink-500/20 to-purple-600/30 border-amber-400/60 shadow-[0_0_12px_rgba(251,191,36,0.3)] animate-pulse'
+                  : msg.isEntryNotice
+                  ? 'bg-gradient-to-r from-purple-950/70 to-pink-950/60 border-purple-400/40 text-amber-200'
+                  : 'bg-black/55 border-white/5 hover:border-[#A855F7]/40 hover:bg-black/75'
+              }`}
               title="Tap to view user profile & controls"
             >
-              {msg.vipLevel && msg.vipLevel > 0 ? (
-                <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[9px] font-bold uppercase border border-amber-500/40">
+              {/* Level Badge Icon */}
+              <LevelBadgeIcon
+                level={msg.level ?? (msg.vipLevel ? msg.vipLevel * 8 : 12)}
+                size="xs"
+                className="shrink-0"
+              />
+
+              {msg.isGiftHighlight ? (
+                <span className="px-1 py-0.2 rounded bg-gradient-to-r from-amber-400 to-pink-500 text-black text-[8px] font-black uppercase shadow">
+                  🎁 GIFT
+                </span>
+              ) : msg.vipLevel && msg.vipLevel > 0 ? (
+                <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[8px] font-bold uppercase border border-amber-500/40">
                   VIP {msg.vipLevel}
                 </span>
               ) : null}
-              <span className="font-bold text-[#C084FC] shrink-0">{msg.user}:</span>
-              <span className="text-zinc-200 break-words">{msg.text}</span>
+
+              <span
+                className={`font-black shrink-0 ${
+                  msg.isGiftHighlight
+                    ? 'text-amber-300'
+                    : msg.isEntryNotice
+                    ? 'text-amber-200'
+                    : 'text-[#C084FC]'
+                }`}
+              >
+                {msg.user}:
+              </span>
+              <span
+                className={`break-words ${
+                  msg.isGiftHighlight ? 'text-white font-semibold' : 'text-zinc-200'
+                }`}
+              >
+                {msg.text}
+              </span>
             </div>
           ))}
           <div ref={commentsEndRef} />
@@ -790,18 +919,15 @@ export const LiveStreamScreen: React.FC = () => {
             BOTTOM CONTROLS HUD — STRICT HOST VS VIEWER DIFFERENTIATION
            ========================================================================= */}
         {activeRole === 'viewer' ? (
-          /* =========================================================
-             VIEWER BOTTOM BAR (Strictly Viewer Controls: Share, Remote Audio Volume, Comment, Gift Box)
-             Viewer has NO host camera or mic controls.
-             ========================================================= */
-          <div className="flex items-center gap-2">
+          /* VIEWER BOTTOM BAR: Share, Volume, Comment Input, Gift Box */
+          <div className="flex items-center gap-1.5">
             {/* 1. Share Broadcast */}
             <button
               onClick={handleShareBroadcast}
-              className="w-10 h-10 rounded-full bg-black/60 backdrop-blur-md border border-white/15 flex items-center justify-center text-zinc-300 hover:text-white active:scale-95 transition-all cursor-pointer shrink-0"
+              className="w-8.5 h-8.5 rounded-full bg-black/60 backdrop-blur-md border border-white/15 flex items-center justify-center text-zinc-300 hover:text-white active:scale-95 transition-all cursor-pointer shrink-0"
               title="Share Broadcast"
             >
-              <Share2 className="w-5 h-5 text-zinc-200" />
+              <Share2 className="w-4 h-4 text-zinc-200" />
             </button>
 
             {/* Remote Audio Volume Toggle for Viewer */}
@@ -811,14 +937,14 @@ export const LiveStreamScreen: React.FC = () => {
                 setIsRemoteAudioMuted(nextMute);
                 showToast(nextMute ? 'Host Audio Muted 🔇' : 'Host Audio Playing 🔊');
               }}
-              className={`w-10 h-10 rounded-full backdrop-blur-md border flex items-center justify-center active:scale-95 transition-all cursor-pointer shrink-0 ${
+              className={`w-8.5 h-8.5 rounded-full backdrop-blur-md border flex items-center justify-center active:scale-95 transition-all cursor-pointer shrink-0 ${
                 isRemoteAudioMuted
                   ? 'bg-rose-950/80 border-rose-500/50 text-rose-300'
                   : 'bg-black/60 border-white/15 text-zinc-200 hover:text-white'
               }`}
               title={isRemoteAudioMuted ? 'Unmute Host Audio' : 'Mute Host Audio'}
             >
-              {isRemoteAudioMuted ? <VolumeX className="w-5 h-5 text-rose-400" /> : <Volume2 className="w-5 h-5 text-[#C084FC]" />}
+              {isRemoteAudioMuted ? <VolumeX className="w-4 h-4 text-rose-400" /> : <Volume2 className="w-4 h-4 text-[#C084FC]" />}
             </button>
 
             {/* 2. Send Comment */}
@@ -828,33 +954,41 @@ export const LiveStreamScreen: React.FC = () => {
                 placeholder="Say something nice..."
                 value={inputComment}
                 onChange={(e) => setInputComment(e.target.value)}
-                className="w-full h-10 pl-3.5 pr-10 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+                className="w-full h-8.5 pl-3 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
               />
               <button
                 type="submit"
-                className="absolute right-1 w-8 h-8 rounded-full bg-[#7928CA] flex items-center justify-center text-white hover:bg-[#A855F7] transition-colors cursor-pointer"
+                className="absolute right-1 w-6.5 h-6.5 rounded-full bg-[#7928CA] flex items-center justify-center text-white hover:bg-[#A855F7] transition-colors cursor-pointer"
               >
-                <Send className="w-3.5 h-3.5" />
+                <Send className="w-3 h-3" />
               </button>
             </form>
 
-            {/* 3. Gift Box Button */}
+            {/* 3. Lucky Draw Mini-Game Button */}
+            <button
+              onClick={() => setShowLuckyDrawModal(true)}
+              className="w-8.5 h-8.5 rounded-full bg-gradient-to-tr from-amber-400 via-[#EC4899] to-[#7928CA] p-[1.5px] shadow-lg shadow-amber-500/40 active:scale-95 transition-transform cursor-pointer shrink-0"
+              title="Lucky Draw Wheel"
+            >
+              <div className="w-full h-full rounded-full bg-[#1A0D30] flex items-center justify-center">
+                <Sparkles className="w-4 h-4 text-amber-300 animate-spin-slow" />
+              </div>
+            </button>
+
+            {/* 4. Gift Box Button */}
             <button
               onClick={() => setShowGiftDrawer(true)}
-              className="w-10 h-10 rounded-full bg-gradient-to-tr from-[#7928CA] via-[#EC4899] to-[#F59E0B] p-[1.5px] shadow-lg shadow-[#EC4899]/40 active:scale-95 transition-transform cursor-pointer shrink-0"
+              className="w-8.5 h-8.5 rounded-full bg-gradient-to-tr from-[#7928CA] via-[#EC4899] to-[#F59E0B] p-[1.5px] shadow-lg shadow-[#EC4899]/40 active:scale-95 transition-transform cursor-pointer shrink-0"
               title="Gift Box"
             >
               <div className="w-full h-full rounded-full bg-[#180E2B] flex items-center justify-center">
-                <GiftIcon className="w-5 h-5 text-amber-300 animate-pulse" />
+                <GiftIcon className="w-4 h-4 text-amber-300 animate-pulse" />
               </div>
             </button>
           </div>
         ) : (
-          /* =========================================================
-             HOST BOTTOM BAR (Host Controls: Comment, Filter, Cam On/Off,
-             Mic On/Off, Rotate Cam, Share, Settings)
-             ========================================================= */
-          <div className="flex flex-col gap-2">
+          /* HOST BOTTOM BAR: Comment input + 6 Direct Compact Action Buttons */
+          <div className="flex flex-col gap-1.5">
             {/* Top row: Comment input */}
             <form onSubmit={handleSendComment} className="w-full flex items-center relative">
               <input
@@ -862,154 +996,244 @@ export const LiveStreamScreen: React.FC = () => {
                 placeholder="Chat with your audience as Host..."
                 value={inputComment}
                 onChange={(e) => setInputComment(e.target.value)}
-                className="w-full h-9 pl-3.5 pr-10 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+                className="w-full h-8 pl-3 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
               />
               <button
                 type="submit"
-                className="absolute right-1 w-7 h-7 rounded-full bg-[#7928CA] flex items-center justify-center text-white hover:bg-[#A855F7] transition-colors cursor-pointer"
+                className="absolute right-1 w-6 h-6 rounded-full bg-[#7928CA] flex items-center justify-center text-white hover:bg-[#A855F7] transition-colors cursor-pointer"
               >
-                <Send className="w-3 h-3" />
+                <Send className="w-2.5 h-2.5" />
               </button>
             </form>
 
-            {/* Bottom Row: 6 Direct Host Action Buttons — Responsive Grid, guaranteed to fit mobile screens */}
+            {/* Bottom Row: 6 Direct Host Action Buttons — Compact & Mobile-fitting */}
             <div className="grid grid-cols-6 gap-1 w-full">
               {/* 1. Camera Color Grading Filter Button */}
               <button
                 onClick={() => setShowFilterDrawer(true)}
-                className={`h-11 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer min-w-0 ${
+                className={`h-8.5 rounded-lg border flex flex-col items-center justify-center p-0.5 transition-all cursor-pointer min-w-0 ${
                   activeFilterPreset !== 'normal'
                     ? 'bg-gradient-to-tr from-[#7928CA] to-[#EC4899] border-[#EC4899] text-white shadow-md'
                     : 'bg-black/65 backdrop-blur-md border-white/15 text-zinc-300 hover:text-white'
                 }`}
                 title="Filters"
               >
-                <Wand2 className="w-3.5 h-3.5 text-[#EC4899]" />
-                <span className="text-[8.5px] font-bold tracking-tight truncate max-w-full mt-0.5">Filter</span>
+                <Wand2 className="w-3 h-3 text-[#EC4899]" />
+                <span className="text-[7.5px] font-bold tracking-tight truncate max-w-full">Filter</span>
               </button>
 
               {/* 2. Cam On / Off Toggle Button */}
               <button
                 onClick={handleToggleHostVideo}
-                className={`h-11 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer min-w-0 ${
+                className={`h-8.5 rounded-lg border flex flex-col items-center justify-center p-0.5 transition-all cursor-pointer min-w-0 ${
                   isHostVideoOn
                     ? 'bg-black/65 backdrop-blur-md border-white/15 text-white'
                     : 'bg-rose-950/80 border-rose-500/50 text-rose-300'
                 }`}
                 title="Toggle Video Camera"
               >
-                {isHostVideoOn ? <Video className="w-3.5 h-3.5 text-emerald-400" /> : <VideoOff className="w-3.5 h-3.5 text-rose-400" />}
-                <span className="text-[8.5px] font-bold tracking-tight truncate max-w-full mt-0.5">{isHostVideoOn ? 'Cam On' : 'Cam Off'}</span>
+                {isHostVideoOn ? <Video className="w-3 h-3 text-emerald-400" /> : <VideoOff className="w-3 h-3 text-rose-400" />}
+                <span className="text-[7.5px] font-bold tracking-tight truncate max-w-full">{isHostVideoOn ? 'Cam' : 'Off'}</span>
               </button>
 
               {/* 3. Mic On / Off Toggle Button */}
               <button
                 onClick={handleToggleHostMic}
-                className={`h-11 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer min-w-0 ${
+                className={`h-8.5 rounded-lg border flex flex-col items-center justify-center p-0.5 transition-all cursor-pointer min-w-0 ${
                   isHostMicOn
                     ? 'bg-black/65 backdrop-blur-md border-white/15 text-white'
                     : 'bg-rose-950/80 border-rose-500/50 text-rose-300'
                 }`}
                 title="Toggle Microphone"
               >
-                {isHostMicOn ? <Mic className="w-3.5 h-3.5 text-emerald-400" /> : <MicOff className="w-3.5 h-3.5 text-rose-400" />}
-                <span className="text-[8.5px] font-bold tracking-tight truncate max-w-full mt-0.5">{isHostMicOn ? 'Mic On' : 'Muted'}</span>
+                {isHostMicOn ? <Mic className="w-3 h-3 text-emerald-400" /> : <MicOff className="w-3 h-3 text-rose-400" />}
+                <span className="text-[7.5px] font-bold tracking-tight truncate max-w-full">{isHostMicOn ? 'Mic' : 'Muted'}</span>
               </button>
 
               {/* 4. Rotate / Flip Cam Button */}
               <button
                 onClick={handleFlipCamera}
-                className="h-11 rounded-xl bg-black/65 backdrop-blur-md border border-white/15 flex flex-col items-center justify-center p-1 text-zinc-200 hover:text-white active:scale-95 transition-all cursor-pointer min-w-0"
+                className="h-8.5 rounded-lg bg-black/65 backdrop-blur-md border border-white/15 flex flex-col items-center justify-center p-0.5 text-zinc-200 hover:text-white active:scale-95 transition-all cursor-pointer min-w-0"
                 title="Rotate / Flip Camera"
               >
-                <RotateCcw className="w-3.5 h-3.5 text-[#C084FC]" />
-                <span className="text-[8.5px] font-bold tracking-tight truncate max-w-full mt-0.5">Rotate</span>
+                <RotateCcw className="w-3 h-3 text-[#C084FC]" />
+                <span className="text-[7.5px] font-bold tracking-tight truncate max-w-full">Rotate</span>
               </button>
 
               {/* 5. Share Broadcast Button */}
               <button
                 onClick={handleShareBroadcast}
-                className="h-11 rounded-xl bg-black/65 backdrop-blur-md border border-white/15 flex flex-col items-center justify-center p-1 text-zinc-200 hover:text-white active:scale-95 transition-all cursor-pointer min-w-0"
+                className="h-8.5 rounded-lg bg-black/65 backdrop-blur-md border border-white/15 flex flex-col items-center justify-center p-0.5 text-zinc-200 hover:text-white active:scale-95 transition-all cursor-pointer min-w-0"
                 title="Share Broadcast"
               >
-                <Share2 className="w-3.5 h-3.5 text-amber-300" />
-                <span className="text-[8.5px] font-bold tracking-tight truncate max-w-full mt-0.5">Share</span>
+                <Share2 className="w-3 h-3 text-amber-300" />
+                <span className="text-[7.5px] font-bold tracking-tight truncate max-w-full">Share</span>
               </button>
 
               {/* 6. Settings Button */}
               <button
                 onClick={() => setShowSettingsModal(true)}
-                className="h-11 rounded-xl bg-black/65 backdrop-blur-md border border-white/15 flex flex-col items-center justify-center p-1 text-zinc-200 hover:text-white active:scale-95 transition-all cursor-pointer min-w-0"
+                className="h-8.5 rounded-lg bg-black/65 backdrop-blur-md border border-white/15 flex flex-col items-center justify-center p-0.5 text-zinc-200 hover:text-white active:scale-95 transition-all cursor-pointer min-w-0"
                 title="Settings"
               >
-                <Settings className="w-3.5 h-3.5 text-zinc-300" />
-                <span className="text-[8.5px] font-bold tracking-tight truncate max-w-full mt-0.5">Config</span>
+                <Settings className="w-3 h-3 text-zinc-300" />
+                <span className="text-[7.5px] font-bold tracking-tight truncate max-w-full">Config</span>
               </button>
             </div>
           </div>
         )}
       </div>
 
-      {/* Virtual Gifts Drawer Modal */}
+      {/* Virtual Gifts Drawer Modal with Multipliers and Rapid Combos */}
       {showGiftDrawer && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex flex-col justify-end">
-          <div className="w-full max-w-md mx-auto rounded-t-3xl bg-[#160E2C] border-t border-[#A855F7]/30 p-4 shadow-2xl animate-slide-up">
-            <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/15">
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex flex-col justify-end animate-fade-in">
+          <div className="w-full max-w-md mx-auto rounded-t-3xl bg-[#140C26] border-t border-[#A855F7]/30 p-4 pb-6 shadow-2xl animate-slide-up">
+            {/* Drawer Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/20">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-white">Send Virtual Gift</span>
-                <span className="text-xs text-amber-400 font-bold">💰 {coins.toLocaleString()} Coins</span>
+                <GiftIcon className="w-4 h-4 text-amber-400" />
+                <span className="text-sm font-black text-white">Send Virtual Gift</span>
+                {giftRecipientUser ? (
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-900/60 border border-purple-500/40 text-purple-200 truncate max-w-[110px]">
+                    To: {giftRecipientUser.displayName}
+                  </span>
+                ) : (
+                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300">
+                    To Host 👑
+                  </span>
+                )}
               </div>
+
               <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-black/60 border border-amber-400/30">
+                  <span className="text-xs text-amber-400 font-black">
+                    💰 {coins.toLocaleString()}
+                  </span>
+                </div>
+                <button
+                  onClick={() => {
+                    setShowGiftDrawer(false);
+                    setShowLuckyDrawModal(true);
+                  }}
+                  className="px-2.5 py-1 rounded-full bg-gradient-to-r from-amber-400 to-[#EC4899] text-black font-black text-[10px] hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow flex items-center gap-1"
+                >
+                  <Sparkles className="w-3 h-3 text-amber-950" />
+                  <span>Lucky Draw</span>
+                </button>
                 <button
                   onClick={() => setCurrentScreen('wallet')}
-                  className="px-2 py-0.5 rounded-full bg-[#7928CA] text-white text-[10px] font-bold hover:bg-[#A855F7]"
+                  className="px-2 py-1 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-zinc-200 text-[10px] font-bold active:scale-95 transition-all cursor-pointer shadow"
                 >
                   + Recharge
                 </button>
-                <button onClick={() => setShowGiftDrawer(false)} className="text-zinc-400 hover:text-white cursor-pointer">
-                  <X className="w-5 h-5" />
+                <button
+                  onClick={() => {
+                    setShowGiftDrawer(false);
+                    setGiftRecipientUser(null);
+                  }}
+                  className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer transition-all ml-1"
+                >
+                  <X className="w-4 h-4" />
                 </button>
               </div>
             </div>
 
             {/* Gift Grid */}
-            <div className="grid grid-cols-4 gap-2.5 py-4 max-h-64 overflow-y-auto">
+            <div className="grid grid-cols-4 gap-2 py-3.5 max-h-64 overflow-y-auto">
               {VIRTUAL_GIFTS.map((g) => {
                 const isSelected = selectedGift.id === g.id;
+                const isMythic = g.coins >= 19999;
+                const isEpic = g.coins >= 1999 && !isMythic;
                 return (
                   <div
                     key={g.id}
                     onClick={() => setSelectedGift(g)}
                     className={`relative rounded-2xl p-2.5 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
                       isSelected
-                        ? 'bg-gradient-to-b from-[#7928CA]/40 to-[#EC4899]/30 border-2 border-[#EC4899] shadow-lg shadow-[#EC4899]/20 scale-105'
-                        : 'bg-[#1D1438] border border-white/5 hover:border-white/20'
+                        ? 'bg-gradient-to-b from-[#7928CA]/50 to-[#EC4899]/40 border-2 border-[#EC4899] shadow-[0_0_20px_rgba(236,72,153,0.4)] scale-105'
+                        : 'bg-[#1C1236] border border-white/5 hover:border-white/20'
                     }`}
                   >
-                    <span className="text-2xl mb-1">{g.icon}</span>
-                    <span className="text-[10px] font-bold text-white truncate max-w-full">{g.name}</span>
-                    <span className="text-[10px] text-amber-400 font-semibold mt-0.5">{g.coins}</span>
+                    {isMythic && (
+                      <span className="absolute -top-1.5 -right-1 px-1 rounded bg-gradient-to-r from-red-600 to-amber-500 text-[7px] font-black text-white shadow">
+                        MYTHIC
+                      </span>
+                    )}
+                    {isEpic && (
+                      <span className="absolute -top-1.5 -right-1 px-1 rounded bg-gradient-to-r from-purple-600 to-pink-500 text-[7px] font-black text-white shadow">
+                        VIP
+                      </span>
+                    )}
+                    <span className="text-2xl mb-1 drop-shadow">{g.icon}</span>
+                    <span className="text-[10.5px] font-bold text-white truncate max-w-full">
+                      {g.name}
+                    </span>
+                    <span className="text-[10px] text-amber-300 font-extrabold mt-0.5 flex items-center gap-0.5">
+                      <span>{g.coins.toLocaleString()}</span>
+                      <span className="text-[9px]">💰</span>
+                    </span>
                   </div>
                 );
               })}
             </div>
 
-            {/* Selected Gift Footer with Send Action */}
-            <div className="flex items-center justify-between pt-2 border-t border-[#A855F7]/15">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">{selectedGift.icon}</span>
-                <div>
-                  <div className="text-xs font-bold text-white">{selectedGift.name}</div>
-                  <div className="text-[10px] text-zinc-400">{selectedGift.description}</div>
+            {/* Quantity Multiplier Selector Bar */}
+            <div className="pt-2 pb-2.5 border-t border-[#A855F7]/15 flex items-center justify-between gap-1.5">
+              <span className="text-[11px] font-bold text-zinc-400 shrink-0">Quantity:</span>
+              <div className="flex items-center gap-1 overflow-x-auto py-0.5">
+                {[1, 5, 10, 66, 99, 188, 520].map((num) => {
+                  const isActive = giftQuantityMultiplier === num;
+                  return (
+                    <button
+                      key={num}
+                      onClick={() => setGiftQuantityMultiplier(num)}
+                      className={`px-2 py-0.5 rounded-lg text-[10px] font-black transition-all cursor-pointer shrink-0 ${
+                        isActive
+                          ? 'bg-gradient-to-r from-amber-400 to-pink-500 text-black shadow-md'
+                          : 'bg-[#221642] text-zinc-300 hover:text-white border border-white/5'
+                      }`}
+                    >
+                      x{num}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Selected Gift Footer with Send & Combo Button */}
+            <div className="flex items-center justify-between pt-2 border-t border-[#A855F7]/15 gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-2xl shrink-0 drop-shadow">{selectedGift.icon}</span>
+                <div className="min-w-0">
+                  <div className="text-xs font-black text-white truncate">
+                    {selectedGift.name}
+                    {giftQuantityMultiplier > 1 && (
+                      <span className="ml-1 text-pink-400">x{giftQuantityMultiplier}</span>
+                    )}
+                  </div>
+                  <div className="text-[10px] text-amber-300 font-bold">
+                    Total: {(selectedGift.coins * giftQuantityMultiplier).toLocaleString()} Coins
+                  </div>
                 </div>
               </div>
 
-              <button
-                onClick={handleSendSelectedGift}
-                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-bold text-xs shadow-lg shadow-[#7928CA]/50 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
-              >
-                Send ({selectedGift.coins} 💰)
-              </button>
+              <div className="flex items-center gap-2">
+                {giftComboCount > 1 && (
+                  <div className="flex items-center gap-1 px-2 py-1 rounded-xl bg-red-950/80 border border-red-500/50 text-red-300 text-[10px] font-black animate-pulse">
+                    <Flame className="w-3 h-3 text-red-400" />
+                    <span>Streak x{giftComboCount}</span>
+                  </div>
+                )}
+                <button
+                  onClick={() => handleSendSelectedGift()}
+                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-black text-xs shadow-lg shadow-[#7928CA]/50 hover:brightness-110 active:scale-90 transition-all cursor-pointer flex items-center gap-1.5 shrink-0"
+                >
+                  <span>Send</span>
+                  <span className="text-[10px] opacity-90">
+                    ({(selectedGift.coins * giftQuantityMultiplier).toLocaleString()} 💰)
+                  </span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1174,6 +1398,46 @@ export const LiveStreamScreen: React.FC = () => {
           setShowViewersModal(false);
           setSelectedUserForActionSheet(viewer);
           setShowUserActionSheet(true);
+        }}
+      />
+
+      {/* Lucky Draw Mini-Game Modal */}
+      <LuckyDrawModal
+        isOpen={showLuckyDrawModal}
+        onClose={() => setShowLuckyDrawModal(false)}
+        userCoins={coins}
+        hostName={activeStream.host.displayName}
+        onWinCoins={(amount, rewardName) => {
+          addCoins(amount, `Lucky Draw: Won ${rewardName} (${amount} Coins)`);
+          showToast(`Won ${amount.toLocaleString()} Coins from Lucky Draw! 🪙✨`);
+
+          // Insert congratulatory comment in chat
+          setComments((prev) => [
+            ...prev,
+            {
+              id: `comment_luck_${Date.now()}`,
+              user: currentUser.displayName,
+              text: `🎉 Won ${amount.toLocaleString()} Coins in Lucky Draw!`,
+              vipLevel: currentUser.vipTier,
+              isGiftHighlight: true,
+            },
+          ]);
+        }}
+        onSendBonusGiftToHost={(coinsWon) => {
+          const halfCoins = Math.floor(coinsWon / 2);
+          if (halfCoins > 0) {
+            // Send bonus gift
+            const bonusGift: Gift = {
+              id: `gift_lucky_${Date.now()}`,
+              name: 'Lucky Share',
+              icon: '🍀',
+              coins: halfCoins,
+              animationType: 'sparkle',
+              description: `Lucky Draw Prize Shared with ${activeStream.host.displayName}!`,
+            };
+            sendLiveGift(bonusGift, activeStream.host.id);
+            showToast(`Sent ${halfCoins.toLocaleString()} Lucky Bonus Coins to ${activeStream.host.displayName}! 🎁`);
+          }
         }}
       />
     </div>

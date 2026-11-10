@@ -17,12 +17,12 @@ export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
   // If responsive mode on desktop
   if (deviceMode === 'responsive') {
     return (
-      <div className="w-full min-h-screen bg-[#09070F] flex flex-col">
+      <div className="w-full h-[100dvh] bg-[#09070F] flex flex-col overflow-hidden">
         {/* Top Desktop Helper Toolbar */}
-        <div className="h-10 bg-[#0E081D] border-b border-[#A855F7]/20 px-4 flex items-center justify-between text-xs text-zinc-400">
+        <div className="h-10 bg-[#0E081D] border-b border-[#A855F7]/20 px-4 flex items-center justify-between text-xs text-zinc-400 shrink-0">
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span className="font-semibold text-white">ALPHA MATE Responsive Preview</span>
+            <span className="font-semibold text-white">ALPHA MATE Responsive Mobile Shell</span>
           </div>
 
           <div className="flex items-center gap-2">
@@ -43,7 +43,9 @@ export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
           </div>
         </div>
 
-        <div className="flex-1 w-full max-w-md mx-auto">{children}</div>
+        <div className="flex-1 w-full max-w-[420px] mx-auto overflow-hidden flex flex-col h-full min-h-0 relative">
+          {children}
+        </div>
       </div>
     );
   }
@@ -101,8 +103,8 @@ export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
           </div>
         </div>
 
-        {/* Screen Content */}
-        <div className="flex-1 w-full overflow-y-auto relative flex flex-col scrollbar-none">
+        {/* Screen Content — strictly overflow-hidden so individual screens control their scroll zones */}
+        <div className="flex-1 w-full overflow-hidden relative flex flex-col h-full min-h-0">
           {children}
         </div>
 

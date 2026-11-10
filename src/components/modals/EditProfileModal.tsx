@@ -78,24 +78,19 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
   const bioWordsCount = bio.trim() ? bio.trim().split(/\s+/).length : 0;
   const maxWords = 300;
 
-  // Handle Photo Selection via FileReader
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Handle Photo Selection via FileReader with client-side compression
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 8 * 1024 * 1024) {
-      setErrorMessage('Image size too large. Please select an image under 8MB.');
-      return;
+    try {
+      // Compress and resize avatar to max 360x360 compact JPEG (< 40KB)
+      const compressed = await compressImage(file, 360, 360, 0.75);
+      setAvatar(compressed);
+      setErrorMessage('');
+    } catch {
+      setErrorMessage('Could not process image. Please try another photo.');
     }
-
-    const reader = new FileReader();
-    reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setAvatar(reader.result);
-        setErrorMessage('');
-      }
-    };
-    reader.readAsDataURL(file);
   };
 
   const handleAppendDecorator = (decorator: string) => {
@@ -406,7 +401,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
           <div className="p-3.5 rounded-2xl bg-[#1B1233]/70 border border-[#A855F7]/30">
             <div className="flex items-center justify-between mb-1">
               <label className="text-xs font-bold text-white flex items-center gap-1.5">
-                <span>Bio / About Me (بائیو)</span>
+                <span>Bio / About Me</span>
                 <span className="text-[10px] text-emerald-400 font-semibold">• Edit Anytime</span>
               </label>
 
@@ -416,7 +411,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
             </div>
 
             <p className="text-[10px] text-zinc-400 mb-2">
-              Supports Urdu (اردو), English, and emojis. Share your personality with fans!
+              Share your personality, hobbies, and style with your community!
             </p>
 
             <textarea
@@ -424,7 +419,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
               rows={4}
               value={bio}
               onChange={(e) => setBio(e.target.value)}
-              placeholder="Write your bio in English or Urdu... مثلاً: لائیو اسٹریمر اور میوزک آرٹسٹ 💜"
+              placeholder="Write your bio here... (e.g. Live music streamer & DJ producer 💜)"
               className="w-full p-3 rounded-xl bg-[#0E081D] border border-[#A855F7]/40 text-white text-xs leading-relaxed focus:border-[#EC4899] focus:outline-none resize-none"
             />
 
@@ -451,7 +446,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
             <div className="flex items-center justify-between mb-1">
               <label className="text-xs font-bold text-white flex items-center gap-1.5">
                 <Calendar className="w-3.5 h-3.5 text-amber-400" />
-                <span>Date of Birth (تاریخ پیدائش)</span>
+                <span>Date of Birth</span>
               </label>
               <span className="text-[10px] text-zinc-400">18+ Required</span>
             </div>

@@ -76,7 +76,7 @@ export const ChatScreen: React.FC = () => {
     const partner = activeConversation.user;
 
     return (
-      <div className="relative w-full h-full min-h-screen bg-[#09070F] text-white flex flex-col justify-between overflow-hidden">
+      <div className="relative w-full h-full h-[100dvh] max-h-[100dvh] bg-[#09070F] text-white flex flex-col justify-between overflow-hidden">
         {/* Chat Header */}
         <div className="pt-3 px-4 pb-3 flex items-center justify-between border-b border-[#A855F7]/15 bg-[#120A24] backdrop-blur-md">
           <div className="flex items-center gap-3">

@@ -1,8 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { TopBar } from '../components/navigation/TopBar';
 import { DailyCheckInModal } from '../components/modals/DailyCheckInModal';
-import { LiveStream } from '../types';
+import { StoryViewerModal } from '../components/story/StoryViewerModal';
+import { CreateStoryModal } from '../components/story/CreateStoryModal';
+import { PKComingSoonModal } from '../components/modals/PKComingSoonModal';
+import { CoinSellerAgenciesCarousel } from '../components/home/CoinSellerAgenciesCarousel';
+import { LiveStream, FriendStory } from '../types';
 import {
   Radio,
   Users,
@@ -15,6 +19,9 @@ import {
   Gift,
   Check,
   Coins,
+  Crown,
+  Trophy,
+  TrendingUp,
 } from 'lucide-react';
 
 export const HomeScreen: React.FC = () => {
@@ -25,12 +32,24 @@ export const HomeScreen: React.FC = () => {
     setCurrentScreen,
     dailyCheckInState,
     setShowDailyCheckInModal,
+    friendStories,
+    myStories,
+    addMyStory,
+    toggleLikeStory,
+    reactToStory,
+    markStorySeen,
   } = useApp();
 
   const [activeCategory, setActiveCategory] = useState<'Live' | 'Following' | 'For You'>('Live');
   const [selectedTag, setSelectedTag] = useState<string>('All');
   const [showGoLiveModal, setShowGoLiveModal] = useState<boolean>(false);
+  const [showPKModal, setShowPKModal] = useState<boolean>(false);
   const [customRoomTitle, setCustomRoomTitle] = useState<string>('Party with Alex! 💜 Drop in');
+
+  // Stories modal state
+  const [viewingStoryFriend, setViewingStoryFriend] = useState<FriendStory | null>(null);
+  const [isViewingMyStory, setIsViewingMyStory] = useState<boolean>(false);
+  const [showCreateStoryModal, setShowCreateStoryModal] = useState<boolean>(false);
 
   const tags = ['All', 'PK Battle', 'Music', 'Dancing', 'Gaming', 'Chat'];
 
@@ -48,15 +67,30 @@ export const HomeScreen: React.FC = () => {
     }
   }, [dailyCheckInState.isClaimedToday, setShowDailyCheckInModal]);
 
-  // Filter streams based on tab & tag
-  const filteredStreams = liveStreams.filter((stream: LiveStream) => {
-    if (activeCategory === 'Following' && stream.host.id !== 'host_01') return false;
-    if (selectedTag !== 'All') {
-      if (selectedTag === 'PK Battle' && !stream.isPK) return false;
-      if (selectedTag !== 'PK Battle' && stream.category !== selectedTag) return false;
-    }
-    return true;
-  });
+  // Dynamic ranking algorithm:
+  // Balances Gifting (1.5x) and Live Viewers (50x)
+  // When a host receives higher gifting, they rank higher; if another host overtakes in viewers, they take Top 1.
+  const rankedStreams = useMemo(() => {
+    let list = liveStreams.filter((stream: LiveStream) => {
+      if (activeCategory === 'Following' && stream.host.id !== 'host_01') return false;
+      if (selectedTag !== 'All') {
+        if (selectedTag === 'PK Battle' && !stream.isPK) return false;
+        if (selectedTag !== 'PK Battle' && stream.category !== selectedTag) return false;
+      }
+      return true;
+    });
+
+    return list.sort((a, b) => {
+      const scoreA = (a.totalGiftCoins || 0) * 1.5 + (a.viewerCount || 0) * 50;
+      const scoreB = (b.totalGiftCoins || 0) * 1.5 + (b.viewerCount || 0) * 50;
+      return scoreB - scoreA;
+    });
+  }, [liveStreams, activeCategory, selectedTag]);
+
+  // Top 1 or 2 Top Broadcasters
+  const topStreams = useMemo(() => rankedStreams.slice(0, 2), [rankedStreams]);
+  // Remaining All Broadcasts
+  const allOtherStreams = useMemo(() => rankedStreams.slice(2), [rankedStreams]);
 
   const handleStartBroadcast = () => {
     setShowGoLiveModal(false);
@@ -75,7 +109,7 @@ export const HomeScreen: React.FC = () => {
   };
 
   return (
-    <div className="relative w-full h-full min-h-screen pb-32 bg-[#09070F] text-white overflow-y-auto">
+    <div className="relative w-full h-full pb-24 bg-[#09070F] text-white overflow-y-auto overscroll-contain">
       {/* Top Bar */}
       <TopBar />
 
@@ -157,49 +191,128 @@ export const HomeScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* Horizontal List of Live Users (Live Avatars with Animated Status Borders) */}
+      {/* Official Coin Seller Agencies Auto-Rotating & Swipeable Carousel */}
+      <CoinSellerAgenciesCarousel />
+
+      {/* Horizontal Strip of Friends & Stories (Replacing old generic Live Hosts) */}
       <div className="pt-2 pb-2 px-4 border-b border-[#A855F7]/10">
         <div className="flex items-center justify-between mb-2">
-          <span className="text-[11px] font-bold tracking-wider uppercase text-zinc-400">Live Hosts</span>
-          <span className="text-[10px] text-[#C084FC] font-semibold">{liveStreams.length} streaming now</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[11px] font-bold tracking-wider uppercase text-zinc-300">Friends</span>
+            <span className="px-1.5 py-0.2 rounded-full bg-[#EC4899]/20 text-[#EC4899] text-[9px] font-extrabold uppercase">
+              Stories
+            </span>
+          </div>
+          <span className="text-[10px] text-[#C084FC] font-semibold">
+            {friendStories.filter((f) => f.isLive).length} Live •{' '}
+            {friendStories.filter((f) => f.hasStory).length + (myStories.length > 0 ? 1 : 0)} Stories
+          </span>
         </div>
 
         <div className="flex items-center gap-3.5 overflow-x-auto pb-1 scrollbar-none">
-          {/* "Go Live" quick avatar shortcut */}
+          {/* First Item: Current User Profile ("You") */}
           <div
-            onClick={() => setShowGoLiveModal(true)}
+            onClick={() => {
+              if (myStories.length > 0) {
+                setIsViewingMyStory(true);
+              } else {
+                setShowCreateStoryModal(true);
+              }
+            }}
             className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
           >
-            <div className="relative w-15 h-15 rounded-full p-[2px] bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center">
-              <div className="w-full h-full rounded-full bg-[#1A1233] flex items-center justify-center group-hover:scale-105 transition-transform">
-                <Plus className="w-6 h-6 text-white" />
-              </div>
+            <div
+              className={`relative w-15 h-15 rounded-full p-[2px] transition-transform group-hover:scale-105 ${
+                myStories.length > 0
+                  ? 'bg-gradient-to-tr from-[#EC4899] via-[#A855F7] to-[#06B6D4] ring-2 ring-[#EC4899]/40 shadow-md shadow-[#EC4899]/25 animate-spin-slow'
+                  : 'bg-[#2A1F4D] border border-dashed border-[#A855F7]/40'
+              }`}
+            >
+              <img
+                src={currentUser.avatar}
+                alt={currentUser.displayName}
+                className="w-full h-full rounded-full object-cover"
+              />
+              {/* Plus Button to add story */}
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowCreateStoryModal(true);
+                }}
+                title="Add Story"
+                className="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-gradient-to-tr from-[#7928CA] to-[#EC4899] border-2 border-[#0D091F] flex items-center justify-center text-white shadow-md hover:scale-110 transition-transform cursor-pointer"
+              >
+                <Plus className="w-3 h-3 stroke-[3]" />
+              </button>
             </div>
-            <span className="text-[10px] font-bold text-white tracking-tight">Go Live</span>
+            <span className="text-[10px] font-bold text-white tracking-tight flex items-center gap-0.5">
+              <span>You</span>
+              {myStories.length > 0 && <span className="w-1.5 h-1.5 rounded-full bg-pink-500" />}
+            </span>
           </div>
 
-          {/* Live hosts list */}
-          {liveStreams.map((stream) => (
-            <div
-              key={stream.id}
-              onClick={() => openLiveStream(stream)}
-              className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
-            >
-              <div className="relative w-15 h-15 rounded-full p-[2px] bg-gradient-to-tr from-[#EC4899] via-[#A855F7] to-[#3B82F6] animate-spin-slow">
-                <img
-                  src={stream.host.avatar}
-                  alt={stream.host.displayName}
-                  className="w-full h-full rounded-full object-cover group-hover:scale-105 transition-transform"
-                />
-                <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 px-1.5 py-0.2 rounded-full bg-[#EC4899] text-[8px] font-black tracking-widest text-white uppercase shadow-sm">
-                  LIVE
+          {/* Friends List (Live & Stories) */}
+          {friendStories.map((friend) => {
+            const isLive = friend.isLive;
+            const hasStory = friend.hasStory && friend.stories.length > 0;
+            const isSeen = friend.isSeen;
+
+            return (
+              <div
+                key={friend.id}
+                onClick={() => {
+                  if (isLive && friend.liveStreamId) {
+                    const matchedStream = liveStreams.find((s) => s.id === friend.liveStreamId);
+                    if (matchedStream) {
+                      openLiveStream(matchedStream);
+                      return;
+                    }
+                  }
+                  if (hasStory) {
+                    markStorySeen(friend.id);
+                    setViewingStoryFriend(friend);
+                  } else if (isLive && liveStreams.length > 0) {
+                    openLiveStream(liveStreams[0]);
+                  }
+                }}
+                className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
+              >
+                <div
+                  className={`relative w-15 h-15 rounded-full p-[2px] transition-transform group-hover:scale-105 ${
+                    isLive
+                      ? 'bg-gradient-to-tr from-[#EF4444] via-[#EC4899] to-[#8B5CF6] animate-pulse ring-2 ring-red-500/50'
+                      : hasStory
+                      ? isSeen
+                        ? 'bg-zinc-700/60 ring-1 ring-zinc-600'
+                        : 'bg-gradient-to-tr from-[#EC4899] via-[#A855F7] to-[#06B6D4] ring-2 ring-[#A855F7]/40 animate-spin-slow'
+                      : 'bg-[#21183E]'
+                  }`}
+                >
+                  <img
+                    src={friend.user.avatar}
+                    alt={friend.user.displayName}
+                    className="w-full h-full rounded-full object-cover"
+                  />
+
+                  {/* Badge: Red LIVE badge or story circle indicator */}
+                  {isLive ? (
+                    <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 px-1.5 py-0.2 rounded-full bg-red-600 text-[8px] font-black tracking-widest text-white uppercase shadow-md animate-bounce">
+                      LIVE
+                    </span>
+                  ) : hasStory && !isSeen ? (
+                    <span className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-gradient-to-tr from-[#06B6D4] to-[#A855F7] border border-[#0D091F] flex items-center justify-center">
+                      <span className="w-1.5 h-1.5 rounded-full bg-white animate-ping" />
+                    </span>
+                  ) : null}
+                </div>
+
+                <span className="text-[10px] font-medium text-zinc-300 max-w-[62px] truncate text-center">
+                  {friend.user.displayName.split(' ')[0]}
                 </span>
               </div>
-              <span className="text-[10px] font-medium text-zinc-300 max-w-[62px] truncate text-center">
-                {stream.host.displayName.split(' ')[0]}
-              </span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
 
@@ -210,7 +323,13 @@ export const HomeScreen: React.FC = () => {
           return (
             <button
               key={tag}
-              onClick={() => setSelectedTag(tag)}
+              onClick={() => {
+                if (tag === 'PK Battle') {
+                  setShowPKModal(true);
+                } else {
+                  setSelectedTag(tag);
+                }
+              }}
               className={`px-3 py-1 rounded-full text-xs font-semibold whitespace-nowrap shrink-0 transition-all cursor-pointer ${
                 isSelected
                   ? 'bg-gradient-to-r from-[#7928CA] to-[#A855F7] text-white shadow-md shadow-[#7928CA]/30'
@@ -223,71 +342,220 @@ export const HomeScreen: React.FC = () => {
         })}
       </div>
 
-      {/* Live Room Cards Grid (Screen 05 requirement) */}
-      <div className="px-4 py-2">
-        <div className="grid grid-cols-2 gap-3 sm:gap-4">
-          {filteredStreams.map((stream) => (
-            <div
-              key={stream.id}
-              onClick={() => openLiveStream(stream)}
-              className="group relative rounded-2xl overflow-hidden bg-[#160F2E] border border-[#A855F7]/20 hover:border-[#A855F7]/50 shadow-lg shadow-black/40 cursor-pointer transform hover:-translate-y-0.5 transition-all"
-            >
-              {/* Thumbnail Container */}
-              <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#1E143B]">
-                <img
-                  src={stream.thumbnail}
-                  alt={stream.title}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                />
-
-                {/* Scrim Overlay */}
-                <div className="absolute inset-0 bg-gradient-to-t from-[#09070F] via-transparent to-black/40" />
-
-                {/* Top Badges: Category & Live Viewer Count */}
-                <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
-                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white text-[10px] font-bold">
-                    <span className="w-1.5 h-1.5 rounded-full bg-[#EC4899] animate-ping" />
-                    <span>LIVE</span>
-                  </div>
-
-                  <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-zinc-200 text-[10px] font-medium">
-                    <Users className="w-3 h-3 text-[#A855F7]" />
-                    <span>{stream.viewerCount.toLocaleString()}</span>
-                  </div>
-                </div>
-
-                {/* PK Battle Ribbon if 1v1 */}
-                {stream.isPK && (
-                  <div className="absolute top-9 left-2 px-2 py-0.5 rounded-md bg-gradient-to-r from-[#EC4899] to-[#7928CA] text-white text-[9px] font-extrabold uppercase tracking-wider shadow-md">
-                    PK 1v1 BATTLE
-                  </div>
-                )}
-
-                {/* Host Info & Room Title Overlay */}
-                <div className="absolute bottom-2 left-2 right-2 flex flex-col gap-1">
-                  <div className="flex items-center gap-1.5">
-                    <img
-                      src={stream.host.avatar}
-                      alt={stream.host.displayName}
-                      className="w-5 h-5 rounded-full object-cover border border-[#EC4899]"
-                    />
-                    <span className="text-[11px] font-semibold text-white truncate drop-shadow">
-                      {stream.host.displayName}
-                    </span>
-                    {stream.host.vipTier && stream.host.vipTier > 0 ? (
-                      <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[8px] font-black border border-amber-500/30 shrink-0">
-                        VIP {stream.host.vipTier}
-                      </span>
-                    ) : null}
-                  </div>
-
-                  <p className="text-[11px] font-bold text-zinc-100 line-clamp-2 leading-tight drop-shadow">
-                    {stream.title}
-                  </p>
-                </div>
-              </div>
+      {/* Top Broadcasters & All Broadcasts Grid */}
+      <div className="px-4 py-2 space-y-4">
+        {/* Top 1 & Top 2 Dynamic Ranking Cards */}
+        {topStreams.length > 0 && (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-black tracking-wider uppercase text-amber-300 flex items-center gap-1.5">
+                <Crown className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
+                <span>TOP BROADCASTS</span>
+              </span>
+              <span className="text-[10px] text-zinc-400 font-medium">
+                Live Gifting & Viewers
+              </span>
             </div>
-          ))}
+
+            <div className="grid grid-cols-2 gap-3 sm:gap-4">
+              {topStreams.map((stream, idx) => {
+                const isTop1 = idx === 0;
+
+                return (
+                  <div
+                    key={stream.id}
+                    onClick={() => {
+                      if (stream.isPK) {
+                        setShowPKModal(true);
+                      } else {
+                        openLiveStream(stream);
+                      }
+                    }}
+                    className={`group relative rounded-2xl overflow-hidden bg-[#160F2E] border cursor-pointer transform hover:-translate-y-0.5 transition-all shadow-xl ${
+                      isTop1
+                        ? 'border-2 border-amber-400/80 shadow-amber-500/20'
+                        : 'border-2 border-[#EC4899]/70 shadow-pink-500/20'
+                    }`}
+                  >
+                    {/* Thumbnail Container */}
+                    <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#1E143B]">
+                      <img
+                        src={stream.thumbnail}
+                        alt={stream.title}
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                      />
+
+                      {/* Scrim Overlay */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-[#09070F] via-transparent to-black/50" />
+
+                      {/* Top Rank Badge Trophy Banner */}
+                      <div className="absolute top-2 left-2 z-10">
+                        <div
+                          className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider flex items-center gap-1 shadow-md ${
+                            isTop1
+                              ? 'bg-gradient-to-r from-amber-400 to-yellow-500 text-amber-950'
+                              : 'bg-gradient-to-r from-[#EC4899] to-[#7928CA] text-white'
+                          }`}
+                        >
+                          <Trophy className="w-2.5 h-2.5" />
+                          <span>{isTop1 ? 'TOP 1' : 'TOP 2'}</span>
+                        </div>
+                      </div>
+
+                      {/* Top Right: Live Viewer Count */}
+                      <div className="absolute top-2 right-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-zinc-200 text-[10px] font-medium z-10">
+                        <Users className="w-3 h-3 text-[#A855F7]" />
+                        <span>{stream.viewerCount.toLocaleString()}</span>
+                      </div>
+
+                      {/* Gifting Coin Counter Badge */}
+                      <div className="absolute top-8 left-2 z-10">
+                        <div className="flex items-center gap-1 px-2 py-0.5 rounded-md bg-black/70 backdrop-blur-md border border-amber-400/50 text-amber-300 text-[9px] font-bold">
+                          <span>🎁</span>
+                          <span>{((stream.totalGiftCoins || 0) > 999 ? `${((stream.totalGiftCoins || 0) / 1000).toFixed(1)}k` : stream.totalGiftCoins || 0)} Coins</span>
+                        </div>
+                      </div>
+
+                      {/* PK Battle Ribbon if 1v1 */}
+                      {stream.isPK && (
+                        <div className="absolute top-15 left-2 px-2 py-0.5 rounded-md bg-gradient-to-r from-[#EC4899] to-[#7928CA] text-white text-[8px] font-extrabold uppercase tracking-wider shadow-md">
+                          PK 1v1
+                        </div>
+                      )}
+
+                      {/* Host Info & Room Title Overlay */}
+                      <div className="absolute bottom-2 left-2 right-2 flex flex-col gap-1">
+                        <div className="flex items-center gap-1.5">
+                          <img
+                            src={stream.host.avatar}
+                            alt={stream.host.displayName}
+                            className={`w-5 h-5 rounded-full object-cover border ${
+                              isTop1 ? 'border-amber-400' : 'border-[#EC4899]'
+                            }`}
+                          />
+                          <span className="text-[11px] font-semibold text-white truncate drop-shadow">
+                            {stream.host.displayName}
+                          </span>
+                          {stream.countryFlag && (
+                            <span className="text-[10px] shrink-0">{stream.countryFlag}</span>
+                          )}
+                        </div>
+
+                        <p className="text-[11px] font-bold text-zinc-100 line-clamp-1 leading-tight drop-shadow">
+                          {stream.title}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* All Other Live Broadcasts Section */}
+        <div>
+          <div className="flex items-center justify-between mb-2 pt-1">
+            <span className="text-[11px] font-bold tracking-wider uppercase text-zinc-400">
+              All Broadcasts
+            </span>
+            <span className="text-[10px] text-[#C084FC] font-semibold">
+              {allOtherStreams.length} streaming
+            </span>
+          </div>
+
+          {rankedStreams.length === 0 ? (
+            <div className="py-12 px-4 rounded-3xl bg-gradient-to-b from-[#170E2E]/80 to-[#0F0820]/90 border border-[#A855F7]/20 text-center flex flex-col items-center justify-center my-2">
+              <div className="w-16 h-16 rounded-2xl bg-gradient-to-tr from-[#7928CA]/30 to-[#EC4899]/30 border border-[#A855F7]/30 flex items-center justify-center text-[#EC4899] mb-3 shadow-lg">
+                <Radio className="w-8 h-8 animate-pulse text-[#EC4899]" />
+              </div>
+              <h3 className="text-sm font-bold text-white mb-1">No Live Streams Right Now</h3>
+              <p className="text-xs text-zinc-400 max-w-xs mb-4">
+                Be the first broadcaster to go live today and collect gifts from the Alpha Mate community!
+              </p>
+              <button
+                onClick={() => setShowGoLiveModal(true)}
+                className="px-5 py-2.5 rounded-full bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white text-xs font-bold shadow-lg shadow-purple-600/30 hover:scale-105 active:scale-95 transition-all cursor-pointer flex items-center gap-1.5"
+              >
+                <Radio className="w-3.5 h-3.5" />
+                <span>Start Solo Live Stream</span>
+              </button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-3 sm:gap-4">
+              {allOtherStreams.map((stream) => (
+                <div
+                  key={stream.id}
+                  onClick={() => {
+                    if (stream.isPK) {
+                      setShowPKModal(true);
+                    } else {
+                      openLiveStream(stream);
+                    }
+                  }}
+                  className="group relative rounded-2xl overflow-hidden bg-[#160F2E] border border-[#A855F7]/20 hover:border-[#A855F7]/50 shadow-lg shadow-black/40 cursor-pointer transform hover:-translate-y-0.5 transition-all"
+                >
+                  {/* Thumbnail Container */}
+                  <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#1E143B]">
+                    <img
+                      src={stream.thumbnail}
+                      alt={stream.title}
+                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                    />
+
+                    {/* Scrim Overlay */}
+                    <div className="absolute inset-0 bg-gradient-to-t from-[#09070F] via-transparent to-black/40" />
+
+                    {/* Top Badges: Category & Live Viewer Count */}
+                    <div className="absolute top-2 left-2 right-2 flex items-center justify-between">
+                      <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-white text-[10px] font-bold">
+                        <span className="w-1.5 h-1.5 rounded-full bg-[#EC4899] animate-ping" />
+                        <span>LIVE</span>
+                      </div>
+
+                      <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md border border-white/10 text-zinc-200 text-[10px] font-medium">
+                        <Users className="w-3 h-3 text-[#A855F7]" />
+                        <span>{stream.viewerCount.toLocaleString()}</span>
+                      </div>
+                    </div>
+
+                    {/* PK Battle Ribbon if 1v1 */}
+                    {stream.isPK && (
+                      <div className="absolute top-9 left-2 px-2 py-0.5 rounded-md bg-gradient-to-r from-[#EC4899] to-[#7928CA] text-white text-[9px] font-extrabold uppercase tracking-wider shadow-md">
+                        PK 1v1 BATTLE
+                      </div>
+                    )}
+
+                    {/* Host Info & Room Title Overlay */}
+                    <div className="absolute bottom-2 left-2 right-2 flex flex-col gap-1">
+                      <div className="flex items-center gap-1.5">
+                        <img
+                          src={stream.host.avatar}
+                          alt={stream.host.displayName}
+                          className="w-5 h-5 rounded-full object-cover border border-[#EC4899]"
+                        />
+                        <span className="text-[11px] font-semibold text-white truncate drop-shadow">
+                          {stream.host.displayName}
+                        </span>
+                        {stream.countryFlag && (
+                          <span className="text-[10px] shrink-0">{stream.countryFlag}</span>
+                        )}
+                        {stream.host.vipTier && stream.host.vipTier > 0 ? (
+                          <span className="px-1 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[8px] font-black border border-amber-500/30 shrink-0">
+                            VIP {stream.host.vipTier}
+                          </span>
+                        ) : null}
+                      </div>
+
+                      <p className="text-[11px] font-bold text-zinc-100 line-clamp-2 leading-tight drop-shadow">
+                        {stream.title}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -370,6 +638,45 @@ export const HomeScreen: React.FC = () => {
 
       {/* Daily Check-In Pop-up Modal */}
       <DailyCheckInModal />
+
+      {/* Story Viewer Modal (For Friends or Current User) */}
+      {(viewingStoryFriend || isViewingMyStory) && (
+        <StoryViewerModal
+          friend={viewingStoryFriend}
+          isMyStory={isViewingMyStory}
+          currentUser={currentUser}
+          myStories={myStories}
+          allFriends={friendStories}
+          onClose={() => {
+            setViewingStoryFriend(null);
+            setIsViewingMyStory(false);
+          }}
+          onOpenLiveStream={(streamId) => {
+            const stream = liveStreams.find((s) => s.id === streamId);
+            if (stream) openLiveStream(stream);
+          }}
+          onToggleLike={toggleLikeStory}
+          onReact={reactToStory}
+          onOpenCreateStory={() => setShowCreateStoryModal(true)}
+        />
+      )}
+
+      {/* Create / Add Story Modal */}
+      {showCreateStoryModal && (
+        <CreateStoryModal
+          currentUser={currentUser}
+          onClose={() => setShowCreateStoryModal(false)}
+          onSubmit={(newStory) => {
+            addMyStory(newStory);
+          }}
+        />
+      )}
+
+      {/* PK Battle Coming Soon Modal */}
+      <PKComingSoonModal
+        isOpen={showPKModal}
+        onClose={() => setShowPKModal(false)}
+      />
     </div>
   );
 };
