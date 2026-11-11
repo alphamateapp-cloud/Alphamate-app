@@ -17,7 +17,10 @@ import {
   Check,
   ChevronRight,
   Sparkles,
+  Smartphone,
 } from 'lucide-react';
+import { AndroidSetupModal } from '../components/modals/AndroidSetupModal';
+import { PushNotificationSettingsModal } from '../components/modals/PushNotificationSettingsModal';
 
 export const SettingsScreen: React.FC = () => {
   const {
@@ -33,13 +36,21 @@ export const SettingsScreen: React.FC = () => {
   const [streamQuality, setStreamQuality] = useState<'1080p' | '720p'>('1080p');
   const [selectedLanguage, setSelectedLanguage] = useState('English');
   const [showLogoModal, setShowLogoModal] = useState(false);
+  const [showAndroidModal, setShowAndroidModal] = useState(false);
+  const [showPushModal, setShowPushModal] = useState(false);
   const [logoInputUrl, setLogoInputUrl] = useState('');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 3000);
+  };
 
   const handleApplyLogoUrl = () => {
     if (logoInputUrl.trim()) {
       setCustomLogoUrl(logoInputUrl.trim());
       setShowLogoModal(false);
-      alert('Custom original logo applied across the entire app!');
+      showToast('Custom original logo applied across the entire app!');
     }
   };
 
@@ -83,6 +94,36 @@ export const SettingsScreen: React.FC = () => {
           </button>
         </div>
 
+        {/* Android Environment Hub (APK & AAB Setup) */}
+        <div>
+          <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-400 block px-1 mb-2 flex items-center gap-1.5">
+            <Smartphone className="w-3.5 h-3.5" />
+            <span>Android Environment (APK & AAB)</span>
+          </span>
+          <div className="rounded-2xl bg-[#140D26] border border-emerald-500/30 divide-y divide-white/5 overflow-hidden">
+            <div
+              onClick={() => setShowAndroidModal(true)}
+              className="p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-300 flex items-center justify-center shrink-0 border border-emerald-500/30">
+                  <Smartphone className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-white">Android APK & AAB Hub</span>
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-bold uppercase">
+                      Ready
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-zinc-400">Capacitor native setup, build commands & signing</p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
+            </div>
+          </div>
+        </div>
+
         {/* Section 1: Account & Security */}
         <div>
           <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 block px-1 mb-2">
@@ -104,7 +145,7 @@ export const SettingsScreen: React.FC = () => {
             </div>
 
             <div
-              onClick={() => alert('Account security status: Verified 2FA enabled.')}
+              onClick={() => showToast('Account security status: Verified 2FA enabled.')}
               className="p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer"
             >
               <div className="flex items-center gap-3">
@@ -122,23 +163,25 @@ export const SettingsScreen: React.FC = () => {
             Preferences & Stream
           </span>
           <div className="rounded-2xl bg-[#140D26] border border-white/5 divide-y divide-white/5 overflow-hidden">
-            <div className="p-3.5 flex items-center justify-between">
+            <div
+              onClick={() => setShowPushModal(true)}
+              className="p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer"
+            >
               <div className="flex items-center gap-3">
-                <Bell className="w-4 h-4 text-[#EC4899]" />
-                <span className="text-xs font-medium text-white">Push Notifications</span>
+                <div className="w-8 h-8 rounded-xl bg-[#EC4899]/20 text-[#EC4899] flex items-center justify-center shrink-0 border border-[#EC4899]/30">
+                  <Bell className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs font-bold text-white">Push Notifications Hub</span>
+                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/20 text-[#C084FC] font-bold uppercase">
+                      FCM Live
+                    </span>
+                  </div>
+                  <p className="text-[10px] text-zinc-400">Real-time alerts, PK challenges & device token</p>
+                </div>
               </div>
-              <button
-                onClick={() => setNotificationsEnabled(!notificationsEnabled)}
-                className={`w-10 h-6 rounded-full transition-colors p-0.5 cursor-pointer ${
-                  notificationsEnabled ? 'bg-[#7928CA]' : 'bg-zinc-700'
-                }`}
-              >
-                <div
-                  className={`w-5 h-5 rounded-full bg-white transition-transform ${
-                    notificationsEnabled ? 'translate-x-4' : 'translate-x-0'
-                  }`}
-                />
-              </button>
+              <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
             </div>
 
             <div className="p-3.5 flex items-center justify-between">
@@ -182,7 +225,7 @@ export const SettingsScreen: React.FC = () => {
             </div>
 
             <div
-              onClick={() => alert('No users currently blocked.')}
+              onClick={() => showToast('No users currently blocked.')}
               className="p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer"
             >
               <div className="flex items-center gap-3">
@@ -201,7 +244,7 @@ export const SettingsScreen: React.FC = () => {
           </span>
           <div className="rounded-2xl bg-[#140D26] border border-white/5 divide-y divide-white/5 overflow-hidden">
             <div
-              onClick={() => alert('Alpha Mate v2.4.0 (Build 8849). Official International Release.')}
+              onClick={() => showToast('Alpha Mate v2.4.0 (Build 8849). Official International Release.')}
               className="p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer"
             >
               <div className="flex items-center gap-3">
@@ -212,7 +255,7 @@ export const SettingsScreen: React.FC = () => {
             </div>
 
             <div
-              onClick={() => alert('Alpha Mate 24/7 Creator Support: support@alphamate.app')}
+              onClick={() => showToast('Alpha Mate 24/7 Creator Support: support@alphamate.app')}
               className="p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer"
             >
               <div className="flex items-center gap-3">
@@ -269,6 +312,28 @@ export const SettingsScreen: React.FC = () => {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Android Setup Modal */}
+      <AndroidSetupModal
+        isOpen={showAndroidModal}
+        onClose={() => setShowAndroidModal(false)}
+      />
+
+      {/* Push Notification Settings Modal */}
+      <PushNotificationSettingsModal
+        isOpen={showPushModal}
+        onClose={() => setShowPushModal(false)}
+      />
+
+      {/* Non-blocking in-app toast notification */}
+      {toastMessage && (
+        <div className="fixed bottom-16 inset-x-4 z-50 flex justify-center pointer-events-none animate-in fade-in slide-in-from-bottom-2 duration-200">
+          <div className="px-4 py-2.5 rounded-2xl bg-[#1E1136]/95 border border-[#A855F7]/40 text-xs font-semibold text-white shadow-2xl backdrop-blur-md flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400" />
+            <span>{toastMessage}</span>
           </div>
         </div>
       )}

@@ -152,6 +152,7 @@ interface AppContextType {
   // Wallet & Economy
   coins: number;
   diamonds: number;
+  heldDiamonds: number;
   transactions: WalletTransaction[];
   addCoins: (amount: number, reason: string) => void;
   addDiamonds: (amount: number, reason: string) => void;
@@ -165,6 +166,8 @@ interface AppContextType {
     diamondsAmount: number
   ) => { success: boolean; message: string };
   purchaseStoreItem: (cost: number, currency: 'coins' | 'diamonds', itemTitle: string) => boolean;
+  equipFrame: (frameId: string) => void;
+  equipHonorTitle: (title: string) => void;
 
   // Daily Check-In & Rewards
   dailyCheckInState: {
@@ -533,6 +536,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Economy
   const [coins, setCoins] = useState<number>(CURRENT_USER.coins);
   const [diamonds, setDiamonds] = useState<number>(CURRENT_USER.diamonds);
+  const [heldDiamonds, setHeldDiamonds] = useState<number>(CURRENT_USER.heldDiamonds || 0);
   const [transactions, setTransactions] = useState<WalletTransaction[]>(MOCK_TRANSACTIONS);
 
   // Daily Check-In & Rewards System
@@ -2495,9 +2499,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    setDiamonds((prev) => prev - diamondsNeeded);
+    // Exchange rate: 1 USD = ~280 PKR
+    const pkrAmount = Math.round(amountUSD * 280);
+
+    // Hold the diamonds immediately: deduct from available diamonds, add to heldDiamonds
+    setDiamonds((prev) => Math.max(0, prev - diamondsNeeded));
+    setHeldDiamonds((prev) => prev + diamondsNeeded);
+
     setCurrentUser((prev) => {
-      const updated = { ...prev, diamonds: Math.max(0, (prev.diamonds || 0) - diamondsNeeded) };
+      const updated = {
+        ...prev,
+        diamonds: Math.max(0, (prev.diamonds || 0) - diamondsNeeded),
+        heldDiamonds: (prev.heldDiamonds || 0) + diamondsNeeded,
+      };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
@@ -2509,17 +2523,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       type: 'withdrawal',
       amount: amountUSD,
       currency: 'USD',
-      title: `Withdrawal via ${method} ($${amountUSD.toFixed(2)} - ${accountDetails.title})`,
+      title: `Withdrawal via ${method} ($${amountUSD.toFixed(2)} / PKR ${pkrAmount.toLocaleString()})`,
       date: 'Just now',
       status: 'pending',
+      heldDiamonds: diamondsNeeded,
+      pkrAmount: pkrAmount,
+      accountDetails: {
+        method,
+        title: accountDetails.title,
+        number: accountDetails.number,
+        bankName: accountDetails.bankName,
+      },
     };
     setTransactions((prev) => [newTx, ...prev]);
 
     const withdrawNotif: NotificationItem = {
       id: `notif_withdraw_${Date.now()}`,
       type: 'system',
-      title: '💸 Withdrawal Request Submitted',
-      message: `Your withdrawal of $${amountUSD.toFixed(2)} (${diamondsNeeded.toLocaleString()} Diamonds) via ${method} has been received. Processing time: 12-24 hours.`,
+      title: '💸 Withdrawal Request Submitted (Pending)',
+      message: `Your withdrawal of $${amountUSD.toFixed(2)} (PKR ${pkrAmount.toLocaleString()}) via ${method} has been submitted to admin. ${diamondsNeeded.toLocaleString()} Diamonds are now securely held until approval. Processing time: 12-24 hours.`,
       timestamp: 'Just now',
       isRead: false,
     };
@@ -2527,8 +2549,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return {
       success: true,
-      message: `Withdrawal request for $${amountUSD.toFixed(2)} (${diamondsNeeded.toLocaleString()} Diamonds) submitted successfully!`,
+      message: `Withdrawal request for $${amountUSD.toFixed(2)} (PKR ${pkrAmount.toLocaleString()}) submitted! ${diamondsNeeded.toLocaleString()} Diamonds are held pending admin review.`,
     };
+  };
+
+  const equipFrame = (frameId: string) => {
+    setCurrentUser((prev) => {
+      const updated = { ...prev, activeFrame: frameId };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+  };
+
+  const equipHonorTitle = (title: string) => {
+    setCurrentUser((prev) => {
+      const updated = { ...prev, activeHonorTitle: title };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
   };
 
   const exchangeDiamondsToCoins = (
@@ -2664,6 +2706,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         markStorySeen,
         coins,
         diamonds,
+        heldDiamonds,
         transactions,
         addCoins,
         addDiamonds,
@@ -2671,6 +2714,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         withdrawDiamonds,
         exchangeDiamondsToCoins,
         purchaseStoreItem,
+        equipFrame,
+        equipHonorTitle,
         dailyCheckInState,
         claimDailyReward,
         showDailyCheckInModal,

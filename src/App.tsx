@@ -1,5 +1,8 @@
-import React from 'react';
+import React, { useEffect } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { Capacitor } from '@capacitor/core';
+import { App as CapApp } from '@capacitor/app';
+import { StatusBar, Style } from '@capacitor/status-bar';
 import { DeviceFrame } from './components/layout/DeviceFrame';
 import { SplashScreen } from './screens/SplashScreen';
 import { WelcomeScreen } from './screens/WelcomeScreen';
@@ -22,9 +25,69 @@ import { StoreScreen } from './screens/StoreScreen';
 import { AdminDashboard } from './screens/AdminDashboard';
 import { AgencyManagementScreen } from './screens/AgencyManagementScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
+import { pushService } from './services/pushNotificationService';
+import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
 
 const AppContent: React.FC = () => {
-  const { currentScreen, deviceMode, activePartyRoom, activeConversation } = useApp();
+  const {
+    currentScreen,
+    setCurrentScreen,
+    setActiveTab,
+    deviceMode,
+    activePartyRoom,
+    activeConversation,
+    navigateBack,
+    currentUser,
+  } = useApp();
+
+  // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
+  useEffect(() => {
+    pushService
+      .initialize({
+        onToken: (token) => {
+          if (currentUser?.id) {
+            pushService.syncTokenToUserDoc(currentUser.id).catch(() => {});
+          }
+        },
+        onActionPerformed: (action) => {
+          const screen = action.notification?.data?.screen;
+          const tab = action.notification?.data?.tab;
+          if (screen) setCurrentScreen(screen as any);
+          else if (tab) setActiveTab(tab as any);
+        },
+      })
+      .catch(() => {});
+  }, [currentUser?.id, setCurrentScreen, setActiveTab]);
+
+  // Android Native Hardware Back Button & Status Bar Integration (Active on Native Android/iOS)
+  useEffect(() => {
+    // Only invoke native bridge plugins if running inside Capacitor native shell
+    if (!Capacitor.isNativePlatform()) return;
+
+    try {
+      StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
+      StatusBar.setBackgroundColor({ color: '#09070F' }).catch(() => {});
+    } catch {}
+
+    let listenerHandle: { remove: () => Promise<void> } | null = null;
+    CapApp.addListener('backButton', ({ canGoBack }) => {
+      if (currentScreen !== 'home' && currentScreen !== 'welcome' && currentScreen !== 'splash') {
+        navigateBack();
+      } else if (!canGoBack) {
+        CapApp.minimizeApp().catch(() => {});
+      }
+    })
+      .then((handle) => {
+        listenerHandle = handle;
+      })
+      .catch(() => {});
+
+    return () => {
+      if (listenerHandle) {
+        listenerHandle.remove().catch(() => {});
+      }
+    };
+  }, [currentScreen, navigateBack]);
 
   // If Admin Dashboard mode is chosen
   if (deviceMode === 'admin') {
@@ -102,6 +165,7 @@ export default function App() {
   return (
     <AppProvider>
       <DeviceFrame>
+        <PushNotificationBanner />
         <AppContent />
       </DeviceFrame>
     </AppProvider>

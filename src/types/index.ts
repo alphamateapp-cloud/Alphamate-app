@@ -64,6 +64,9 @@ export interface User {
   agencyName?: string;
   agencyTag?: string;
   isAgencyHost?: boolean;
+  heldDiamonds?: number;
+  activeFrame?: string;
+  activeHonorTitle?: string;
 }
 
 export interface LiveStream {
@@ -205,6 +208,14 @@ export interface WalletTransaction {
   title: string;
   date: string;
   status: 'completed' | 'pending';
+  heldDiamonds?: number;
+  pkrAmount?: number;
+  accountDetails?: {
+    method: string;
+    title: string;
+    number: string;
+    bankName?: string;
+  };
 }
 
 export interface NotificationItem {

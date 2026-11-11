@@ -21,12 +21,15 @@ import {
   Clock,
   DollarSign,
   Smartphone,
+  ExternalLink,
+  Check,
 } from 'lucide-react';
 
 export const WalletScreen: React.FC = () => {
   const {
     coins,
     diamonds,
+    heldDiamonds,
     transactions,
     rechargeCoins,
     withdrawDiamonds,
@@ -34,13 +37,20 @@ export const WalletScreen: React.FC = () => {
     navigateBack,
     setCurrentScreen,
     agencyProfile,
+    currentUser,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'recharge' | 'withdraw' | 'exchange' | 'history'>('recharge');
   const [historyFilter, setHistoryFilter] = useState<'all' | 'recharge' | 'withdrawal' | 'reward' | 'gift_received'>('all');
 
   // Recharge state
-  const [selectedPackage, setSelectedPackage] = useState<{ coins: number; price: number; bonus: number; popular?: boolean; bestValue?: boolean }>({
+  const [selectedPackage, setSelectedPackage] = useState<{
+    coins: number;
+    price: number;
+    bonus: number;
+    popular?: boolean;
+    bestValue?: boolean;
+  }>({
     coins: 1000,
     price: 9.99,
     bonus: 100,
@@ -49,17 +59,20 @@ export const WalletScreen: React.FC = () => {
   const [paymentMethod, setPaymentMethod] = useState<'ApplePay' | 'GooglePay' | 'JazzCash' | 'EasyPaisa' | 'Card'>('JazzCash');
   const [isProcessingRecharge, setIsProcessingRecharge] = useState(false);
 
-  // Withdrawal state
+  // Withdrawal state (Limits in USD for global clarity, with PKR live calculations)
+  const USD_TO_PKR_RATE = 280;
   const [withdrawAmountUSD, setWithdrawAmountUSD] = useState<number>(10);
   const [withdrawMethod, setWithdrawMethod] = useState<'JazzCash' | 'EasyPaisa' | 'Bank' | 'USDT'>('JazzCash');
   const [accountTitle, setAccountTitle] = useState('');
   const [accountNumber, setAccountNumber] = useState('');
-  const [bankName, setBankName] = useState('Meezan Bank');
+  const [bankName, setBankName] = useState('Meezan Bank Limited');
+  const [customBankName, setCustomBankName] = useState('');
+  const [branchCity, setBranchCity] = useState('');
   const [isProcessingWithdraw, setIsProcessingWithdraw] = useState(false);
   const [withdrawError, setWithdrawError] = useState<string | null>(null);
   const [withdrawSuccess, setWithdrawSuccess] = useState<string | null>(null);
 
-  // Exchange Diamonds to Coins state
+  // Exchange Diamonds to Coins state (1 Diamond = 1 Coin)
   const [exchangeAmount, setExchangeAmount] = useState<number>(10000);
   const [isProcessingExchange, setIsProcessingExchange] = useState(false);
   const [exchangeFeedback, setExchangeFeedback] = useState<{ message: string; isError: boolean } | null>(null);
@@ -80,11 +93,41 @@ export const WalletScreen: React.FC = () => {
     { coins: 30000, price: 299.99, bonus: 7500 },
   ];
 
+  const PAKISTANI_BANKS = [
+    'Meezan Bank Limited',
+    'Habib Bank Limited (HBL)',
+    'United Bank Limited (UBL)',
+    'MCB Bank Limited',
+    'Allied Bank Limited (ABL)',
+    'Bank Alfalah',
+    'Standard Chartered Pakistan',
+    'Askari Bank',
+    'Faysal Bank',
+    'The Bank of Punjab (BOP)',
+    'BankIslami Pakistan',
+    'Dubai Islamic Bank (DIB)',
+    'JS Bank',
+    'Soneri Bank',
+    'Al Baraka Bank',
+    'SadaPay',
+    'NayaPay',
+    'Other / Custom Bank',
+  ];
+
   // Rate: 10,000 Diamonds = $1.00 USD
   const diamondsUSDValue = (diamonds / 10000).toFixed(2);
+  const heldUSDValue = ((heldDiamonds || 0) / 10000).toFixed(2);
+  const totalDiamonds = diamonds + (heldDiamonds || 0);
+
   const minWithdrawalDiamonds = 100000; // $10 = 100,000 Diamonds
   const isEligibleForWithdraw = diamonds >= minWithdrawalDiamonds;
   const diamondsNeededForChosenUSD = Math.round(withdrawAmountUSD * 10000);
+  const estimatedPKRPayout = Math.round(withdrawAmountUSD * USD_TO_PKR_RATE);
+
+  // Active Pending Withdrawals
+  const pendingWithdrawals = transactions.filter(
+    (tx) => tx.type === 'withdrawal' && tx.status === 'pending'
+  );
 
   // Recharge Handler
   const handleCheckout = async () => {
@@ -115,7 +158,7 @@ export const WalletScreen: React.FC = () => {
 
     if (diamonds < diamondsNeededForChosenUSD) {
       setWithdrawError(
-        `Insufficient diamonds! You need ${diamondsNeededForChosenUSD.toLocaleString()} Diamonds for a $${withdrawAmountUSD.toFixed(2)} withdrawal.`
+        `Insufficient diamonds! You need ${diamondsNeededForChosenUSD.toLocaleString()} Diamonds for a $${withdrawAmountUSD.toFixed(2)} USD withdrawal.`
       );
       return;
     }
@@ -130,12 +173,19 @@ export const WalletScreen: React.FC = () => {
       return;
     }
 
+    const finalBank =
+      withdrawMethod === 'Bank'
+        ? bankName === 'Other / Custom Bank'
+          ? customBankName.trim() || 'Custom Bank'
+          : bankName
+        : undefined;
+
     setIsProcessingWithdraw(true);
     setTimeout(() => {
       const res = withdrawDiamonds(withdrawAmountUSD, withdrawMethod, {
         title: accountTitle.trim(),
         number: accountNumber.trim(),
-        bankName: withdrawMethod === 'Bank' ? bankName : undefined,
+        bankName: finalBank ? `${finalBank}${branchCity ? ` (${branchCity.trim()})` : ''}` : undefined,
       });
 
       setIsProcessingWithdraw(false);
@@ -143,14 +193,18 @@ export const WalletScreen: React.FC = () => {
         setWithdrawSuccess(res.message);
         setAccountTitle('');
         setAccountNumber('');
-        showToast(`Withdrawal of $${withdrawAmountUSD.toFixed(2)} submitted successfully!`);
+        setCustomBankName('');
+        setBranchCity('');
+        showToast(
+          `Withdrawal of $${withdrawAmountUSD.toFixed(2)} (PKR ${estimatedPKRPayout.toLocaleString()}) submitted! Status: Pending.`
+        );
       } else {
         setWithdrawError(res.message);
       }
     }, 600);
   };
 
-  // Exchange Diamonds to Coins Handler
+  // Exchange Diamonds to Coins Handler (One-Way Swap)
   const handleExecuteExchange = () => {
     setExchangeFeedback(null);
     if (exchangeAmount <= 0) {
@@ -168,7 +222,7 @@ export const WalletScreen: React.FC = () => {
       setIsProcessingExchange(false);
       if (res.success) {
         setExchangeFeedback({ message: res.message, isError: false });
-        showToast(`Exchanged ${exchangeAmount.toLocaleString()} Diamonds to Coins!`);
+        showToast(`Successfully converted ${exchangeAmount.toLocaleString()} Diamonds to Coins!`);
       } else {
         setExchangeFeedback({ message: res.message, isError: true });
       }
@@ -218,7 +272,7 @@ export const WalletScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* Dual Balance Hero Section (Coins & Diamonds) */}
+      {/* Dual Balance Hero Section (Coins & Diamonds with Held Balance) */}
       <div className="p-4 space-y-3">
         <div className="relative rounded-3xl p-5 overflow-hidden bg-gradient-to-b from-[#230D42] via-[#16082C] to-[#0D041A] border border-[#A855F7]/40 shadow-2xl shadow-[#7928CA]/20">
           <div className="absolute -top-12 -right-12 w-36 h-36 rounded-full bg-[#EC4899]/20 blur-3xl pointer-events-none" />
@@ -230,7 +284,7 @@ export const WalletScreen: React.FC = () => {
               <Wallet className="w-3.5 h-3.5 text-amber-400" />
               <span>Available Treasury Balances</span>
             </span>
-            <span className="px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 text-[9px] font-black border border-amber-400/30">
+            <span className="px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 text-[9px] font-black border border-amber-400/30 font-mono">
               10,000 💎 = $1.00 USD
             </span>
           </div>
@@ -291,16 +345,34 @@ export const WalletScreen: React.FC = () => {
                 <div className="flex items-center gap-1 text-[10px] font-mono text-emerald-400 font-bold mt-0.5">
                   <span>≈ ${diamondsUSDValue} USD</span>
                 </div>
+
+                {/* Held Diamonds Tag if any */}
+                {(heldDiamonds || 0) > 0 && (
+                  <div className="mt-1 flex items-center gap-1 text-[9px] font-mono text-amber-300 font-bold bg-amber-400/10 px-1.5 py-0.5 rounded border border-amber-400/20">
+                    <Lock className="w-2.5 h-2.5" />
+                    <span>{heldDiamonds.toLocaleString()} 💎 Held (${heldUSDValue})</span>
+                  </div>
+                )}
               </div>
 
-              <button
-                type="button"
-                onClick={() => setActiveTab('withdraw')}
-                className="mt-3 w-full py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-black text-[10.5px] uppercase tracking-wider shadow cursor-pointer hover:brightness-110 active:scale-95 transition-all text-center flex items-center justify-center gap-1"
-              >
-                <ArrowDownLeft className="w-3 h-3" />
-                <span>Withdraw 💸</span>
-              </button>
+              <div className="mt-3 flex gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('withdraw')}
+                  className="flex-1 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-black text-[10px] uppercase tracking-wider shadow cursor-pointer hover:brightness-110 active:scale-95 transition-all text-center flex items-center justify-center gap-1"
+                >
+                  <ArrowDownLeft className="w-3 h-3" />
+                  <span>Withdraw 💸</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('exchange')}
+                  className="px-2 py-1.5 rounded-xl bg-purple-600/40 hover:bg-purple-600/60 border border-purple-400/30 text-purple-200 font-bold text-[10px] cursor-pointer active:scale-95 transition-all"
+                  title="Exchange Diamonds to Coins"
+                >
+                  <Repeat className="w-3 h-3" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -349,12 +421,12 @@ export const WalletScreen: React.FC = () => {
                 onClick={() => setActiveTab(tab.id as any)}
                 className={`flex-1 py-2 rounded-xl transition-all flex items-center justify-center gap-1 cursor-pointer ${
                   isActive
-                    ? 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow font-black'
+                    ? 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow-md font-black'
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                <TabIcon className="w-3.5 h-3.5 shrink-0" />
-                <span className="truncate">{tab.label}</span>
+                <TabIcon className="w-3.5 h-3.5" />
+                <span>{tab.label}</span>
               </button>
             );
           })}
@@ -362,77 +434,83 @@ export const WalletScreen: React.FC = () => {
       </div>
 
       {/* =========================================================================
-          TAB 1: COINS RECHARGE PACKAGES
+          TAB 1: RECHARGE COINS (BUY)
           ========================================================================= */}
       {activeTab === 'recharge' && (
         <div className="p-4 space-y-4 animate-fade-in">
-          <div className="flex items-center justify-between">
-            <span className="text-[11px] font-black uppercase tracking-wider text-zinc-300">
-              Select Coin Package
-            </span>
-            <span className="text-[10px] text-amber-300 font-mono">
-              Auto added to Coins wallet
-            </span>
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-xs font-black uppercase tracking-wider text-zinc-300">
+                Select Coin Top-Up Package
+              </h3>
+              <span className="text-[10px] text-[#C084FC]">Instant Automated Delivery</span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+              {coinPackages.map((pkg, idx) => {
+                const isSelected = selectedPackage.coins === pkg.coins;
+                return (
+                  <button
+                    key={idx}
+                    type="button"
+                    onClick={() => setSelectedPackage(pkg)}
+                    className={`relative p-3.5 rounded-2xl border text-left transition-all cursor-pointer flex flex-col justify-between ${
+                      isSelected
+                        ? 'bg-[#2A114D] border-amber-400 shadow-lg shadow-amber-500/20 scale-[1.02]'
+                        : 'bg-white/5 border-white/10 hover:border-white/20'
+                    }`}
+                  >
+                    {pkg.popular && (
+                      <span className="absolute -top-2 right-2 px-2 py-0.2 rounded-full bg-gradient-to-r from-amber-400 to-rose-500 text-black text-[9px] font-black uppercase shadow">
+                        Popular
+                      </span>
+                    )}
+                    {pkg.bestValue && (
+                      <span className="absolute -top-2 right-2 px-2 py-0.2 rounded-full bg-gradient-to-r from-emerald-400 to-teal-500 text-black text-[9px] font-black uppercase shadow">
+                        Best Value
+                      </span>
+                    )}
+
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="w-7 h-7 rounded-full bg-amber-400/20 text-amber-300 flex items-center justify-center shrink-0">
+                        <Coins className="w-4 h-4 fill-current" />
+                      </div>
+                      <div>
+                        <div className="text-base font-black font-mono text-white">
+                          {pkg.coins.toLocaleString()}
+                        </div>
+                        {pkg.bonus > 0 && (
+                          <div className="text-[9.5px] font-bold text-emerald-400 font-mono">
+                            +{pkg.bonus} Bonus
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-white/10 flex items-center justify-between">
+                      <span className="text-xs font-bold text-zinc-300 font-mono">
+                        ${pkg.price.toFixed(2)}
+                      </span>
+                      <span className="text-[9.5px] font-bold text-[#C084FC]">USD</span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            {coinPackages.map((pkg) => {
-              const isSelected = selectedPackage.coins === pkg.coins;
-              return (
-                <div
-                  key={pkg.coins}
-                  onClick={() => setSelectedPackage(pkg)}
-                  className={`relative p-3.5 rounded-2xl cursor-pointer transition-all ${
-                    isSelected
-                      ? 'bg-gradient-to-b from-[#7928CA]/35 to-[#EC4899]/25 border-2 border-amber-400 shadow-xl shadow-amber-500/20 scale-[1.02]'
-                      : 'bg-[#150D28] border border-white/5 hover:border-white/20'
-                  }`}
-                >
-                  {pkg.popular && (
-                    <div className="absolute -top-2 right-2 px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-amber-600 text-[8px] font-black text-black uppercase tracking-wider shadow">
-                      Popular
-                    </div>
-                  )}
-                  {pkg.bestValue && (
-                    <div className="absolute -top-2 right-2 px-2 py-0.5 rounded-full bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-[8px] font-black text-white uppercase tracking-wider shadow">
-                      Best Value
-                    </div>
-                  )}
-
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <div className="w-5 h-5 rounded-full bg-amber-400 flex items-center justify-center text-black">
-                      <Coins className="w-3 h-3 fill-current" />
-                    </div>
-                    <span className="text-base font-black text-white font-mono">{pkg.coins.toLocaleString()}</span>
-                  </div>
-
-                  {pkg.bonus > 0 ? (
-                    <span className="text-[10px] text-emerald-400 font-bold block mb-1">
-                      +{pkg.bonus.toLocaleString()} Extra Bonus
-                    </span>
-                  ) : (
-                    <span className="text-[10px] text-zinc-500 block mb-1">Standard pack</span>
-                  )}
-
-                  <div className="mt-2 text-xs font-black text-amber-300 font-mono">
-                    ${pkg.price.toFixed(2)} USD
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          {/* Payment Method Selector */}
-          <div className="pt-1 space-y-2">
-            <span className="text-[11px] font-black uppercase tracking-wider text-zinc-300 block">
+          {/* Payment Gateways */}
+          <div>
+            <h3 className="text-xs font-black uppercase tracking-wider text-zinc-300 mb-2">
               Payment Gateway
-            </span>
-            <div className="grid grid-cols-4 gap-2">
+            </h3>
+            <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
               {[
                 { id: 'JazzCash', label: 'JazzCash' },
                 { id: 'EasyPaisa', label: 'EasyPaisa' },
+                { id: 'ApplePay', label: 'Apple Pay' },
                 { id: 'GooglePay', label: 'Google Pay' },
-                { id: 'Card', label: 'Credit Card' },
+                { id: 'Card', label: 'Debit / Card' },
               ].map((m) => {
                 const isSelected = paymentMethod === m.id;
                 return (
@@ -440,10 +518,10 @@ export const WalletScreen: React.FC = () => {
                     key={m.id}
                     type="button"
                     onClick={() => setPaymentMethod(m.id as any)}
-                    className={`py-2 rounded-xl text-[10.5px] font-bold border transition-all cursor-pointer ${
+                    className={`py-2 px-2 rounded-xl text-center text-xs font-bold border transition-all cursor-pointer ${
                       isSelected
-                        ? 'bg-[#7928CA] border-purple-400 text-white shadow-md'
-                        : 'bg-[#150D28] border-white/5 text-zinc-400 hover:text-white'
+                        ? 'bg-amber-400 text-black border-amber-300 shadow font-black'
+                        : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'
                     }`}
                   >
                     {m.label}
@@ -453,49 +531,48 @@ export const WalletScreen: React.FC = () => {
             </div>
           </div>
 
-          {/* Checkout Button */}
+          {/* Checkout Action Button */}
           <button
             type="button"
-            onClick={handleCheckout}
             disabled={isProcessingRecharge}
-            className="w-full h-12 rounded-2xl bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 font-black text-black text-xs uppercase tracking-wider shadow-lg shadow-amber-500/25 hover:brightness-110 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
+            onClick={handleCheckout}
+            className="w-full h-12 rounded-2xl bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-black font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-amber-500/25 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
           >
-            {isProcessingRecharge ? (
-              <span>Connecting {paymentMethod}...</span>
-            ) : (
-              <span>
-                Pay ${selectedPackage.price.toFixed(2)} for {(selectedPackage.coins + selectedPackage.bonus).toLocaleString()} Coins
-              </span>
-            )}
+            <Coins className="w-4 h-4 fill-current" />
+            <span>
+              {isProcessingRecharge
+                ? 'Processing Order...'
+                : `Pay $${selectedPackage.price.toFixed(2)} for ${(
+                    selectedPackage.coins + selectedPackage.bonus
+                  ).toLocaleString()} Coins`}
+            </span>
           </button>
         </div>
       )}
 
       {/* =========================================================================
-          TAB 2: DIAMONDS WITHDRAWAL & CASHOUT (EARNINGS)
+          TAB 2: CASH OUT / WITHDRAW DIAMONDS (USD Limit with Live PKR Calculation)
           ========================================================================= */}
       {activeTab === 'withdraw' && (
         <form onSubmit={handleSubmitWithdrawal} className="p-4 space-y-4 animate-fade-in">
-          {/* Earnings Overview Card */}
-          <div className="p-4 rounded-3xl bg-[#150A2B] border border-[#EC4899]/30 space-y-2.5">
+          {/* Status & Eligibility Banner */}
+          <div className="p-4 rounded-3xl bg-gradient-to-r from-[#170B28] via-[#100720] to-[#0A0314] border border-[#EC4899]/30 space-y-2">
             <div className="flex items-center justify-between">
-              <div>
-                <span className="text-[10.5px] font-black uppercase tracking-wider text-pink-300 block">
-                  Total Creator Earnings
-                </span>
-                <div className="text-xl sm:text-2xl font-black font-mono text-white mt-0.5">
-                  {diamonds.toLocaleString()} 💎
-                </div>
-              </div>
-              <div className="text-right">
-                <span className="text-[10px] text-zinc-400 block">Available Cashout</span>
-                <span className="text-lg font-black font-mono text-emerald-400">
-                  ${diamondsUSDValue} USD
-                </span>
-              </div>
+              <span className="text-xs font-black text-white flex items-center gap-1.5 uppercase tracking-wider">
+                <span className="text-base">💎</span>
+                <span>Diamond Cash Out Service</span>
+              </span>
+              <span className="text-[10px] font-mono text-emerald-400 font-bold">
+                1 USD ≈ {USD_TO_PKR_RATE} PKR
+              </span>
             </div>
 
-            {/* Threshold Notice */}
+            <p className="text-[11px] text-zinc-300 leading-relaxed">
+              International cash out limits are calculated in <strong>USD ($)</strong> for universal clarity.
+              For Pakistani hosts, your payout in <strong>PKR (Pakistani Rupee)</strong> is shown in real-time and
+              transferred directly to your attached JazzCash, EasyPaisa, or Bank Account.
+            </p>
+
             <div
               className={`p-2.5 rounded-xl border text-[11px] flex items-center gap-2 ${
                 isEligibleForWithdraw
@@ -506,8 +583,8 @@ export const WalletScreen: React.FC = () => {
               <Info className="w-4 h-4 shrink-0" />
               <span>
                 {isEligibleForWithdraw
-                  ? 'You meet the minimum withdrawal threshold ($10.00 / 100,000 Diamonds).'
-                  : `Minimum withdrawal is $10.00 (100,000 Diamonds). You need ${(100000 - diamonds).toLocaleString()} more Diamonds.`}
+                  ? 'Eligible! You meet the minimum threshold ($10.00 USD / 100,000 Diamonds).'
+                  : `Minimum withdrawal is $10.00 USD (100,000 Diamonds). You need ${(100000 - diamonds).toLocaleString()} more Diamonds.`}
               </span>
             </div>
           </div>
@@ -518,7 +595,7 @@ export const WalletScreen: React.FC = () => {
               <label className="text-[11px] font-black uppercase tracking-wider text-zinc-300">
                 Withdrawal Amount ($ USD)
               </label>
-              <span className="text-xs font-mono font-bold text-amber-300">
+              <span className="text-xs font-mono font-bold text-pink-300">
                 Requires: {diamondsNeededForChosenUSD.toLocaleString()} 💎
               </span>
             </div>
@@ -537,7 +614,7 @@ export const WalletScreen: React.FC = () => {
               />
             </div>
 
-            {/* Quick Presets */}
+            {/* Quick USD Presets */}
             <div className="grid grid-cols-5 gap-1.5 mt-2">
               {[10, 25, 50, 100, 250].map((amt) => (
                 <button
@@ -546,7 +623,7 @@ export const WalletScreen: React.FC = () => {
                   onClick={() => setWithdrawAmountUSD(amt)}
                   className={`py-1 rounded-xl text-[10px] font-mono font-bold transition-all cursor-pointer ${
                     withdrawAmountUSD === amt
-                      ? 'bg-emerald-500 text-black shadow'
+                      ? 'bg-emerald-500 text-black shadow font-black'
                       : 'bg-white/5 hover:bg-white/10 text-zinc-300 border border-white/5'
                   }`}
                 >
@@ -556,16 +633,50 @@ export const WalletScreen: React.FC = () => {
             </div>
           </div>
 
+          {/* Live Pakistani Rupee (PKR) Price Breakdown Card */}
+          <div className="p-3.5 rounded-2xl bg-[#140A28] border border-amber-400/30 space-y-2">
+            <div className="flex items-center justify-between text-xs">
+              <span className="font-bold text-zinc-300">Net Estimated Payout (PKR)</span>
+              <span className="text-sm font-mono font-black text-amber-300">
+                ₨ {estimatedPKRPayout.toLocaleString()} PKR
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 text-[10px] text-zinc-400 font-mono pt-2 border-t border-white/10">
+              <div>
+                <span>USD Amount: </span>
+                <strong className="text-white">${withdrawAmountUSD.toFixed(2)}</strong>
+              </div>
+              <div className="text-right">
+                <span>Rate: </span>
+                <strong className="text-white">1 USD = {USD_TO_PKR_RATE} PKR</strong>
+              </div>
+              <div>
+                <span>Held Diamonds: </span>
+                <strong className="text-pink-300">{diamondsNeededForChosenUSD.toLocaleString()} 💎</strong>
+              </div>
+              <div className="text-right">
+                <span>Hold State: </span>
+                <strong className="text-amber-400">Locked on Submit</strong>
+              </div>
+            </div>
+
+            <p className="text-[9.5px] text-zinc-400 pt-1 leading-tight">
+              ⚡ Upon submission, <strong>{diamondsNeededForChosenUSD.toLocaleString()} Diamonds</strong> will be
+              securely held in your account. They cannot be spent or traded while pending admin approval.
+            </p>
+          </div>
+
           {/* Withdrawal Destination Method */}
           <div className="space-y-1.5">
             <label className="text-[11px] font-black uppercase tracking-wider text-zinc-300 block">
-              Withdrawal Channel
+              Withdrawal Channel (Attach Account)
             </label>
             <div className="grid grid-cols-4 gap-2">
               {[
                 { id: 'JazzCash', label: 'JazzCash' },
                 { id: 'EasyPaisa', label: 'EasyPaisa' },
-                { id: 'Bank', label: 'Bank Wire' },
+                { id: 'Bank', label: 'All Banks 🏦' },
                 { id: 'USDT', label: 'USDT TRC20' },
               ].map((m) => {
                 const isSelected = withdrawMethod === m.id;
@@ -576,7 +687,7 @@ export const WalletScreen: React.FC = () => {
                     onClick={() => setWithdrawMethod(m.id as any)}
                     className={`py-2 rounded-xl text-[10.5px] font-bold border transition-all cursor-pointer ${
                       isSelected
-                        ? 'bg-gradient-to-r from-emerald-600 to-teal-600 border-emerald-400 text-white shadow'
+                        ? 'bg-gradient-to-r from-emerald-600 to-teal-600 border-emerald-400 text-white shadow font-black'
                         : 'bg-white/5 border-white/5 text-zinc-400 hover:text-white'
                     }`}
                   >
@@ -590,35 +701,63 @@ export const WalletScreen: React.FC = () => {
           {/* Dynamic Account Details Form */}
           <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-3">
             {withdrawMethod === 'Bank' && (
-              <div>
-                <label className="text-[10.5px] font-bold text-zinc-300 block mb-1">
-                  Bank Name
-                </label>
-                <select
-                  value={bankName}
-                  onChange={(e) => setBankName(e.target.value)}
-                  className="w-full h-10 px-3 rounded-xl bg-[#140929] border border-white/15 focus:border-emerald-400 text-xs text-white"
-                >
-                  <option value="Meezan Bank">Meezan Bank</option>
-                  <option value="Habib Bank Limited (HBL)">Habib Bank Limited (HBL)</option>
-                  <option value="Bank Alfalah">Bank Alfalah</option>
-                  <option value="United Bank Limited (UBL)">United Bank Limited (UBL)</option>
-                  <option value="Standard Chartered">Standard Chartered</option>
-                  <option value="SadaPay">SadaPay</option>
-                  <option value="NayaPay">NayaPay</option>
-                </select>
-              </div>
+              <>
+                <div>
+                  <label className="text-[10.5px] font-bold text-zinc-300 block mb-1">
+                    Select Pakistani Bank (All Banks Supported)
+                  </label>
+                  <select
+                    value={bankName}
+                    onChange={(e) => setBankName(e.target.value)}
+                    className="w-full h-10 px-3 rounded-xl bg-[#140929] border border-white/15 focus:border-emerald-400 text-xs text-white"
+                  >
+                    {PAKISTANI_BANKS.map((bank, idx) => (
+                      <option key={idx} value={bank}>
+                        {bank}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {bankName === 'Other / Custom Bank' && (
+                  <div>
+                    <label className="text-[10.5px] font-bold text-zinc-300 block mb-1">
+                      Bank Name
+                    </label>
+                    <input
+                      type="text"
+                      value={customBankName}
+                      onChange={(e) => setCustomBankName(e.target.value)}
+                      placeholder="e.g. Dubai Islamic Bank Pakistan"
+                      className="w-full h-10 px-3 rounded-xl bg-white/5 border border-white/15 focus:border-emerald-400 focus:outline-none text-xs text-white"
+                    />
+                  </div>
+                )}
+
+                <div>
+                  <label className="text-[10.5px] font-bold text-zinc-300 block mb-1">
+                    Branch Name / City (Optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={branchCity}
+                    onChange={(e) => setBranchCity(e.target.value)}
+                    placeholder="e.g. Main Boulevard Lahore"
+                    className="w-full h-10 px-3 rounded-xl bg-white/5 border border-white/15 focus:border-emerald-400 focus:outline-none text-xs text-white"
+                  />
+                </div>
+              </>
             )}
 
             <div>
               <label className="text-[10.5px] font-bold text-zinc-300 block mb-1">
-                Account Title (Beneficiary Name)
+                Account Title (Beneficiary Name on CNIC / Bank)
               </label>
               <input
                 type="text"
                 value={accountTitle}
                 onChange={(e) => setAccountTitle(e.target.value)}
-                placeholder="e.g. Muhammad Ali"
+                placeholder="e.g. Muhammad Ali Khan"
                 className="w-full h-10 px-3 rounded-xl bg-white/5 border border-white/15 focus:border-emerald-400 focus:outline-none text-xs text-white"
               />
             </div>
@@ -626,10 +765,10 @@ export const WalletScreen: React.FC = () => {
             <div>
               <label className="text-[10.5px] font-bold text-zinc-300 block mb-1">
                 {withdrawMethod === 'Bank'
-                  ? 'IBAN / Account Number'
+                  ? 'Account Number / IBAN (PKxx...)'
                   : withdrawMethod === 'USDT'
-                  ? 'USDT TRC-20 Wallet Address'
-                  : `${withdrawMethod} Mobile Number`}
+                  ? 'USDT TRC-20 Wallet Address (Starts with T)'
+                  : `${withdrawMethod} Mobile Wallet Number`}
               </label>
               <input
                 type="text"
@@ -637,9 +776,9 @@ export const WalletScreen: React.FC = () => {
                 onChange={(e) => setAccountNumber(e.target.value)}
                 placeholder={
                   withdrawMethod === 'Bank'
-                    ? 'PK36MEZN0000...'
+                    ? 'PK36MEZN0000123456789012'
                     : withdrawMethod === 'USDT'
-                    ? 'T...'
+                    ? 'T9yD14Nj9j7xAB4dbGeiX9h8...'
                     : '03001234567'
                 }
                 className="w-full h-10 px-3 rounded-xl bg-white/5 border border-white/15 focus:border-emerald-400 focus:outline-none text-xs font-mono text-white"
@@ -675,25 +814,76 @@ export const WalletScreen: React.FC = () => {
             <ArrowDownLeft className="w-4 h-4" />
             <span>
               {isProcessingWithdraw
-                ? 'Submitting...'
-                : `Cash Out $${withdrawAmountUSD.toFixed(2)} USD`}
+                ? 'Locking Diamonds & Submitting...'
+                : `Submit Cash Out $${withdrawAmountUSD.toFixed(2)} USD (PKR ${estimatedPKRPayout.toLocaleString()})`}
             </span>
           </button>
+
+          {/* Pending Cashouts List (Direct Visibility on Cash Out tab) */}
+          {pendingWithdrawals.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-white/10 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                  <Clock className="w-3.5 h-3.5" />
+                  <span>Pending Withdrawal Requests</span>
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 text-[9px] font-black border border-amber-400/30">
+                  {pendingWithdrawals.length} Pending
+                </span>
+              </div>
+
+              <div className="space-y-2">
+                {pendingWithdrawals.map((tx) => (
+                  <div
+                    key={tx.id}
+                    className="p-3 rounded-2xl bg-[#170E28] border border-amber-400/30 flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-xl bg-amber-400/20 text-amber-300 flex items-center justify-center shrink-0">
+                        <Clock className="w-4 h-4 animate-spin-slow" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-black text-white truncate">{tx.title}</span>
+                          <span className="px-1.5 py-0.2 rounded bg-amber-400/20 text-amber-300 text-[9px] font-black uppercase">
+                            Pending
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-zinc-400 mt-0.5 truncate">
+                          {tx.heldDiamonds ? `${tx.heldDiamonds.toLocaleString()} 💎 Held` : 'Diamonds Held'} • Admin Review In Progress
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="text-right shrink-0">
+                      <div className="text-xs font-black text-amber-300 font-mono">
+                        ${tx.amount.toFixed(2)} USD
+                      </div>
+                      <div className="text-[10px] text-zinc-400 font-mono">
+                        ₨ {(tx.pkrAmount || tx.amount * 280).toLocaleString()} PKR
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </form>
       )}
 
       {/* =========================================================================
-          TAB 3: CONVERT DIAMONDS TO COINS (EXCHANGE)
+          TAB 3: CONVERT DIAMONDS TO COINS (ONE-WAY EXCHANGE)
           ========================================================================= */}
       {activeTab === 'exchange' && (
         <div className="p-4 space-y-4 animate-fade-in">
           <div className="p-4 rounded-3xl bg-[#150A2B] border border-purple-400/30 space-y-2">
             <h3 className="text-sm font-black text-white flex items-center gap-1.5">
               <Repeat className="w-4 h-4 text-amber-400" />
-              <span>Convert Diamonds to Coins</span>
+              <span>Convert Diamonds to Coins (One-Way)</span>
             </h3>
-            <p className="text-[11px] text-zinc-300">
-              Turn your streaming earnings into coins instantly to send gifts to friends or enter PK matches with 0 fees!
+            <p className="text-[11px] text-zinc-300 leading-relaxed">
+              Instantly turn your earned Diamonds into Coins to send gifts to hosts or enter party PK matches.
+              <strong> 1 Diamond = 1 Coin.</strong> Note: Coins cannot be converted back into Diamonds.
             </p>
           </div>
 
@@ -703,7 +893,7 @@ export const WalletScreen: React.FC = () => {
                 Diamonds to Convert
               </label>
               <span className="text-xs font-mono font-bold text-pink-300">
-                Max: {diamonds.toLocaleString()} 💎
+                Available: {diamonds.toLocaleString()} 💎
               </span>
             </div>
 
@@ -726,7 +916,7 @@ export const WalletScreen: React.FC = () => {
                   onClick={() => setExchangeAmount(val)}
                   className="py-1 rounded-xl bg-white/5 hover:bg-white/10 text-[10px] font-mono font-bold text-zinc-300 border border-white/5 cursor-pointer"
                 >
-                  {val === diamonds ? 'All Diamonds' : `${val / 1000}k 💎`}
+                  {val === diamonds ? 'All Diamonds' : `${(val / 1000).toFixed(0)}k 💎`}
                 </button>
               ))}
             </div>
@@ -780,7 +970,7 @@ export const WalletScreen: React.FC = () => {
           >
             <Repeat className="w-4 h-4" />
             <span>
-              {isProcessingExchange ? 'Converting...' : 'Instant Convert to Coins'}
+              {isProcessingExchange ? 'Converting...' : `Instant Convert to ${exchangeAmount.toLocaleString()} Coins`}
             </span>
           </button>
         </div>
@@ -881,17 +1071,17 @@ export const WalletScreen: React.FC = () => {
                         }`}
                       >
                         {tx.type === 'withdrawal' ? '-' : isPositive ? '+' : '-'}
-                        {tx.amount.toLocaleString()} {tx.currency}
+                        {tx.currency === 'USD' ? `$${tx.amount.toFixed(2)}` : `${tx.amount.toLocaleString()} ${tx.currency}`}
                       </div>
 
                       <span
                         className={`text-[8.5px] px-1.5 py-0.2 rounded font-black uppercase inline-block mt-0.5 ${
                           tx.status === 'completed'
                             ? 'bg-emerald-500/20 text-emerald-300'
-                            : 'bg-amber-400/20 text-amber-300'
+                            : 'bg-amber-400/20 text-amber-300 animate-pulse'
                         }`}
                       >
-                        {tx.status}
+                        {tx.status === 'pending' ? 'Pending Review' : tx.status}
                       </span>
                     </div>
                   </div>

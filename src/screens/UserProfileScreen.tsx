@@ -3,6 +3,7 @@ import { useApp } from '../context/AppContext';
 import { EditProfileModal } from '../components/modals/EditProfileModal';
 import { ShareProfileModal } from '../components/modals/ShareProfileModal';
 import { JoinAgencyModal } from '../components/modals/JoinAgencyModal';
+import { TopAchievementsModal } from '../components/modals/TopAchievementsModal';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { copyToClipboard } from '../utils/clipboard';
 import { compressImage } from '../utils/imageCompressor';
@@ -52,6 +53,8 @@ import {
   Bookmark,
   Lock,
   Music,
+  BarChart3,
+  Globe,
 } from 'lucide-react';
 
 interface CoverSlide {
@@ -108,7 +111,7 @@ export const UserProfileScreen: React.FC = () => {
   const [showShareModal, setShowShareModal] = useState(false);
   const [showCoverModal, setShowCoverModal] = useState(false);
   const [showJoinAgencyModal, setShowJoinAgencyModal] = useState(false);
-  const [showExploreFeaturesModal, setShowExploreFeaturesModal] = useState(false);
+  const [showTopAchievementsModal, setShowTopAchievementsModal] = useState(false);
   const [showShortcutModal, setShowShortcutModal] = useState<{
     type: string;
     title: string;
@@ -486,6 +489,15 @@ export const UserProfileScreen: React.FC = () => {
               <h1 className="text-xl font-black text-white tracking-tight flex items-center gap-1.5">
                 <span>{currentUser.displayName}</span>
               </h1>
+              {currentUser.activeHonorTitle && (
+                <div
+                  title="Equipped Honor Tag (Tap to view Top Achievements)"
+                  onClick={() => setShowTopAchievementsModal(true)}
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400/20 to-rose-500/20 border border-amber-400/40 text-amber-300 text-[10px] font-black tracking-wider uppercase font-mono shadow cursor-pointer hover:border-amber-400"
+                >
+                  <span>{currentUser.activeHonorTitle}</span>
+                </div>
+              )}
               {currentUser.agencyTag && (
                 <div
                   title={`Official Host bound to ${currentUser.agencyName || 'Agency'}`}
@@ -553,13 +565,14 @@ export const UserProfileScreen: React.FC = () => {
               </span>
             </div>
 
-            {/* Bio with multi-language & Urdu RTL/LTR auto detection */}
+            {/* Bio with multi-language auto detection */}
             <p
               dir="auto"
-              className="text-xs text-zinc-300 mt-3 leading-relaxed break-words whitespace-pre-wrap bg-black/20 p-2.5 rounded-xl border border-white/5"
+              className="text-xs text-zinc-300 mt-3 leading-relaxed break-words whitespace-pre-wrap bg-black/20 p-2.5 rounded-xl border border-white/5 text-center"
             >
               {currentUser.bio}
             </p>
+
 
             {/* Interactive Level & VIP Status Bar (Direct link to 1-100 Levels & 12 VIPs) */}
             <div
@@ -613,21 +626,9 @@ export const UserProfileScreen: React.FC = () => {
           </div>
 
           {/* =========================================================================
-              PROFILE STATISTICS: Friends, Following, Followers, Visitors
+              PROFILE STATISTICS: Following, Followers, Likes (Matching Reference Design)
               ========================================================================= */}
-          <div className="grid grid-cols-4 gap-1 mt-4 pt-4 border-t border-[#A855F7]/20 text-center">
-            <button
-              onClick={() => showToast(`Friends: ${(currentUser.friendsCount || 342).toLocaleString()}`)}
-              className="p-1 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
-            >
-              <div className="text-base sm:text-lg font-black text-white tabular-nums">
-                {(currentUser.friendsCount || 342).toLocaleString()}
-              </div>
-              <div className="text-[10px] text-zinc-400 font-semibold tracking-wider uppercase mt-0.5">
-                Friends
-              </div>
-            </button>
-
+          <div className="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-[#A855F7]/20 text-center">
             <button
               onClick={() => showToast(`Following: ${currentUser.followingCount.toLocaleString()} creators`)}
               className="p-1 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
@@ -635,8 +636,8 @@ export const UserProfileScreen: React.FC = () => {
               <div className="text-base sm:text-lg font-black text-white tabular-nums">
                 {currentUser.followingCount.toLocaleString()}
               </div>
-              <div className="text-[10px] text-zinc-400 font-semibold tracking-wider uppercase mt-0.5">
-                Following
+              <div className="text-[10px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
+                FOLLOWING
               </div>
             </button>
 
@@ -649,24 +650,20 @@ export const UserProfileScreen: React.FC = () => {
                   ? `${(currentUser.followersCount / 1000).toFixed(1)}k`
                   : currentUser.followersCount}
               </div>
-              <div className="text-[10px] text-zinc-400 font-semibold tracking-wider uppercase mt-0.5">
-                Followers
+              <div className="text-[10px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
+                FOLLOWERS
               </div>
             </button>
 
             <button
-              onClick={() => showToast(`Profile Visitors: ${(currentUser.visitorsCount || 8940).toLocaleString()}`)}
+              onClick={() => showToast(`Total Likes: 18`)}
               className="p-1 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
             >
               <div className="text-base sm:text-lg font-black text-white tabular-nums">
-                {currentUser.visitorsCount
-                  ? currentUser.visitorsCount >= 1000
-                    ? `${(currentUser.visitorsCount / 1000).toFixed(1)}k`
-                    : currentUser.visitorsCount
-                  : '8.9k'}
+                {myVideos.reduce((acc, v) => acc + (v.likes || 0), 0) || 18}
               </div>
-              <div className="text-[10px] text-zinc-400 font-semibold tracking-wider uppercase mt-0.5">
-                Visitors
+              <div className="text-[10px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
+                LIKES
               </div>
             </button>
           </div>
@@ -674,126 +671,63 @@ export const UserProfileScreen: React.FC = () => {
       </div>
 
       {/* =========================================================================
-          SECTION 3: "KING OF KINGS" LUXURY VIP MEMBERSHIP BANNER
+          SECTION 3: ACTION BOXES: CREATOR, AGENCY, WALLET (Matching Reference Design)
           ========================================================================= */}
       <div className="px-4 mt-3.5">
-        <div className="relative rounded-2xl overflow-hidden p-4 bg-gradient-to-r from-[#2B1055] via-[#431682] to-[#2B1055] border border-amber-400/40 shadow-xl shadow-purple-950/40 flex items-center justify-between">
-          {/* Ambient Glows */}
-          <div className="absolute -left-6 -top-6 w-24 h-24 rounded-full bg-amber-400/20 blur-xl pointer-events-none" />
-          <div className="absolute -right-6 -bottom-6 w-24 h-24 rounded-full bg-[#EC4899]/20 blur-xl pointer-events-none" />
-
-          {/* Left: Crown icon + King of Kings branding */}
-          <div className="flex items-center gap-3 relative z-10">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-300 via-amber-500 to-amber-700 p-0.5 shadow-lg shadow-amber-500/25 flex items-center justify-center">
-              <div className="w-full h-full rounded-[14px] bg-[#1C0D30] flex items-center justify-center">
-                <Crown className="w-6 h-6 text-amber-400 animate-bounce" />
-              </div>
-            </div>
-
-            <div>
-              <div className="flex items-center gap-1.5">
-                <h3 className="text-sm font-black text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-amber-400 to-yellow-300 tracking-wide uppercase">
-                  King of Kings
-                </h3>
-                <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-amber-400/20 text-amber-300 border border-amber-400/40">
-                  TOP PRIVILEGE
-                </span>
-              </div>
-              <p className="text-[11px] text-purple-200/80 mt-0.5">
-                Become and enjoy exclusive privileges & top room entrance
-              </p>
-            </div>
-          </div>
-
-          {/* Right: Activate Button */}
+        <div className="rounded-3xl p-4 bg-[#120B22]/90 backdrop-blur-xl border border-white/10 shadow-2xl flex items-center justify-around gap-2">
+          {/* Box 1: Top Achievements (Warrior & Victor Honors, Unlocked Avatar Frames & Tags) */}
           <button
-            onClick={() => {
-              setShowShortcutModal({
-                type: 'vip',
-                title: 'King of Kings • Royal Membership',
-                description:
-                  'Activate King of Kings status to unlock: Golden Nameplate, 3D Super Entrance Yacht, Room Dominance Badge, +50% XP Boost, and 24/7 Dedicated Concierge.',
-                icon: Crown,
-              });
-            }}
-            className="relative z-10 px-3.5 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 text-black text-xs font-black tracking-wide shadow-lg shadow-amber-500/30 hover:brightness-110 active:scale-95 transition-all cursor-pointer whitespace-nowrap"
+            type="button"
+            onClick={() => setShowTopAchievementsModal(true)}
+            className="flex-1 flex flex-col items-center gap-2 group cursor-pointer active:scale-95 transition-transform"
           >
-            Activate
+            <div className="relative w-14 h-14 rounded-2xl bg-gradient-to-tr from-amber-400 via-rose-500 to-purple-600 p-0.5 shadow-lg shadow-amber-500/25 flex items-center justify-center group-hover:scale-105 transition-all">
+              <div className="w-full h-full rounded-[14px] bg-gradient-to-b from-[#250F3B] to-[#130722] flex items-center justify-center text-amber-300 group-hover:text-amber-200">
+                <Trophy className="w-6 h-6 drop-shadow-[0_0_8px_rgba(245,158,11,0.6)]" />
+              </div>
+              <span className="absolute -top-1 -right-1 flex h-2.5 w-2.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-amber-500"></span>
+              </span>
+            </div>
+            <div className="text-center leading-tight">
+              <span className="text-[11px] sm:text-xs font-black text-amber-300 group-hover:text-white block line-clamp-1">
+                Top Achievements
+              </span>
+              <span className="text-[9px] text-zinc-400 group-hover:text-amber-300 font-semibold line-clamp-1">
+                Warrior & Victor
+              </span>
+            </div>
+          </button>
+
+          {/* Box 2: Agency */}
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('agency_management')}
+            className="flex-1 flex flex-col items-center gap-2 group cursor-pointer active:scale-95 transition-transform"
+          >
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#1D4ED8] to-[#0284C7] p-0.5 shadow-lg shadow-blue-600/30 flex items-center justify-center group-hover:scale-105 transition-all">
+              <div className="w-full h-full rounded-[14px] bg-[#0E1D3B] flex items-center justify-center text-sky-300 group-hover:text-white">
+                <Building2 className="w-6 h-6" />
+              </div>
+            </div>
+            <span className="text-xs font-bold text-zinc-300 group-hover:text-white">Agency</span>
+          </button>
+
+          {/* Box 3: Wallet */}
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('wallet')}
+            className="flex-1 flex flex-col items-center gap-2 group cursor-pointer active:scale-95 transition-transform"
+          >
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#B45309] to-[#F59E0B] p-0.5 shadow-lg shadow-amber-600/30 flex items-center justify-center group-hover:scale-105 transition-all">
+              <div className="w-full h-full rounded-[14px] bg-[#2A1608] flex items-center justify-center text-amber-300 group-hover:text-white">
+                <Wallet className="w-6 h-6" />
+              </div>
+            </div>
+            <span className="text-xs font-bold text-zinc-300 group-hover:text-white">Wallet</span>
           </button>
         </div>
-      </div>
-
-      {/* =========================================================================
-          AGENCY CENTER: OFFICIAL COIN SELLER & HOST AGENCY MANAGEMENT
-          ========================================================================= */}
-      <div className="px-4 mt-3.5">
-        <button
-          onClick={() => setCurrentScreen('agency_management')}
-          className="w-full p-4 rounded-2xl bg-gradient-to-r from-[#2A1305] via-[#210D38] to-[#120724] border border-amber-400/50 hover:border-amber-400 shadow-xl shadow-amber-950/30 flex items-center justify-between cursor-pointer group active:scale-[0.99] transition-all text-left"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-amber-400 via-amber-500 to-[#EC4899] p-0.5 shadow-lg shadow-amber-500/25 flex items-center justify-center shrink-0">
-              <div className="w-full h-full rounded-[14px] bg-[#160A2A] flex items-center justify-center text-amber-300">
-                <Coins className="w-5 h-5 fill-current group-hover:scale-110 transition-transform" />
-              </div>
-            </div>
-
-            <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h3 className="text-sm font-black text-white tracking-wide group-hover:text-amber-300 transition-colors">
-                  Agency Center
-                </h3>
-                <span className="text-[9px] font-black px-1.5 py-0.2 rounded bg-amber-400/20 text-amber-300 border border-amber-400/40 uppercase">
-                  OFFICIAL ACTIVE
-                </span>
-              </div>
-              <p className="text-[11px] text-zinc-300 mt-0.5 truncate">
-                Coin Seller Agency • <span className="text-amber-300 font-mono font-bold">{agencyProfile.agencyBalance.toLocaleString()} Coins</span> Stock
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-1.5 shrink-0 ml-2">
-            <span className="text-[10px] font-bold text-amber-400 hidden sm:inline">Manage</span>
-            <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-zinc-400 group-hover:text-white group-hover:bg-white/10 transition-colors">
-              <ChevronRight className="w-4 h-4" />
-            </div>
-          </div>
-        </button>
-      </div>
-
-      {/* =========================================================================
-          EXPLORE FEATURES & SERVICES (Single Option Replacing Cluttered Shelves)
-          ========================================================================= */}
-      <div className="px-4 mt-3.5">
-        <button
-          onClick={() => setShowExploreFeaturesModal(true)}
-          className="w-full p-4 rounded-2xl bg-gradient-to-r from-[#180E2E] via-[#241344] to-[#180E2E] border border-[#A855F7]/30 hover:border-[#A855F7]/60 shadow-xl flex items-center justify-between cursor-pointer group active:scale-[0.99] transition-all"
-        >
-          <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-2xl bg-gradient-to-tr from-[#7928CA] to-[#EC4899] p-0.5 shadow-lg shadow-[#7928CA]/30 flex items-center justify-center">
-              <div className="w-full h-full rounded-[14px] bg-[#140A28] flex items-center justify-center text-white">
-                <Sparkles className="w-5 h-5 text-[#C084FC] group-hover:rotate-12 transition-transform" />
-              </div>
-            </div>
-            <div className="text-left">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-black text-white tracking-wide">
-                  Explore Features
-                </h3>
-                <span className="text-[9px] font-black px-2 py-0.5 rounded-full bg-[#EC4899]/20 text-[#EC4899] border border-[#EC4899]/30">
-                  13 Services
-                </span>
-              </div>
-              <p className="text-[11px] text-zinc-300 mt-0.5">
-                Tasks, Honor Level, Fans Club, VIP, Games & more
-              </p>
-            </div>
-          </div>
-          <div className="w-8 h-8 rounded-full bg-white/5 flex items-center justify-center text-zinc-400 group-hover:text-white group-hover:bg-white/10 transition-colors">
-            <ChevronRight className="w-4 h-4" />
-          </div>
-        </button>
       </div>
 
       {/* =========================================================================
@@ -802,11 +736,11 @@ export const UserProfileScreen: React.FC = () => {
       <div className="px-4 mt-6">
         <div className="border-b border-[#A855F7]/20 flex items-center justify-between overflow-x-auto scrollbar-none gap-2">
           {[
-            { id: 'videos', label: 'Videos', count: myVideos.length, icon: Video },
+            { id: 'videos', label: 'Public', count: myVideos.length, icon: Globe },
+            { id: 'private', label: 'Private', count: privateVideos.length, icon: Lock },
+            { id: 'saved', label: 'Saved', count: savedVideos.length, icon: Bookmark },
             { id: 'posts', label: 'Posts', count: myPosts.length + 1, icon: MessageCircle },
             { id: 'liked', label: 'Liked', count: likedVideos.length, icon: Heart },
-            { id: 'saved', label: 'Saved', count: savedVideos.length, icon: Bookmark },
-            { id: 'private', label: 'Private', count: privateVideos.length, icon: Lock },
           ].map((tab) => {
             const isActive = activeTab === tab.id;
             const TabIcon = tab.icon;
@@ -1318,278 +1252,6 @@ export const UserProfileScreen: React.FC = () => {
         </div>
       )}
 
-      {/* Explore Features & Services Modal / Sheet */}
-      {showExploreFeaturesModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-end sm:items-center justify-center p-3 sm:p-4">
-          <div className="w-full max-w-md rounded-3xl bg-[#130B24] border border-[#A855F7]/40 p-5 shadow-2xl max-h-[85vh] flex flex-col animate-in fade-in slide-in-from-bottom duration-200">
-            {/* Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/20">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-[#7928CA] to-[#EC4899] p-0.5 flex items-center justify-center">
-                  <div className="w-full h-full rounded-[10px] bg-[#140A28] flex items-center justify-center">
-                    <Sparkles className="w-4 h-4 text-[#C084FC]" />
-                  </div>
-                </div>
-                <div>
-                  <h3 className="text-sm font-black text-white uppercase tracking-wider">
-                    Explore Features & Services
-                  </h3>
-                  <span className="text-[10px] text-zinc-400">13 interactive entertainment features</span>
-                </div>
-              </div>
-              <button
-                onClick={() => setShowExploreFeaturesModal(false)}
-                className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Grid of 13 features */}
-            <div className="flex-1 overflow-y-auto py-4 grid grid-cols-3 sm:grid-cols-4 gap-2.5">
-              {[
-                {
-                  id: 'task',
-                  label: 'Daily Tasks',
-                  badge: 'Rewards',
-                  icon: CheckSquare,
-                  color: 'from-emerald-500 to-teal-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'task',
-                      title: 'Daily & Weekly Tasks',
-                      description:
-                        'Complete daily streaming, chat in party rooms, send 3 gifts, and claim up to 1,500 free bonus coins every day!',
-                      icon: CheckSquare,
-                    });
-                  },
-                },
-                {
-                  id: 'level',
-                  label: 'Honor Level',
-                  badge: `Lv.${currentUser.level}`,
-                  icon: Zap,
-                  color: 'from-[#7928CA] to-[#9333EA]',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setCurrentScreen('levels');
-                  },
-                },
-                {
-                  id: 'fans_club',
-                  label: 'Fans Club',
-                  badge: 'Top 5',
-                  icon: Heart,
-                  color: 'from-rose-500 to-pink-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'fans_club',
-                      title: 'Creator Fans Club',
-                      description:
-                        'Join Alex Rider’s exclusive fan club! Unlock custom fan badges, private audio room access, and weekly fan ranking rewards.',
-                      icon: Heart,
-                    });
-                  },
-                },
-                {
-                  id: 'game',
-                  label: 'Game Hall',
-                  badge: 'Lucky',
-                  icon: Gamepad2,
-                  color: 'from-amber-500 to-orange-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'game',
-                      title: 'Alpha Entertainment Games',
-                      description:
-                        'Play Lucky Wheel, Live PK Predictions, and Dice Battles to multiply your coins and win exclusive entrance effects!',
-                      icon: Gamepad2,
-                    });
-                  },
-                },
-                {
-                  id: 'backpack',
-                  label: 'Backpack',
-                  badge: '8 Items',
-                  icon: Briefcase,
-                  color: 'from-blue-500 to-indigo-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'backpack',
-                      title: 'My Inventory Backpack',
-                      description:
-                        'Your storage contains: 2x Galaxy Rocket Gift, 1x 7-Day Neon Avatar Frame, 5x Room Broadcast Megaphones.',
-                      icon: Briefcase,
-                    });
-                  },
-                },
-                {
-                  id: 'dress_store',
-                  label: 'Dress Store',
-                  badge: 'New',
-                  icon: Sparkles,
-                  color: 'from-fuchsia-500 to-purple-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'dress_store',
-                      title: 'Avatar & Entrance Dress Store',
-                      description:
-                        'Equip cyber neon frames, golden chat bubbles, and 3D sports car entrance effects to stun everyone when entering live rooms!',
-                      icon: Sparkles,
-                    });
-                  },
-                },
-                {
-                  id: 'event_center',
-                  label: 'Event Center',
-                  badge: 'Live',
-                  icon: PartyPopper,
-                  color: 'from-pink-500 to-rose-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'event_center',
-                      title: 'Alpha Seasonal Tournaments',
-                      description:
-                        'Summer PK Clash & Singing Star 2026 is underway! Compete on the leaderboard to win 500,000 Diamonds prize pool.',
-                      icon: PartyPopper,
-                    });
-                  },
-                },
-                {
-                  id: 'vip',
-                  label: 'VIP Privileges',
-                  badge: `VIP ${currentUser.vipTier}`,
-                  icon: Crown,
-                  color: 'from-amber-400 to-yellow-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'vip',
-                      title: 'VIP Royal Tier Privileges',
-                      description:
-                        'Your current tier is VIP 3 Gold. Privileges include: Custom ID flair, anti-kick immunity in normal rooms, and priority customer service.',
-                      icon: Crown,
-                    });
-                  },
-                },
-                {
-                  id: 'guardian',
-                  label: 'Guardian Angel',
-                  badge: 'Shield',
-                  icon: Shield,
-                  color: 'from-indigo-500 to-purple-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'guardian',
-                      title: 'Guardian Angel Protection',
-                      description:
-                        'Become a host’s personal Guardian Angel! Display an exclusive golden shield next to their avatar and enjoy special party room rights.',
-                      icon: Shield,
-                    });
-                  },
-                },
-                {
-                  id: 'real_person',
-                  label: 'Real Person',
-                  badge: 'Verified',
-                  icon: UserCheck,
-                  color: 'from-emerald-500 to-green-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'real_person',
-                      title: 'Real Person Identity Detection',
-                      description:
-                        'Your profile is fully verified with biometric facial scan and authentic host certification. No further verification required.',
-                      icon: UserCheck,
-                    });
-                  },
-                },
-                {
-                  id: 'help',
-                  label: 'Help Center',
-                  badge: 'Guides',
-                  icon: HelpCircle,
-                  color: 'from-sky-500 to-blue-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'help',
-                      title: 'Help Center & Guides',
-                      description:
-                        'Learn how to host live streams, play PK battles, withdraw diamond earnings, and secure your account credentials.',
-                      icon: HelpCircle,
-                    });
-                  },
-                },
-                {
-                  id: 'customer_service',
-                  label: 'Live Support',
-                  badge: '24/7 Live',
-                  icon: Headphones,
-                  color: 'from-purple-500 to-fuchsia-600',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setShowShortcutModal({
-                      type: 'customer_service',
-                      title: '24/7 Official Customer Support',
-                      description:
-                        'Connect with an official Alpha Mate representative directly through live chat for assistance with recharge, accounts, or disputes.',
-                      icon: Headphones,
-                    });
-                  },
-                },
-                {
-                  id: 'settings',
-                  label: 'Settings',
-                  badge: 'Config',
-                  icon: Settings,
-                  color: 'from-slate-600 to-zinc-700',
-                  action: () => {
-                    setShowExploreFeaturesModal(false);
-                    setCurrentScreen('settings');
-                  },
-                },
-              ].map((item) => {
-                const Icon = item.icon;
-                return (
-                  <button
-                    key={item.id}
-                    onClick={item.action}
-                    className="p-3 rounded-2xl bg-[#1A1030] hover:bg-[#251745] border border-white/10 hover:border-[#A855F7]/40 flex flex-col items-center justify-between text-center group cursor-pointer transition-all active:scale-95 shadow-md"
-                  >
-                    <div
-                      className={`w-11 h-11 rounded-xl bg-gradient-to-tr ${item.color} flex items-center justify-center text-white shadow-md group-hover:scale-105 transition-transform`}
-                    >
-                      <Icon className="w-5 h-5" />
-                    </div>
-                    <span className="text-[11px] font-bold text-white mt-2 line-clamp-1 w-full">
-                      {item.label}
-                    </span>
-                    <span className="text-[9px] font-bold text-[#C084FC] bg-white/5 px-1.5 py-0.5 rounded-md mt-1 line-clamp-1">
-                      {item.badge}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            <button
-              onClick={() => setShowExploreFeaturesModal(false)}
-              className="mt-2 w-full py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-zinc-300 text-xs font-bold cursor-pointer"
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
 
 
       <EditProfileModal isOpen={showEditModal} onClose={() => setShowEditModal(false)} />
@@ -1599,6 +1261,12 @@ export const UserProfileScreen: React.FC = () => {
 
       {/* Join Official Host Agency Modal */}
       <JoinAgencyModal isOpen={showJoinAgencyModal} onClose={() => setShowJoinAgencyModal(false)} />
+
+      {/* Top Achievements & Honor Hall Modal (Warrior & Victor Badges & Frames) */}
+      <TopAchievementsModal
+        isOpen={showTopAchievementsModal}
+        onClose={() => setShowTopAchievementsModal(false)}
+      />
     </div>
   );
 };

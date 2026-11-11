@@ -1,22 +1,33 @@
 {
-  "short_name": "Alpha Mate",
+  "id": "/",
   "name": "Alpha Mate — Live • Party • Social",
+  "short_name": "Alpha Mate",
   "description": "Premium social entertainment platform featuring live streaming, PK battles, audio party rooms, 1-on-1 chat, and VIP honors.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#09070F",
+  "theme_color": "#09070F",
+  "categories": ["social", "entertainment"],
   "icons": [
     {
       "src": "/alpha-mate-logo-emblem.png",
+      "sizes": "192x192",
       "type": "image/png",
-      "sizes": "192x192"
+      "purpose": "any"
     },
     {
       "src": "/alpha-mate-logo-emblem.png",
+      "sizes": "512x512",
       "type": "image/png",
-      "sizes": "512x512"
+      "purpose": "any"
+    },
+    {
+      "src": "/alpha-mate-logo-emblem.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
-  ],
-  "start_url": "/",
-  "background_color": "#09070F",
-  "theme_color": "#09070F",
-  "display": "standalone",
-  "orientation": "portrait"
+  ]
 }

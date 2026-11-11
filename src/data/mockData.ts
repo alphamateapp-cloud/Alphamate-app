@@ -36,6 +36,9 @@ export const CURRENT_USER: User = {
   age: 22,
   country: 'United States',
   countryFlag: '🇺🇸',
+  heldDiamonds: 0,
+  activeFrame: 'golden_dragon',
+  activeHonorTitle: '[VICTOR]',
 };
 
 export const MOCK_HOSTS: User[] = [];
