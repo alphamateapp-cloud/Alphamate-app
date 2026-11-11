@@ -114,7 +114,7 @@ export const HomeScreen: React.FC = () => {
       <TopBar />
 
       {/* Categories Bar: Live | Following | For You */}
-      <div className="px-4 pt-2.5 pb-1 flex items-center justify-between border-b border-[#A855F7]/10 bg-[#0C081A]/60 backdrop-blur-sm">
+      <div className="px-4 pt-1 pb-1 flex items-center justify-between bg-transparent">
         <div className="flex items-center gap-6">
           {(['Live', 'Following', 'For You'] as const).map((cat) => {
             const isActive = activeCategory === cat;

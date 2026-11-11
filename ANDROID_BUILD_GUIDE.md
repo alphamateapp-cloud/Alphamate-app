@@ -43,7 +43,23 @@ android/app/build/outputs/apk/debug/app-debug.apk
 
 ---
 
-### 3. Build Release AAB (Google Play Store Bundle)
+### 3. Build Release APK (Unsigned or Signed Release APK)
+```bash
+npm run android:release-apk
+```
+Or directly using Gradle:
+```bash
+cd android
+./gradlew assembleRelease
+```
+📍 **Release APK Output Location:**
+```
+android/app/build/outputs/apk/release/app-release-unsigned.apk
+```
+
+---
+
+### 4. Build Release AAB (Google Play Store Bundle)
 ```bash
 npm run android:aab
 ```

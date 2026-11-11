@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
-import { TopBar } from '../components/navigation/TopBar';
 import { PartyRoom, PartySeat, User, Gift } from '../types';
 import { p2pStreamingEngine } from '../services/webrtcService';
 import { PartyRoomAtmosphere } from '../components/party/PartyRoomAtmosphere';
@@ -2369,8 +2368,6 @@ export const PartyRoomsScreen: React.FC = () => {
 
   return (
     <div className="relative w-full h-full pb-24 bg-[#09070F] text-white overflow-y-auto overscroll-contain">
-      <TopBar />
-
       {/* Hero Party Discovery Animated Musical Banner */}
       <div className="px-4 pt-3 pb-2">
         <div className="relative rounded-3xl p-4.5 overflow-hidden bg-gradient-to-r from-[#200A45] via-[#35105E] to-[#160B2A] border border-[#EC4899]/30 shadow-2xl shadow-purple-950/60">

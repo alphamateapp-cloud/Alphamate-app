@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { TopBar } from '../components/navigation/TopBar';
 import { Conversation, ChatMessage } from '../types';
 import {
   Search,
@@ -204,10 +203,13 @@ export const ChatScreen: React.FC = () => {
   // Conversation List Screen
   return (
     <div className="relative w-full h-full min-h-screen pb-32 bg-[#09070F] text-white overflow-y-auto">
-      <TopBar />
+      {/* Header */}
+      <div className="px-4 pt-3.5 pb-1 flex items-center justify-between">
+        <h1 className="text-lg font-black tracking-tight text-white">Messages</h1>
+      </div>
 
       {/* Header Search & Tabs */}
-      <div className="px-4 pt-3 pb-2">
+      <div className="px-4 pt-1.5 pb-2">
         <div className="relative mb-3">
           <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
           <input
