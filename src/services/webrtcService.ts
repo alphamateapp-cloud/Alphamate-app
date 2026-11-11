@@ -121,11 +121,9 @@ class P2PStreamingEngine {
 
       return stream;
     } catch (err) {
-      console.warn('Direct mediaDevices.getUserMedia not available or permission denied, using simulated stream', err);
-      // Fallback for sandboxes or environments without physical camera: return synthetic stream
-      const fallbackStream = this.createSyntheticMediaStream(facing, withAudio);
-      this.localStream = fallbackStream;
-      return fallbackStream;
+      console.error('Unable to acquire real camera/microphone. Live broadcast cannot start.', err);
+      this.stopLocalMediaStream();
+      throw err;
     }
   }
 
@@ -394,17 +392,9 @@ class P2PStreamingEngine {
       };
     }
 
-    // 5. Generate high-fidelity remote live stream for the host
-    // Video: Animated stage canvas with dynamic lighting & equalizer
-    // Audio: Real Web Audio tone/melody synthesizer so remote audio plays
-    const remoteStream = this.createRemoteHostMediaStream(streamId, hostUser);
-    this.remoteStreams.set(streamId, remoteStream);
-
-    return {
-      stream: remoteStream,
-      isVideoOn: state.isVideoOn,
-      isMicOn: state.isMicOn,
-    };
+    // Never fabricate a remote host stream. A real remote MediaStream must arrive
+    // through an established RTCPeerConnection and Firestore signaling exchange.
+    throw new Error('LIVE_SIGNALING_NOT_CONNECTED: host peer connection has not delivered a remote media stream.');
   }
 
   /**

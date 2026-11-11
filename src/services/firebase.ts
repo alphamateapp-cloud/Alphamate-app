@@ -21,6 +21,7 @@ import {
   query,
   orderBy,
   limit,
+  runTransaction,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
@@ -306,5 +307,73 @@ export function subscribeToPartyRooms(onUpdate: (rooms: any[]) => void) {
       handleFirestoreError(error, OperationType.GET, path);
     }
   );
+}
+
+/**
+ * Atomically claim or release a party seat.
+ * A user may occupy only one guest seat in a room. The host seat is never claimable.
+ * Firestore transaction prevents two clients from successfully claiming the same seat.
+ */
+export async function updatePartyRoomSeat(
+  roomId: string,
+  seatIndex: number,
+  user: any | null,
+  hostId?: string
+): Promise<{ success: boolean; seats?: any[]; reason?: string }> {
+  const roomRef = doc(db, 'partyRooms', roomId);
+  try {
+    return await runTransaction(db, async (transaction) => {
+      const snapshot = await transaction.get(roomRef);
+      if (!snapshot.exists()) return { success: false, reason: 'ROOM_NOT_FOUND' };
+
+      const room = snapshot.data() as any;
+      const seats = Array.isArray(room.seats) ? room.seats.map((seat: any) => ({ ...seat })) : [];
+      const target = seats.findIndex((seat: any) => Number(seat.seatIndex) === seatIndex);
+      if (target < 0) return { success: false, reason: 'SEAT_NOT_FOUND' };
+
+      const targetSeat = seats[target];
+      if (hostId && room.host?.id === user?.id) {
+        return { success: false, reason: 'HOST_CANNOT_TAKE_GUEST_SEAT' };
+      }
+
+      if (!user) {
+        // Release only the seat owned by this user (never clear another member).
+        const owned = seats.findIndex((seat: any) => seat.user?.id === hostId);
+        if (owned < 0) return { success: true, seats };
+        seats[owned] = { ...seats[owned], user: null, isSpeaking: false, isMuted: true };
+      } else {
+        if (targetSeat.user && targetSeat.user.id !== user.id) {
+          return { success: false, reason: 'SEAT_OCCUPIED' };
+        }
+        const previous = seats.findIndex((seat: any) => seat.user?.id === user.id);
+        if (previous >= 0 && previous !== target) {
+          seats[previous] = { ...seats[previous], user: null, isSpeaking: false, isMuted: true };
+        }
+        seats[target] = {
+          ...targetSeat,
+          user: {
+            id: user.id,
+            uniqueId: user.uniqueId || user.id,
+            displayName: user.displayName || user.username || 'Guest',
+            avatar: sanitizeAvatarString(user.avatar),
+            level: Number(user.level) || 1,
+            vipTier: Number(user.vipTier) || 0,
+            isVerified: !!user.isVerified,
+          },
+          isSpeaking: false,
+          isMuted: true,
+        };
+      }
+
+      transaction.update(roomRef, {
+        seats,
+        updatedAt: new Date().toISOString(),
+      });
+      return { success: true, seats };
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `partyRooms/${roomId}/seats`);
+    return { success: false, reason: 'FIRESTORE_ERROR' };
+  }
 }
 

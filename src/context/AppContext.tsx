@@ -44,6 +44,7 @@ import {
   subscribeToUserProfile,
   syncPartyRoomToFirestore,
   subscribeToPartyRooms,
+  updatePartyRoomSeat,
   FirebaseUser,
 } from '../services/firebase';
 
@@ -118,7 +119,7 @@ interface AppContextType {
   closePartyRoom: () => void;
   createPartyRoom: (room: PartyRoom) => void;
   updateActivePartyRoomLevel: (level: 1 | 2 | 3) => void;
-  toggleSeat: (seatIndex: number) => void;
+  toggleSeat: (seatIndex: number) => Promise<void>;
   userSeatIndex: number | null;
   isMicMuted: boolean;
   setIsMicMuted: (muted: boolean) => void;
@@ -2169,38 +2170,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     syncPartyRoomToFirestore(updated).catch(() => {});
   };
 
-  const toggleSeat = (seatIndex: number) => {
-    if (!activePartyRoom) return;
+  const toggleSeat = async (seatIndex: number) => {
+    if (!activePartyRoom || !currentUser?.id) return;
 
-    const currentSeat = activePartyRoom.seats[seatIndex];
-    if (userSeatIndex === seatIndex) {
-      // Leave seat
-      const updatedSeats = [...activePartyRoom.seats];
-      updatedSeats[seatIndex] = {
-        ...currentSeat,
-        user: null,
-        isSpeaking: false,
-      };
-      setActivePartyRoom({ ...activePartyRoom, seats: updatedSeats });
-      setUserSeatIndex(null);
-    } else if (!currentSeat.user) {
-      // Take seat
-      const updatedSeats = [...activePartyRoom.seats];
-      if (userSeatIndex !== null) {
-        updatedSeats[userSeatIndex] = {
-          ...updatedSeats[userSeatIndex],
-          user: null,
-          isSpeaking: false,
-        };
-      }
-      updatedSeats[seatIndex] = {
-        ...currentSeat,
-        user: currentUser,
-        isSpeaking: false,
-      };
-      setActivePartyRoom({ ...activePartyRoom, seats: updatedSeats });
-      setUserSeatIndex(seatIndex);
+    const room = activePartyRoom;
+    const currentSeat = room.seats[seatIndex];
+    if (!currentSeat) return;
+
+    // Tapping the current seat releases it; tapping another empty seat moves the user.
+    const isLeaving = userSeatIndex === seatIndex;
+    if (!isLeaving && currentSeat.user && currentSeat.user.id !== currentUser.id) return;
+
+    const result = await updatePartyRoomSeat(
+      room.id,
+      seatIndex,
+      isLeaving ? null : currentUser,
+      currentUser.id
+    );
+    if (!result.success) {
+      console.warn('Party seat update rejected:', result.reason);
+      return;
     }
+
+    const updatedRoom = { ...room, seats: result.seats || room.seats };
+    setActivePartyRoom(updatedRoom);
+    setPartyRooms((prev) => prev.map((item) => item.id === room.id ? updatedRoom : item));
+    setUserSeatIndex(isLeaving ? null : seatIndex);
   };
 
   const openConversation = (conv: Conversation) => {
