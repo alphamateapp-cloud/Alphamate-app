@@ -89,7 +89,7 @@ npm run android:open
  - Go to **Actions** tab on your GitHub repository.
  - Select **Build Android APK and AAB**.
  - Click **Run workflow**.
- - It automatically builds and provides both `alphamate-debug-apk` and `alphamate-release-aab` as downloadable artifacts!
+ - It automatically runs on Node.js 22 LTS (required by Capacitor 8 CLI) and provides `alphamate-debug-apk`, `alphamate-release-apk`, and `alphamate-release-aab` as downloadable artifacts!
 
 ---
 
