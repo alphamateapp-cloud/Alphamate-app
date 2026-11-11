@@ -37,12 +37,6 @@ jobs:
           java-version: '21'
           cache: 'gradle'
 
-      - name: Verify Java 21 Environment
-        run: |
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
-          test "$(java -version 2>&1 | head -n 1 | grep -c '21\\.')" -eq 1
-
       - name: Sync Capacitor Android
         run: npx cap sync android
 
