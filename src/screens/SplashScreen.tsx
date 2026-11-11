@@ -1,13 +1,12 @@
 import React, { useEffect } from 'react';
 import { useApp } from '../context/AppContext';
-import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
 
 export const SplashScreen: React.FC = () => {
   const { setCurrentScreen, isAuthenticated, currentUser, customLogoUrl } = useApp();
 
   const handleNextScreen = () => {
-    // If the user has already logged in/registered, go directly into the app (home)
-    // Never show welcome/register/signin screens repeatedly
+    // Keep the existing navigation behavior: signed-in users go Home,
+    // while new users go to Welcome.
     if (isAuthenticated && currentUser) {
       setCurrentScreen('home');
     } else {
@@ -16,53 +15,65 @@ export const SplashScreen: React.FC = () => {
   };
 
   useEffect(() => {
-    // Automatically transition into the app after 1.8 seconds
-    const timer = setTimeout(() => {
+    // Preserve the existing automatic transition timing.
+    const timer = window.setTimeout(() => {
       handleNextScreen();
     }, 1800);
 
-    return () => clearTimeout(timer);
+    return () => window.clearTimeout(timer);
   }, [isAuthenticated, currentUser]);
+
+  const logoSrc = customLogoUrl || '/alpha-mate-logo-emblem.png';
 
   return (
     <div
       onClick={handleNextScreen}
-      className="relative w-full h-full min-h-[640px] flex flex-col items-center justify-center cursor-pointer select-none overflow-hidden bg-gradient-to-b from-[#09070F] via-[#140D26] to-[#05030A]"
+      className="relative flex h-full min-h-[100dvh] w-full cursor-pointer select-none flex-col items-center justify-center overflow-hidden bg-[#080510] px-5"
+      role="button"
+      aria-label="Continue to Alpha Mate"
     >
-      {/* Ambient glowing radial effects */}
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-80 h-80 rounded-full bg-gradient-to-tr from-[#7928CA]/30 via-[#A855F7]/25 to-[#EC4899]/20 blur-3xl pointer-events-none animate-pulse" />
-      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 rounded-full bg-[#7928CA]/40 blur-2xl pointer-events-none" />
+      {/* Deep purple ambient glow, matching the approved splash concept */}
+      <div className="pointer-events-none absolute left-1/2 top-1/2 h-[min(82vw,560px)] w-[min(82vw,560px)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#7928CA]/25 blur-[100px]" />
+      <div className="pointer-events-none absolute left-1/2 top-[43%] h-[min(58vw,390px)] w-[min(58vw,390px)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#A855F7]/20 blur-[85px]" />
 
-      {/* Subtle background ambient mesh */}
+      {/* Fine background texture */}
       <div
-        className="absolute inset-0 opacity-15 pointer-events-none"
+        className="pointer-events-none absolute inset-0 opacity-[0.12]"
         style={{
-          backgroundImage: 'radial-gradient(circle at 50% 50%, rgba(168, 85, 247, 0.25) 1px, transparent 1px)',
-          backgroundSize: '24px 24px',
+          backgroundImage:
+            'radial-gradient(circle, rgba(192,132,252,0.48) 0.8px, transparent 0.9px)',
+          backgroundSize: '25px 25px',
         }}
       />
 
-      {/* Logo & App Name Container (Strict requirement: ONLY logo and app name, NO tagline on splash) */}
-      <div className="relative z-10 flex flex-col items-center text-center animate-fade-in">
-        <div className="transition-transform duration-700 hover:scale-105 active:scale-95">
-          <AlphaMateLogo
-            size="xl"
-            showText={true}
-            withGlow={true}
-            customLogoUrl={customLogoUrl}
+      {/* Official logo enlarged and centered above the app name */}
+      <div className="relative z-10 flex w-full max-w-md -translate-y-2 flex-col items-center text-center">
+        <div className="relative flex items-center justify-center">
+          <div className="pointer-events-none absolute -inset-8 rounded-[42px] bg-gradient-to-br from-[#7928CA]/35 via-[#A855F7]/25 to-[#EC4899]/25 blur-3xl" />
+          <img
+            src={logoSrc}
+            alt="Alpha Mate official logo"
+            className="relative z-10 h-[clamp(168px,48vw,218px)] w-[clamp(168px,48vw,218px)] rounded-[28px] object-contain drop-shadow-[0_0_28px_rgba(168,85,247,0.58)]"
           />
         </div>
 
-        {/* Subtle loading spinner / pulse */}
-        <div className="mt-12 flex items-center gap-1.5">
-          <div className="w-2 h-2 rounded-full bg-[#A855F7] animate-bounce [animation-delay:-0.3s]" />
-          <div className="w-2 h-2 rounded-full bg-[#EC4899] animate-bounce [animation-delay:-0.15s]" />
-          <div className="w-2 h-2 rounded-full bg-[#C084FC] animate-bounce" />
+        <h1 className="mt-7 text-center text-[clamp(30px,8vw,42px)] font-extrabold leading-none tracking-[0.09em] text-white [text-shadow:0_2px_18px_rgba(168,85,247,0.42)]">
+          ALPHA{' '}
+          <span className="bg-gradient-to-r from-[#D8B4FE] via-[#EC4899] to-[#F43F5E] bg-clip-text text-transparent">
+            MATE
+          </span>
+        </h1>
+
+        {/* Three animated loading dots */}
+        <div className="mt-10 flex items-center justify-center gap-2.5" aria-hidden="true">
+          <span className="h-3.5 w-3.5 animate-bounce rounded-full bg-[#A855F7] [animation-delay:-0.3s]" />
+          <span className="h-3.5 w-3.5 animate-bounce rounded-full bg-[#EC4899] [animation-delay:-0.15s]" />
+          <span className="h-3.5 w-3.5 animate-bounce rounded-full bg-[#C084FC]" />
         </div>
       </div>
 
-      {/* Screen tap hint */}
-      <div className="absolute bottom-8 text-[11px] text-zinc-500 tracking-wider uppercase font-medium">
+      {/* Existing tap-to-continue hint stays at the bottom */}
+      <div className="absolute bottom-[max(28px,env(safe-area-inset-bottom))] z-10 text-center text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500">
         Tap anywhere to continue
       </div>
     </div>
