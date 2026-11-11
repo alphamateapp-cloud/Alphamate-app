@@ -30,12 +30,18 @@ jobs:
       - name: Build Web Application
         run: npm run build
 
-      - name: Set up Java JDK 17
+      - name: Set up Java JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: '17'
+          java-version: '21'
           cache: 'gradle'
+
+      - name: Verify Java 21 Environment
+        run: |
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          test "$(java -version 2>&1 | head -n 1 | grep -c '21\\.')" -eq 1
 
       - name: Sync Capacitor Android
         run: npx cap sync android
@@ -46,17 +52,18 @@ jobs:
       - name: Build Debug APK
         run: |
           cd android
-          ./gradlew assembleDebug --stacktrace
+          ./gradlew --stop
+          ./gradlew --no-daemon assembleDebug --stacktrace
 
       - name: Build Release APK
         run: |
           cd android
-          ./gradlew assembleRelease --stacktrace || echo "assembleRelease completed"
+          ./gradlew --no-daemon assembleRelease --stacktrace
 
       - name: Build Android App Bundle (AAB)
         run: |
           cd android
-          ./gradlew bundleRelease --stacktrace
+          ./gradlew --no-daemon bundleRelease --stacktrace
 
       - name: Verify Generated Binaries
         run: |
