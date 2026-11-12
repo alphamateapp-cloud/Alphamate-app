@@ -22,6 +22,7 @@ import {
   orderBy,
   limit,
   runTransaction,
+  deleteDoc,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
@@ -244,7 +245,7 @@ export async function syncPartyRoomToFirestore(room: any) {
       title: (room.title || '').slice(0, 100),
       category: room.category || 'Chat',
       announcement: (room.announcement || '').slice(0, 200),
-      activeViewers: Number(room.activeViewers) || 1,
+      activeViewers: Math.max(0, Number(room.activeViewers) || 0),
       level: Number(room.level) || 1,
       totalGiftCoins: Number(room.totalGiftCoins) || 0,
       backgroundTheme: room.backgroundTheme || 'from-[#1E103A] to-[#0A0614]',
@@ -377,3 +378,44 @@ export async function updatePartyRoomSeat(
   }
 }
 
+
+
+/** Live directory shared by every signed-in device. This is presence metadata,
+ * not the video transport; actual video requires RTC signaling and TURN. */
+export async function publishLiveStream(stream: any): Promise<void> {
+  if (!stream?.id || !stream?.host?.id) throw new Error('Missing live stream or host ID');
+  await setDoc(doc(db, 'liveStreams', stream.id), {
+    id: stream.id,
+    title: String(stream.title || 'Live').slice(0, 100),
+    host: {
+      id: stream.host.id,
+      uniqueId: stream.host.uniqueId || stream.host.id,
+      displayName: stream.host.displayName || 'Host',
+      username: stream.host.username || '',
+      avatar: sanitizeAvatarString(stream.host.avatar),
+      level: Number(stream.host.level) || 1,
+      vipTier: Number(stream.host.vipTier) || 0,
+      isVerified: !!stream.host.isVerified,
+    },
+    viewerCount: 1,
+    thumbnail: sanitizeAvatarString(stream.thumbnail),
+    category: stream.category || 'Chat',
+    tag: stream.tag || 'Live',
+    isPK: false,
+    durationMinutes: 0,
+    status: 'live',
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+}
+
+export function subscribeToLiveStreams(onUpdate: (streams: any[]) => void): () => void {
+  return onSnapshot(collection(db, 'liveStreams'), snapshot => {
+    onUpdate(snapshot.docs.map(d => ({ ...d.data(), id: d.id }))
+      .filter((s: any) => s.status === 'live' && s.host?.id));
+  }, error => console.error('Live directory listener failed:', error));
+}
+
+export async function unpublishLiveStream(streamId: string): Promise<void> {
+  await deleteDoc(doc(db, 'liveStreams', streamId));
+}

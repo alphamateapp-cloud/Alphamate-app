@@ -47,7 +47,6 @@ import {
 import { User } from '../types';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
-import { MOCK_ROOM_VIEWERS } from '../data/mockData';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
@@ -1388,7 +1387,7 @@ export const LiveStreamScreen: React.FC = () => {
       <RoomViewersModal
         isOpen={showViewersModal}
         onClose={() => setShowViewersModal(false)}
-        viewers={MOCK_ROOM_VIEWERS}
+        viewers={[]}
         hostUser={activeStream.host}
         moderatorIds={moderatorIds}
         totalViewerCount={viewerCount}

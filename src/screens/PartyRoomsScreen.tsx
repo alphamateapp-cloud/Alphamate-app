@@ -56,7 +56,6 @@ import { RoomPKInviteModal, OpponentRoomCandidate } from '../components/party/Ro
 import { RoomPKIncomingModal } from '../components/party/RoomPKIncomingModal';
 import { RoomPKSplitStage } from '../components/party/RoomPKSplitStage';
 import { RoomPKVictoryModal } from '../components/party/RoomPKVictoryModal';
-import { MOCK_ROOM_VIEWERS } from '../data/mockData';
 
 interface FloatingHeart {
   id: number;
@@ -591,69 +590,8 @@ export const PartyRoomsScreen: React.FC = () => {
     showToast(`🎉 Room converted to ${tierConfig.name}! 🚀`);
   };
 
-  // Chat Feed with system, host, room and gift messages
-  const [chatItems, setChatItems] = useState<ChatItem[]>([
-    {
-      id: 'sys_0',
-      sender: {
-        displayName: 'Alpha System',
-        avatar: '/alpha-mate-logo-emblem.png',
-        vipTier: 8,
-      },
-      text: '🎉 Welcome to the Alpha Mate VIP Party Room! Be respectful, send gifts, and tap any empty seat to talk.',
-      type: 'system',
-      timestamp: 'Just now',
-    },
-    {
-      id: 'host_0',
-      sender: {
-        displayName: activePartyRoom?.host.displayName || 'Saif Ali ★',
-        avatar: activePartyRoom?.host.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
-        vipTier: 6,
-        isHost: true,
-      },
-      text: 'Hey everyone! Welcome to tonight’s royal session! Turn up your volume 🎶💜',
-      type: 'host',
-      timestamp: '1m ago',
-    },
-    {
-      id: 'msg_1',
-      sender: {
-        displayName: 'Luna Star 🌙',
-        avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
-        vipTier: 5,
-        level: 45,
-      },
-      text: 'The audio stage sounds incredible tonight! Requesting track 2 next! ✨',
-      type: 'room',
-      timestamp: '1m ago',
-    },
-    {
-      id: 'gift_1',
-      sender: {
-        displayName: 'DJ Kairo 🔥',
-        avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
-        vipTier: 4,
-      },
-      text: 'sent Royal Crown to Host',
-      type: 'gift',
-      giftName: 'Royal Crown',
-      giftIcon: '👑',
-      giftCoins: 500,
-      timestamp: '30s ago',
-    },
-    {
-      id: 'msg_2',
-      sender: {
-        displayName: 'QueenBee',
-        avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80',
-        vipTier: 6,
-      },
-      text: 'Double tap the screen to send neon hearts to the host! ❤️🔥',
-      type: 'room',
-      timestamp: '10s ago',
-    },
-  ]);
+  // Production chat starts empty; only real messages/events may be rendered.
+  const [chatItems, setChatItems] = useState<ChatItem[]>([]);
 
   // 15-Seat Guest Roster ready for real users
   const defaultGuestSeats: PartySeat[] = useMemo(() => {
@@ -731,24 +669,7 @@ export const PartyRoomsScreen: React.FC = () => {
     };
   }, [activePartyRoom, userSeatIndex, isMicMuted]);
 
-  // Periodic random speaking simulation across guest seats
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const targetCount = partyLevel === 1 ? 4 : partyLevel === 2 ? 8 : 15;
-      const randomIdx = Math.floor(Math.random() * targetCount);
-      setSpeakingGuestIndex(randomIdx);
-      setIsHostSpeaking(Math.random() > 0.4);
-    }, 2800);
-
-    const viewerInterval = setInterval(() => {
-      setActiveViewers((v) => Math.max(20, v + Math.floor(Math.random() * 7) - 3));
-    }, 4500);
-
-    return () => {
-      clearInterval(interval);
-      clearInterval(viewerInterval);
-    };
-  }, [partyLevel]);
+  // No synthetic audience or speaking activity in production mode.
 
   // Auto-scroll chat feed
   useEffect(() => {
@@ -1763,7 +1684,7 @@ export const PartyRoomsScreen: React.FC = () => {
         <RoomViewersModal
           isOpen={showViewersModal}
           onClose={() => setShowViewersModal(false)}
-          viewers={MOCK_ROOM_VIEWERS}
+          viewers={[]}
           hostUser={activePartyRoom.host}
           moderatorIds={moderatorIds}
           totalViewerCount={activeViewers}
