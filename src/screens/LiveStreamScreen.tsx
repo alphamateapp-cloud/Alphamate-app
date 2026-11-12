@@ -11,7 +11,8 @@ import { p2pStreamingEngine } from '../services/webrtcService';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 import { copyToClipboard } from '../utils/clipboard';
-import { subscribeToLiveStreamMessages, sendLiveStreamMessage } from '../services/firebase';
+import { db, subscribeToLiveStreamMessages, sendLiveStreamMessage } from '../services/firebase';
+import { doc, onSnapshot } from 'firebase/firestore';
 import {
   X,
   Heart,
@@ -160,6 +161,35 @@ export const LiveStreamScreen: React.FC = () => {
       closeLiveStream();
     }
   }, [activeStream?.id, blockedUserIds, kickedUserIds, currentUser.id]);
+
+  // Remote Viewer: Instant detection when Host closes broadcast
+  const [isBroadcastEnded, setIsBroadcastEnded] = useState(false);
+  const [endCountdown, setEndCountdown] = useState(3);
+
+  useEffect(() => {
+    if (!activeStream?.id || isHost) return;
+
+    const unsub = onSnapshot(doc(db, 'liveStreams', activeStream.id), (snapshot) => {
+      // If doc is deleted by host or marked inactive
+      if (!snapshot.exists() || snapshot.data()?.isActive === false) {
+        setIsBroadcastEnded(true);
+      }
+    });
+
+    return () => unsub();
+  }, [activeStream?.id, isHost]);
+
+  useEffect(() => {
+    if (!isBroadcastEnded) return;
+    if (endCountdown <= 0) {
+      closeLiveStream();
+      return;
+    }
+    const timer = setTimeout(() => {
+      setEndCountdown((prev) => prev - 1);
+    }, 1000);
+    return () => clearTimeout(timer);
+  }, [isBroadcastEnded, endCountdown, closeLiveStream]);
 
   // Moderation Action Handlers
   const handleToggleModerator = (targetUserId: string) => {
@@ -1472,6 +1502,34 @@ export const LiveStreamScreen: React.FC = () => {
           }
         }}
       />
+
+      {/* Broadcast Ended Overlay for Remote Viewers */}
+      {isBroadcastEnded && (
+        <div className="fixed inset-0 z-50 bg-black/90 backdrop-blur-xl flex items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-3xl bg-[#140827] border border-[#EC4899]/40 p-6 text-center shadow-2xl flex flex-col items-center animate-scale-up">
+            <div className="w-16 h-16 rounded-full bg-rose-500/20 border-2 border-rose-500/80 flex items-center justify-center mb-3">
+              <Radio className="w-8 h-8 text-rose-400 animate-pulse" />
+            </div>
+            <div className="px-3 py-0.5 rounded-full bg-rose-500/20 border border-rose-500/30 text-rose-300 font-extrabold text-[10px] uppercase tracking-wider mb-2">
+              Broadcast Ended
+            </div>
+            <h3 className="text-base font-bold text-white mb-1">
+              Host has ended this live broadcast
+            </h3>
+            <p className="text-xs text-zinc-400 mb-5">
+              This session is closed. Automatically redirecting to home in <span className="text-[#EC4899] font-bold">{endCountdown}s</span>...
+            </p>
+            <div className="flex gap-2 w-full">
+              <button
+                onClick={closeLiveStream}
+                className="flex-1 py-3 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold shadow-lg shadow-[#7928CA]/30 cursor-pointer hover:brightness-110 active:scale-95 transition-all"
+              >
+                Return to Home ({endCountdown})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

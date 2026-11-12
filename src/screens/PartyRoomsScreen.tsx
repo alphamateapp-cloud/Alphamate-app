@@ -9,6 +9,7 @@ import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
 import { uploadPartyRoomCover } from '../services/chatService';
 import { sendPartyRoomMessage, subscribeToPartyRoomMessages } from '../services/partyChatService';
+import { getHdImageUrl } from '../utils/imageHd';
 import {
   Radio,
   Mic,
@@ -192,6 +193,7 @@ export const PartyRoomsScreen: React.FC = () => {
   const [showMoreModal, setShowMoreModal] = useState(false);
   const [showSeatActionModal, setShowSeatActionModal] = useState<number | null>(null);
   const [showShareModal, setShowShareModal] = useState(false);
+  const [showExitConfirmModal, setShowExitConfirmModal] = useState(false);
   const [roomBackground, setRoomBackground] = useState<'logo' | 'dp' | 'sunrise' | 'sunset' | 'mosque'>('logo');
   const [showBackgroundModal, setShowBackgroundModal] = useState(false);
   const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
@@ -319,9 +321,34 @@ export const PartyRoomsScreen: React.FC = () => {
       closePartyRoom();
     } else if (kickedUserIds.includes(currentUser.id)) {
       showToast('You have been kicked from this session! 🚫');
-      closePartyRoom();
+      closePartyRoom(false);
     }
   }, [activePartyRoom?.id, blockedUserIds, kickedUserIds, currentUser.id]);
+
+  // Auto-exit remote guests if Host permanently closes this lounge
+  useEffect(() => {
+    if (!activePartyRoom) return;
+    const isCurrentHost = activePartyRoom.host?.id === currentUser?.id;
+    if (isCurrentHost) return;
+
+    const roomStillExists = partyRooms.some((r) => r.id === activePartyRoom.id);
+    if (!roomStillExists && partyRooms.length > 0) {
+      showToast('The Host has closed this lounge! 🚪');
+      closePartyRoom(false);
+    }
+  }, [partyRooms, activePartyRoom?.id, currentUser?.id]);
+
+  const handleExitClick = () => {
+    const isRoomHost = activePartyRoom?.host?.id === currentUser?.id;
+    if (isRoomHost) {
+      setShowExitConfirmModal(true);
+    } else {
+      if (userSeatIndex !== null) {
+        toggleSeat(userSeatIndex);
+      }
+      closePartyRoom(false);
+    }
+  };
 
   // Moderation Action Handlers
   const handleToggleModerator = (targetUserId: string) => {
@@ -908,7 +935,7 @@ export const PartyRoomsScreen: React.FC = () => {
         <PartyRoomAtmosphere
           isMusicPlaying={isMusicPlaying}
           theme={roomBackground}
-          hostAvatar={activePartyRoom.host.avatar}
+          hostAvatar={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar)}
         />
 
         {/* Toast Alert Feedback */}
@@ -971,7 +998,7 @@ export const PartyRoomsScreen: React.FC = () => {
             <div className="flex items-center gap-2 min-w-0">
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <img src={activePartyRoom.coverImageUrl || activePartyRoom.host.avatar} alt="Room cover" className="w-7 h-7 rounded-lg object-cover border border-[#EC4899]/50 shrink-0" />
+                <img src={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar)} alt="Room cover" className="w-7 h-7 rounded-lg object-cover border border-[#EC4899]/50 shrink-0 shadow-sm" />
                 <Radio className="w-3.5 h-3.5 text-[#EC4899] animate-pulse shrink-0" />
                 <h2 className="text-xs sm:text-sm font-extrabold text-white truncate max-w-[120px] sm:max-w-[170px]">
                   {activePartyRoom.title || `${activePartyRoom.host.displayName}'s Party Room`}
@@ -1014,9 +1041,9 @@ export const PartyRoomsScreen: React.FC = () => {
             </div>
             </div>
             <button
-              onClick={closePartyRoom}
-              className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer shrink-0"
-              title="Leave Room"
+              onClick={handleExitClick}
+              className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer shrink-0 active:scale-90 transition-transform"
+              title="Exit Lounge"
             >
               <X className="w-4 h-4" />
             </button>
@@ -2172,6 +2199,90 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         )}
 
+        {/* Host Exit Options Confirmation Modal: Leave Room vs Close Room */}
+        {showExitConfirmModal && (
+          <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="w-full max-w-sm rounded-3xl bg-[#140826] border border-[#A855F7]/30 p-6 shadow-2xl animate-scale-up text-white">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center shadow-md">
+                    <Crown className="w-5 h-5 text-amber-300" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white">Exit Party Lounge</h3>
+                    <p className="text-[10px] text-zinc-400">You are the Host of this lounge</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowExitConfirmModal(false)}
+                  className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <p className="text-xs text-zinc-300 mb-4 leading-relaxed">
+                Choose how you want to leave. You can keep the room open for guests or close it completely:
+              </p>
+
+              <div className="space-y-3 mb-5">
+                {/* 1. Leave Room (Lounge stays open) */}
+                <button
+                  onClick={() => {
+                    setShowExitConfirmModal(false);
+                    closePartyRoom(false);
+                    showToast('Lounge is still active for guests! 🎙️');
+                  }}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1033] border border-[#A855F7]/30 hover:border-[#A855F7] flex items-start gap-3 text-left transition-all cursor-pointer group hover:bg-[#231540]"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-purple-500/20 border border-purple-500/30 flex items-center justify-center shrink-0 mt-0.5 group-hover:scale-105 transition-transform">
+                    <Users className="w-5 h-5 text-purple-300" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white">Leave Room</span>
+                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold uppercase tracking-wider">Keep Open</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
+                      The room remains active. Seated guests and viewers can stay and chat. Your host throne remains reserved.
+                    </p>
+                  </div>
+                </button>
+
+                {/* 2. Close Room (Destroys room) */}
+                <button
+                  onClick={() => {
+                    setShowExitConfirmModal(false);
+                    closePartyRoom(true);
+                    showToast('Party lounge closed permanently 🚪');
+                  }}
+                  className="w-full p-3.5 rounded-2xl bg-rose-950/25 border border-rose-500/30 hover:border-rose-500 flex items-start gap-3 text-left transition-all cursor-pointer group hover:bg-rose-950/40"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center shrink-0 mt-0.5 group-hover:scale-105 transition-transform">
+                    <Trash2 className="w-5 h-5 text-rose-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-rose-200">Close Room</span>
+                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 font-bold uppercase tracking-wider">End Session</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
+                      Permanently terminates this party lounge and removes its card from the discovery feed.
+                    </p>
+                  </div>
+                </button>
+              </div>
+
+              <button
+                onClick={() => setShowExitConfirmModal(false)}
+                className="w-full h-11 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-bold hover:bg-zinc-700 cursor-pointer transition-colors"
+              >
+                Cancel (Stay in Room)
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Party Leaderboard Modal (Active Room) */}
         <PartyLeaderboardModal
           isOpen={showLeaderboardModal}
@@ -2483,13 +2594,16 @@ export const PartyRoomsScreen: React.FC = () => {
                       <div className="flex items-center gap-3">
                         <div className="relative">
                           <img
-                            src={room.coverImageUrl || room.host.avatar}
+                            src={getHdImageUrl(room.coverImageUrl || room.host.avatar)}
                             alt={room.host.displayName}
-                            className={`w-12 h-12 rounded-2xl object-cover ${
-                              isTop1 ? 'border-2 border-amber-400' : 'border-2 border-[#EC4899]'
+                            className={`w-13 h-13 sm:w-14 sm:h-14 rounded-2xl object-cover shadow-md ${
+                              isTop1 ? 'border-2 border-amber-400 shadow-amber-400/20' : 'border-2 border-[#EC4899] shadow-pink-500/20'
                             }`}
                           />
-                          <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#EC4899] flex items-center justify-center">
+                          <span className="absolute -top-1 -left-1 px-1 py-0.2 rounded bg-black/80 border border-white/20 text-[7.5px] font-black text-amber-300">
+                            HD
+                          </span>
+                          <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#EC4899] flex items-center justify-center shadow-sm">
                             <Mic className="w-2.5 h-2.5 text-white" />
                           </div>
                         </div>
@@ -2574,10 +2688,13 @@ export const PartyRoomsScreen: React.FC = () => {
                     <div className="flex items-center gap-3">
                       <div className="relative">
                         <img
-                          src={room.coverImageUrl || room.host.avatar}
+                          src={getHdImageUrl(room.coverImageUrl || room.host.avatar)}
                           alt={room.host.displayName}
                           className="w-11 h-11 rounded-2xl object-cover border border-[#A855F7]"
                         />
+                        <span className="absolute -top-1 -left-1 px-1 py-0.2 rounded bg-black/80 border border-white/20 text-[7.5px] font-black text-amber-300">
+                          HD
+                        </span>
                         <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-[#EC4899] flex items-center justify-center">
                           <Mic className="w-2.5 h-2.5 text-white" />
                         </div>

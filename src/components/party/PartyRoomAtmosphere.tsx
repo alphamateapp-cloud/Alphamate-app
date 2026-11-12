@@ -1,4 +1,5 @@
 import React from 'react';
+import { getHdImageUrl } from '../../utils/imageHd';
 
 export type PartyBackgroundTheme = 'logo' | 'dp' | 'sunrise' | 'sunset' | 'mosque';
 
@@ -13,6 +14,8 @@ export const PartyRoomAtmosphere: React.FC<PartyRoomAtmosphereProps> = ({
   theme = 'logo',
   hostAvatar,
 }) => {
+  const hdAvatar = getHdImageUrl(hostAvatar);
+
   return (
     <div className="absolute inset-0 pointer-events-none overflow-hidden z-0 select-none">
       {/* =====================================================================
@@ -43,26 +46,23 @@ export const PartyRoomAtmosphere: React.FC<PartyRoomAtmosphereProps> = ({
         </div>
       )}
 
-      {/* 2. Theme: Host DP / Profile Picture Backdrop */}
+      {/* 2. Theme: Host DP / Profile Picture Backdrop (CRYSTAL CLEAR HD) */}
       {theme === 'dp' && (
         <div className="absolute inset-0 bg-[#07020F] overflow-hidden">
-          {hostAvatar ? (
-            <div
-              className="absolute inset-0 bg-cover bg-center scale-110 filter blur-xl brightness-50 opacity-60 transition-all duration-700"
-              style={{ backgroundImage: `url(${hostAvatar})` }}
-            />
+          {hdAvatar ? (
+            <>
+              {/* Full HD Backdrop: Crisp, high-resolution display with high-end contrast */}
+              <div
+                className="absolute inset-0 bg-cover bg-center scale-105 brightness-[0.72] contrast-[1.12] transition-all duration-700"
+                style={{ backgroundImage: `url(${hdAvatar})` }}
+              />
+              {/* High-definition cinematic lighting and vignette */}
+              <div className="absolute inset-0 bg-gradient-to-b from-[#090314]/75 via-transparent to-[#05010B]/90" />
+              <div className="absolute inset-0 bg-radial-vignette opacity-50" />
+            </>
           ) : (
             <div className="absolute inset-0 bg-gradient-to-b from-[#180A30] to-[#07020F]" />
           )}
-          {/* Radial spotlight on Host DP in upper-middle */}
-          <div className="absolute inset-0 flex items-center justify-center -mt-16 pointer-events-none">
-            {hostAvatar && (
-              <div className="w-64 h-64 rounded-full overflow-hidden opacity-25 border-4 border-[#EC4899]/30 shadow-[0_0_40px_rgba(236,72,153,0.3)] filter blur-[1px]">
-                <img src={hostAvatar} alt="Host Backdrop" className="w-full h-full object-cover" />
-              </div>
-            )}
-          </div>
-          <div className="absolute inset-0 bg-gradient-to-b from-[#090314]/80 via-[#07020F]/65 to-[#05010B]/95" />
         </div>
       )}
 

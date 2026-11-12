@@ -43,6 +43,7 @@ import {
   getUserProfileFromFirestore,
   subscribeToUserProfile,
   syncPartyRoomToFirestore,
+  deletePartyRoomFromFirestore,
   subscribeToPartyRooms,
   updatePartyRoomSeat,
   syncLiveStreamToFirestore,
@@ -119,7 +120,7 @@ interface AppContextType {
   partyRooms: PartyRoom[];
   activePartyRoom: PartyRoom | null;
   openPartyRoom: (room: PartyRoom) => void;
-  closePartyRoom: () => void;
+  closePartyRoom: (shouldDelete?: boolean) => void;
   createPartyRoom: (room: PartyRoom) => void;
   updateActivePartyRoomLevel: (level: 1 | 2 | 3) => void;
   toggleSeat: (seatIndex: number) => Promise<void>;
@@ -2185,7 +2186,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentScreen('party_room');
   };
 
-  const closePartyRoom = () => {
+  const closePartyRoom = (shouldDelete = false) => {
+    if (activePartyRoom && shouldDelete) {
+      deletePartyRoomFromFirestore(activePartyRoom.id).catch(() => {});
+      setPartyRooms((prev) => prev.filter((r) => r.id !== activePartyRoom.id));
+    }
     setActivePartyRoom(null);
     setUserSeatIndex(null);
     navigateBack();

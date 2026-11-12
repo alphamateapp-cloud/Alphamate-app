@@ -31,11 +31,17 @@ jobs:
         run: npm run build
 
       - name: Set up Java JDK 21
+        id: setup-java
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
           cache: 'gradle'
+
+      - name: Verify Java Environment
+        run: |
+          java -version
+          echo "JAVA_HOME is $JAVA_HOME"
 
       - name: Sync Capacitor Android
         run: npx cap sync android
@@ -44,17 +50,23 @@ jobs:
         run: chmod +x android/gradlew
 
       - name: Build Debug APK
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
         run: |
           cd android
           ./gradlew --stop
           ./gradlew --no-daemon assembleDebug --stacktrace
 
       - name: Build Release APK
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
         run: |
           cd android
           ./gradlew --no-daemon assembleRelease --stacktrace
 
       - name: Build Android App Bundle (AAB)
+        env:
+          JAVA_HOME: ${{ steps.setup-java.outputs.path }}
         run: |
           cd android
           ./gradlew --no-daemon bundleRelease --stacktrace

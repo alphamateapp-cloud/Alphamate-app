@@ -294,6 +294,19 @@ export async function syncPartyRoomToFirestore(room: any) {
 }
 
 /**
+ * Permanently delete Party Room from Firestore when host chooses Close Room
+ */
+export async function deletePartyRoomFromFirestore(roomId: string) {
+  if (!roomId) return;
+  const path = `partyRooms/${roomId}`;
+  try {
+    await deleteDoc(doc(db, 'partyRooms', roomId));
+  } catch (error) {
+    console.warn('Error deleting party room from Firestore:', error);
+  }
+}
+
+/**
  * Real-time Listener for Party Rooms
  */
 export function subscribeToPartyRooms(onUpdate: (rooms: any[]) => void) {
@@ -461,6 +474,12 @@ export async function deleteLiveStreamFromFirestore(streamId: string) {
   if (!streamId) return;
   const path = `liveStreams/${streamId}`;
   try {
+    // Notify all active viewers immediately
+    await updateDoc(doc(db, 'liveStreams', streamId), {
+      isActive: false,
+      endedAt: new Date().toISOString(),
+    }).catch(() => {});
+    // Delete document from active collection
     await deleteDoc(doc(db, 'liveStreams', streamId));
   } catch (error) {
     console.warn('Error deleting live stream from Firestore:', error);
