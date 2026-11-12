@@ -11,6 +11,7 @@ import { p2pStreamingEngine } from '../services/webrtcService';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 import { copyToClipboard } from '../utils/clipboard';
+import { subscribeToLiveStreamMessages, sendLiveStreamMessage } from '../services/firebase';
 import {
   X,
   Heart,
@@ -470,20 +471,51 @@ export const LiveStreamScreen: React.FC = () => {
     }
   };
 
+  // Real-time Live Stream Comments subscription
+  useEffect(() => {
+    if (!activeStream?.id) return;
+    const unsubscribe = subscribeToLiveStreamMessages(activeStream.id, (remoteComments) => {
+      if (remoteComments && remoteComments.length > 0) {
+        setComments(
+          remoteComments.map((rc: any) => ({
+            id: rc.id,
+            user: rc.user || 'Viewer',
+            text: rc.text || '',
+            vipLevel: rc.vipLevel || 0,
+            level: rc.level || 1,
+            isGiftHighlight: rc.isGiftHighlight,
+            isEntryNotice: rc.isEntryNotice,
+          }))
+        );
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [activeStream?.id]);
+
   const handleSendComment = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputComment.trim()) return;
-    setComments((prev) => [
-      ...prev,
-      {
-        id: String(Date.now()),
-        user: currentUser.displayName,
-        text: inputComment.trim(),
-        vipLevel: currentUser.vipTier,
-        level: currentUser.level,
-      },
-    ]);
+    if (!inputComment.trim() || !activeStream?.id) return;
+
+    const newComment = {
+      id: String(Date.now()),
+      user: currentUser.displayName,
+      text: inputComment.trim(),
+      vipLevel: currentUser.vipTier,
+      level: currentUser.level,
+    };
+
+    setComments((prev) => [...prev, newComment]);
     setInputComment('');
+
+    sendLiveStreamMessage(activeStream.id, {
+      user: currentUser.displayName,
+      text: newComment.text,
+      vipLevel: currentUser.vipTier,
+      level: currentUser.level,
+      senderId: currentUser.id,
+    }).catch((err) => console.warn('Failed to send live comment:', err));
   };
 
   // Sync incoming external gift banner to full visual animation

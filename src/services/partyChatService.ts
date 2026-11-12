@@ -20,8 +20,7 @@ export function subscribeToPartyRoomMessages(roomId: string, callback: (messages
 }
 
 export async function sendPartyRoomMessage(roomId: string, message: Omit<PartyRoomMessage, 'id' | 'createdAt'>) {
-  const uid = auth.currentUser?.uid;
-  if (!uid) throw new Error('Please sign in to send a party message.');
+  const uid = auth.currentUser?.uid || message.sender.id || 'guest_user';
   await addDoc(collection(db, 'partyRooms', roomId, 'messages'), {
     ...message,
     senderId: uid,

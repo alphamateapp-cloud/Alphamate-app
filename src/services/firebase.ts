@@ -22,6 +22,9 @@ import {
   orderBy,
   limit,
   runTransaction,
+  addDoc,
+  deleteDoc,
+  serverTimestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
@@ -319,50 +322,81 @@ export async function updatePartyRoomSeat(
   roomId: string,
   seatIndex: number,
   user: any | null,
-  hostId?: string
+  currentUserId?: string
 ): Promise<{ success: boolean; seats?: any[]; reason?: string }> {
   const roomRef = doc(db, 'partyRooms', roomId);
+  const effectiveUserId = user?.id || currentUserId || auth.currentUser?.uid || 'guest_user';
   try {
     return await runTransaction(db, async (transaction) => {
       const snapshot = await transaction.get(roomRef);
       if (!snapshot.exists()) return { success: false, reason: 'ROOM_NOT_FOUND' };
 
       const room = snapshot.data() as any;
-      const seats = Array.isArray(room.seats) ? room.seats.map((seat: any) => ({ ...seat })) : [];
-      const target = seats.findIndex((seat: any) => Number(seat.seatIndex) === seatIndex);
-      if (target < 0) return { success: false, reason: 'SEAT_NOT_FOUND' };
+      const totalCapacity = room.level === 3 ? 15 : room.level === 1 ? 4 : 8;
+      let seats = Array.isArray(room.seats) ? room.seats.map((seat: any) => ({ ...seat })) : [];
 
-      const targetSeat = seats[target];
-      if (hostId && room.host?.id === user?.id) {
-        return { success: false, reason: 'HOST_CANNOT_TAKE_GUEST_SEAT' };
+      // Ensure all seat slots exist up to max capacity
+      while (seats.length < totalCapacity) {
+        seats.push({
+          seatIndex: seats.length,
+          user: null,
+          isMuted: false,
+          isSpeaking: false,
+          receivedCoins: 0,
+        });
       }
 
+      let target = seats.findIndex((seat: any) => Number(seat.seatIndex) === seatIndex);
+      if (target < 0) {
+        seats.push({
+          seatIndex,
+          user: null,
+          isMuted: false,
+          isSpeaking: false,
+          receivedCoins: 0,
+        });
+        target = seats.length - 1;
+      }
+
+      const targetSeat = seats[target];
+
       if (!user) {
-        // Release only the seat owned by this user (never clear another member).
-        const owned = seats.findIndex((seat: any) => seat.user?.id === hostId);
-        if (owned < 0) return { success: true, seats };
-        seats[owned] = { ...seats[owned], user: null, isSpeaking: false, isMuted: true };
+        // Leaving seat: clear any seat occupied by this user or this target seat
+        seats = seats.map((s: any) => {
+          if (s.seatIndex === seatIndex || (s.user && s.user.id === effectiveUserId)) {
+            return { ...s, user: null, isSpeaking: false, isMuted: true };
+          }
+          return s;
+        });
       } else {
+        // Moving or taking seat: if seat is occupied by someone else, return error
         if (targetSeat.user && targetSeat.user.id !== user.id) {
           return { success: false, reason: 'SEAT_OCCUPIED' };
         }
-        const previous = seats.findIndex((seat: any) => seat.user?.id === user.id);
-        if (previous >= 0 && previous !== target) {
-          seats[previous] = { ...seats[previous], user: null, isSpeaking: false, isMuted: true };
-        }
+
+        // Vacate previous seat occupied by this user
+        seats = seats.map((s: any) => {
+          if (s.user && s.user.id === user.id && s.seatIndex !== seatIndex) {
+            return { ...s, user: null, isSpeaking: false, isMuted: true };
+          }
+          return s;
+        });
+
+        // Claim target seat
         seats[target] = {
           ...targetSeat,
+          seatIndex,
           user: {
             id: user.id,
             uniqueId: user.uniqueId || user.id,
-            displayName: user.displayName || user.username || 'Guest',
+            displayName: user.displayName || user.username || 'User',
             avatar: sanitizeAvatarString(user.avatar),
             level: Number(user.level) || 1,
             vipTier: Number(user.vipTier) || 0,
             isVerified: !!user.isVerified,
           },
           isSpeaking: false,
-          isMuted: true,
+          isMuted: false,
         };
       }
 
@@ -377,4 +411,124 @@ export async function updatePartyRoomSeat(
     return { success: false, reason: 'FIRESTORE_ERROR' };
   }
 }
+
+// =========================================================================
+// REAL-TIME LIVE STREAMS (SOLO & PK BROADCASTS)
+// =========================================================================
+
+/**
+ * Sync active Live Stream to Firestore so all devices discover it in real time
+ */
+export async function syncLiveStreamToFirestore(stream: any) {
+  if (!stream?.id) return;
+  const path = `liveStreams/${stream.id}`;
+  try {
+    const sanitizedStream = {
+      id: stream.id,
+      title: (stream.title || 'Live Stream').slice(0, 100),
+      category: stream.category || 'Live',
+      tag: stream.tag || 'Live',
+      viewerCount: Number(stream.viewerCount) || 1,
+      thumbnail: sanitizeAvatarString(stream.thumbnail || stream.host?.avatar),
+      coverImageUrl: typeof stream.coverImageUrl === 'string' && stream.coverImageUrl.startsWith('https://') ? stream.coverImageUrl : '',
+      isPK: !!stream.isPK,
+      isActive: true,
+      durationMinutes: Number(stream.durationMinutes) || 0,
+      host: {
+        id: stream.host?.id || '',
+        uniqueId: stream.host?.uniqueId || stream.host?.id || '',
+        displayName: stream.host?.displayName || 'Host',
+        username: stream.host?.username || '',
+        avatar: sanitizeAvatarString(stream.host?.avatar),
+        level: Number(stream.host?.level) || 1,
+        vipTier: Number(stream.host?.vipTier) || 0,
+        isVerified: !!stream.host?.isVerified,
+      },
+      updatedAt: new Date().toISOString(),
+      createdAt: stream.createdAt || new Date().toISOString(),
+    };
+
+    await setDoc(doc(db, 'liveStreams', stream.id), sanitizedStream, { merge: true });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+/**
+ * Remove Live Stream from Firestore when host finishes broadcast
+ */
+export async function deleteLiveStreamFromFirestore(streamId: string) {
+  if (!streamId) return;
+  const path = `liveStreams/${streamId}`;
+  try {
+    await deleteDoc(doc(db, 'liveStreams', streamId));
+  } catch (error) {
+    console.warn('Error deleting live stream from Firestore:', error);
+  }
+}
+
+/**
+ * Subscribe to real-time Live Streams list across all users/devices
+ */
+export function subscribeToLiveStreams(onUpdate: (streams: any[]) => void) {
+  const path = 'liveStreams';
+  return onSnapshot(
+    collection(db, 'liveStreams'),
+    (snapshot) => {
+      const activeStreams = snapshot.docs
+        .map((docSnap) => ({
+          id: docSnap.id,
+          ...docSnap.data(),
+        }))
+        .filter((s: any) => s.isActive !== false);
+      onUpdate(activeStreams);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.GET, path);
+    }
+  );
+}
+
+/**
+ * Live Stream Comments Real-time Subscription
+ */
+export function subscribeToLiveStreamMessages(
+  streamId: string,
+  onUpdate: (msgs: any[]) => void
+) {
+  const messagesQuery = query(
+    collection(db, 'liveStreams', streamId, 'messages'),
+    orderBy('createdAt', 'asc'),
+    limit(100)
+  );
+  return onSnapshot(
+    messagesQuery,
+    (snapshot) => {
+      const list = snapshot.docs.map((item) => ({
+        id: item.id,
+        ...item.data(),
+      }));
+      onUpdate(list);
+    },
+    (error) => {
+      console.warn('Live stream comments listener error:', error);
+    }
+  );
+}
+
+/**
+ * Send comment to real-time Live Stream
+ */
+export async function sendLiveStreamMessage(streamId: string, message: any) {
+  if (!streamId) return;
+  try {
+    await addDoc(collection(db, 'liveStreams', streamId, 'messages'), {
+      ...message,
+      createdAt: serverTimestamp(),
+    });
+  } catch (error) {
+    console.warn('Failed to send live stream message:', error);
+  }
+}
+
 

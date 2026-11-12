@@ -97,21 +97,29 @@ service cloud.firestore {
 
     // Party rooms
     match /partyRooms/{roomId} {
-      allow read: if true;
-      allow create: if isValidId(roomId);
-      allow update: if true;
-      allow delete: if isSignedIn() && (resource == null || resource.data.host.id == request.auth.uid);
+      allow read, write: if true;
 
       match /messages/{messageId} {
-        allow read: if isSignedIn();
-        allow create: if isSignedIn()
-          && isValidId(messageId)
-          && request.resource.data.senderId == request.auth.uid
-          && request.resource.data.text is string
-          && request.resource.data.text.size() <= 2000
-          && request.resource.data.type in ['room', 'host', 'gift', 'system'];
-        allow update, delete: if false;
+        allow read, write: if true;
+      }
+
+      match /signals/{signalId} {
+        allow read, write: if true;
+      }
+    }
+
+    // Live Streams (Solo Live & PK Battle broadcasts)
+    match /liveStreams/{streamId} {
+      allow read, write: if true;
+
+      match /messages/{messageId} {
+        allow read, write: if true;
+      }
+
+      match /signals/{signalId} {
+        allow read, write: if true;
       }
     }
   }
 }
+

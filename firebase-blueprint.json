@@ -60,6 +60,24 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "roomId", "senderId", "senderName", "text"]
+    },
+    "LiveStream": {
+      "title": "LiveStream",
+      "description": "Active solo and PK video live streams",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 128 },
+        "hostId": { "type": "string", "maxLength": 128 },
+        "hostName": { "type": "string", "maxLength": 64 },
+        "hostAvatar": { "type": "string", "maxLength": 1024 },
+        "viewerCount": { "type": "number" },
+        "category": { "type": "string", "maxLength": 64 },
+        "isActive": { "type": "boolean" },
+        "isPK": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "hostId"]
     }
   },
   "firestore": {
@@ -74,6 +92,10 @@
     "/partyRooms/{roomId}/messages/{messageId}": {
       "schema": "RoomMessage",
       "description": "Chat messages inside a party room"
+    },
+    "/liveStreams/{streamId}": {
+      "schema": "LiveStream",
+      "description": "Active live video broadcasts"
     }
   }
 }

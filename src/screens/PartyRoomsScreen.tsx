@@ -156,6 +156,7 @@ export const PartyRoomsScreen: React.FC = () => {
     updateActivePartyRoomLevel,
     toggleSeat,
     userSeatIndex,
+    setUserSeatIndex,
     isMicMuted,
     setIsMicMuted,
     currentUser,
@@ -601,12 +602,14 @@ export const PartyRoomsScreen: React.FC = () => {
     }));
   }, []);
 
-  // Compute Active Seats array based on current Party Level
+  // Compute Active Seats array based on current Party Level and real-time Firestore room seats
   const activeGuestSeats = useMemo(() => {
     const targetSeatCount = partyLevel === 1 ? 4 : partyLevel === 2 ? 8 : 15;
+    const roomSeats = activePartyRoom?.seats || [];
     const seats: PartySeat[] = [];
 
     for (let i = 0; i < targetSeatCount; i++) {
+      const serverSeat = roomSeats.find((s: any) => Number(s.seatIndex) === i);
       if (userSeatIndex === i) {
         // Current user is in this seat
         seats.push({
@@ -614,24 +617,38 @@ export const PartyRoomsScreen: React.FC = () => {
           user: currentUser,
           isMuted: isMicMuted,
           isSpeaking: !isMicMuted,
-          receivedCoins: 350,
+          receivedCoins: serverSeat?.receivedCoins || 350,
+        });
+      } else if (serverSeat && serverSeat.user) {
+        seats.push({
+          seatIndex: i,
+          user: serverSeat.user,
+          isMuted: !!serverSeat.isMuted,
+          isSpeaking: !!serverSeat.isSpeaking,
+          receivedCoins: Number(serverSeat.receivedCoins) || 0,
         });
       } else {
-        const fallbackSeat = defaultGuestSeats[i];
-        seats.push(
-          fallbackSeat || {
-            seatIndex: i,
-            user: null,
-            isMuted: false,
-            isSpeaking: false,
-            receivedCoins: 0,
-          }
-        );
+        seats.push({
+          seatIndex: i,
+          user: null,
+          isMuted: false,
+          isSpeaking: false,
+          receivedCoins: 0,
+        });
       }
     }
 
     return seats;
-  }, [partyLevel, userSeatIndex, isMicMuted, currentUser, defaultGuestSeats]);
+  }, [partyLevel, userSeatIndex, isMicMuted, currentUser, activePartyRoom?.seats]);
+
+  // Keep userSeatIndex in sync if set by Firestore
+  useEffect(() => {
+    if (!activePartyRoom?.seats) return;
+    const mySeat = activePartyRoom.seats.find((s: any) => s.user?.id === currentUser.id);
+    if (mySeat) {
+      setUserSeatIndex(Number(mySeat.seatIndex));
+    }
+  }, [activePartyRoom?.seats, currentUser.id]);
 
   // Guest seats occupancy and dynamic upgrade eligibility
   const occupiedGuestSeatsCount = useMemo(() => {
@@ -643,28 +660,35 @@ export const PartyRoomsScreen: React.FC = () => {
   const nextTargetTier = partyLevel === 1 ? PARTY_TIER_SETTINGS[1] : partyLevel === 2 ? PARTY_TIER_SETTINGS[2] : null;
   const canHostUpgrade = Boolean(isHost && nextTargetTier && currentUser.level >= nextTargetTier.requiredLevel);
 
-  // Audio Pipeline & Speaking Volume Detection
+  // Audio Pipeline & Speaking Volume Detection for Host and Seated Guests
   useEffect(() => {
     let animFrame: any;
+    const isUserHost = activePartyRoom?.host?.id === currentUser?.id;
+    const canSpeak = (isUserHost && !isHostMicMuted) || (userSeatIndex !== null && !isMicMuted);
 
-    if (activePartyRoom && userSeatIndex !== null && !isMicMuted) {
+    if (activePartyRoom && canSpeak) {
       p2pStreamingEngine.getLocalMediaStream('user', true).catch(() => {});
       p2pStreamingEngine.createPeerConnection(activePartyRoom.id).catch(() => {});
 
       const checkVolume = () => {
         const vol = p2pStreamingEngine.getSpeakingVolume();
-        setIsHostSpeaking(vol > 15);
+        if (isUserHost) {
+          setIsHostSpeaking(vol > 12);
+        }
         animFrame = requestAnimationFrame(checkVolume);
       };
       animFrame = requestAnimationFrame(checkVolume);
     } else {
       p2pStreamingEngine.toggleMicrophone(false);
+      if (isUserHost) {
+        setIsHostSpeaking(false);
+      }
     }
 
     return () => {
       if (animFrame) cancelAnimationFrame(animFrame);
     };
-  }, [activePartyRoom, userSeatIndex, isMicMuted]);
+  }, [activePartyRoom?.id, userSeatIndex, isMicMuted, isHostMicMuted, currentUser?.id]);
 
   // Live room presence and speaking state must come from real room events;
   // never fabricate viewer counts or speaking indicators locally.
@@ -731,9 +755,9 @@ export const PartyRoomsScreen: React.FC = () => {
   // Send Chat Comment
   const handleSendChat = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputChat.trim()) return;
+    if (!activePartyRoom || !inputChat.trim()) return;
 
-    const isHost = activePartyRoom?.host.id === currentUser.id;
+    const isHost = activePartyRoom.host?.id === currentUser.id;
 
     const newMsg: ChatItem = {
       id: `chat_${Date.now()}`,

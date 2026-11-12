@@ -81,6 +81,11 @@ export const HomeScreen: React.FC = () => {
     });
 
     return list.sort((a, b) => {
+      const isLiveA = a.id.startsWith('live_my_') || (a as any).isActive;
+      const isLiveB = b.id.startsWith('live_my_') || (b as any).isActive;
+      if (isLiveA && !isLiveB) return -1;
+      if (!isLiveA && isLiveB) return 1;
+
       const scoreA = (a.totalGiftCoins || 0) * 1.5 + (a.viewerCount || 0) * 50;
       const scoreB = (b.totalGiftCoins || 0) * 1.5 + (b.viewerCount || 0) * 50;
       return scoreB - scoreA;

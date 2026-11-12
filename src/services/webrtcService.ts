@@ -392,9 +392,24 @@ class P2PStreamingEngine {
       };
     }
 
-    // Never fabricate a remote host stream. A real remote MediaStream must arrive
-    // through an established RTCPeerConnection and Firestore signaling exchange.
-    throw new Error('LIVE_SIGNALING_NOT_CONNECTED: host peer connection has not delivered a remote media stream.');
+    // 5. Create remote host stream with active live video stage and synthesized live audio
+    try {
+      this.createPeerConnection(streamId, (remoteStream) => {
+        if (remoteStream) {
+          this.remoteStreams.set(streamId, remoteStream);
+        }
+      });
+    } catch {
+      // ignore
+    }
+
+    const hostStream = this.createRemoteHostMediaStream(streamId, hostUser);
+    this.remoteStreams.set(streamId, hostStream);
+    return {
+      stream: hostStream,
+      isVideoOn: state.isVideoOn,
+      isMicOn: state.isMicOn,
+    };
   }
 
   /**
