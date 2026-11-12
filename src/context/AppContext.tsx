@@ -51,6 +51,12 @@ import {
   subscribeToLiveStreams,
   FirebaseUser,
 } from '../services/firebase';
+import {
+  subscribeToActiveReels,
+  deleteReel,
+  toggleReelLike,
+  Reel,
+} from '../services/reelsService';
 
 interface AppContextType {
   // Navigation & Screen state
@@ -140,6 +146,7 @@ interface AppContextType {
   videos: VideoPost[];
   addVideoPost: (video: Omit<VideoPost, 'id' | 'likes' | 'commentsCount' | 'sharesCount' | 'timestamp'>) => void;
   toggleLikeVideo: (videoId: string) => void;
+  deleteVideoPost: (postId: string, videoKey?: string) => Promise<void>;
 
   // Stories & Friends System
   friendStories: FriendStory[];
@@ -508,10 +515,58 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
+    // Real-time Firestore Reels & Cloudflare R2 Feed Subscription
+    const unsubscribeReels = subscribeToActiveReels((remoteReels: Reel[]) => {
+      if (remoteReels && remoteReels.length > 0) {
+        setVideos((prevLocal) => {
+          const remotePosts: VideoPost[] = remoteReels.map((reel) => ({
+            id: reel.id,
+            user: {
+              id: reel.creator?.id || reel.uid,
+              uniqueId: reel.creator?.uniqueId || reel.uid.slice(0, 8),
+              username: reel.creator?.username || 'creator',
+              displayName: reel.creator?.displayName || 'Alpha Creator',
+              avatar: reel.creator?.avatar || '',
+              bio: '',
+              followersCount: 120,
+              followingCount: 45,
+              likesCount: reel.likesCount || 0,
+              level: reel.creator?.level || 1,
+              xp: 100,
+              nextLevelXp: 500,
+              vipTier: reel.creator?.vipTier || 0,
+              coins: 500,
+              diamonds: 50,
+              isVerified: !!reel.creator?.isVerified,
+            },
+            videoUrl: reel.videoUrl,
+            videoKey: reel.videoKey,
+            thumbnail: reel.thumbnailUrl || reel.creator?.avatar || '',
+            title: reel.title || reel.caption || 'Alpha Moment',
+            description: reel.caption || '',
+            tags: reel.tags || ['#AlphaMoments'],
+            likes: reel.likesCount || 0,
+            commentsCount: reel.commentsCount || 0,
+            sharesCount: 0,
+            viewsCount: reel.viewsCount || 0,
+            isLiked: false,
+            feedCategory: 'For You',
+            timestamp: reel.createdAt ? new Date(reel.createdAt).toLocaleDateString() : 'Just now',
+            postType: 'video',
+          }));
+
+          const remoteIds = new Set(remotePosts.map((r) => r.id));
+          const localOnly = prevLocal.filter((p) => !remoteIds.has(p.id) && !p.videoKey);
+          return [...remotePosts, ...localOnly];
+        });
+      }
+    });
+
     return () => {
       unsubscribeAuth();
       unsubscribeRooms();
       unsubscribeLiveStreams();
+      unsubscribeReels();
     };
   }, []);
 
@@ -2357,15 +2412,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       prev.map((v) => {
         if (v.id === videoId) {
           const isLiked = !v.isLiked;
+          // Sync with Firestore reel likes
+          toggleReelLike(videoId, isLiked).catch(() => {});
           return {
             ...v,
             isLiked,
-            likes: isLiked ? v.likes + 1 : v.likes - 1,
+            likes: isLiked ? v.likes + 1 : Math.max(0, v.likes - 1),
           };
         }
         return v;
       })
     );
+  };
+
+  const deleteVideoPost = async (postId: string, videoKey?: string) => {
+    // 1. Optimistically remove from state
+    setVideos((prev) => prev.filter((v) => v.id !== postId));
+
+    // 2. Permanently remove from Cloudflare R2 and Cloud Firestore
+    try {
+      await deleteReel(postId, videoKey || '');
+    } catch (err) {
+      console.warn('Reel deletion error:', err);
+      throw err;
+    }
   };
 
   const addMyStory = (storyData: {
@@ -2754,6 +2824,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         videos,
         addVideoPost,
         toggleLikeVideo,
+        deleteVideoPost,
         friendStories,
         myStories,
         addMyStory,

@@ -200,6 +200,7 @@ export interface VideoPost {
   musicTitle?: string;
   musicArtist?: string;
   fontStyle?: string;
+  videoKey?: string;
 }
 
 export interface WalletTransaction {

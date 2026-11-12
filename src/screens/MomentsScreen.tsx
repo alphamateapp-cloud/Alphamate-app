@@ -32,12 +32,17 @@ import {
   ShieldCheck,
   Crown,
   Edit3,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
+import { auth } from '../services/firebase';
+import { incrementReelViews } from '../services/reelsService';
 
 export const MomentsScreen: React.FC = () => {
   const {
     videos,
     toggleLikeVideo,
+    deleteVideoPost,
     currentUser,
     setCurrentScreen,
     sendLiveGift,
@@ -99,6 +104,8 @@ export const MomentsScreen: React.FC = () => {
 
   // Three-dots More Action Sheet state
   const [threeDotsVideo, setThreeDotsVideo] = useState<VideoPost | null>(null);
+  const [showDeleteConfirmModal, setShowDeleteConfirmModal] = useState<VideoPost | null>(null);
+  const [isDeletingReel, setIsDeletingReel] = useState(false);
   const [isDownloading, setIsDownloading] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState(0);
 
@@ -499,6 +506,9 @@ export const MomentsScreen: React.FC = () => {
                       autoPlay
                       playsInline
                       className="w-full h-full object-cover"
+                      onPlay={() => {
+                        incrementReelViews(video.id);
+                      }}
                       ref={(el) => {
                         if (el) {
                           if (isPlaying) {
@@ -876,6 +886,27 @@ export const MomentsScreen: React.FC = () => {
                   <span className="text-[10px] text-zinc-400">Report inappropriate or spam content</span>
                 </div>
               </button>
+
+              {/* Option 6: Delete Reel (Strictly for Owner) */}
+              {(threeDotsVideo.user.id === currentUser.id ||
+                (auth.currentUser && threeDotsVideo.user.id === auth.currentUser.uid)) && (
+                <button
+                  onClick={() => {
+                    const target = threeDotsVideo;
+                    setThreeDotsVideo(null);
+                    setShowDeleteConfirmModal(target);
+                  }}
+                  className="w-full py-3 px-4 rounded-2xl bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 flex items-center gap-3 transition-colors cursor-pointer"
+                >
+                  <div className="w-9 h-9 rounded-xl bg-rose-600/30 text-rose-300 flex items-center justify-center">
+                    <Trash2 className="w-4 h-4 text-rose-400" />
+                  </div>
+                  <div className="text-left">
+                    <span className="text-xs font-black text-rose-300 block">Delete Reel (Cloudflare R2)</span>
+                    <span className="text-[10px] text-rose-400/80">Permanently remove video and metadata</span>
+                  </div>
+                </button>
+              )}
             </div>
 
             <button
@@ -884,6 +915,60 @@ export const MomentsScreen: React.FC = () => {
             >
               Cancel
             </button>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          CONFIRM DELETE REEL MODAL (Permanent Cloudflare R2 & Firestore Deletion)
+          ========================================================================= */}
+      {showDeleteConfirmModal && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className="w-full max-w-sm rounded-3xl bg-[#170E28] border border-rose-500/30 p-5 shadow-2xl text-center space-y-4">
+            <div className="w-14 h-14 rounded-full bg-rose-600/20 text-rose-400 mx-auto flex items-center justify-center border border-rose-500/30">
+              <AlertTriangle className="w-7 h-7" />
+            </div>
+
+            <div>
+              <h3 className="text-base font-black text-white">Delete This Reel?</h3>
+              <p className="text-xs text-zinc-300 mt-1.5 leading-relaxed">
+                This will permanently delete the video file from <strong className="text-amber-300">Cloudflare R2 Object Storage</strong> and remove its record from Cloud Firestore.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingReel}
+                onClick={() => setShowDeleteConfirmModal(null)}
+                className="py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-zinc-300 text-xs font-bold transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                disabled={isDeletingReel}
+                onClick={async () => {
+                  if (!showDeleteConfirmModal) return;
+                  setIsDeletingReel(true);
+                  try {
+                    showToast('Deleting video from Cloudflare R2...');
+                    await deleteVideoPost(showDeleteConfirmModal.id, showDeleteConfirmModal.videoKey);
+                    showToast('Reel deleted from R2 and Moments! 🗑️');
+                    setShowDeleteConfirmModal(null);
+                  } catch (err: any) {
+                    showToast(`Deletion failed: ${err?.message || 'Error'}`);
+                  } finally {
+                    setIsDeletingReel(false);
+                  }
+                }}
+                className="py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-rose-700 hover:from-red-500 hover:to-rose-600 text-white text-xs font-black shadow-lg shadow-rose-900/40 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingReel ? 'Deleting...' : 'Delete Now'}</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

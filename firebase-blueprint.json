@@ -78,12 +78,38 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "title", "hostId"]
+    },
+    "Reel": {
+      "title": "Reel",
+      "description": "Short-form video reel uploaded to Cloudflare R2 and indexed in Firestore",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "videoKey": { "type": "string", "maxLength": 256 },
+        "videoUrl": { "type": "string", "maxLength": 1024 },
+        "caption": { "type": "string", "maxLength": 2000 },
+        "thumbnailUrl": { "type": "string", "maxLength": 2048 },
+        "title": { "type": "string", "maxLength": 256 },
+        "likesCount": { "type": "number" },
+        "commentsCount": { "type": "number" },
+        "viewsCount": { "type": "number" },
+        "visibility": { "type": "string", "enum": ["public", "private", "friends"] },
+        "status": { "type": "string", "enum": ["active", "archived", "deleted"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "videoKey", "videoUrl", "status", "visibility"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
       "description": "User profile documents keyed by Firebase auth UID"
+    },
+    "/reels/{reelId}": {
+      "schema": "Reel",
+      "description": "Public and user video reels metadata"
     },
     "/partyRooms/{roomId}": {
       "schema": "PartyRoom",

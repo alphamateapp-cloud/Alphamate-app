@@ -3,6 +3,7 @@ import { useApp } from '../context/AppContext';
 import { p2pStreamingEngine } from '../services/webrtcService';
 import { compressImage } from '../utils/imageCompressor';
 import { playMusicSnippet, stopMusicSnippet } from '../utils/storeAudio';
+import { publishReel, MAX_VIDEO_SIZE_BYTES } from '../services/reelsService';
 import {
   UploadCloud,
   Film,
@@ -73,8 +74,11 @@ export const VideoUploadScreen: React.FC = () => {
 
   // Captured media preview state
   const [capturedVideoUrl, setCapturedVideoUrl] = useState<string | null>(null);
+  const [capturedVideoFile, setCapturedVideoFile] = useState<Blob | File | null>(null);
+  const [capturedVideoMime, setCapturedVideoMime] = useState<string>('video/mp4');
   const [capturedPhotoUrl, setCapturedPhotoUrl] = useState<string | null>(null);
   const [customThumbnail, setCustomThumbnail] = useState<string | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   // =========================================================================
   // POST MODE STATES (PEN TEXT, PHOTO ATTACHMENT, MUSIC, TEXT-OVER-PHOTO)
@@ -202,7 +206,10 @@ export const VideoUploadScreen: React.FC = () => {
         const blob = new Blob(recordedChunksRef.current, { type: mime });
         const videoUrl = URL.createObjectURL(blob);
         setCapturedVideoUrl(videoUrl);
+        setCapturedVideoFile(blob);
+        setCapturedVideoMime(mime);
         setCustomThumbnail(currentUser.avatar);
+        setUploadError(null);
         if (!title) setTitle(`Live Moment ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`);
         p2pStreamingEngine.stopLocalMediaStream();
       };
@@ -285,10 +292,17 @@ export const VideoUploadScreen: React.FC = () => {
   const handleVideoFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      if (file.size > MAX_VIDEO_SIZE_BYTES) {
+        showToast(`Video size (${(file.size / (1024 * 1024)).toFixed(1)} MB) exceeds 100 MB limit.`);
+        return;
+      }
       const url = URL.createObjectURL(file);
       setCapturedVideoUrl(url);
+      setCapturedVideoFile(file);
+      setCapturedVideoMime(file.type || 'video/mp4');
       setCapturedPhotoUrl(null);
       setCustomThumbnail(currentUser.avatar);
+      setUploadError(null);
       if (!title) setTitle(file.name.replace(/\.[^/.]+$/, ''));
       showToast('Video selected from gallery! 🎥');
     }
@@ -353,8 +367,8 @@ export const VideoUploadScreen: React.FC = () => {
     showToast(`Loaded sample: ${sample.label}`);
   };
 
-  // Publish to Moments Feed & User Profile
-  const handlePublish = () => {
+  // Publish to Moments Feed & User Profile (Direct R2 Video Upload + Firestore)
+  const handlePublish = async () => {
     if (activeMode === 'post') {
       if (!postText.trim() && !postAttachedPhoto) {
         showToast('Please write some text or attach a photo for your post ✍️');
@@ -371,6 +385,72 @@ export const VideoUploadScreen: React.FC = () => {
       }
     }
 
+    // REAL R2 VIDEO UPLOAD VIA CLOUDFLARE WORKER & FIRESTORE INDEXING
+    if (activeMode !== 'post' && capturedVideoFile) {
+      if (capturedVideoFile.size > MAX_VIDEO_SIZE_BYTES) {
+        showToast(`Video size exceeds 100 MB limit.`);
+        return;
+      }
+
+      setIsUploading(true);
+      setUploadProgress(5);
+      setUploadError(null);
+
+      try {
+        const result = await publishReel({
+          videoFile: capturedVideoFile,
+          mimeType: capturedVideoMime || 'video/mp4',
+          title: title.trim(),
+          caption: description.trim() || title.trim(),
+          tags: tags.split(' ').filter(Boolean),
+          thumbnailUrl: customThumbnail || currentUser.avatar,
+          visibility: (privacy.toLowerCase() as any) || 'public',
+          creator: {
+            id: currentUser.id,
+            uniqueId: currentUser.uniqueId,
+            displayName: currentUser.displayName,
+            username: currentUser.username,
+            avatar: currentUser.avatar,
+            level: currentUser.level,
+            vipTier: currentUser.vipTier,
+            isVerified: currentUser.isVerified,
+          },
+          onProgress: (pct) => setUploadProgress(pct),
+        });
+
+        stopMusicSnippet();
+
+        addVideoPost({
+          user: currentUser,
+          videoUrl: result.videoUrl,
+          thumbnail: customThumbnail || currentUser.avatar,
+          title: title.trim(),
+          description: description.trim() || title.trim(),
+          tags: tags.split(' ').filter(Boolean),
+          feedCategory: 'For You',
+          postType: 'video',
+        });
+
+        showToast('Reel uploaded to R2 & published to Moments! 🚀');
+        setIsUploading(false);
+        setUploadProgress(0);
+        setCapturedVideoFile(null);
+
+        setActiveTab('moments');
+        setCurrentScreen('moments');
+        return;
+      } catch (err: any) {
+        console.error('Publish reel to R2 failed:', err);
+        const errMsg = err?.message || 'Failed to upload video to Cloudflare R2.';
+        setUploadError(errMsg);
+        showToast(`Upload failed: ${errMsg.slice(0, 60)}`);
+        setIsUploading(false);
+        setUploadProgress(0);
+        return;
+      }
+    }
+
+    // PHOTO / POST MODE OR SAMPLE CLIPS
     setIsUploading(true);
     let progress = 0;
     const interval = setInterval(() => {
@@ -420,7 +500,6 @@ export const VideoUploadScreen: React.FC = () => {
           setIsUploading(false);
           setUploadProgress(0);
 
-          // Route immediately to Moments feed to watch published creation!
           setActiveTab('moments');
           setCurrentScreen('moments');
         }, 350);
@@ -1060,7 +1139,7 @@ export const VideoUploadScreen: React.FC = () => {
         {isUploading && (
           <div className="mb-4">
             <div className="flex justify-between text-xs text-zinc-300 mb-1">
-              <span>Publishing to Alpha Moments...</span>
+              <span>Uploading raw video to Cloudflare R2...</span>
               <span className="font-mono text-[#EC4899] font-bold">{uploadProgress}%</span>
             </div>
             <div className="w-full h-2 rounded-full bg-zinc-800 overflow-hidden">
@@ -1069,6 +1148,26 @@ export const VideoUploadScreen: React.FC = () => {
                 style={{ width: `${uploadProgress}%` }}
               />
             </div>
+          </div>
+        )}
+
+        {/* Upload Error Banner if failed */}
+        {uploadError && (
+          <div className="mb-4 p-3 rounded-2xl bg-rose-950/80 border border-rose-500/40 text-rose-200 text-xs flex flex-col gap-1.5 animate-shake">
+            <div className="flex items-center justify-between font-bold text-rose-300">
+              <span className="flex items-center gap-1.5">
+                <X className="w-3.5 h-3.5 text-rose-400" />
+                Upload Failed
+              </span>
+              <button
+                type="button"
+                onClick={() => setUploadError(null)}
+                className="text-zinc-400 hover:text-white"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-[11px] leading-relaxed break-words">{uploadError}</p>
           </div>
         )}
 

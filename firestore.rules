@@ -120,6 +120,57 @@ service cloud.firestore {
         allow read, write: if true;
       }
     }
+
+    // Alpha Mate Reels (Cloudflare R2 + Firestore integration)
+    function isValidReel(data) {
+      return data.uid is string && data.uid == request.auth.uid
+        && data.videoKey is string && data.videoKey.size() <= 256
+        && data.videoUrl is string && data.videoUrl.size() <= 1024
+        && data.status in ['active', 'archived', 'deleted']
+        && data.visibility in ['public', 'private', 'friends']
+        && (!('caption' in data) || (data.caption is string && data.caption.size() <= 2000))
+        && (!('title' in data) || (data.title is string && data.title.size() <= 256))
+        && (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 2048));
+    }
+
+    match /reels/{reelId} {
+      // Public users may read only active and public reels; owners can read their own reels
+      allow get: if (resource.data.status == 'active' && resource.data.visibility == 'public')
+                 || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow list: if (resource.data.status == 'active' && resource.data.visibility == 'public')
+                  || (isSignedIn() && resource.data.uid == request.auth.uid);
+
+      // Only authenticated users may create reels, document UID must match auth.uid
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && isValidReel(request.resource.data);
+
+      // Users may update only their own reel metadata without modifying protected fields (uid, videoKey)
+      // Viewers can update interaction counters (likesCount, viewsCount)
+      allow update: if isSignedIn() && (
+        (resource.data.uid == request.auth.uid
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.videoKey == resource.data.videoKey
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'caption', 'thumbnailUrl', 'title', 'tags', 'visibility', 'status',
+            'updatedAt', 'likesCount', 'commentsCount', 'viewsCount'
+          ]))
+        || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'viewsCount']))
+      );
+
+      // Only owner may delete a reel
+      allow delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+
+      // Reels Comments subcollection
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if isSignedIn()
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 500;
+        allow update, delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+      }
+    }
   }
 }
 
