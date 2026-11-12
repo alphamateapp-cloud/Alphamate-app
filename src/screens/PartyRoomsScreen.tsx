@@ -907,7 +907,7 @@ export const PartyRoomsScreen: React.FC = () => {
         {/* =====================================================================
             2. ROOM HEADER & LEVEL SWITCHER (Top Bar)
            ===================================================================== */}
-        <div className="relative z-20 pt-2 px-3 pb-2 flex items-center justify-between border-b border-[#A855F7]/15 bg-black/45 backdrop-blur-md">
+        <div className="relative z-20 pt-3 px-3 pb-3 flex flex-col gap-2 items-stretch border-b border-[#A855F7]/15 bg-black/45 backdrop-blur-md">
           {/* Left: Back/Leave Button & Room Info */}
           <div className="flex items-center gap-2 min-w-0">
             <button
@@ -959,8 +959,8 @@ export const PartyRoomsScreen: React.FC = () => {
             </div>
           </div>
 
-          {/* Right: Party Level Switcher (Lv 1 / Lv 2 / Lv 3) + Leaderboard + Background + Speaker + Share */}
-          <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+          {/* Separate second row prevents tier buttons overlapping PK/actions on narrow phones */}
+          <div className="flex items-center justify-end flex-wrap gap-1.5 w-full pt-1">
             {/* Dynamic Level Switcher Capsule (1 Host + 4, 1 Host + 8, 1 Host + 15) */}
             <div
               className="flex items-center p-0.5 rounded-full bg-[#180C2E]/90 border border-[#A855F7]/40 shadow-inner"
@@ -2204,11 +2204,20 @@ export const PartyRoomsScreen: React.FC = () => {
             />
           ) : (
             <div
-              className={`rounded-full transition-all flex items-center justify-center border-2 border-dashed border-[#A855F7]/40 bg-[#160A2C]/60 hover:border-[#EC4899] hover:bg-[#1E0D3A] ${sizeClasses}`}
+              className={`relative flex items-center justify-center transition-transform duration-200 group-hover:-translate-y-1 ${sizeClasses}`}
+              title={`Tap to join seat ${seat.seatIndex + 1}`}
             >
-              <div className="flex flex-col items-center justify-center text-zinc-400 group-hover:text-[#EC4899] transition-colors">
-                <Plus className="w-3.5 h-3.5" />
-                <span className="text-[7.5px] font-bold">{seat.seatIndex + 1}</span>
+              {/* Golden lounge sofa: backrest, upholstered cushion, armrests and legs */}
+              <div className="absolute inset-x-[13%] top-[10%] h-[59%] rounded-t-[42%] rounded-b-lg border-2 border-[#FFE9A0] bg-gradient-to-b from-[#FFF1A5] via-[#DCA43B] to-[#875019] shadow-[0_0_13px_rgba(255,194,67,0.55)]" />
+              <div className="absolute inset-x-[18%] top-[39%] h-[29%] rounded-lg border border-[#FFE3A0]/80 bg-gradient-to-b from-[#F7CD6D] to-[#A96920]" />
+              <div className="absolute left-[3%] top-[43%] w-[20%] h-[37%] rounded-md border border-[#FFE1A0] bg-gradient-to-r from-[#9A5B1B] to-[#F6C45E]" />
+              <div className="absolute right-[3%] top-[43%] w-[20%] h-[37%] rounded-md border border-[#FFE1A0] bg-gradient-to-l from-[#9A5B1B] to-[#F6C45E]" />
+              <div className="absolute inset-x-[12%] top-[67%] h-[16%] rounded-b-md border border-[#E9B44D] bg-gradient-to-b from-[#C88B2E] to-[#6D3912]" />
+              <div className="absolute left-[19%] top-[81%] w-[9%] h-[10%] rounded-b-sm bg-[#B77A29]" />
+              <div className="absolute right-[19%] top-[81%] w-[9%] h-[10%] rounded-b-sm bg-[#B77A29]" />
+              <div className="absolute top-[24%] flex flex-col items-center text-[#4B270D] drop-shadow-[0_1px_1px_rgba(255,255,255,0.8)]">
+                <Plus className="w-3 h-3 stroke-[3]" />
+                <span className="text-[7px] font-black leading-none">{seat.seatIndex + 1}</span>
               </div>
             </div>
           )}
