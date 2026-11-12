@@ -86,6 +86,7 @@ export interface LiveStream {
   blockedUserIds?: string[];
   viewers?: User[];
   totalGiftCoins?: number;
+  coverImageUrl?: string;
   country?: string;
   countryFlag?: string;
 }
@@ -113,6 +114,7 @@ export interface PartyRoom {
   nowPlaying?: string;
   level?: 1 | 2 | 3;
   totalGiftCoins?: number;
+  coverImageUrl?: string;
   country?: string;
   countryFlag?: string;
   moderatorIds?: string[];

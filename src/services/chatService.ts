@@ -15,6 +15,16 @@ const uid = () => {
 };
 const safeId = (value: string) => value.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
 
+export async function uploadPartyRoomCover(file: File): Promise<string> {
+  const me = uid();
+  if (!file.type.startsWith('image/')) throw new Error('Please choose an image file.');
+  if (file.size > 5 * 1024 * 1024) throw new Error('Room cover must be 5 MB or smaller.');
+  const path = `partyRoomCovers/${me}/${Date.now()}_${safeId(file.name)}`;
+  const objectRef = ref(storage, path);
+  await uploadBytes(objectRef, file, { contentType: file.type });
+  return getDownloadURL(objectRef);
+}
+
 export type ChatProfile = { id: string; displayName: string; username?: string; avatar?: string };
 export type ChatPayload = { text?: string; mediaUrl?: string; mediaType?: 'image'|'video'|'audio'|'file'; replyTo?: string; linkUrl?: string };
 

@@ -247,6 +247,7 @@ export async function syncPartyRoomToFirestore(room: any) {
       activeViewers: Number(room.activeViewers) || 1,
       level: Number(room.level) || 1,
       totalGiftCoins: Number(room.totalGiftCoins) || 0,
+      coverImageUrl: typeof room.coverImageUrl === 'string' && room.coverImageUrl.startsWith('https://') ? room.coverImageUrl : '',
       backgroundTheme: room.backgroundTheme || 'from-[#1E103A] to-[#0A0614]',
       nowPlaying: room.nowPlaying || '',
       moderatorIds: (room.moderatorIds || []).slice(0, 10),
