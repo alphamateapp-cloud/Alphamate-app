@@ -56,6 +56,7 @@ import { RoomPKInviteModal, OpponentRoomCandidate } from '../components/party/Ro
 import { RoomPKIncomingModal } from '../components/party/RoomPKIncomingModal';
 import { RoomPKSplitStage } from '../components/party/RoomPKSplitStage';
 import { RoomPKVictoryModal } from '../components/party/RoomPKVictoryModal';
+import { MOCK_ROOM_VIEWERS } from '../data/mockData';
 
 interface FloatingHeart {
   id: number;
@@ -590,8 +591,69 @@ export const PartyRoomsScreen: React.FC = () => {
     showToast(`🎉 Room converted to ${tierConfig.name}! 🚀`);
   };
 
-  // Production chat starts empty; only real messages/events may be rendered.
-  const [chatItems, setChatItems] = useState<ChatItem[]>([]);
+  // Chat Feed with system, host, room and gift messages
+  const [chatItems, setChatItems] = useState<ChatItem[]>([
+    {
+      id: 'sys_0',
+      sender: {
+        displayName: 'Alpha System',
+        avatar: '/alpha-mate-logo-emblem.png',
+        vipTier: 8,
+      },
+      text: '🎉 Welcome to the Alpha Mate VIP Party Room! Be respectful, send gifts, and tap any empty seat to talk.',
+      type: 'system',
+      timestamp: 'Just now',
+    },
+    {
+      id: 'host_0',
+      sender: {
+        displayName: activePartyRoom?.host.displayName || 'Saif Ali ★',
+        avatar: activePartyRoom?.host.avatar || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
+        vipTier: 6,
+        isHost: true,
+      },
+      text: 'Hey everyone! Welcome to tonight’s royal session! Turn up your volume 🎶💜',
+      type: 'host',
+      timestamp: '1m ago',
+    },
+    {
+      id: 'msg_1',
+      sender: {
+        displayName: 'Luna Star 🌙',
+        avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
+        vipTier: 5,
+        level: 45,
+      },
+      text: 'The audio stage sounds incredible tonight! Requesting track 2 next! ✨',
+      type: 'room',
+      timestamp: '1m ago',
+    },
+    {
+      id: 'gift_1',
+      sender: {
+        displayName: 'DJ Kairo 🔥',
+        avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
+        vipTier: 4,
+      },
+      text: 'sent Royal Crown to Host',
+      type: 'gift',
+      giftName: 'Royal Crown',
+      giftIcon: '👑',
+      giftCoins: 500,
+      timestamp: '30s ago',
+    },
+    {
+      id: 'msg_2',
+      sender: {
+        displayName: 'QueenBee',
+        avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80',
+        vipTier: 6,
+      },
+      text: 'Double tap the screen to send neon hearts to the host! ❤️🔥',
+      type: 'room',
+      timestamp: '10s ago',
+    },
+  ]);
 
   // 15-Seat Guest Roster ready for real users
   const defaultGuestSeats: PartySeat[] = useMemo(() => {
@@ -669,7 +731,24 @@ export const PartyRoomsScreen: React.FC = () => {
     };
   }, [activePartyRoom, userSeatIndex, isMicMuted]);
 
-  // No synthetic audience or speaking activity in production mode.
+  // Periodic random speaking simulation across guest seats
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const targetCount = partyLevel === 1 ? 4 : partyLevel === 2 ? 8 : 15;
+      const randomIdx = Math.floor(Math.random() * targetCount);
+      setSpeakingGuestIndex(randomIdx);
+      setIsHostSpeaking(Math.random() > 0.4);
+    }, 2800);
+
+    const viewerInterval = setInterval(() => {
+      setActiveViewers((v) => Math.max(20, v + Math.floor(Math.random() * 7) - 3));
+    }, 4500);
+
+    return () => {
+      clearInterval(interval);
+      clearInterval(viewerInterval);
+    };
+  }, [partyLevel]);
 
   // Auto-scroll chat feed
   useEffect(() => {
@@ -842,7 +921,7 @@ export const PartyRoomsScreen: React.FC = () => {
           spawnHeart(e.clientX + 10, e.clientY - 20);
         }}
         onTouchStart={handleScreenTouchOrClick}
-        className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
+        className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
       >
         {/* =====================================================================
             1. COMPLETE NIGHTCLUB PARTY ROOM BACKGROUND (5 Custom Themes)
@@ -907,7 +986,7 @@ export const PartyRoomsScreen: React.FC = () => {
         {/* =====================================================================
             2. ROOM HEADER & LEVEL SWITCHER (Top Bar)
            ===================================================================== */}
-        <div className="relative z-20 pt-3 px-3 pb-3 flex flex-col gap-2 items-stretch border-b border-[#A855F7]/15 bg-black/45 backdrop-blur-md">
+        <div className="relative z-20 pt-2 px-3 pb-2 flex flex-col gap-2 border-b border-[#A855F7]/15 bg-black/45 backdrop-blur-md shrink-0">
           {/* Left: Back/Leave Button & Room Info */}
           <div className="flex items-center gap-2 min-w-0">
             <button
@@ -933,6 +1012,8 @@ export const PartyRoomsScreen: React.FC = () => {
                   <Eye className="w-3 h-3 text-cyan-400" />
                   <span>{activeViewers.toLocaleString()}</span>
                 </button>
+                <span className="text-[9px] font-extrabold text-white truncate max-w-[92px]">{activePartyRoom.host.displayName}</span>
+                <span className="text-[7px] text-emerald-300 font-bold shrink-0">HOST</span>
                 <span>•</span>
                 {/* Party Room Leaderboard Capsule */}
                 <button
@@ -959,8 +1040,8 @@ export const PartyRoomsScreen: React.FC = () => {
             </div>
           </div>
 
-          {/* Separate second row prevents tier buttons overlapping PK/actions on narrow phones */}
-          <div className="flex items-center justify-end flex-wrap gap-1.5 w-full pt-1">
+          {/* Right: Party Level Switcher (Lv 1 / Lv 2 / Lv 3) + Leaderboard + Background + Speaker + Share */}
+          <div className="flex items-center justify-end gap-1 sm:gap-1.5 w-full min-w-0">
             {/* Dynamic Level Switcher Capsule (1 Host + 4, 1 Host + 8, 1 Host + 15) */}
             <div
               className="flex items-center p-0.5 rounded-full bg-[#180C2E]/90 border border-[#A855F7]/40 shadow-inner"
@@ -1160,23 +1241,6 @@ export const PartyRoomsScreen: React.FC = () => {
             >
               {isHostMicMuted ? <MicOff className="w-2.5 h-2.5" /> : <Mic className="w-2.5 h-2.5" />}
             </div>
-          </div>
-
-          {/* Host Display Name & Host ID */}
-          <div className="mt-0.5 flex items-center gap-1.5">
-            <span className="text-xs font-black text-white tracking-wide truncate max-w-[140px]">
-              {activePartyRoom.host.displayName}
-            </span>
-            <span className="w-3 h-3 rounded-full bg-[#EC4899] text-white text-[7.5px] font-black flex items-center justify-center shadow-sm">
-              ✓
-            </span>
-            <button
-              onClick={() => handleCopyHostId(activePartyRoom.host.uniqueId || 'AM_772091')}
-              className="text-[8.5px] font-mono text-zinc-400 hover:text-white px-1.5 py-0.2 rounded bg-black/40 border border-white/10 cursor-pointer"
-              title="Click to copy Host ID"
-            >
-              ID: {activePartyRoom.host.uniqueId || 'AM_772091'}
-            </button>
           </div>
 
           {/* Host Badges: Level Badge + VIP Badge + Received Coins + Follow Button */}
@@ -1684,7 +1748,7 @@ export const PartyRoomsScreen: React.FC = () => {
         <RoomViewersModal
           isOpen={showViewersModal}
           onClose={() => setShowViewersModal(false)}
-          viewers={[]}
+          viewers={MOCK_ROOM_VIEWERS}
           hostUser={activePartyRoom.host}
           moderatorIds={moderatorIds}
           totalViewerCount={activeViewers}
@@ -2204,20 +2268,11 @@ export const PartyRoomsScreen: React.FC = () => {
             />
           ) : (
             <div
-              className={`relative flex items-center justify-center transition-transform duration-200 group-hover:-translate-y-1 ${sizeClasses}`}
-              title={`Tap to join seat ${seat.seatIndex + 1}`}
+              className={`rounded-full transition-all flex items-center justify-center border-2 border-dashed border-[#A855F7]/40 bg-[#160A2C]/60 hover:border-[#EC4899] hover:bg-[#1E0D3A] ${sizeClasses}`}
             >
-              {/* Golden lounge sofa: backrest, upholstered cushion, armrests and legs */}
-              <div className="absolute inset-x-[13%] top-[10%] h-[59%] rounded-t-[42%] rounded-b-lg border-2 border-[#FFE9A0] bg-gradient-to-b from-[#FFF1A5] via-[#DCA43B] to-[#875019] shadow-[0_0_13px_rgba(255,194,67,0.55)]" />
-              <div className="absolute inset-x-[18%] top-[39%] h-[29%] rounded-lg border border-[#FFE3A0]/80 bg-gradient-to-b from-[#F7CD6D] to-[#A96920]" />
-              <div className="absolute left-[3%] top-[43%] w-[20%] h-[37%] rounded-md border border-[#FFE1A0] bg-gradient-to-r from-[#9A5B1B] to-[#F6C45E]" />
-              <div className="absolute right-[3%] top-[43%] w-[20%] h-[37%] rounded-md border border-[#FFE1A0] bg-gradient-to-l from-[#9A5B1B] to-[#F6C45E]" />
-              <div className="absolute inset-x-[12%] top-[67%] h-[16%] rounded-b-md border border-[#E9B44D] bg-gradient-to-b from-[#C88B2E] to-[#6D3912]" />
-              <div className="absolute left-[19%] top-[81%] w-[9%] h-[10%] rounded-b-sm bg-[#B77A29]" />
-              <div className="absolute right-[19%] top-[81%] w-[9%] h-[10%] rounded-b-sm bg-[#B77A29]" />
-              <div className="absolute top-[24%] flex flex-col items-center text-[#4B270D] drop-shadow-[0_1px_1px_rgba(255,255,255,0.8)]">
-                <Plus className="w-3 h-3 stroke-[3]" />
-                <span className="text-[7px] font-black leading-none">{seat.seatIndex + 1}</span>
+              <div className="flex flex-col items-center justify-center text-zinc-400 group-hover:text-[#EC4899] transition-colors">
+                <Plus className="w-3.5 h-3.5" />
+                <span className="text-[7.5px] font-bold">{seat.seatIndex + 1}</span>
               </div>
             </div>
           )}

@@ -33,6 +33,68 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+
+    // Alpha Mate private and group chat
+    function chatMember(chatId) {
+      return isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/chats/$(chatId)).data.participantIds && (!('memberStatus' in get(/databases/$(database)/documents/chats/$(chatId)).data) || get(/databases/$(database)/documents/chats/$(chatId)).data.memberStatus[request.auth.uid] == 'joined');
+    }
+    match /chatRequests/{requestId} {
+      allow create: if isSignedIn()
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.recipientId is string
+        && request.resource.data.recipientId != request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow get, list: if isSignedIn()
+        && (resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow update: if isSignedIn()
+        && resource.data.recipientId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','chatId','updatedAt'])
+        && request.resource.data.status in ['accepted','rejected','blocked'];
+      allow delete: if false;
+    }
+    match /chats/{chatId} {
+      allow create: if isSignedIn()
+        && request.auth.uid in request.resource.data.participantIds
+        && request.resource.data.participantIds is list
+        && request.resource.data.participantIds.size() >= 2
+        && request.resource.data.participantIds.size() <= 101;
+      allow get, list: if isSignedIn() && request.auth.uid in resource.data.participantIds;
+      allow update: if isSignedIn() && request.resource.data.participantIds == resource.data.participantIds
+        && ((request.auth.uid in resource.data.participantIds
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage','lastSenderId','updatedAt','unreadBy','memberStatus']))
+          || (resource.data.memberStatus[request.auth.uid] == 'invited'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['memberStatus','updatedAt'])
+            && request.resource.data.memberStatus[request.auth.uid] in ['joined','declined']));
+      allow delete: if false;
+      match /messages/{messageId} {
+        allow get, list: if chatMember(chatId);
+        allow create: if chatMember(chatId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 4000;
+        allow update: if chatMember(chatId)
+          && (resource.data.senderId == request.auth.uid
+            || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readBy','deliveredTo','deletedFor']));
+        allow delete: if false;
+      }
+    }
+    match /groupInvites/{inviteId} {
+      allow create: if isSignedIn() && request.resource.data.inviterId == request.auth.uid;
+      allow get, list: if isSignedIn() && (resource.data.inviteeId == request.auth.uid || resource.data.inviterId == request.auth.uid);
+      allow update: if isSignedIn() && resource.data.inviteeId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','respondedAt'])
+        && request.resource.data.status in ['accepted','declined'];
+      allow delete: if false;
+    }
+    match /presence/{userId} {
+      allow read: if isSignedIn();
+      allow create, update: if isOwner(userId);
+      allow delete: if isOwner(userId);
+    }
+    match /users/{userId}/blockedUsers/{blockedId} {
+      allow read, write: if isOwner(userId);
+    }
+
     // Party rooms
     match /partyRooms/{roomId} {
       allow read: if true;

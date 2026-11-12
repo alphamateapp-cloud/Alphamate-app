@@ -45,9 +45,6 @@ import {
   syncPartyRoomToFirestore,
   subscribeToPartyRooms,
   updatePartyRoomSeat,
-  publishLiveStream,
-  subscribeToLiveStreams,
-  unpublishLiveStream,
   FirebaseUser,
 } from '../services/firebase';
 
@@ -478,33 +475,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
-    // Remote snapshots are authoritative; never reinsert local demo rooms.
     const unsubscribeRooms = subscribeToPartyRooms((remoteRooms) => {
-      setPartyRooms(remoteRooms as PartyRoom[]);
-      setActivePartyRoom(prev => prev
-        ? (remoteRooms.find((r: any) => r.id === prev.id) as PartyRoom || prev)
-        : null);
-    });
-    const unsubscribeLive = subscribeToLiveStreams((remoteStreams) => {
-      setLiveStreams(remoteStreams as LiveStream[]);
+      if (remoteRooms && remoteRooms.length > 0) {
+        setPartyRooms((prev) => {
+          const remoteIds = new Set(remoteRooms.map((r: any) => r.id));
+          const uniqueExisting = prev.filter((r) => !remoteIds.has(r.id));
+          return [...remoteRooms, ...uniqueExisting];
+        });
+      }
     });
 
     return () => {
       unsubscribeAuth();
       unsubscribeRooms();
-      unsubscribeLive();
     };
   }, []);
 
   // Live Streams & PK
-  const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
+  const [liveStreams, setLiveStreams] = useState<LiveStream[]>(MOCK_LIVE_STREAMS);
   const [activeStream, setActiveStream] = useState<LiveStream | null>(null);
   const [activePKBattle, setActivePKBattle] = useState<LiveStream | null>(null);
   const [pkScores, setPkScores] = useState<{ left: number; right: number }>({ left: 3420, right: 2890 });
   const [activeGiftBanner, setActiveGiftBanner] = useState<{ gift: Gift; sender: string; recipient: string } | null>(null);
 
   // Audio Party Rooms
-  const [partyRooms, setPartyRooms] = useState<PartyRoom[]>([]);
+  const [partyRooms, setPartyRooms] = useState<PartyRoom[]>(MOCK_PARTY_ROOMS);
   const [activePartyRoom, setActivePartyRoom] = useState<PartyRoom | null>(null);
   const [userSeatIndex, setUserSeatIndex] = useState<number | null>(null);
   const [isMicMuted, setIsMicMuted] = useState<boolean>(false);
@@ -2089,19 +2084,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     } else {
       setActiveStream(stream);
       setCurrentScreen('live_stream');
-      if (stream.host.id === currentUser.id && stream.id.startsWith('live_my_')) {
-        publishLiveStream(stream).catch(error => {
-          console.error('Live publish failed; other devices will not see this room:', error);
-          alert('Live room could not be published. Check Firebase permissions and connection.');
-        });
-      }
     }
   };
 
   const closeLiveStream = () => {
-    if (activeStream?.host.id === currentUser.id && activeStream.id.startsWith('live_my_')) {
-      unpublishLiveStream(activeStream.id).catch(error => console.error('Failed to close live room:', error));
-    }
     setActiveStream(null);
     navigateBack();
   };
@@ -2172,10 +2158,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const createPartyRoom = (room: PartyRoom) => {
     setPartyRooms((prev) => [room, ...prev]);
-    syncPartyRoomToFirestore(room).catch(error => {
-      console.error('Party publish failed:', error);
-      alert('Party room could not be published. Check Firebase permissions and connection.');
-    });
+    syncPartyRoomToFirestore(room).catch(() => {});
     openPartyRoom(room);
   };
 

@@ -1,11 +1,5 @@
 apply plugin: 'com.android.application'
 
-def signingStoreFile = System.getenv('ALPHAMATE_STORE_FILE') ?: findProperty('ALPHAMATE_STORE_FILE')
-def signingStorePassword = System.getenv('ALPHAMATE_STORE_PASSWORD') ?: findProperty('ALPHAMATE_STORE_PASSWORD')
-def signingKeyAlias = System.getenv('ALPHAMATE_KEY_ALIAS') ?: findProperty('ALPHAMATE_KEY_ALIAS')
-def signingKeyPassword = System.getenv('ALPHAMATE_KEY_PASSWORD') ?: findProperty('ALPHAMATE_KEY_PASSWORD')
-def hasReleaseSigning = signingStoreFile && signingStorePassword && signingKeyAlias && signingKeyPassword && file(signingStoreFile).exists()
-
 android {
     namespace = "com.alphamate.liveparty"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -26,21 +20,8 @@ android {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
-    signingConfigs {
-        release {
-            if (hasReleaseSigning) {
-                storeFile file(signingStoreFile)
-                storePassword signingStorePassword
-                keyAlias signingKeyAlias
-                keyPassword signingKeyPassword
-            }
-        }
-    }
     buildTypes {
         release {
-            if (hasReleaseSigning) {
-                signingConfig signingConfigs.release
-            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
@@ -75,5 +56,3 @@ try {
 } catch(Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
 }
-
-// Release signing is enabled only when the upload keystore and credentials are supplied.

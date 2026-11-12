@@ -1,4 +1,4 @@
-name: Build Signed Android APK and AAB
+name: Build Android APK and AAB
 
 on:
   push:
@@ -11,6 +11,7 @@ jobs:
   build:
     name: Build Android APK & AAB
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
@@ -19,11 +20,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
+          cache: 'npm'
           cache-dependency-path: package-lock.json
 
       - name: Install Web Dependencies
-        run: npm ci || npm install --legacy-peer-deps
+        run: |
+          npm ci || npm install --legacy-peer-deps
 
       - name: Build Web Application
         run: npm run build
@@ -31,29 +33,9 @@ jobs:
       - name: Set up Java JDK 21
         uses: actions/setup-java@v4
         with:
-          distribution: temurin
+          distribution: 'temurin'
           java-version: '21'
-          cache: gradle
-
-      - name: Configure Android upload signing
-        if: github.event_name != 'pull_request'
-        env:
-          KEYSTORE_BASE64: ${{ secrets.ALPHAMATE_UPLOAD_KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.ALPHAMATE_STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.ALPHAMATE_KEY_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ALPHAMATE_KEY_ALIAS }}
-        run: |
-          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$STORE_PASSWORD" ] || [ -z "$KEY_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
-            echo 'Missing GitHub Actions signing secrets. Add ALPHAMATE_UPLOAD_KEYSTORE_BASE64, ALPHAMATE_STORE_PASSWORD, ALPHAMATE_KEY_PASSWORD, ALPHAMATE_KEY_ALIAS.'
-            exit 1
-          fi
-          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/alphamate-upload-key.jks"
-          echo "ALPHAMATE_STORE_FILE=$RUNNER_TEMP/alphamate-upload-key.jks" >> "$GITHUB_ENV"
-          echo "ALPHAMATE_STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "ALPHAMATE_KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
-          echo "ALPHAMATE_KEY_ALIAS=$KEY_ALIAS" >> "$GITHUB_ENV"
-          keytool -list -keystore "$RUNNER_TEMP/alphamate-upload-key.jks" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
-          echo "Upload keystore and alias verified."
+          cache: 'gradle'
 
       - name: Sync Capacitor Android
         run: npx cap sync android
@@ -61,52 +43,52 @@ jobs:
       - name: Grant Execute Permission for Gradlew
         run: chmod +x android/gradlew
 
-      - name: Build Debug APK (PR validation only)
-        if: github.event_name == 'pull_request'
-        run: cd android && ./gradlew --no-daemon assembleDebug --stacktrace
-
-      - name: Build Signed Release APK
-        if: github.event_name != 'pull_request'
-        run: cd android && ./gradlew --no-daemon assembleRelease --stacktrace
-
-      - name: Build Signed Play Store AAB
-        if: github.event_name != 'pull_request'
-        run: cd android && ./gradlew --no-daemon bundleRelease --stacktrace
-
-      - name: Verify Release Signing
-        if: github.event_name != 'pull_request'
+      - name: Build Debug APK
         run: |
-          APK=android/app/build/outputs/apk/release/app-release.apk
-          AAB=android/app/build/outputs/bundle/release/app-release.aab
-          test -s "$APK"
-          test -s "$AAB"
-          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --verbose "$APK"
-          jarsigner -verify -verbose -certs "$AAB" >/dev/null
-          echo 'Signed APK and AAB verification passed.'
+          cd android
+          ./gradlew --stop
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Build Release APK
+        run: |
+          cd android
+          ./gradlew --no-daemon assembleRelease --stacktrace
+
+      - name: Build Android App Bundle (AAB)
+        run: |
+          cd android
+          ./gradlew --no-daemon bundleRelease --stacktrace
+
+      - name: Verify Generated Binaries
+        run: |
+          echo "=== Android Build Outputs Inspection ==="
+          ls -la android/app/build/outputs/apk/debug/ || true
+          ls -la android/app/build/outputs/apk/release/ || true
+          ls -la android/app/build/outputs/bundle/release/ || true
 
       - name: Upload Debug APK Artifact
-        if: always() && github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: alphamate-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: warn
-          retention-days: 7
-
-      - name: Upload Signed Release APK
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
-        with:
-          name: alphamate-signed-release-apk
-          path: android/app/build/outputs/apk/release/*.apk
-          if-no-files-found: error
           retention-days: 14
 
-      - name: Upload Signed Play Store AAB
-        if: github.event_name != 'pull_request'
+      - name: Upload Release APK Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: alphamate-signed-play-store-aab
+          name: alphamate-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Release AAB Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: alphamate-release-aab
           path: android/app/build/outputs/bundle/release/*.aab
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14

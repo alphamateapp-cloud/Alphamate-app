@@ -47,6 +47,7 @@ import {
 import { User } from '../types';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
+import { MOCK_ROOM_VIEWERS } from '../data/mockData';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
@@ -738,9 +739,9 @@ export const LiveStreamScreen: React.FC = () => {
       />
 
       {/* Top Overlay Bar: Host Profile, Level, VIP, Follow, Viewer Count, Perspective Switcher, Close */}
-      <div className="relative z-30 pt-2.5 px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
+      <div className="relative z-30 pt-[calc(env(safe-area-inset-top,0px)+10px)] px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
         {/* Left Column: Host Capsule on top + Top Givers Leaderboard line directly underneath it */}
-        <div className="flex flex-col items-start gap-1 min-w-0 max-w-[68%] pointer-events-auto">
+        <div className="flex flex-col items-start gap-1 min-w-0 max-w-[62%] pointer-events-auto">
           {/* Host Capsule with VIP Avatar Frame, Name, Level & VIP */}
           <div
             onClick={() => {
@@ -837,7 +838,7 @@ export const LiveStreamScreen: React.FC = () => {
       </div>
 
       {/* Bottom Live Stream Section: Comments Feed + Bottom Controls HUD (Tight Mobile Fit) */}
-      <div className="relative z-30 px-2.5 pb-2 shrink-0 flex flex-col justify-end pointer-events-auto">
+      <div className="relative z-30 px-2.5 pb-[calc(env(safe-area-inset-bottom,0px)+8px)] shrink-0 flex flex-col justify-end pointer-events-auto">
         {/* Live Chat Comments Header with Clear Chat for Host & Mod */}
         <div className="flex items-center justify-between mb-1 px-1">
           <span className="text-[9.5px] text-purple-200 font-bold flex items-center gap-1">
@@ -1387,7 +1388,7 @@ export const LiveStreamScreen: React.FC = () => {
       <RoomViewersModal
         isOpen={showViewersModal}
         onClose={() => setShowViewersModal(false)}
-        viewers={[]}
+        viewers={MOCK_ROOM_VIEWERS}
         hostUser={activeStream.host}
         moderatorIds={moderatorIds}
         totalViewerCount={viewerCount}
