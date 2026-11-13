@@ -19,6 +19,7 @@ import {
   query,
   orderBy,
   limit,
+  where,
 } from 'firebase/firestore';
 import { db, auth } from './firebase';
 import { User } from '../types';
@@ -96,6 +97,11 @@ class P2PStreamingEngine {
 
   // Candidate buffering to eliminate race conditions on restricted mobile connections
   private pendingRemoteCandidates: Map<string, RTCIceCandidateInit[]> = new Map();
+  private partyStreams: Map<string, MediaStream> = new Map();
+  private partyRoomUnsubscribers: Map<string, () => void> = new Map();
+  private partyPeerUnsubscribers: Map<string, () => void> = new Map();
+  private partyOfferStarted: Set<string> = new Set();
+  private partySessionIds: Map<string, string> = new Map();
 
   constructor() {
     this.initTurnConfiguration();
@@ -169,71 +175,58 @@ class P2PStreamingEngine {
    */
   public async fetchCloudflareTurnCredentials(forceRefresh: boolean = false): Promise<RTCIceServer[]> {
     const now = Date.now();
-    if (!forceRefresh && this.cachedTurnServers.length > 0 && now < this.turnExpiresAt) {
-      return this.cachedTurnServers;
+    if (!forceRefresh && this.cachedTurnServers.length > 0 && now < this.turnExpiresAt) return this.cachedTurnServers;
+
+    const railwayUrl = (import.meta as any).env?.VITE_RAILWAY_API_URL;
+    if (railwayUrl && auth.currentUser) {
+      try {
+        const idToken = await auth.currentUser.getIdToken(forceRefresh);
+        const response = await fetch(`${railwayUrl.replace(/\/$/, '')}/api/webrtc/turn-credentials`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+        });
+        const data = await response.json();
+        if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
+          const hasTurn = data.iceServers.some((server: RTCIceServer) =>
+            (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some((url) => url.startsWith('turn:') || url.startsWith('turns:'))
+          );
+          if (hasTurn) {
+            this.cachedTurnServers = data.iceServers;
+            this.turnExpiresAt = now + (Math.max(300, Number(data.ttl) || 3600) * 1000) - 60000;
+            this.customIceServers = data.iceServers;
+            this.hasCloudflareTurn = true;
+            return data.iceServers;
+          }
+          console.warn('[WebRTC] Railway returned STUN-only ICE servers; will retry TURN after configuration.');
+        } else {
+          console.warn('[WebRTC] Railway TURN endpoint unavailable:', data?.error || response.status);
+        }
+      } catch (error) {
+        console.warn('[WebRTC] Railway TURN credential request failed:', error);
+      }
     }
 
-    const workerUrl =
-      (import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL ||
-      'https://alpha-mate-reels-api.alphamateapp.workers.dev';
-
+    // Backward-compatible fallback to the existing Cloudflare Worker endpoint.
+    // No private TURN API token is ever read from frontend environment variables.
+    const workerUrl = (import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || 'https://alpha-mate-reels-api.alphamateapp.workers.dev';
     try {
-      const endpoint = `${workerUrl.replace(/\/$/, '')}/turn-credentials`;
-      const res = await fetch(endpoint, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-      });
-
-      if (res.ok) {
-        const data = await res.json();
-        if (data?.iceServers && Array.isArray(data.iceServers) && data.iceServers.length > 0) {
+      const response = await fetch(`${workerUrl.replace(/\/$/, '')}/turn-credentials`, { headers: { Accept: 'application/json' } });
+      const data = await response.json();
+      if (response.ok && data?.iceServers && Array.isArray(data.iceServers)) {
+        const hasTurn = data.iceServers.some((server: RTCIceServer) =>
+          (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some((url) => url.startsWith('turn:') || url.startsWith('turns:'))
+        );
+        if (hasTurn) {
           this.cachedTurnServers = data.iceServers;
-          this.turnExpiresAt = now + ((data.ttl || 86400) * 1000) - 60000;
+          this.turnExpiresAt = now + (Math.max(300, Number(data.ttl) || 3600) * 1000) - 60000;
           this.customIceServers = data.iceServers;
           this.hasCloudflareTurn = true;
-          console.log('[WebRTC / Cloudflare TURN] Active ICE servers loaded from Worker:', data.source);
           return data.iceServers;
         }
       }
-    } catch (err) {
-      console.warn('[WebRTC / Cloudflare TURN] Worker credentials fetch skipped, using direct config:', err);
+    } catch (error) {
+      console.warn('[WebRTC] Existing Worker TURN fallback failed:', error);
     }
-
-    // Direct Cloudflare Calls TURN API check
-    const cfTurnKeyId = (import.meta as any).env?.VITE_CLOUDFLARE_TURN_KEY_ID;
-    const cfTurnApiToken = (import.meta as any).env?.VITE_CLOUDFLARE_TURN_API_TOKEN;
-
-    if (cfTurnKeyId && cfTurnApiToken) {
-      try {
-        const cfRes = await fetch(
-          `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(cfTurnKeyId)}/credentials`,
-          {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${cfTurnApiToken}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ ttl: 86400 }),
-          }
-        );
-
-        if (cfRes.ok) {
-          const cfData = await cfRes.json();
-          const turnServers = cfData.iceServers;
-          const serversList = Array.isArray(turnServers) ? turnServers : [turnServers];
-          const fullServers: RTCIceServer[] = [...DEFAULT_ICE_SERVERS, ...serversList];
-          this.cachedTurnServers = fullServers;
-          this.turnExpiresAt = now + 86400000 - 60000;
-          this.customIceServers = fullServers;
-          this.hasCloudflareTurn = true;
-          console.log('[WebRTC / Cloudflare TURN] Ephemeral credentials created via Cloudflare Calls API');
-          return fullServers;
-        }
-      } catch (cfErr) {
-        console.warn('[WebRTC / Cloudflare TURN] Direct Cloudflare Calls API error:', cfErr);
-      }
-    }
-
     return this.getIceServers();
   }
 
@@ -410,14 +403,15 @@ class P2PStreamingEngine {
    * Toggle local microphone audio track
    */
   public toggleMicrophone(enabled?: boolean): boolean {
-    if (!this.localStream) return false;
-    const audioTrack = this.localStream.getAudioTracks()[0];
-    if (audioTrack) {
-      this.isMuted = enabled !== undefined ? !enabled : !audioTrack.enabled;
-      audioTrack.enabled = !this.isMuted;
-      return !this.isMuted;
-    }
-    return false;
+    const tracks = [
+      ...(this.localStream?.getAudioTracks() || []),
+      ...Array.from(this.partyStreams.values()).flatMap((stream) => stream.getAudioTracks()),
+    ];
+    if (!tracks.length) return false;
+    const nextEnabled = enabled !== undefined ? enabled : !tracks.some((track) => track.enabled);
+    this.isMuted = !nextEnabled;
+    tracks.forEach((track) => { track.enabled = nextEnabled; });
+    return nextEnabled;
   }
 
   /**
@@ -977,31 +971,144 @@ class P2PStreamingEngine {
    * Acquires local microphone, hooks real-time audio volume analyzer,
    * and advertises audio track via Firestore party room signals.
    */
-  public async startPartyVoice(roomId: string, userId: string, isMuted: boolean = false): Promise<MediaStream> {
-    const stream = await this.getLocalMediaStream('user', true);
-    this.toggleMicrophone(!isMuted);
-
-    // Notify peers in room that speaker is active
-    try {
-      await addDoc(collection(db, 'partyRooms', roomId, 'signals'), {
-        type: 'speaker_joined',
-        userId,
-        isMuted,
-        createdAt: serverTimestamp(),
-      });
-    } catch (e) {
-      console.warn('Failed to broadcast speaker state:', e);
+  public async startPartyVoice(roomId: string, userId: string, isMuted: boolean = false, listenOnly: boolean = false): Promise<MediaStream | null> {
+    await this.stopPartyVoice(roomId);
+    let stream: MediaStream | null = null;
+    if (!listenOnly) {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
+      stream.getAudioTracks().forEach((track) => { track.enabled = !isMuted; });
+      this.partyStreams.set(roomId, stream);
+      this.isMuted = isMuted;
+      this.initAudioAnalyser(stream);
     }
 
+    const sessionId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    this.partySessionIds.set(roomId, sessionId);
+    const participantsRef = collection(db, 'partyRooms', roomId, 'voiceParticipants');
+    await setDoc(doc(db, 'partyRooms', roomId, 'voiceParticipants', userId), {
+      userId, sessionId, joinedAt: serverTimestamp(), isMuted: listenOnly ? true : isMuted, listenOnly, lastSeenAt: serverTimestamp(),
+    }, { merge: true });
+
+    const roomUnsub = onSnapshot(participantsRef, (snapshot) => {
+      snapshot.docChanges().forEach((change) => {
+        const peerId = change.doc.id;
+        const connectionKey = `party:${roomId}:${peerId}`;
+        if (peerId === userId) return;
+        if (change.type === 'removed') {
+          this.partyPeerUnsubscribers.get(connectionKey)?.();
+          this.partyPeerUnsubscribers.delete(connectionKey);
+          this.partyOfferStarted.delete(connectionKey);
+          this.closePeerConnection(connectionKey);
+          return;
+        }
+        const peerSessionId = change.doc.data().sessionId;
+        if (peerSessionId) this.ensurePartyPeer(roomId, userId, peerId, peerSessionId, stream).catch((error) => console.error('[Party WebRTC] Peer setup failed:', error));
+      });
+    }, (error) => console.error('[Party WebRTC] Participant listener failed:', error));
+    this.partyRoomUnsubscribers.set(roomId, roomUnsub);
+
+    await addDoc(collection(db, 'partyRooms', roomId, 'signals'), {
+      type: 'speaker_joined', userId, isMuted, createdAt: serverTimestamp(),
+    }).catch((error) => console.warn('[Party WebRTC] Speaker presence event failed:', error));
     return stream;
   }
 
-  /**
-   * Stop Party Voice when leaving seat
-   */
-  public stopPartyVoice(roomId: string): void {
-    this.stopLocalMediaStream();
-    this.closePeerConnection(roomId);
+  private async ensurePartyPeer(roomId: string, userId: string, peerId: string, peerSessionId: string, localStream: MediaStream | null): Promise<void> {
+    const connectionKey = `party:${roomId}:${peerId}`;
+    if (this.peerConnections.has(connectionKey)) return;
+    await this.fetchCloudflareTurnCredentials().catch(() => {});
+    const pc = new RTCPeerConnection(this.getRtcConfiguration());
+    if (localStream?.getAudioTracks().length) localStream.getAudioTracks().forEach((track) => pc.addTrack(track, localStream));
+    else pc.addTransceiver('audio', { direction: 'recvonly' });
+    this.peerConnections.set(connectionKey, pc);
+
+    const localSessionId = this.partySessionIds.get(roomId) || 'session';
+    const pairKey = [`${userId}_${localSessionId}`, `${peerId}_${peerSessionId}`].sort().join('__');
+    const messagesRef = collection(db, 'partyRooms', roomId, 'voiceSignals', pairKey, 'messages');
+    const isOfferer = userId.localeCompare(peerId) < 0;
+    const processed = new Set<string>();
+    let makingOffer = false;
+
+    pc.ontrack = (event) => {
+      const remoteStream = event.streams[0];
+      if (!remoteStream) return;
+      this.remoteStreams.set(connectionKey, remoteStream);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('alphamate-party-remote-stream', { detail: { roomId, peerId, stream: remoteStream } }));
+      }
+    };
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        addDoc(messagesRef, {
+          type: 'candidate', from: userId, to: peerId,
+          candidate: event.candidate.toJSON(), createdAt: serverTimestamp(),
+        }).catch((error) => console.warn('[Party WebRTC] ICE candidate write failed:', error));
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+        console.warn(`[Party WebRTC] ${userId} -> ${peerId}: ${pc.connectionState}`);
+      }
+    };
+
+    const unsubscribe = onSnapshot(query(messagesRef, where('to', '==', userId), limit(100)), async (snapshot) => {
+      for (const change of snapshot.docChanges()) {
+        if (change.type === 'removed' || processed.has(change.doc.id)) continue;
+        processed.add(change.doc.id);
+        const signal: any = change.doc.data();
+        if (signal.from === userId || signal.to !== userId) continue;
+        try {
+          if (signal.type === 'offer' && !isOfferer && signal.sdp) {
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
+            await this.drainPendingCandidates(connectionKey, pc);
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            await addDoc(messagesRef, { type: 'answer', from: userId, to: peerId, sdp: answer.sdp, createdAt: serverTimestamp() });
+          } else if (signal.type === 'answer' && isOfferer && signal.sdp && !pc.remoteDescription) {
+            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signal.sdp }));
+            await this.drainPendingCandidates(connectionKey, pc);
+          } else if (signal.type === 'candidate' && signal.candidate) {
+            if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
+            else this.queueRemoteCandidate(connectionKey, signal.candidate);
+          }
+        } catch (error) {
+          console.error('[Party WebRTC] Signal processing failed:', error);
+        }
+      }
+    }, (error) => console.error('[Party WebRTC] Signal listener failed:', error));
+    this.partyPeerUnsubscribers.set(connectionKey, unsubscribe);
+
+    if (isOfferer && !this.partyOfferStarted.has(connectionKey)) {
+      this.partyOfferStarted.add(connectionKey);
+      makingOffer = true;
+      try {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await addDoc(messagesRef, { type: 'offer', from: userId, to: peerId, sdp: offer.sdp, createdAt: serverTimestamp() });
+      } finally {
+        makingOffer = false;
+      }
+    }
+    void makingOffer;
+  }
+
+  public async stopPartyVoice(roomId: string): Promise<void> {
+    const roomUnsub = this.partyRoomUnsubscribers.get(roomId);
+    if (roomUnsub) roomUnsub();
+    this.partyRoomUnsubscribers.delete(roomId);
+    const stream = this.partyStreams.get(roomId);
+    stream?.getTracks().forEach((track) => track.stop());
+    this.partyStreams.delete(roomId);
+    this.partySessionIds.delete(roomId);
+    const prefix = `party:${roomId}:`;
+    Array.from(this.peerConnections.keys()).filter((key) => key.startsWith(prefix)).forEach((key) => {
+      this.partyPeerUnsubscribers.get(key)?.();
+      this.partyPeerUnsubscribers.delete(key);
+      this.partyOfferStarted.delete(key);
+      this.closePeerConnection(key);
+    });
+    const uid = auth.currentUser?.uid;
+    if (uid) await deleteDoc(doc(db, 'partyRooms', roomId, 'voiceParticipants', uid)).catch(() => {});
   }
 
   // =========================================================================

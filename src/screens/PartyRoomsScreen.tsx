@@ -691,31 +691,64 @@ export const PartyRoomsScreen: React.FC = () => {
   useEffect(() => {
     let animFrame: any;
     const isUserHost = activePartyRoom?.host?.id === currentUser?.id;
-    const canSpeak = (isUserHost && !isHostMicMuted) || (userSeatIndex !== null && !isMicMuted);
+    const canSpeak = isUserHost || userSeatIndex !== null;
 
-    if (activePartyRoom && canSpeak) {
-      p2pStreamingEngine.getLocalMediaStream('user', true).catch(() => {});
-      p2pStreamingEngine.createPeerConnection(activePartyRoom.id).catch(() => {});
+    if (activePartyRoom) {
+      const muted = isUserHost ? isHostMicMuted : isMicMuted;
+      p2pStreamingEngine.startPartyVoice(activePartyRoom.id, currentUser.id, muted, !canSpeak).catch((error) => {
+        console.error('[Party Voice] Unable to start real microphone/signaling:', error);
+      });
 
-      const checkVolume = () => {
-        const vol = p2pStreamingEngine.getSpeakingVolume();
-        if (isUserHost) {
-          setIsHostSpeaking(vol > 12);
-        }
+      if (canSpeak) {
+        const checkVolume = () => {
+          const vol = p2pStreamingEngine.getSpeakingVolume();
+          if (isUserHost) setIsHostSpeaking(vol > 12);
+          animFrame = requestAnimationFrame(checkVolume);
+        };
         animFrame = requestAnimationFrame(checkVolume);
-      };
-      animFrame = requestAnimationFrame(checkVolume);
+      } else if (isUserHost) setIsHostSpeaking(false);
     } else {
       p2pStreamingEngine.toggleMicrophone(false);
-      if (isUserHost) {
-        setIsHostSpeaking(false);
-      }
+      if (isUserHost) setIsHostSpeaking(false);
     }
 
     return () => {
       if (animFrame) cancelAnimationFrame(animFrame);
+      if (activePartyRoom?.id) p2pStreamingEngine.stopPartyVoice(activePartyRoom.id);
     };
+  }, [activePartyRoom?.id, userSeatIndex, currentUser?.id]);
+
+  // Mute/unmute the already-published microphone track without tearing down peer connections.
+  useEffect(() => {
+    const isUserHost = activePartyRoom?.host?.id === currentUser?.id;
+    if (activePartyRoom && (isUserHost || userSeatIndex !== null)) {
+      p2pStreamingEngine.toggleMicrophone(!(isUserHost ? isHostMicMuted : isMicMuted));
+    }
   }, [activePartyRoom?.id, userSeatIndex, isMicMuted, isHostMicMuted, currentUser?.id]);
+
+  // Attach real remote party microphone tracks to audio outputs on this device.
+  useEffect(() => {
+    const audioByPeer = new Map<string, HTMLAudioElement>();
+    const handleRemotePartyStream = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (!detail || detail.roomId !== activePartyRoom?.id || !detail.stream) return;
+      let audio = audioByPeer.get(detail.peerId);
+      if (!audio) {
+        audio = new Audio();
+        audio.autoplay = true;
+        audio.playsInline = true;
+        audioByPeer.set(detail.peerId, audio);
+      }
+      audio.srcObject = detail.stream;
+      audio.play().catch((error) => console.warn('[Party Voice] Audio playback awaits user interaction:', error));
+    };
+    window.addEventListener('alphamate-party-remote-stream', handleRemotePartyStream);
+    return () => {
+      window.removeEventListener('alphamate-party-remote-stream', handleRemotePartyStream);
+      audioByPeer.forEach((audio) => { audio.pause(); audio.srcObject = null; });
+      audioByPeer.clear();
+    };
+  }, [activePartyRoom?.id]);
 
   // Live room presence and speaking state must come from real room events;
   // never fabricate viewer counts or speaking indicators locally.

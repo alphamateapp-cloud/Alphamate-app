@@ -7,12 +7,7 @@ compatibility_date = "2024-11-01"
 binding = "REELS_BUCKET"
 bucket_name = "alpha-mate-reels"
 
-# Environment Variables & Secrets:
-# 1. Firebase Token Verification Secret:
-# wrangler secret put FIREBASE_API_KEY
-# 2. Ephemeral Cloudflare Calls TURN Key Secrets (Optional):
-# wrangler secret put CLOUDFLARE_TURN_KEY_ID
-# wrangler secret put CLOUDFLARE_TURN_API_TOKEN
-# 3. Static Cloudflare TURN Secrets (Optional):
-# wrangler secret put CLOUDFLARE_TURN_USERNAME
-# wrangler secret put CLOUDFLARE_TURN_CREDENTIAL
+# Set the Railway backend base URL below. R2 remains a Cloudflare binding.
+
+[vars]
+RAILWAY_API_URL = "https://YOUR-RAILWAY-DOMAIN.up.railway.app"

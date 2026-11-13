@@ -51,37 +51,20 @@ function jsonResponse(data, status = 200, request = null) {
 
 /**
  * Verify Firebase ID Token using Google Identity Toolkit API
- * Requires env.FIREBASE_API_KEY secret configured in Cloudflare Worker
+ * Delegates Firebase ID token verification to the Railway backend (RAILWAY_API_URL)
  */
 async function verifyFirebaseToken(idToken, env) {
-  if (!env.FIREBASE_API_KEY) {
-    throw new Error('FIREBASE_API_KEY secret missing in Worker configuration');
-  }
-
-  const endpoint = `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(env.FIREBASE_API_KEY)}`;
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ idToken }),
+  const railwayBase = (env.RAILWAY_API_URL || '').replace(/\/$/, '');
+  if (!railwayBase) throw new Error('RAILWAY_API_URL variable missing in Cloudflare Worker.');
+  const response = await fetch(`${railwayBase}/api/auth/verify`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
   });
-
-  if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    const message = errorData?.error?.message || 'Invalid or expired Firebase ID token';
-    throw new Error(message);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.success || !data.user?.uid) {
+    throw new Error(data.error || 'Invalid or expired Firebase ID token');
   }
-
-  const data = await res.json();
-  const user = data.users?.[0];
-  if (!user || !user.localId) {
-    throw new Error('User not found in Firebase token verification');
-  }
-
-  return {
-    uid: user.localId,
-    email: user.email,
-    emailVerified: !!user.emailVerified,
-  };
+  return data.user;
 }
 
 /**
@@ -230,7 +213,7 @@ export default {
         authUser = await verifyFirebaseToken(idToken, env);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        const status = msg.includes('FIREBASE_API_KEY secret missing') ? 500 : 401;
+        const status = msg.includes('RAILWAY_API_URL variable missing') ? 500 : 401;
         return jsonResponse({ error: msg }, status, request);
       }
 
@@ -339,7 +322,7 @@ export default {
         authUser = await verifyFirebaseToken(idToken, env);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        const status = msg.includes('FIREBASE_API_KEY secret missing') ? 500 : 401;
+        const status = msg.includes('RAILWAY_API_URL variable missing') ? 500 : 401;
         return jsonResponse({ error: msg }, status, request);
       }
 

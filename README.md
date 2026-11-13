@@ -18,3 +18,7 @@ View your app in AI Studio: https://ai.studio/apps/88a3637b-56a3-47f2-a3ab-b67bf
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## Railway / WebRTC backend setup
+
+See `RAILWAY_BACKEND_SETUP.md` for the exact Railway variables, Cloudflare Worker URL binding, Firebase rules deployment, and test order. Private TURN API credentials are kept on Railway; the client receives only short-lived TURN ICE credentials after Firebase authentication.

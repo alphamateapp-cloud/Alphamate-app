@@ -19,25 +19,11 @@ npx wrangler deploy
 
 ---
 
-## 2. Set the Required Secret: `FIREBASE_API_KEY`
+## 2. Connect the Railway authentication backend
 
-The worker requires the `FIREBASE_API_KEY` secret to verify incoming Firebase ID tokens:
+The Worker delegates Firebase ID-token verification to Railway. Set the non-secret `RAILWAY_API_URL` variable in `wrangler.toml` (or Cloudflare Dashboard -> Worker Settings -> Variables and Secrets) to the deployed Railway service URL. Do not add the Firebase API key or Cloudflare TURN API token to the Worker.
 
-```bash
-npx wrangler secret put FIREBASE_API_KEY
-```
-When prompted, paste the Firebase Web API Key:
-```
-AIzaSyBvTPyVnoubFs9J36o4thMhta5-NYUWPn0
-```
-
-Or configure it in the Cloudflare Dashboard:
-1. Go to **Workers & Pages** -> **alpha-mate-reels-api**.
-2. Click **Settings** -> **Variables and Secrets**.
-3. Add a secret named `FIREBASE_API_KEY` with the Firebase Web API key value.
-4. Click **Deploy / Save**.
-
----
+After updating the URL, deploy the Worker again with `npx wrangler deploy`.
 
 ## 3. R2 Bucket & Custom Domain Configuration
 
@@ -46,3 +32,7 @@ In Cloudflare Dashboard:
 2. In **Settings** -> **Public access**:
    - Ensure custom domain `media.alphamate.app` is connected to bucket `alpha-mate-reels`.
    - Ensure CORS rule allows `GET` requests with `AllowedOrigins: ["*"]`.
+
+## Railway authentication bridge
+
+Set the non-secret `RAILWAY_API_URL` Worker variable to the deployed Railway backend URL. The Worker delegates Firebase ID-token validation to `GET /api/auth/verify`; keep `FIREBASE_API_KEY` only in Railway Variables. Keep the `REELS_BUCKET` R2 binding in Cloudflare because the Worker executes the R2 upload/delete operations.
