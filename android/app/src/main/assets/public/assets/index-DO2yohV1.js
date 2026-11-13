@@ -49424,7 +49424,7 @@ var DEFAULT_ICE_SERVERS = [
 	{ urls: "stun:stun.l.google.com:19302" },
 	{ urls: "stun:stun1.l.google.com:19302" }
 ];
-var PARTY_HEARTBEAT_INTERVAL_MS = 5e3;
+var PARTY_HEARTBEAT_INTERVAL_MS = 4e3;
 var RECONNECT_GRACE_MS = 2500;
 var MAX_RECONNECT_ATTEMPTS = 3;
 var LIVE_HEARTBEAT_INTERVAL_MS = 5e3;
@@ -49443,6 +49443,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		this.hostSfuSessions = /* @__PURE__ */ new Map();
 		this.viewerSfuSessions = /* @__PURE__ */ new Map();
 		this.partySfuSessions = /* @__PURE__ */ new Map();
+		this.partyRoomCallbacks = /* @__PURE__ */ new Map();
 		this.sessionQueues = /* @__PURE__ */ new Map();
 		this.reconnectTimers = /* @__PURE__ */ new Map();
 		this.reconnectInFlight = /* @__PURE__ */ new Map();
@@ -49489,15 +49490,41 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		return user.getIdToken(forceRefresh);
 	}
 	formatNetworkFetchError(base, cause) {
-		const msg = `Unable to reach the Live SFU backend at ${base || RealtimeSfuStreamingEngine.PRODUCTION_API_URL}${cause instanceof Error && cause.message && cause.message !== "Failed to fetch" ? ` (${cause.message})` : ""}. Verify your internet connection and that the backend server is online.`;
+		const target = base || RealtimeSfuStreamingEngine.PRODUCTION_API_URL;
+		let detail = "";
+		if (cause instanceof Error) {
+			if (cause.name === "AbortError") detail = " (request timed out)";
+			else if (cause.message && cause.message !== "Failed to fetch") detail = ` (${cause.message})`;
+		}
+		const msg = `Unable to reach the Live SFU backend at ${target}${detail}. Verify your internet connection and that the backend server is online.`;
 		const err = new Error(msg);
 		err.code = "SFU_BACKEND_UNREACHABLE";
 		return err;
 	}
+	async fetchWithTimeout(url, init, timeoutMs) {
+		if (init.keepalive || typeof AbortController === "undefined" || timeoutMs <= 0) return fetch(url, init);
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), timeoutMs);
+		try {
+			return await fetch(url, {
+				...init,
+				signal: controller.signal
+			});
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+	isRetryableGatewayStatus(status, errorCode) {
+		if (errorCode === "SFU_NOT_CONFIGURED" || errorCode === "TURN_NOT_CONFIGURED") return false;
+		return status === 429 || status === 502 || status === 503 || status === 504 || status >= 520;
+	}
+	async delayMs(ms) {
+		await new Promise((resolve) => setTimeout(resolve, ms));
+	}
 	async sfuFetch(path, method, body, keepalive = false) {
 		const base = this.getBackendApiBase();
 		const url = `${base}${path}`;
-		const exec = async (forceTokenRefresh) => {
+		const execOnce = async (forceTokenRefresh) => {
 			const headers = {
 				Authorization: `Bearer ${await this.getFirebaseIdToken(forceTokenRefresh)}`,
 				Accept: "application/json"
@@ -49505,7 +49532,9 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			const init = {
 				method,
 				headers,
-				keepalive
+				keepalive,
+				mode: "cors",
+				cache: "no-store"
 			};
 			if (body !== void 0 && method !== "GET") {
 				headers["Content-Type"] = "application/json";
@@ -49513,8 +49542,9 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			}
 			let response;
 			try {
-				response = await fetch(url, init);
+				response = await this.fetchWithTimeout(url, init, 12e3);
 			} catch (networkErr) {
+				console.warn(`[WebRTC SFU] Network error calling ${method} ${url}:`, networkErr);
 				throw this.formatNetworkFetchError(base, networkErr);
 			}
 			const contentType = response.headers.get("content-type") || "";
@@ -49524,6 +49554,12 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				data = JSON.parse(rawText);
 			} catch {
 				if (!contentType.includes("application/json")) {
+					if (this.isRetryableGatewayStatus(response.status)) {
+						const err = /* @__PURE__ */ new Error(`SFU backend gateway at ${base} temporarily unavailable (${response.status}).`);
+						err.status = response.status;
+						err.code = "SFU_BACKEND_UNREACHABLE";
+						throw err;
+					}
 					const msg = this.hasConfiguredRailwayUrl() ? `Backend API at ${base} returned non-JSON (${response.status}) for ${path}. Verify Railway is running the Express API (npm start).` : `No Express/SFU API server on this host (${response.status} HTML). Set VITE_RAILWAY_API_URL to your deployed Railway backend.`;
 					const err = new Error(msg);
 					err.status = response.status;
@@ -49539,50 +49575,86 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				data
 			};
 		};
-		let { response, data } = await exec(false);
-		if (response.status === 401 && !keepalive) ({response, data} = await exec(true));
-		if (!response.ok || data?.success === false) {
-			const msg = data?.error || `SFU request failed (${response.status})`;
-			const err = new Error(msg);
-			err.status = response.status;
-			if (data?.code) err.code = data.code;
+		const maxAttempts = keepalive ? 1 : 3;
+		let lastError = null;
+		for (let attempt = 0; attempt < maxAttempts; attempt++) try {
+			let { response, data } = await execOnce(false);
+			if (response.status === 401 && !keepalive) ({response, data} = await execOnce(true));
+			if (!response.ok || data?.success === false) {
+				const msg = data?.error || `SFU request failed (${response.status})`;
+				const err = new Error(msg);
+				err.status = response.status;
+				if (data?.code) err.code = data.code;
+				if (!keepalive && attempt < maxAttempts - 1 && this.isRetryableGatewayStatus(response.status, data?.code)) {
+					lastError = err;
+					await this.delayMs(350 * (attempt + 1));
+					continue;
+				}
+				throw err;
+			}
+			return data;
+		} catch (err) {
+			lastError = err;
+			if (!keepalive && attempt < maxAttempts - 1 && (err?.code === "SFU_BACKEND_UNREACHABLE" || this.isRetryableGatewayStatus(Number(err?.status || 0), err?.code))) {
+				await this.delayMs(350 * (attempt + 1));
+				continue;
+			}
 			throw err;
 		}
-		return data;
+		throw lastError || this.formatNetworkFetchError(base, null);
 	}
 	async checkBackendHealth() {
 		const base = this.getBackendApiBase();
-		let response;
-		try {
-			response = await fetch(`${base}/api/health`, {
-				method: "GET",
-				headers: { Accept: "application/json" },
-				cache: "no-store"
-			});
-		} catch (networkErr) {
-			throw this.formatNetworkFetchError(base, networkErr);
+		const maxAttempts = 3;
+		let lastError = null;
+		for (let attempt = 0; attempt < maxAttempts; attempt++) {
+			let response;
+			try {
+				response = await this.fetchWithTimeout(`${base}/api/health`, {
+					method: "GET",
+					headers: { Accept: "application/json" },
+					mode: "cors",
+					cache: "no-store"
+				}, 1e4);
+			} catch (networkErr) {
+				lastError = networkErr;
+				if (attempt < 2) {
+					await this.delayMs(350 * (attempt + 1));
+					continue;
+				}
+				throw this.formatNetworkFetchError(base, networkErr);
+			}
+			const contentType = response.headers.get("content-type") || "";
+			const rawText = await response.text().catch(() => "");
+			let data = null;
+			if (rawText) try {
+				data = JSON.parse(rawText);
+			} catch {
+				data = null;
+			}
+			if (!data || !contentType.includes("application/json")) {
+				if (this.isRetryableGatewayStatus(response.status) && attempt < 2) {
+					await this.delayMs(350 * (attempt + 1));
+					continue;
+				}
+				const msg = this.hasConfiguredRailwayUrl() ? `Backend API at ${base} returned non-JSON (${response.status}) for /api/health. Ensure Railway is running the Express API (npm start).` : `This build is serving static frontend files without an SFU API server (${response.status}). Set VITE_RAILWAY_API_URL to your Railway backend URL and rebuild.`;
+				const err = new Error(msg);
+				err.status = response.status;
+				err.code = "SFU_NOT_CONFIGURED";
+				throw err;
+			}
+			if (this.isRetryableGatewayStatus(response.status) && attempt < 2) {
+				await this.delayMs(350 * (attempt + 1));
+				continue;
+			}
+			return {
+				ok: Boolean(response.ok && data?.success),
+				firebaseConfigured: Boolean(data?.firebaseConfigured),
+				turnConfigured: Boolean(data?.turnConfigured),
+				sfuConfigured: Boolean(data?.sfuConfigured)
+			};
 		}
-		const contentType = response.headers.get("content-type") || "";
-		const rawText = await response.text().catch(() => "");
-		let data = null;
-		if (rawText) try {
-			data = JSON.parse(rawText);
-		} catch {
-			data = null;
-		}
-		if (!data || !contentType.includes("application/json")) {
-			const msg = this.hasConfiguredRailwayUrl() ? `Backend API at ${base} returned non-JSON (${response.status}) for /api/health. Ensure Railway is running the Express API (npm start).` : `This build is serving static frontend files without an SFU API server (${response.status}). Set VITE_RAILWAY_API_URL to your Railway backend URL and rebuild.`;
-			const err = new Error(msg);
-			err.status = response.status;
-			err.code = "SFU_NOT_CONFIGURED";
-			throw err;
-		}
-		return {
-			ok: Boolean(response.ok && data?.success),
-			firebaseConfigured: Boolean(data?.firebaseConfigured),
-			turnConfigured: Boolean(data?.turnConfigured),
-			sfuConfigured: Boolean(data?.sfuConfigured)
-		};
+		throw this.formatNetworkFetchError(base, lastError);
 	}
 	async ensureSfuBackendConfigured() {
 		if (Date.now() < this.sfuConfiguredUntil) return;
@@ -49605,16 +49677,18 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 	async fetchCloudflareTurnCredentials(forceRefresh = false) {
 		const now = Date.now();
 		if (!forceRefresh && this.cachedTurnServers.length > 0 && now < this.turnExpiresAt) return this.cachedTurnServers;
-		if (auth.currentUser) try {
+		if (auth.currentUser) for (let attempt = 0; attempt < 2; attempt++) try {
 			const base = this.getBackendApiBase();
-			const idToken = await auth.currentUser.getIdToken(forceRefresh);
-			const response = await fetch(`${base}/api/webrtc/turn-credentials`, {
+			const idToken = await auth.currentUser.getIdToken(forceRefresh || attempt > 0);
+			const response = await this.fetchWithTimeout(`${base}/api/webrtc/turn-credentials`, {
 				method: "GET",
 				headers: {
 					Authorization: `Bearer ${idToken}`,
 					Accept: "application/json"
-				}
-			});
+				},
+				mode: "cors",
+				cache: "no-store"
+			}, 8e3);
 			const data = (response.headers.get("content-type") || "").includes("application/json") ? await response.json().catch(() => ({})) : {};
 			if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
 				if (data.iceServers.some((server) => (typeof server.urls === "string" ? [server.urls] : server.urls || []).some((url) => url.startsWith("turn:") || url.startsWith("turns:")))) {
@@ -49625,7 +49699,12 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 					return data.iceServers;
 				}
 			}
+			break;
 		} catch (error) {
+			if (attempt === 0) {
+				await this.delayMs(250);
+				continue;
+			}
 			console.warn("[WebRTC] Railway TURN credential request failed:", error);
 		}
 		return this.getIceServers();
@@ -49688,7 +49767,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		return res.sessionId;
 	}
 	async requestPartyRoomSessionToken(roomId, wantPublish) {
-		try {
+		for (let attempt = 0; attempt < 2; attempt++) try {
 			const res = await this.sfuFetch(`/api/sfu/party/rooms/${encodeURIComponent(roomId)}/token`, "POST", { wantPublish });
 			if (Array.isArray(res.iceServers) && res.iceServers.length > 0) {
 				if (res.iceServers.some((server) => (typeof server.urls === "string" ? [server.urls] : server.urls || []).some((u) => u.startsWith("turn:") || u.startsWith("turns:")))) {
@@ -49702,8 +49781,14 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				role: res.role || (wantPublish ? "guest" : "viewer"),
 				canPublish: Boolean(res.canPublish)
 			};
+			break;
 		} catch (err) {
-			if (err?.status !== 404) throw err;
+			if (err?.status === 401 || err?.status === 403 || err?.code === "SFU_NOT_CONFIGURED") throw err;
+			if (attempt === 0) {
+				await this.delayMs(350);
+				continue;
+			}
+			console.warn("[Party SFU] Role token endpoint unavailable, falling back to /api/sfu/sessions:", err?.message || err);
 		}
 		return {
 			sfuSessionId: await this.createSfuSession(),
@@ -49954,7 +50039,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		this.stopAudioAnalyser();
 	}
 	toggleMicrophone(enabled) {
-		const partyAudioTracks = Array.from(this.partySfuSessions.values()).flatMap((s) => [...s.localStream?.getAudioTracks() || [], ...s.pc.getSenders().map((sender) => sender.track).filter((t) => Boolean(t && t.kind === "audio"))]);
+		const partyAudioTracks = Array.from(this.partySfuSessions.values()).flatMap((s) => [...s.localStream?.getAudioTracks() || [], ...s.pubPc ? s.pubPc.getSenders().map((sender) => sender.track).filter((t) => Boolean(t && t.kind === "audio")) : []]);
 		const localAudioTracks = this.localStream?.getAudioTracks() || [];
 		const allTracks = Array.from(/* @__PURE__ */ new Set([...localAudioTracks, ...partyAudioTracks]));
 		if (!allTracks.length && this.partySfuSessions.size === 0) return false;
@@ -50076,7 +50161,9 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			if (!s.isClosed && (s.pc.connectionState === "disconnected" || s.pc.connectionState === "failed" || s.pc.iceConnectionState === "disconnected" || s.pc.iceConnectionState === "failed")) this.autoReconnect("viewer", streamId).catch(() => {});
 		});
 		this.partySfuSessions.forEach((s, roomId) => {
-			if (!s.isClosed && (s.pc.connectionState === "disconnected" || s.pc.connectionState === "failed" || s.pc.iceConnectionState === "disconnected" || s.pc.iceConnectionState === "failed")) this.autoReconnect("party", roomId).catch(() => {});
+			const subBroken = s.subPc.connectionState === "disconnected" || s.subPc.connectionState === "failed" || s.subPc.iceConnectionState === "disconnected" || s.subPc.iceConnectionState === "failed";
+			const pubBroken = s.pubPc && (s.pubPc.connectionState === "disconnected" || s.pubPc.connectionState === "failed" || s.pubPc.iceConnectionState === "disconnected" || s.pubPc.iceConnectionState === "failed");
+			if (!s.isClosed && (subBroken || pubBroken)) this.autoReconnect("party", roomId).catch(() => {});
 		});
 	}
 	/**
@@ -50307,19 +50394,23 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		const userId = existing.userId;
 		const wasPublishing = existing.isPublishing;
 		const wasMuted = existing.isMuted;
-		let newSfuSessionId = "";
-		let newPc = null;
+		let newSubSessionId = "";
+		let newSubPc = null;
+		let newPubSessionId = "";
+		let newPubPc = null;
 		let newSession = null;
 		try {
-			newSfuSessionId = (await this.requestPartyRoomSessionToken(roomId, wasPublishing)).sfuSessionId;
-			newPc = new RTCPeerConnection(this.getRtcConfiguration());
+			newSubSessionId = (await this.requestPartyRoomSessionToken(roomId, false)).sfuSessionId;
+			newSubPc = new RTCPeerConnection(this.getRtcConfiguration());
 			newSession = {
 				roomId,
 				userId,
 				profile: existing.profile,
 				joinedAtMs: existing.joinedAtMs,
-				sfuSessionId: newSfuSessionId,
-				pc: newPc,
+				subSfuSessionId: newSubSessionId,
+				subPc: newSubPc,
+				pubSfuSessionId: null,
+				pubPc: null,
 				localStream: null,
 				localTrackName: null,
 				localMid: null,
@@ -50327,7 +50418,9 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				isMuted: wasPublishing ? wasMuted : true,
 				isSpeaking: false,
 				isClosed: false,
-				connectingSinceMs: Date.now(),
+				subConnectingSinceMs: Date.now(),
+				pubConnectingSinceMs: Date.now(),
+				reconcileFailCount: 0,
 				unsubscribeParticipants: null,
 				heartbeatTimer: null,
 				reconcileRetryTimer: null,
@@ -50339,35 +50432,49 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				onConnectionStateChange: existing.onConnectionStateChange,
 				onParticipantsChange: existing.onParticipantsChange
 			};
-			this.attachPartyTrackHandlers(newSession, newPc);
+			this.attachPartyTrackHandlers(newSession, newSubPc);
 			if (wasPublishing) {
+				newPubSessionId = (await this.requestPartyRoomSessionToken(roomId, true)).sfuSessionId;
+				newPubPc = new RTCPeerConnection(this.getRtcConfiguration());
 				const liveAudioTrack = existing.localStream?.getAudioTracks().find((t) => t.readyState === "live");
 				if (liveAudioTrack && existing.localStream) {
 					liveAudioTrack.enabled = !wasMuted;
 					const trackName = `party-${roomId}-${userId}-${Date.now().toString(36)}`;
-					const published = await this.publishTracksOnSession(newSfuSessionId, newPc, [{
+					const published = await this.publishTracksOnSession(newPubSessionId, newPubPc, [{
 						track: liveAudioTrack,
 						trackName
 					}], existing.localStream);
+					newSession.pubSfuSessionId = newPubSessionId;
+					newSession.pubPc = newPubPc;
 					newSession.localStream = existing.localStream;
 					newSession.localTrackName = trackName;
 					newSession.localMid = published[0]?.mid || null;
 					newSession.isPublishing = true;
 					newSession.isMuted = wasMuted;
 					this.isMuted = wasMuted;
-				} else await this.publishPartyLocalMic(newSession, wasMuted);
-				await this.waitForPeerConnected(newPc, 15e3);
+					await this.waitForPeerConnected(newPubPc, 15e3);
+					this.attachPartyPubMonitor(newSession, newPubPc);
+				} else {
+					newPubPc.close();
+					await this.deleteSfuSession(newPubSessionId);
+					newPubPc = null;
+					newPubSessionId = "";
+					await this.publishPartyLocalMic(newSession, wasMuted);
+				}
 			}
 			if (existing.isClosed || this.partySfuSessions.get(roomId) !== existing) {
 				if (newSession.localStream && newSession.localStream !== existing.localStream) newSession.localStream.getTracks().forEach((t) => t.stop());
-				newPc.close();
-				await this.deleteSfuSession(newSfuSessionId);
+				newSubPc.close();
+				await this.deleteSfuSession(newSubSessionId);
+				if (newSession.pubPc) newSession.pubPc.close();
+				if (newSession.pubSfuSessionId) await this.deleteSfuSession(newSession.pubSfuSessionId);
 				return false;
 			}
 			this.partySfuSessions.set(roomId, newSession);
-			this.monitorPeerConnection(`party:${roomId}`, newPc, {
+			this.monitorPeerConnection(`party:${roomId}`, newSubPc, {
 				isSessionActive: () => !newSession.isClosed && this.partySfuSessions.get(roomId) === newSession,
 				onStateChange: (state) => {
+					if (state === "connecting") newSession.subConnectingSinceMs = Date.now();
 					newSession?.onConnectionStateChange?.(state);
 				},
 				onReconnectNeeded: () => this.reconnectPartyVoice(roomId)
@@ -50376,8 +50483,12 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			this.startPartyHeartbeat(newSession);
 			this.attachPartyParticipantsListener(newSession);
 			existing.isClosed = true;
-			existing.pc.onconnectionstatechange = null;
-			existing.pc.oniceconnectionstatechange = null;
+			existing.subPc.onconnectionstatechange = null;
+			existing.subPc.oniceconnectionstatechange = null;
+			if (existing.pubPc) {
+				existing.pubPc.onconnectionstatechange = null;
+				existing.pubPc.oniceconnectionstatechange = null;
+			}
 			if (existing.heartbeatTimer) {
 				clearInterval(existing.heartbeatTimer);
 				existing.heartbeatTimer = null;
@@ -50396,11 +50507,15 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				} catch {}
 			});
 			try {
-				existing.pc.close();
+				existing.subPc.close();
 			} catch {}
-			this.deleteSfuSession(existing.sfuSessionId).catch(() => {});
+			if (existing.pubPc) try {
+				existing.pubPc.close();
+			} catch {}
+			this.deleteSfuSession(existing.subSfuSessionId).catch(() => {});
+			if (existing.pubSfuSessionId) this.deleteSfuSession(existing.pubSfuSessionId).catch(() => {});
 			if (wasPublishing) newSession.onConnectionStateChange?.("connected");
-			else this.waitForPeerConnected(newPc, 15e3).then(() => {
+			else this.waitForPeerConnected(newSubPc, 15e3).then(() => {
 				if (!newSession?.isClosed) newSession?.onConnectionStateChange?.("connected");
 			}).catch(() => {});
 			return true;
@@ -50410,10 +50525,18 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 					t.stop();
 				} catch {}
 			});
-			if (newPc) try {
-				newPc.close();
+			if (newSubPc) try {
+				newSubPc.close();
 			} catch {}
-			if (newSfuSessionId) await this.deleteSfuSession(newSfuSessionId);
+			if (newSubSessionId) await this.deleteSfuSession(newSubSessionId);
+			if (newSession?.pubPc && newSession.pubPc !== newPubPc) try {
+				newSession.pubPc.close();
+			} catch {}
+			else if (newPubPc) try {
+				newPubPc.close();
+			} catch {}
+			if (newSession?.pubSfuSessionId && newSession.pubSfuSessionId !== newPubSessionId) await this.deleteSfuSession(newSession.pubSfuSessionId);
+			else if (newPubSessionId) await this.deleteSfuSession(newPubSessionId);
 			console.warn("[Party SFU] Reconnect failed:", err);
 			return false;
 		}
@@ -50439,20 +50562,42 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			if (!videoTrack && !audioTrack) throw new Error("Camera and microphone tracks were not available.");
 			if (videoTrack) videoTrack.enabled = isVideoOn;
 			if (audioTrack) audioTrack.enabled = isMicOn;
-			sfuSessionId = await this.createSfuSession();
-			pc = new RTCPeerConnection(this.getRtcConfiguration());
-			const suffix = Date.now().toString(36);
-			const tracksToPublish = [];
-			if (videoTrack) tracksToPublish.push({
-				track: videoTrack,
-				trackName: `${streamId}-video-${suffix}`
-			});
-			if (audioTrack) tracksToPublish.push({
-				track: audioTrack,
-				trackName: `${streamId}-audio-${suffix}`
-			});
-			const publishedTracks = await this.publishTracksOnSession(sfuSessionId, pc, tracksToPublish, stream);
-			await this.waitForPeerConnected(pc, 15e3);
+			let publishedTracks = [];
+			for (let publishAttempt = 0; publishAttempt < 2; publishAttempt++) try {
+				sfuSessionId = await this.createSfuSession();
+				pc = new RTCPeerConnection(this.getRtcConfiguration());
+				const suffix = `${Date.now().toString(36)}${publishAttempt > 0 ? "r" : ""}`;
+				const tracksToPublish = [];
+				if (videoTrack) tracksToPublish.push({
+					track: videoTrack,
+					trackName: `${streamId}-video-${suffix}`
+				});
+				if (audioTrack) tracksToPublish.push({
+					track: audioTrack,
+					trackName: `${streamId}-audio-${suffix}`
+				});
+				publishedTracks = await this.publishTracksOnSession(sfuSessionId, pc, tracksToPublish, stream);
+				await this.waitForPeerConnected(pc, 15e3);
+				break;
+			} catch (attemptErr) {
+				if (pc) {
+					try {
+						pc.close();
+					} catch {}
+					pc = null;
+				}
+				if (sfuSessionId) {
+					await this.deleteSfuSession(sfuSessionId);
+					sfuSessionId = "";
+				}
+				const isTransientSfuFailure = attemptErr?.code === "SFU_BACKEND_UNREACHABLE" || this.isRetryableGatewayStatus(Number(attemptErr?.status || 0), attemptErr?.code);
+				if (publishAttempt === 0 && isTransientSfuFailure) {
+					await this.delayMs(400);
+					continue;
+				}
+				throw attemptErr;
+			}
+			if (!pc || !sfuSessionId) throw new Error("Unable to establish Live SFU peer connection.");
 			const sessionObj = {
 				streamId,
 				hostId,
@@ -50719,7 +50864,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 	}
 	hasActivePartySession(roomId) {
 		const s = this.partySfuSessions.get(roomId);
-		return Boolean(s && !s.isClosed && s.pc.connectionState !== "closed" && s.pc.connectionState !== "failed");
+		return Boolean(s && !s.isClosed && s.subPc.connectionState !== "closed" && s.subPc.connectionState !== "failed");
 	}
 	getActivePartyRemoteStreams(roomId) {
 		const session = this.partySfuSessions.get(roomId);
@@ -50732,12 +50877,12 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 	async getPartyRemoteAudioActivity(roomId) {
 		const speakingPeers = /* @__PURE__ */ new Set();
 		const session = this.partySfuSessions.get(roomId);
-		if (!session || session.isClosed || session.pc.connectionState === "closed") return speakingPeers;
+		if (!session || session.isClosed || session.subPc.connectionState === "closed") return speakingPeers;
 		try {
-			const receivers = session.pc.getReceivers();
+			const receivers = session.subPc.getReceivers();
 			for (const receiver of receivers) {
 				if (!receiver.track || receiver.track.kind !== "audio" || receiver.track.readyState !== "live") continue;
-				const mid = session.pc.getTransceivers().find((t) => t.receiver === receiver)?.mid || "";
+				const mid = session.subPc.getTransceivers().find((t) => t.receiver === receiver)?.mid || "";
 				const peerId = mid ? session.pendingMidToPeer.get(mid) : void 0;
 				if (!peerId) continue;
 				if (typeof receiver.getSynchronizationSources === "function") {
@@ -50756,6 +50901,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		return speakingPeers;
 	}
 	startPartyVoice(roomId, userId, isMuted = false, listenOnly = false, callbacks) {
+		if (callbacks) this.partyRoomCallbacks.set(roomId, callbacks);
 		return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () => this._startPartyVoiceInternal(roomId, userId, isMuted, listenOnly, callbacks));
 	}
 	dispatchPartyRemoteStream(roomId, peerId, stream) {
@@ -50774,11 +50920,32 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		const unattachedSubs = Array.from(session.subscribedByPeerKey.values()).filter((sub) => sub.stream.getTracks().length === 0);
 		if (unattachedSubs.length === 1) return unattachedSubs[0].peerId;
 	}
-	attachPartyTrackHandlers(session, pc) {
-		pc.ontrack = (event) => {
+	ensureCanonicalRemoteAudioStream(session, peerId, track, mid) {
+		track.enabled = true;
+		const existingStream = session.activeRemoteStreams.get(peerId);
+		if (existingStream) {
+			if (existingStream.getAudioTracks().some((t) => t.id === track.id)) {
+				for (const [, sub] of session.subscribedByPeerKey.entries()) if (sub.peerId === peerId && (sub.mid === mid || !sub.mid)) {
+					sub.mid = mid || sub.mid;
+					sub.stream = existingStream;
+				}
+				return existingStream;
+			}
+		}
+		const stream = new MediaStream([track]);
+		session.activeRemoteStreams.set(peerId, stream);
+		for (const [, sub] of session.subscribedByPeerKey.entries()) if (sub.peerId === peerId && (sub.mid === mid || !sub.mid || sub.stream.getTracks().length === 0)) {
+			sub.mid = mid || sub.mid;
+			sub.stream = stream;
+		}
+		this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
+		return stream;
+	}
+	attachPartyTrackHandlers(session, subPc) {
+		subPc.ontrack = (event) => {
 			if (session.isClosed || !event.track) return;
-			const resolvedMid = event.transceiver?.mid || pc.getTransceivers().find((t) => t.receiver === event.receiver)?.mid || "";
-			const peerId = this.resolvePeerIdForTrack(session, pc, resolvedMid, event.receiver);
+			const resolvedMid = event.transceiver?.mid || subPc.getTransceivers().find((t) => t.receiver === event.receiver)?.mid || "";
+			const peerId = this.resolvePeerIdForTrack(session, subPc, resolvedMid, event.receiver);
 			if (!peerId) {
 				console.warn("[Party SFU] Received track before mid->peer mapping was ready:", {
 					roomId: session.roomId,
@@ -50787,30 +50954,47 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				});
 				return;
 			}
-			event.track.enabled = true;
-			const stream = event.streams?.[0] || new MediaStream([event.track]);
-			if (!stream.getTracks().some((t) => t.id === event.track.id)) stream.addTrack(event.track);
-			for (const [, sub] of session.subscribedByPeerKey.entries()) if (sub.peerId === peerId && (sub.mid === resolvedMid || !sub.mid || sub.stream.getTracks().length === 0)) {
-				sub.mid = resolvedMid || sub.mid;
-				sub.stream = stream;
-			}
-			session.activeRemoteStreams.set(peerId, stream);
+			this.ensureCanonicalRemoteAudioStream(session, peerId, event.track, resolvedMid);
 			console.info("[Party SFU] Remote audio track attached:", {
 				roomId: session.roomId,
 				peerId,
 				mid: resolvedMid,
 				readyState: event.track.readyState,
 				muted: event.track.muted,
-				iceConnectionState: pc.iceConnectionState
+				iceConnectionState: subPc.iceConnectionState
 			});
-			this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
 			event.track.onunmute = () => {
 				if (session.isClosed) return;
-				event.track.enabled = true;
-				session.activeRemoteStreams.set(peerId, stream);
-				this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
+				this.ensureCanonicalRemoteAudioStream(session, peerId, event.track, resolvedMid);
 			};
 		};
+	}
+	attachPartyPubMonitor(session, pubPc) {
+		this.monitorPeerConnection(`party-pub:${session.roomId}`, pubPc, {
+			isSessionActive: () => !session.isClosed && this.partySfuSessions.get(session.roomId) === session && session.pubPc === pubPc,
+			onStateChange: (state) => {
+				if (state === "connecting") session.pubConnectingSinceMs = Date.now();
+				if (state === "connected") session.onConnectionStateChange?.("connected");
+				else if (state === "disconnected" || state === "failed") session.onConnectionStateChange?.(state);
+			},
+			onReconnectNeeded: () => this.reconnectPartyPublisher(session.roomId)
+		});
+	}
+	reconnectPartyPublisher(roomId) {
+		return this.enqueueSessionOp(`party-lifecycle:${roomId}`, async () => {
+			const session = this.partySfuSessions.get(roomId);
+			if (!session || session.isClosed || !session.isPublishing) return false;
+			try {
+				await this.getFirebaseIdToken(true);
+				await this.fetchCloudflareTurnCredentials(true).catch(() => {});
+				await this.publishPartyLocalMic(session, session.isMuted);
+				await this.writePartyParticipantPresence(session);
+				return true;
+			} catch (err) {
+				console.warn("[Party SFU] Publisher reconnect failed:", err);
+				return false;
+			}
+		});
 	}
 	startPartyHeartbeat(session) {
 		if (session.heartbeatTimer) clearInterval(session.heartbeatTimer);
@@ -50820,9 +51004,13 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			if (session.latestDesiredPeers.size > 0) {
 				if (Array.from(session.latestDesiredPeers.keys()).some((k) => !session.subscribedByPeerKey.has(k))) this.reconcilePartySubscriptions(session).catch(() => {});
 			}
-			if ((session.isPublishing || session.subscribedByPeerKey.size > 0) && (session.pc.connectionState === "failed" || session.pc.connectionState === "connecting" && Date.now() - session.connectingSinceMs > 18e3)) {
-				session.connectingSinceMs = Date.now();
+			if (session.subscribedByPeerKey.size > 0 && (session.subPc.connectionState === "failed" || session.subPc.iceConnectionState === "failed" || session.subPc.connectionState === "connecting" && Date.now() - session.subConnectingSinceMs > 18e3)) {
+				session.subConnectingSinceMs = Date.now();
 				this.reconnectPartyVoice(session.roomId).catch(() => {});
+			}
+			if (session.isPublishing && session.pubPc && (session.pubPc.connectionState === "failed" || session.pubPc.iceConnectionState === "failed" || session.pubPc.connectionState === "connecting" && Date.now() - session.pubConnectingSinceMs > 18e3)) {
+				session.pubConnectingSinceMs = Date.now();
+				this.reconnectPartyPublisher(session.roomId).catch(() => {});
 			}
 		}, PARTY_HEARTBEAT_INTERVAL_MS);
 	}
@@ -50840,7 +51028,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				const peerId = docSnap.id;
 				const data = docSnap.data();
 				const lastSeenMs = typeof data?.lastSeenAt?.toMillis === "function" ? data.lastSeenAt.toMillis() : typeof data?.lastSeenAtMs === "number" ? data.lastSeenAtMs : now;
-				if (!(now - lastSeenMs <= 22e3) && peerId !== session.userId) return;
+				if (!(now - lastSeenMs <= 15e3) && peerId !== session.userId) return;
 				activeParticipantsByUid.set(peerId, {
 					userId: peerId,
 					uniqueId: String(data?.uniqueId || peerId),
@@ -50861,7 +51049,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 					lastSeenAtMs: lastSeenMs
 				});
 				if (peerId === session.userId) return;
-				if (data?.isPublishing === true && !data?.listenOnly && typeof data?.sfuSessionId === "string" && data.sfuSessionId && data.sfuSessionId !== session.sfuSessionId && typeof data?.trackName === "string" && data.trackName) {
+				if (data?.isPublishing === true && !data?.listenOnly && typeof data?.sfuSessionId === "string" && data.sfuSessionId && data.sfuSessionId !== session.pubSfuSessionId && data.sfuSessionId !== session.subSfuSessionId && typeof data?.trackName === "string" && data.trackName) {
 					const peerKey = `${peerId}::${data.sfuSessionId}::${data.trackName}`;
 					desiredPeers.set(peerKey, {
 						peerId,
@@ -50874,7 +51062,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			session.onParticipantsChange?.(Array.from(activeParticipantsByUid.values()));
 			this.reconcilePartySubscriptions(session).catch((err) => {
 				console.warn("[Party SFU] Subscription reconciliation error:", err);
-				session.onError?.(err instanceof Error ? err : new Error(String(err)));
+				if (err?.status === 403 || session.reconcileFailCount >= 2) session.onError?.(err instanceof Error ? err : new Error(String(err)));
 			});
 		}, (error) => {
 			console.error("[Party SFU] Participants listener error:", error);
@@ -50882,30 +51070,33 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		});
 	}
 	async _startPartyVoiceInternal(roomId, userId, isMuted = false, listenOnly = false, callbacks) {
+		const resolvedCallbacks = callbacks || this.partyRoomCallbacks.get(roomId);
 		const existing = this.partySfuSessions.get(roomId);
-		if (existing && !existing.isClosed && existing.userId === userId && existing.pc.connectionState !== "closed" && existing.pc.connectionState !== "failed") {
-			if (callbacks?.profile) existing.profile = {
+		if (existing && !existing.isClosed && existing.userId === userId && existing.subPc.connectionState !== "closed" && existing.subPc.connectionState !== "failed") {
+			if (resolvedCallbacks?.profile) existing.profile = {
 				...existing.profile,
-				...callbacks.profile
+				...resolvedCallbacks.profile
 			};
-			existing.onError = callbacks?.onError;
-			existing.onConnectionStateChange = callbacks?.onConnectionStateChange;
-			existing.onParticipantsChange = callbacks?.onParticipantsChange;
+			if (resolvedCallbacks?.onError) existing.onError = resolvedCallbacks.onError;
+			if (resolvedCallbacks?.onConnectionStateChange) existing.onConnectionStateChange = resolvedCallbacks.onConnectionStateChange;
+			if (resolvedCallbacks?.onParticipantsChange) existing.onParticipantsChange = resolvedCallbacks.onParticipantsChange;
 			return this._setPartySpeakingModeInternal(roomId, userId, !listenOnly, isMuted);
 		}
-		await this._stopPartyVoiceInternal(roomId);
+		await this._stopPartyVoiceInternal(roomId, false, false);
 		await this.getFirebaseIdToken();
 		await this.ensureSfuBackendConfigured();
 		await this.fetchCloudflareTurnCredentials().catch(() => {});
-		const sfuSessionId = (await this.requestPartyRoomSessionToken(roomId, !listenOnly)).sfuSessionId;
-		const pc = new RTCPeerConnection(this.getRtcConfiguration());
+		const subSfuSessionId = (await this.requestPartyRoomSessionToken(roomId, false)).sfuSessionId;
+		const subPc = new RTCPeerConnection(this.getRtcConfiguration());
 		const session = {
 			roomId,
 			userId,
-			profile: callbacks?.profile || {},
+			profile: resolvedCallbacks?.profile || {},
 			joinedAtMs: Date.now(),
-			sfuSessionId,
-			pc,
+			subSfuSessionId,
+			subPc,
+			pubSfuSessionId: null,
+			pubPc: null,
 			localStream: null,
 			localTrackName: null,
 			localMid: null,
@@ -50913,7 +51104,9 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			isMuted: listenOnly ? true : isMuted,
 			isSpeaking: false,
 			isClosed: false,
-			connectingSinceMs: Date.now(),
+			subConnectingSinceMs: Date.now(),
+			pubConnectingSinceMs: Date.now(),
+			reconcileFailCount: 0,
 			unsubscribeParticipants: null,
 			heartbeatTimer: null,
 			reconcileRetryTimer: null,
@@ -50921,16 +51114,16 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			pendingMidToPeer: /* @__PURE__ */ new Map(),
 			latestDesiredPeers: /* @__PURE__ */ new Map(),
 			activeRemoteStreams: /* @__PURE__ */ new Map(),
-			onError: callbacks?.onError,
-			onConnectionStateChange: callbacks?.onConnectionStateChange,
-			onParticipantsChange: callbacks?.onParticipantsChange
+			onError: resolvedCallbacks?.onError,
+			onConnectionStateChange: resolvedCallbacks?.onConnectionStateChange,
+			onParticipantsChange: resolvedCallbacks?.onParticipantsChange
 		};
 		this.partySfuSessions.set(roomId, session);
-		this.attachPartyTrackHandlers(session, pc);
-		this.monitorPeerConnection(`party:${roomId}`, pc, {
+		this.attachPartyTrackHandlers(session, subPc);
+		this.monitorPeerConnection(`party:${roomId}`, subPc, {
 			isSessionActive: () => !session.isClosed && this.partySfuSessions.get(roomId) === session,
 			onStateChange: (state) => {
-				if (state === "connecting") session.connectingSinceMs = Date.now();
+				if (state === "connecting") session.subConnectingSinceMs = Date.now();
 				session.onConnectionStateChange?.(state);
 			},
 			onReconnectNeeded: () => this.reconnectPartyVoice(roomId)
@@ -50942,7 +51135,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			this.attachPartyParticipantsListener(session);
 			return session.localStream;
 		} catch (err) {
-			await this._stopPartyVoiceInternal(roomId);
+			await this._stopPartyVoiceInternal(roomId, false, false);
 			throw err;
 		}
 	}
@@ -50961,11 +51154,24 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		}).catch(() => {});
 	}
 	setPartySpeakingMode(roomId, userId, canSpeak, isMuted, profile) {
+		if (profile) {
+			const prev = this.partyRoomCallbacks.get(roomId) || {};
+			this.partyRoomCallbacks.set(roomId, {
+				...prev,
+				profile
+			});
+		}
 		return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () => this._setPartySpeakingModeInternal(roomId, userId, canSpeak, isMuted, profile));
 	}
 	async _setPartySpeakingModeInternal(roomId, userId, canSpeak, isMuted, profile) {
 		const session = this.partySfuSessions.get(roomId);
-		if (!session || session.isClosed || session.userId !== userId) return this._startPartyVoiceInternal(roomId, userId, isMuted, !canSpeak, profile ? { profile } : void 0);
+		if (!session || session.isClosed || session.userId !== userId) {
+			const savedCallbacks = this.partyRoomCallbacks.get(roomId) || {};
+			return this._startPartyVoiceInternal(roomId, userId, isMuted, !canSpeak, {
+				...savedCallbacks,
+				...profile ? { profile } : {}
+			});
+		}
 		if (profile) session.profile = {
 			...session.profile,
 			...profile
@@ -50982,7 +51188,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			return null;
 		}
 		if (canSpeak && session.isPublishing) {
-			if (!Boolean(session.localStream?.getAudioTracks().some((t) => t.readyState === "live"))) try {
+			if (!Boolean(session.localStream?.getAudioTracks().some((t) => t.readyState === "live")) && session.pubPc) try {
 				const newStream = await navigator.mediaDevices.getUserMedia({
 					audio: {
 						echoCancellation: true,
@@ -50994,7 +51200,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				const newTrack = newStream.getAudioTracks()[0];
 				if (newTrack) {
 					newTrack.enabled = !isMuted;
-					const audioSender = session.pc.getSenders().find((s) => s.track?.kind === "audio" || !s.track);
+					const audioSender = session.pubPc.getSenders().find((s) => s.track?.kind === "audio" || !s.track);
 					if (audioSender) await audioSender.replaceTrack(newTrack);
 					session.localStream?.getTracks().forEach((t) => {
 						try {
@@ -51013,14 +51219,30 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			session.localStream?.getAudioTracks().forEach((t) => {
 				t.enabled = !isMuted;
 			});
-			session.pc.getSenders().forEach((sender) => {
+			session.pubPc?.getSenders().forEach((sender) => {
 				if (sender.track?.kind === "audio") sender.track.enabled = !isMuted;
 			});
 			await this.writePartyParticipantPresence(session);
 		}
 		return session.localStream;
 	}
+	async cleanupPartyPublisher(session, keepalive = false) {
+		this.clearReconnectState(`party-pub:${session.roomId}`, true);
+		const oldPubPc = session.pubPc;
+		const oldPubSessionId = session.pubSfuSessionId;
+		session.pubPc = null;
+		session.pubSfuSessionId = null;
+		if (oldPubPc) {
+			oldPubPc.onconnectionstatechange = null;
+			oldPubPc.oniceconnectionstatechange = null;
+			try {
+				oldPubPc.close();
+			} catch {}
+		}
+		if (oldPubSessionId) await this.deleteSfuSession(oldPubSessionId, keepalive);
+	}
 	async publishPartyLocalMic(session, isMuted) {
+		await this.cleanupPartyPublisher(session);
 		const stream = await navigator.mediaDevices.getUserMedia({
 			audio: {
 				echoCancellation: true,
@@ -51037,13 +51259,19 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			stream.getTracks().forEach((t) => t.stop());
 			throw new Error("Microphone track unavailable.");
 		}
+		let pubSfuSessionId = "";
+		let pubPc = null;
 		const trackName = `party-${session.roomId}-${session.userId}-${Date.now().toString(36)}`;
 		try {
-			session.connectingSinceMs = Date.now();
-			const published = await this.publishTracksOnSession(session.sfuSessionId, session.pc, [{
+			pubSfuSessionId = (await this.requestPartyRoomSessionToken(session.roomId, true)).sfuSessionId;
+			pubPc = new RTCPeerConnection(this.getRtcConfiguration());
+			session.pubConnectingSinceMs = Date.now();
+			const published = await this.publishTracksOnSession(pubSfuSessionId, pubPc, [{
 				track: audioTrack,
 				trackName
 			}], stream);
+			session.pubSfuSessionId = pubSfuSessionId;
+			session.pubPc = pubPc;
 			session.localStream = stream;
 			session.localTrackName = trackName;
 			session.localMid = published[0]?.mid || null;
@@ -51052,24 +51280,43 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			session.isSpeaking = false;
 			this.isMuted = isMuted;
 			this.initAudioAnalyser(stream);
-			console.info("[Party SFU] Local mic published to Cloudflare SFU:", {
+			this.attachPartyPubMonitor(session, pubPc);
+			await this.writePartyParticipantPresence(session);
+			await this.waitForPeerConnected(pubPc, 15e3);
+			console.info("[Party SFU] Local mic published & ICE connected to Cloudflare SFU:", {
 				roomId: session.roomId,
-				sfuSessionId: session.sfuSessionId,
+				pubSfuSessionId,
 				trackName,
 				mid: session.localMid,
 				muted: isMuted,
-				readyState: audioTrack.readyState
-			});
-			this.waitForPeerConnected(session.pc, 15e3).catch((connErr) => {
-				console.warn("[Party SFU] Publish peer ICE confirmation delayed:", connErr?.message || connErr);
+				readyState: audioTrack.readyState,
+				iceConnectionState: pubPc.iceConnectionState
 			});
 		} catch (err) {
-			stream.getTracks().forEach((t) => t.stop());
+			stream.getTracks().forEach((t) => {
+				try {
+					t.stop();
+				} catch {}
+			});
+			if (session.localStream === stream) session.localStream = null;
+			session.localTrackName = null;
+			session.localMid = null;
+			session.isPublishing = false;
+			this.stopAudioAnalyser();
+			if (pubPc) {
+				pubPc.onconnectionstatechange = null;
+				pubPc.oniceconnectionstatechange = null;
+				try {
+					pubPc.close();
+				} catch {}
+			}
+			if (session.pubPc === pubPc) session.pubPc = null;
+			if (pubSfuSessionId) await this.deleteSfuSession(pubSfuSessionId);
+			if (session.pubSfuSessionId === pubSfuSessionId) session.pubSfuSessionId = null;
 			throw err;
 		}
 	}
 	async unpublishPartyLocalMic(session) {
-		const midToClose = session.localMid;
 		if (session.localStream) session.localStream.getTracks().forEach((t) => {
 			try {
 				t.stop();
@@ -51082,13 +51329,14 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		session.isMuted = true;
 		session.isSpeaking = false;
 		this.stopAudioAnalyser();
-		if (midToClose) await this.closeTracksOnSession(session.sfuSessionId, session.pc, [midToClose], false);
+		await this.cleanupPartyPublisher(session);
 	}
 	async writePartyParticipantPresence(session) {
 		if (session.isClosed) return;
 		const uid = auth.currentUser?.uid || session.userId;
 		if (!uid) return;
 		const profile = session.profile || {};
+		const activeSfuSessionId = session.isPublishing && session.pubSfuSessionId ? session.pubSfuSessionId : session.subSfuSessionId;
 		const payload = {
 			userId: uid,
 			uniqueId: profile.uniqueId || uid,
@@ -51099,7 +51347,7 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			...profile.countryFlag ? { countryFlag: profile.countryFlag } : {},
 			isHost: Boolean(profile.isHost),
 			joinedAtMs: session.joinedAtMs,
-			sfuSessionId: session.sfuSessionId,
+			sfuSessionId: activeSfuSessionId,
 			trackName: session.isPublishing ? session.localTrackName : null,
 			mid: session.isPublishing ? session.localMid : null,
 			isPublishing: session.isPublishing,
@@ -51112,8 +51360,8 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		await setDoc(doc(db, "partyRooms", session.roomId, "voiceParticipants", uid), payload, { merge: true });
 	}
 	reconcilePartySubscriptions(session) {
-		return this.enqueueSessionOp(`party-reconcile:${session.sfuSessionId}`, async () => {
-			if (session.isClosed || session.pc.signalingState === "closed") return;
+		return this.enqueueSessionOp(`party-reconcile:${session.subSfuSessionId}`, async () => {
+			if (session.isClosed || session.subPc.signalingState === "closed") return;
 			const desiredPeers = session.latestDesiredPeers;
 			const removedKeys = [];
 			const midsToClose = [];
@@ -51134,16 +51382,19 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				}
 			}
 			removedKeys.forEach((k) => session.subscribedByPeerKey.delete(k));
-			if (midsToClose.length > 0) await this.closeTracksOnSession(session.sfuSessionId, session.pc, midsToClose, false);
+			if (midsToClose.length > 0) await this.closeTracksOnSession(session.subSfuSessionId, session.subPc, midsToClose, false);
 			const toSubscribe = [];
 			for (const [peerKey, info] of desiredPeers.entries()) if (!session.subscribedByPeerKey.has(peerKey)) toSubscribe.push({
 				peerKey,
 				...info
 			});
-			if (toSubscribe.length === 0) return;
-			session.connectingSinceMs = Date.now();
+			if (toSubscribe.length === 0) {
+				session.reconcileFailCount = 0;
+				return;
+			}
+			session.subConnectingSinceMs = Date.now();
 			try {
-				const assigned = await this.subscribeTracksOnSession(session.sfuSessionId, session.pc, toSubscribe.map((item) => ({
+				const assigned = await this.subscribeTracksOnSession(session.subSfuSessionId, session.subPc, toSubscribe.map((item) => ({
 					publisherSessionId: item.publisherSessionId,
 					trackName: item.trackName,
 					peerId: item.peerId
@@ -51157,29 +51408,30 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 				toSubscribe.forEach((item, idx) => {
 					const mid = (assigned.find((a) => a.trackName === item.trackName && a.publisherSessionId === item.publisherSessionId) || assigned[idx])?.mid || "";
 					if (mid) session.pendingMidToPeer.set(mid, item.peerId);
+					const existingCanonical = session.activeRemoteStreams.get(item.peerId);
 					session.subscribedByPeerKey.set(item.peerKey, {
 						peerId: item.peerId,
 						publisherSessionId: item.publisherSessionId,
 						trackName: item.trackName,
 						mid,
-						stream: new MediaStream()
+						stream: existingCanonical || new MediaStream()
 					});
 				});
-				session.pc.getReceivers().forEach((receiver) => {
-					const mid = session.pc.getTransceivers().find((t) => t.receiver === receiver)?.mid;
+				session.subPc.getReceivers().forEach((receiver) => {
+					const mid = session.subPc.getTransceivers().find((t) => t.receiver === receiver)?.mid;
 					if (!mid || !receiver.track || receiver.track.readyState !== "live") return;
 					const peerId = session.pendingMidToPeer.get(mid);
 					if (!peerId) return;
-					receiver.track.enabled = true;
-					const stream = new MediaStream([receiver.track]);
-					for (const [, sub] of session.subscribedByPeerKey.entries()) if (sub.peerId === peerId && (sub.mid === mid || !sub.mid) && sub.stream.getTracks().length === 0) {
-						sub.mid = mid;
-						sub.stream = stream;
-						session.activeRemoteStreams.set(peerId, stream);
-						this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
-					}
+					this.ensureCanonicalRemoteAudioStream(session, peerId, receiver.track, mid);
+				});
+				session.reconcileFailCount = 0;
+				this.waitForPeerConnected(session.subPc, 15e3).then(() => {
+					if (!session.isClosed) session.onConnectionStateChange?.("connected");
+				}).catch((iceErr) => {
+					console.warn("[Party SFU] Subscriber ICE confirmation failed:", iceErr?.message || iceErr);
 				});
 			} catch (err) {
+				session.reconcileFailCount += 1;
 				if (!session.isClosed && !session.reconcileRetryTimer) session.reconcileRetryTimer = setTimeout(() => {
 					session.reconcileRetryTimer = null;
 					if (!session.isClosed) this.reconcilePartySubscriptions(session).catch(() => {});
@@ -51189,17 +51441,23 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 		});
 	}
 	stopPartyVoice(roomId, keepalive = false) {
-		if (keepalive) return this._stopPartyVoiceInternal(roomId, true);
-		return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () => this._stopPartyVoiceInternal(roomId, false));
+		if (keepalive) return this._stopPartyVoiceInternal(roomId, true, true);
+		return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () => this._stopPartyVoiceInternal(roomId, false, true));
 	}
-	async _stopPartyVoiceInternal(roomId, keepalive = false) {
+	async _stopPartyVoiceInternal(roomId, keepalive = false, clearCallbacks = true) {
 		this.clearReconnectState(`party:${roomId}`, true);
+		this.clearReconnectState(`party-pub:${roomId}`, true);
+		if (clearCallbacks) this.partyRoomCallbacks.delete(roomId);
 		const session = this.partySfuSessions.get(roomId);
 		this.partySfuSessions.delete(roomId);
 		if (session) {
 			session.isClosed = true;
-			session.pc.onconnectionstatechange = null;
-			session.pc.oniceconnectionstatechange = null;
+			session.subPc.onconnectionstatechange = null;
+			session.subPc.oniceconnectionstatechange = null;
+			if (session.pubPc) {
+				session.pubPc.onconnectionstatechange = null;
+				session.pubPc.oniceconnectionstatechange = null;
+			}
 			if (session.heartbeatTimer) {
 				clearInterval(session.heartbeatTimer);
 				session.heartbeatTimer = null;
@@ -51220,9 +51478,12 @@ var p2pStreamingEngine = new class RealtimeSfuStreamingEngine {
 			});
 			this.stopAudioAnalyser();
 			try {
-				session.pc.close();
+				session.subPc.close();
 			} catch {}
-			await this.deleteSfuSession(session.sfuSessionId, keepalive);
+			if (session.pubPc) try {
+				session.pubPc.close();
+			} catch {}
+			await Promise.all([this.deleteSfuSession(session.subSfuSessionId, keepalive), session.pubSfuSessionId ? this.deleteSfuSession(session.pubSfuSessionId, keepalive) : Promise.resolve()]);
 		}
 		const uid = auth.currentUser?.uid;
 		if (uid) await deleteDoc(doc(db, "partyRooms", roomId, "voiceParticipants", uid)).catch(() => {});
@@ -54205,7 +54466,7 @@ var __vitePreload = function preload(baseModule, deps, importerUrl) {
 	});
 };
 // node_modules/@capacitor/app/dist/esm/index.js
-var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-Rp-Vl1w5.js").then((m) => new m.AppWeb()), []) });
+var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-CFgnaKBf.js").then((m) => new m.AppWeb()), []) });
 // node_modules/@capacitor/status-bar/dist/esm/definitions.js
 var Style;
 (function(Style) {
@@ -68970,6 +69231,74 @@ var PartyRoomAtmosphere = ({ isMusicPlaying = true, theme = "logo", hostAvatar }
 		]
 	});
 };
+// src/components/party/PartyRemoteAudioPlayer.tsx
+var PartyRemoteAudioPlayer = import_react.memo(({ peerId, stream, isSpeakerOn, onRegisterAudioEl, onAutoplayStateChange }) => {
+	const audioRef = (0, import_react.useRef)(null);
+	const isSpeakerOnRef = (0, import_react.useRef)(isSpeakerOn);
+	isSpeakerOnRef.current = isSpeakerOn;
+	(0, import_react.useEffect)(() => {
+		const el = audioRef.current;
+		onRegisterAudioEl(peerId, el);
+		return () => {
+			onRegisterAudioEl(peerId, null);
+		};
+	}, [peerId, onRegisterAudioEl]);
+	(0, import_react.useEffect)(() => {
+		const el = audioRef.current;
+		if (!el) return;
+		if (el.srcObject !== stream) el.srcObject = stream;
+		const attemptPlay = () => {
+			el.muted = !isSpeakerOnRef.current;
+			el.volume = 1;
+			stream.getAudioTracks().forEach((track) => {
+				track.enabled = true;
+			});
+			const playPromise = el.play();
+			if (playPromise && typeof playPromise.then === "function") playPromise.then(() => {
+				onAutoplayStateChange(false);
+			}).catch(() => {
+				onAutoplayStateChange(true);
+			});
+		};
+		const handleCanPlay = () => {
+			if (isSpeakerOnRef.current && el.paused) attemptPlay();
+		};
+		const handlePlaying = () => {
+			onAutoplayStateChange(false);
+		};
+		el.addEventListener("canplay", handleCanPlay);
+		el.addEventListener("playing", handlePlaying);
+		attemptPlay();
+		const audioTracks = stream.getAudioTracks();
+		const handleUnmute = () => {
+			attemptPlay();
+		};
+		audioTracks.forEach((track) => {
+			track.addEventListener("unmute", handleUnmute);
+		});
+		return () => {
+			el.removeEventListener("canplay", handleCanPlay);
+			el.removeEventListener("playing", handlePlaying);
+			audioTracks.forEach((track) => {
+				track.removeEventListener("unmute", handleUnmute);
+			});
+		};
+	}, [stream, onAutoplayStateChange]);
+	(0, import_react.useEffect)(() => {
+		const el = audioRef.current;
+		if (!el) return;
+		el.muted = !isSpeakerOn;
+		el.volume = 1;
+		if (isSpeakerOn && el.srcObject && el.paused) el.play().then(() => onAutoplayStateChange(false)).catch(() => onAutoplayStateChange(true));
+	}, [isSpeakerOn, onAutoplayStateChange]);
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("audio", {
+		ref: audioRef,
+		autoPlay: true,
+		playsInline: true,
+		"data-peer-id": peerId
+	});
+});
+PartyRemoteAudioPlayer.displayName = "PartyRemoteAudioPlayer";
 // node_modules/@firebase/storage/dist/index.esm.js
 /**
 * @license
@@ -72631,6 +72960,7 @@ var PartyRoomsScreen = () => {
 	const [isSelfSpeaking, setIsSelfSpeaking] = (0, import_react.useState)(false);
 	const [partyAudioAutoplayBlocked, setPartyAudioAutoplayBlocked] = (0, import_react.useState)(false);
 	const [partyVoiceError, setPartyVoiceError] = (0, import_react.useState)(null);
+	const [partyVoiceRetryToken, setPartyVoiceRetryToken] = (0, import_react.useState)(0);
 	const [remotePartyStreams, setRemotePartyStreams] = (0, import_react.useState)([]);
 	const [activeVoiceParticipants, setActiveVoiceParticipants] = (0, import_react.useState)([]);
 	const [remoteSpeakingPeerIds, setRemoteSpeakingPeerIds] = (0, import_react.useState)(/* @__PURE__ */ new Set());
@@ -72639,6 +72969,11 @@ var PartyRoomsScreen = () => {
 	const roomSeenInListRef = (0, import_react.useRef)(false);
 	const isSpeakerOnRef = (0, import_react.useRef)(isSpeakerOn);
 	const wasHostMutedRef = (0, import_react.useRef)(false);
+	const voiceHasConnectedRef = (0, import_react.useRef)(false);
+	const voiceParticipantsLoadedRef = (0, import_react.useRef)(false);
+	const startupAutoRetryKeyRef = (0, import_react.useRef)("");
+	const startupAutoRetryCountRef = (0, import_react.useRef)(0);
+	const startupRetryTimerRef = (0, import_react.useRef)(null);
 	const initialParticipantsSeededRef = (0, import_react.useRef)(false);
 	const notifiedJoinTimestampsRef = (0, import_react.useRef)(/* @__PURE__ */ new Map());
 	const joinNotificationTimerRef = (0, import_react.useRef)(null);
@@ -73166,22 +73501,40 @@ var PartyRoomsScreen = () => {
 	const isRoomFull = occupiedGuestSeatsCount >= maxGuestSeats;
 	const nextTargetTier = partyLevel === 1 ? PARTY_TIER_SETTINGS[1] : partyLevel === 2 ? PARTY_TIER_SETTINGS[2] : null;
 	const canHostUpgrade = Boolean(isHost && nextTargetTier && currentUser.level >= nextTargetTier.requiredLevel);
-	const unlockAllRemoteAudioPlayback = () => {
-		let anyBlocked = false;
+	const registerPartyAudioEl = (0, import_react.useCallback)((peerId, el) => {
+		if (!el) partyAudioElsRef.current.delete(peerId);
+		else partyAudioElsRef.current.set(peerId, el);
+	}, []);
+	const handleAutoplayStateChange = (0, import_react.useCallback)((blocked) => {
+		setPartyAudioAutoplayBlocked(blocked);
+	}, []);
+	const unlockAllRemoteAudioPlayback = (0, import_react.useCallback)(async () => {
+		const targets = [];
 		partyAudioElsRef.current.forEach((audioEl) => {
 			if (!audioEl || !audioEl.srcObject) return;
 			audioEl.muted = !isSpeakerOnRef.current;
 			audioEl.volume = 1;
-			audioEl.play().catch(() => {
-				anyBlocked = true;
-			});
+			targets.push(audioEl);
 		});
-		if (!anyBlocked) setPartyAudioAutoplayBlocked(false);
-	};
+		if (targets.length === 0) {
+			setPartyAudioAutoplayBlocked(false);
+			return;
+		}
+		const anyRejected = (await Promise.allSettled(targets.map((el) => el.play()))).some((r) => r.status === "rejected");
+		setPartyAudioAutoplayBlocked(anyRejected);
+	}, []);
 	(0, import_react.useEffect)(() => {
 		const roomId = activePartyRoom?.id;
+		if (startupRetryTimerRef.current) {
+			clearTimeout(startupRetryTimerRef.current);
+			startupRetryTimerRef.current = null;
+		}
 		if (!roomId) {
 			lastVoiceModeRef.current = null;
+			startupAutoRetryKeyRef.current = "";
+			startupAutoRetryCountRef.current = 0;
+			voiceHasConnectedRef.current = false;
+			voiceParticipantsLoadedRef.current = false;
 			setPartyVoiceError(null);
 			setPartyAudioAutoplayBlocked(false);
 			setIsHostMicMuted(false);
@@ -73198,18 +73551,26 @@ var PartyRoomsScreen = () => {
 			wasHostMutedRef.current = false;
 			return;
 		}
+		const sessionIdentityKey = `${roomId}:${effectiveUserId}`;
+		if (startupAutoRetryKeyRef.current !== sessionIdentityKey) {
+			startupAutoRetryKeyRef.current = sessionIdentityKey;
+			startupAutoRetryCountRef.current = 0;
+		}
 		const isUserHost = activePartyRoom.host?.id === effectiveUserId;
 		const myInitialSeat = activePartyRoom.seats?.find((s) => s.user?.id === effectiveUserId);
 		const initialCanSpeak = isUserHost || Boolean(myInitialSeat);
 		const initialMuted = isUserHost ? false : myInitialSeat ? Boolean(myInitialSeat.isMuted || myInitialSeat.isHostMuted) : false;
+		let cancelled = false;
 		setIsHostMicMuted(false);
+		voiceHasConnectedRef.current = false;
+		voiceParticipantsLoadedRef.current = false;
 		initialParticipantsSeededRef.current = false;
 		notifiedJoinTimestampsRef.current.clear();
 		lastSyncedViewerCountRef.current = -1;
 		lastSelfSpeakingSyncedRef.current = false;
 		setJoinNotification(null);
 		lastVoiceModeRef.current = {
-			key: `${roomId}:${effectiveUserId}`,
+			key: sessionIdentityKey,
 			canSpeak: initialCanSpeak,
 			muted: initialMuted
 		};
@@ -73226,14 +73587,20 @@ var PartyRoomsScreen = () => {
 				isHost: isUserHost
 			},
 			onError: (err) => {
-				setPartyVoiceError(err.message || "Voice audio connection interrupted.");
+				if (!cancelled) setPartyVoiceError(err.message || "Voice audio connection interrupted.");
 			},
 			onConnectionStateChange: (connState) => {
-				if (connState === "disconnected" || connState === "connecting") setPartyVoiceError("Network interrupted — reconnecting voice...");
-				else if (connState === "connected") setPartyVoiceError(null);
-				else if (connState === "failed") setPartyVoiceError("Voice connection lost after reconnect attempts. Rejoin room to retry.");
+				if (cancelled) return;
+				if (connState === "connected") {
+					voiceHasConnectedRef.current = true;
+					setPartyVoiceError(null);
+				} else if (connState === "disconnected") {
+					if (voiceHasConnectedRef.current) setPartyVoiceError("Network interrupted — reconnecting voice...");
+				} else if (connState === "failed") setPartyVoiceError("Voice connection lost. Tap Retry to reconnect.");
 			},
 			onParticipantsChange: (participants) => {
+				if (cancelled) return;
+				voiceParticipantsLoadedRef.current = true;
 				setActiveVoiceParticipants(participants);
 				const now = Date.now();
 				if (!initialParticipantsSeededRef.current) {
@@ -73261,11 +73628,22 @@ var PartyRoomsScreen = () => {
 				}
 			}
 		}).then(() => {
+			if (cancelled) return;
+			setPartyVoiceError(null);
 			const existingStreams = p2pStreamingEngine.getActivePartyRemoteStreams(roomId);
 			if (existingStreams.length > 0) setRemotePartyStreams(existingStreams);
 		}).catch((error) => {
+			if (cancelled) return;
 			if (error?.code === "SFU_NOT_CONFIGURED" || error?.status === 503) console.warn("[Party Voice] SFU unavailable:", error?.message || error);
 			else console.error("[Party Voice] Unable to start SFU session:", error);
+			if (error?.code === "SFU_BACKEND_UNREACHABLE" && startupAutoRetryCountRef.current < 1) {
+				startupAutoRetryCountRef.current += 1;
+				startupRetryTimerRef.current = setTimeout(() => {
+					startupRetryTimerRef.current = null;
+					if (!cancelled) setPartyVoiceRetryToken((prev) => prev + 1);
+				}, 1500);
+				return;
+			}
 			setPartyVoiceError(error?.message || "Unable to connect to Party Voice SFU.");
 		});
 		const handlePageHide = () => {
@@ -73274,6 +73652,11 @@ var PartyRoomsScreen = () => {
 		window.addEventListener("pagehide", handlePageHide);
 		window.addEventListener("beforeunload", handlePageHide);
 		return () => {
+			cancelled = true;
+			if (startupRetryTimerRef.current) {
+				clearTimeout(startupRetryTimerRef.current);
+				startupRetryTimerRef.current = null;
+			}
 			if (joinNotificationTimerRef.current) {
 				clearTimeout(joinNotificationTimerRef.current);
 				joinNotificationTimerRef.current = null;
@@ -73282,7 +73665,11 @@ var PartyRoomsScreen = () => {
 			window.removeEventListener("beforeunload", handlePageHide);
 			p2pStreamingEngine.stopPartyVoice(roomId).catch(() => {});
 		};
-	}, [activePartyRoom?.id, effectiveUserId]);
+	}, [
+		activePartyRoom?.id,
+		effectiveUserId,
+		partyVoiceRetryToken
+	]);
 	(0, import_react.useEffect)(() => {
 		const roomId = activePartyRoom?.id;
 		if (!roomId) {
@@ -73360,12 +73747,15 @@ var PartyRoomsScreen = () => {
 	(0, import_react.useEffect)(() => {
 		const roomId = activePartyRoom?.id;
 		if (!roomId || remotePartyStreams.length === 0) {
-			setRemoteSpeakingPeerIds(/* @__PURE__ */ new Set());
+			setRemoteSpeakingPeerIds((prev) => prev.size === 0 ? prev : /* @__PURE__ */ new Set());
 			return;
 		}
 		const timer = setInterval(() => {
 			p2pStreamingEngine.getPartyRemoteAudioActivity(roomId).then((activeSet) => {
-				setRemoteSpeakingPeerIds(activeSet);
+				setRemoteSpeakingPeerIds((prev) => {
+					if (prev.size === activeSet.size && Array.from(activeSet).every((id) => prev.has(id))) return prev;
+					return activeSet;
+				});
 			}).catch(() => {});
 		}, 260);
 		return () => clearInterval(timer);
@@ -73381,6 +73771,8 @@ var PartyRoomsScreen = () => {
 			const detail = event.detail;
 			if (!detail || detail.roomId !== roomId || !detail.stream || !detail.peerId) return;
 			setRemotePartyStreams((prev) => {
+				const existing = prev.find((item) => item.peerId === detail.peerId);
+				if (existing && existing.stream === detail.stream) return prev;
 				return [...prev.filter((item) => item.peerId !== detail.peerId), {
 					peerId: detail.peerId,
 					stream: detail.stream
@@ -73402,17 +73794,9 @@ var PartyRoomsScreen = () => {
 		};
 	}, [activePartyRoom?.id]);
 	(0, import_react.useEffect)(() => {
-		partyAudioElsRef.current.forEach((audioEl) => {
-			if (!audioEl || !audioEl.srcObject) return;
-			audioEl.muted = !isSpeakerOn;
-			audioEl.volume = 1;
-			if (isSpeakerOn) audioEl.play().then(() => setPartyAudioAutoplayBlocked(false)).catch(() => setPartyAudioAutoplayBlocked(true));
-		});
-	}, [isSpeakerOn, remotePartyStreams]);
-	(0, import_react.useEffect)(() => {
 		if (!activePartyRoom?.id || !partyAudioAutoplayBlocked) return;
 		const handleGestureUnlock = () => {
-			unlockAllRemoteAudioPlayback();
+			unlockAllRemoteAudioPlayback().catch(() => {});
 		};
 		window.addEventListener("pointerdown", handleGestureUnlock, { passive: true });
 		window.addEventListener("touchstart", handleGestureUnlock, { passive: true });
@@ -73422,43 +73806,60 @@ var PartyRoomsScreen = () => {
 			window.removeEventListener("touchstart", handleGestureUnlock);
 			window.removeEventListener("click", handleGestureUnlock);
 		};
-	}, [activePartyRoom?.id, partyAudioAutoplayBlocked]);
+	}, [
+		activePartyRoom?.id,
+		partyAudioAutoplayBlocked,
+		unlockAllRemoteAudioPlayback
+	]);
 	const realViewersList = (0, import_react.useMemo)(() => {
 		if (!activePartyRoom) return [];
 		const byId = /* @__PURE__ */ new Map();
-		if (activePartyRoom.host?.id) byId.set(activePartyRoom.host.id, {
+		const seenUniqueIds = /* @__PURE__ */ new Set();
+		const addUniqueViewer = (u) => {
+			if (!u.id || byId.has(u.id)) return;
+			const normUnique = u.uniqueId && u.uniqueId !== u.id ? String(u.uniqueId).trim() : "";
+			if (normUnique && seenUniqueIds.has(normUnique)) return;
+			if (normUnique) seenUniqueIds.add(normUnique);
+			byId.set(u.id, u);
+		};
+		if (voiceParticipantsLoadedRef.current) {
+			activeVoiceParticipants.forEach((p) => {
+				const isHostPeer = p.isHost || p.userId === activePartyRoom.host?.id;
+				const baseHost = isHostPeer ? activePartyRoom.host : void 0;
+				addUniqueViewer({
+					id: p.userId,
+					uniqueId: p.uniqueId || baseHost?.uniqueId || p.userId,
+					username: (p.displayName || baseHost?.username || "user").replace(/\s+/g, ""),
+					displayName: p.displayName || baseHost?.displayName || "Alpha User",
+					avatar: p.avatar || baseHost?.avatar || "",
+					bio: baseHost?.bio || "Alpha Mate live party member",
+					followersCount: baseHost?.followersCount || 0,
+					followingCount: baseHost?.followingCount || 0,
+					likesCount: baseHost?.likesCount || 0,
+					level: p.level || baseHost?.level || 1,
+					xp: baseHost?.xp || 0,
+					nextLevelXp: baseHost?.nextLevelXp || 1e3,
+					vipTier: p.vipTier ?? baseHost?.vipTier ?? 0,
+					countryFlag: p.countryFlag || baseHost?.countryFlag,
+					coins: baseHost?.coins || 0,
+					diamonds: baseHost?.diamonds || 0,
+					isVerified: baseHost?.isVerified || false,
+					isHost: isHostPeer
+				});
+			});
+			if (effectiveUserId) addUniqueViewer({
+				...currentUser,
+				id: effectiveUserId,
+				isHost: effectiveUserId === activePartyRoom.host?.id
+			});
+		} else if (effectiveUserId) addUniqueViewer({
+			...currentUser,
+			id: effectiveUserId,
+			isHost: effectiveUserId === activePartyRoom.host?.id
+		});
+		else if (activePartyRoom.host?.id) addUniqueViewer({
 			...activePartyRoom.host,
 			isHost: true
-		});
-		activeVoiceParticipants.forEach((p) => {
-			const existing = byId.get(p.userId);
-			byId.set(p.userId, {
-				id: p.userId,
-				uniqueId: p.uniqueId || existing?.uniqueId || p.userId,
-				username: (p.displayName || existing?.username || "user").replace(/\s+/g, ""),
-				displayName: p.displayName || existing?.displayName || "Alpha User",
-				avatar: p.avatar || existing?.avatar || "",
-				bio: existing?.bio || "Alpha Mate live party member",
-				followersCount: existing?.followersCount || 0,
-				followingCount: existing?.followingCount || 0,
-				likesCount: existing?.likesCount || 0,
-				level: p.level || existing?.level || 1,
-				xp: existing?.xp || 0,
-				nextLevelXp: existing?.nextLevelXp || 1e3,
-				vipTier: p.vipTier ?? existing?.vipTier ?? 0,
-				countryFlag: p.countryFlag || existing?.countryFlag,
-				coins: existing?.coins || 0,
-				diamonds: existing?.diamonds || 0,
-				isVerified: existing?.isVerified || false,
-				isHost: p.isHost || p.userId === activePartyRoom.host?.id
-			});
-		});
-		(activePartyRoom.seats || []).forEach((s) => {
-			if (s.user?.id && !byId.has(s.user.id)) byId.set(s.user.id, s.user);
-		});
-		if (effectiveUserId && !byId.has(effectiveUserId)) byId.set(effectiveUserId, {
-			...currentUser,
-			id: effectiveUserId
 		});
 		return Array.from(byId.values());
 	}, [
@@ -73472,7 +73873,7 @@ var PartyRoomsScreen = () => {
 			setActiveViewers(0);
 			return;
 		}
-		const realCount = Math.max(realViewersList.length, activeVoiceParticipants.length > 0 ? activeVoiceParticipants.length : 1);
+		const realCount = Math.max(1, realViewersList.length);
 		setActiveViewers(realCount);
 		if (isHost && lastSyncedViewerCountRef.current !== realCount) {
 			lastSyncedViewerCountRef.current = realCount;
@@ -73481,7 +73882,6 @@ var PartyRoomsScreen = () => {
 	}, [
 		activePartyRoom?.id,
 		realViewersList.length,
-		activeVoiceParticipants.length,
 		isHost
 	]);
 	(0, import_react.useEffect)(() => {
@@ -73673,22 +74073,13 @@ var PartyRoomsScreen = () => {
 			className: "fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40",
 			children: [
 				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-					className: "sr-only",
-					"aria-hidden": "true",
-					children: remotePartyStreams.map(({ peerId, stream }) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("audio", {
-						autoPlay: true,
-						playsInline: true,
-						ref: (el) => {
-							if (!el) {
-								partyAudioElsRef.current.delete(peerId);
-								return;
-							}
-							partyAudioElsRef.current.set(peerId, el);
-							if (el.srcObject !== stream) el.srcObject = stream;
-							el.muted = !isSpeakerOn;
-							el.volume = 1;
-							el.play().then(() => setPartyAudioAutoplayBlocked(false)).catch(() => setPartyAudioAutoplayBlocked(true));
-						}
+					className: "fixed -left-[9999px] top-0 w-1 h-1 opacity-0 pointer-events-none",
+					children: remotePartyStreams.map(({ peerId, stream }) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PartyRemoteAudioPlayer, {
+						peerId,
+						stream,
+						isSpeakerOn,
+						onRegisterAudioEl: registerPartyAudioEl,
+						onAutoplayStateChange: handleAutoplayStateChange
 					}, peerId))
 				}),
 				/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PartyRoomAtmosphere, {
@@ -73919,10 +74310,20 @@ var PartyRoomsScreen = () => {
 					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 						className: "leading-snug break-words",
 						children: partyVoiceError
-					}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-						onClick: () => setPartyVoiceError(null),
-						className: "text-rose-300 hover:text-white font-bold shrink-0 cursor-pointer",
-						children: "Dismiss"
+					}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "flex items-center gap-2 shrink-0",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+							onClick: () => {
+								setPartyVoiceError(null);
+								setPartyVoiceRetryToken((prev) => prev + 1);
+							},
+							className: "text-amber-300 hover:text-white font-bold cursor-pointer",
+							children: "Retry"
+						}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+							onClick: () => setPartyVoiceError(null),
+							className: "text-rose-300 hover:text-white font-bold cursor-pointer",
+							children: "Dismiss"
+						})]
 					})]
 				}),
 				isRoomPKActive && activePKChallenger ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(RoomPKSplitStage, {
@@ -74224,8 +74625,11 @@ var PartyRoomsScreen = () => {
 									}),
 									(isHost || isModerator) && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 										onClick: () => {
-											setIsSpeakerOn(!isSpeakerOn);
-											showToast(isSpeakerOn ? "Speaker Muted 🔇" : "Speaker Active 🔊");
+											const nextSpeakerOn = !isSpeakerOn;
+											isSpeakerOnRef.current = nextSpeakerOn;
+											setIsSpeakerOn(nextSpeakerOn);
+											if (nextSpeakerOn) unlockAllRemoteAudioPlayback().catch(() => {});
+											showToast(nextSpeakerOn ? "Speaker Active 🔊" : "Speaker Muted 🔇");
 										},
 										className: `h-9 sm:h-10 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer backdrop-blur-md ${isSpeakerOn ? "bg-black/50 border-white/10 text-zinc-200 hover:text-white" : "bg-rose-950/80 border-rose-500/50 text-rose-300"}`,
 										title: "Room Audio",

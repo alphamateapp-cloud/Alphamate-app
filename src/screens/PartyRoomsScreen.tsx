@@ -1,10 +1,11 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { PartyRoom, PartySeat, User, Gift } from '../types';
 import { p2pStreamingEngine, PartyParticipantPresence } from '../services/webrtcService';
 import { auth, db, updatePartyRoomFields, togglePartySeatLockInFirestore } from '../services/firebase';
 import { deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { PartyRoomAtmosphere } from '../components/party/PartyRoomAtmosphere';
+import { PartyRemoteAudioPlayer } from '../components/party/PartyRemoteAudioPlayer';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 import { VIRTUAL_GIFTS } from '../data/mockData';
@@ -187,6 +188,7 @@ export const PartyRoomsScreen: React.FC = () => {
   const [isSelfSpeaking, setIsSelfSpeaking] = useState(false);
   const [partyAudioAutoplayBlocked, setPartyAudioAutoplayBlocked] = useState(false);
   const [partyVoiceError, setPartyVoiceError] = useState<string | null>(null);
+  const [partyVoiceRetryToken, setPartyVoiceRetryToken] = useState(0);
   const [remotePartyStreams, setRemotePartyStreams] = useState<Array<{ peerId: string; stream: MediaStream }>>([]);
   const [activeVoiceParticipants, setActiveVoiceParticipants] = useState<PartyParticipantPresence[]>([]);
   const [remoteSpeakingPeerIds, setRemoteSpeakingPeerIds] = useState<Set<string>>(new Set());
@@ -195,6 +197,11 @@ export const PartyRoomsScreen: React.FC = () => {
   const roomSeenInListRef = useRef<boolean>(false);
   const isSpeakerOnRef = useRef<boolean>(isSpeakerOn);
   const wasHostMutedRef = useRef<boolean>(false);
+  const voiceHasConnectedRef = useRef<boolean>(false);
+  const voiceParticipantsLoadedRef = useRef<boolean>(false);
+  const startupAutoRetryKeyRef = useRef<string>('');
+  const startupAutoRetryCountRef = useRef<number>(0);
+  const startupRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialParticipantsSeededRef = useRef<boolean>(false);
   const notifiedJoinTimestampsRef = useRef<Map<string, number>>(new Map());
   const joinNotificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -860,26 +867,49 @@ export const PartyRoomsScreen: React.FC = () => {
   const nextTargetTier = partyLevel === 1 ? PARTY_TIER_SETTINGS[1] : partyLevel === 2 ? PARTY_TIER_SETTINGS[2] : null;
   const canHostUpgrade = Boolean(isHost && nextTargetTier && currentUser.level >= nextTargetTier.requiredLevel);
 
-  const unlockAllRemoteAudioPlayback = () => {
-    let anyBlocked = false;
+  const registerPartyAudioEl = useCallback((peerId: string, el: HTMLAudioElement | null) => {
+    if (!el) {
+      partyAudioElsRef.current.delete(peerId);
+    } else {
+      partyAudioElsRef.current.set(peerId, el);
+    }
+  }, []);
+
+  const handleAutoplayStateChange = useCallback((blocked: boolean) => {
+    setPartyAudioAutoplayBlocked(blocked);
+  }, []);
+
+  const unlockAllRemoteAudioPlayback = useCallback(async () => {
+    const targets: HTMLAudioElement[] = [];
     partyAudioElsRef.current.forEach((audioEl) => {
       if (!audioEl || !audioEl.srcObject) return;
       audioEl.muted = !isSpeakerOnRef.current;
       audioEl.volume = 1;
-      audioEl.play().catch(() => {
-        anyBlocked = true;
-      });
+      targets.push(audioEl);
     });
-    if (!anyBlocked) {
+    if (targets.length === 0) {
       setPartyAudioAutoplayBlocked(false);
+      return;
     }
-  };
+    const results = await Promise.allSettled(targets.map((el) => el.play()));
+    const anyRejected = results.some((r) => r.status === 'rejected');
+    setPartyAudioAutoplayBlocked(anyRejected);
+  }, []);
 
   // 1. Single SFU Session Lifecycle per Room Join / Leave (never torn down on seat changes)
   useEffect(() => {
     const roomId = activePartyRoom?.id;
+    if (startupRetryTimerRef.current) {
+      clearTimeout(startupRetryTimerRef.current);
+      startupRetryTimerRef.current = null;
+    }
+
     if (!roomId) {
       lastVoiceModeRef.current = null;
+      startupAutoRetryKeyRef.current = '';
+      startupAutoRetryCountRef.current = 0;
+      voiceHasConnectedRef.current = false;
+      voiceParticipantsLoadedRef.current = false;
       setPartyVoiceError(null);
       setPartyAudioAutoplayBlocked(false);
       setIsHostMicMuted(false);
@@ -897,6 +927,12 @@ export const PartyRoomsScreen: React.FC = () => {
       return;
     }
 
+    const sessionIdentityKey = `${roomId}:${effectiveUserId}`;
+    if (startupAutoRetryKeyRef.current !== sessionIdentityKey) {
+      startupAutoRetryKeyRef.current = sessionIdentityKey;
+      startupAutoRetryCountRef.current = 0;
+    }
+
     const isUserHost = activePartyRoom.host?.id === effectiveUserId;
     const myInitialSeat = activePartyRoom.seats?.find((s: any) => s.user?.id === effectiveUserId);
     const isSeatedNow = Boolean(myInitialSeat);
@@ -907,7 +943,10 @@ export const PartyRoomsScreen: React.FC = () => {
         ? Boolean(myInitialSeat.isMuted || myInitialSeat.isHostMuted)
         : false;
 
+    let cancelled = false;
     setIsHostMicMuted(false);
+    voiceHasConnectedRef.current = false;
+    voiceParticipantsLoadedRef.current = false;
     initialParticipantsSeededRef.current = false;
     notifiedJoinTimestampsRef.current.clear();
     lastSyncedViewerCountRef.current = -1;
@@ -916,7 +955,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
     // Record initial voice state so Effect #2 does not redundantly re-trigger startup
     lastVoiceModeRef.current = {
-      key: `${roomId}:${effectiveUserId}`,
+      key: sessionIdentityKey,
       canSpeak: initialCanSpeak,
       muted: initialMuted,
     };
@@ -935,18 +974,26 @@ export const PartyRoomsScreen: React.FC = () => {
           isHost: isUserHost,
         },
         onError: (err) => {
-          setPartyVoiceError(err.message || 'Voice audio connection interrupted.');
+          if (!cancelled) {
+            setPartyVoiceError(err.message || 'Voice audio connection interrupted.');
+          }
         },
         onConnectionStateChange: (connState) => {
-          if (connState === 'disconnected' || connState === 'connecting') {
-            setPartyVoiceError('Network interrupted — reconnecting voice...');
-          } else if (connState === 'connected') {
+          if (cancelled) return;
+          if (connState === 'connected') {
+            voiceHasConnectedRef.current = true;
             setPartyVoiceError(null);
+          } else if (connState === 'disconnected') {
+            if (voiceHasConnectedRef.current) {
+              setPartyVoiceError('Network interrupted — reconnecting voice...');
+            }
           } else if (connState === 'failed') {
-            setPartyVoiceError('Voice connection lost after reconnect attempts. Rejoin room to retry.');
+            setPartyVoiceError('Voice connection lost. Tap Retry to reconnect.');
           }
         },
         onParticipantsChange: (participants) => {
+          if (cancelled) return;
+          voiceParticipantsLoadedRef.current = true;
           setActiveVoiceParticipants(participants);
 
           const now = Date.now();
@@ -982,17 +1029,35 @@ export const PartyRoomsScreen: React.FC = () => {
         },
       })
       .then(() => {
+        if (cancelled) return;
+        setPartyVoiceError(null);
         const existingStreams = p2pStreamingEngine.getActivePartyRemoteStreams(roomId);
         if (existingStreams.length > 0) {
           setRemotePartyStreams(existingStreams);
         }
       })
       .catch((error: any) => {
+        if (cancelled) return;
         if (error?.code === 'SFU_NOT_CONFIGURED' || error?.status === 503) {
           console.warn('[Party Voice] SFU unavailable:', error?.message || error);
         } else {
           console.error('[Party Voice] Unable to start SFU session:', error);
         }
+
+        if (
+          error?.code === 'SFU_BACKEND_UNREACHABLE' &&
+          startupAutoRetryCountRef.current < 1
+        ) {
+          startupAutoRetryCountRef.current += 1;
+          startupRetryTimerRef.current = setTimeout(() => {
+            startupRetryTimerRef.current = null;
+            if (!cancelled) {
+              setPartyVoiceRetryToken((prev) => prev + 1);
+            }
+          }, 1500);
+          return;
+        }
+
         setPartyVoiceError(error?.message || 'Unable to connect to Party Voice SFU.');
       });
 
@@ -1003,6 +1068,11 @@ export const PartyRoomsScreen: React.FC = () => {
     window.addEventListener('beforeunload', handlePageHide);
 
     return () => {
+      cancelled = true;
+      if (startupRetryTimerRef.current) {
+        clearTimeout(startupRetryTimerRef.current);
+        startupRetryTimerRef.current = null;
+      }
       if (joinNotificationTimerRef.current) {
         clearTimeout(joinNotificationTimerRef.current);
         joinNotificationTimerRef.current = null;
@@ -1011,7 +1081,7 @@ export const PartyRoomsScreen: React.FC = () => {
       window.removeEventListener('beforeunload', handlePageHide);
       p2pStreamingEngine.stopPartyVoice(roomId).catch(() => {});
     };
-  }, [activePartyRoom?.id, effectiveUserId]);
+  }, [activePartyRoom?.id, effectiveUserId, partyVoiceRetryToken]);
 
   // 2. Sync speaking / mic publish state inside the SAME SFU session when sitting, leaving seat, or muting
   useEffect(() => {
@@ -1103,14 +1173,19 @@ export const PartyRoomsScreen: React.FC = () => {
   useEffect(() => {
     const roomId = activePartyRoom?.id;
     if (!roomId || remotePartyStreams.length === 0) {
-      setRemoteSpeakingPeerIds(new Set());
+      setRemoteSpeakingPeerIds((prev) => (prev.size === 0 ? prev : new Set()));
       return;
     }
     const timer = setInterval(() => {
       p2pStreamingEngine
         .getPartyRemoteAudioActivity(roomId)
         .then((activeSet) => {
-          setRemoteSpeakingPeerIds(activeSet);
+          setRemoteSpeakingPeerIds((prev) => {
+            if (prev.size === activeSet.size && Array.from(activeSet).every((id) => prev.has(id))) {
+              return prev;
+            }
+            return activeSet;
+          });
         })
         .catch(() => {});
     }, 260);
@@ -1132,6 +1207,10 @@ export const PartyRoomsScreen: React.FC = () => {
       const detail = (event as CustomEvent).detail;
       if (!detail || detail.roomId !== roomId || !detail.stream || !detail.peerId) return;
       setRemotePartyStreams((prev) => {
+        const existing = prev.find((item) => item.peerId === detail.peerId);
+        if (existing && existing.stream === detail.stream) {
+          return prev;
+        }
         const filtered = prev.filter((item) => item.peerId !== detail.peerId);
         return [...filtered, { peerId: detail.peerId, stream: detail.stream }];
       });
@@ -1153,25 +1232,10 @@ export const PartyRoomsScreen: React.FC = () => {
     };
   }, [activePartyRoom?.id]);
 
-  // Sync speaker mute button & unlock blocked audio on user gesture across mounted <audio> tags
-  useEffect(() => {
-    partyAudioElsRef.current.forEach((audioEl) => {
-      if (!audioEl || !audioEl.srcObject) return;
-      audioEl.muted = !isSpeakerOn;
-      audioEl.volume = 1;
-      if (isSpeakerOn) {
-        audioEl
-          .play()
-          .then(() => setPartyAudioAutoplayBlocked(false))
-          .catch(() => setPartyAudioAutoplayBlocked(true));
-      }
-    });
-  }, [isSpeakerOn, remotePartyStreams]);
-
   useEffect(() => {
     if (!activePartyRoom?.id || !partyAudioAutoplayBlocked) return;
     const handleGestureUnlock = () => {
-      unlockAllRemoteAudioPlayback();
+      unlockAllRemoteAudioPlayback().catch(() => {});
     };
     window.addEventListener('pointerdown', handleGestureUnlock, { passive: true });
     window.addEventListener('touchstart', handleGestureUnlock, { passive: true });
@@ -1181,71 +1245,84 @@ export const PartyRoomsScreen: React.FC = () => {
       window.removeEventListener('touchstart', handleGestureUnlock);
       window.removeEventListener('click', handleGestureUnlock);
     };
-  }, [activePartyRoom?.id, partyAudioAutoplayBlocked]);
+  }, [activePartyRoom?.id, partyAudioAutoplayBlocked, unlockAllRemoteAudioPlayback]);
 
-  // Build deduplicated active audience list strictly from real Firestore voiceParticipants + host/seated users
+  // Build deduplicated active audience list strictly from real live voiceParticipants + self
   const realViewersList: User[] = useMemo(() => {
     if (!activePartyRoom) return [];
     const byId = new Map<string, User>();
+    const seenUniqueIds = new Set<string>();
 
-    if (activePartyRoom.host?.id) {
-      byId.set(activePartyRoom.host.id, { ...activePartyRoom.host, isHost: true });
-    }
+    const addUniqueViewer = (u: User) => {
+      if (!u.id || byId.has(u.id)) return;
+      const normUnique = u.uniqueId && u.uniqueId !== u.id ? String(u.uniqueId).trim() : '';
+      if (normUnique && seenUniqueIds.has(normUnique)) return;
+      if (normUnique) seenUniqueIds.add(normUnique);
+      byId.set(u.id, u);
+    };
 
-    activeVoiceParticipants.forEach((p) => {
-      const existing = byId.get(p.userId);
-      byId.set(p.userId, {
-        id: p.userId,
-        uniqueId: p.uniqueId || existing?.uniqueId || p.userId,
-        username: (p.displayName || existing?.username || 'user').replace(/\s+/g, ''),
-        displayName: p.displayName || existing?.displayName || 'Alpha User',
-        avatar: p.avatar || existing?.avatar || '',
-        bio: existing?.bio || 'Alpha Mate live party member',
-        followersCount: existing?.followersCount || 0,
-        followingCount: existing?.followingCount || 0,
-        likesCount: existing?.likesCount || 0,
-        level: p.level || existing?.level || 1,
-        xp: existing?.xp || 0,
-        nextLevelXp: existing?.nextLevelXp || 1000,
-        vipTier: p.vipTier ?? existing?.vipTier ?? 0,
-        countryFlag: p.countryFlag || existing?.countryFlag,
-        coins: existing?.coins || 0,
-        diamonds: existing?.diamonds || 0,
-        isVerified: existing?.isVerified || false,
-        isHost: p.isHost || p.userId === activePartyRoom.host?.id,
+    if (voiceParticipantsLoadedRef.current) {
+      activeVoiceParticipants.forEach((p) => {
+        const isHostPeer = p.isHost || p.userId === activePartyRoom.host?.id;
+        const baseHost = isHostPeer ? activePartyRoom.host : undefined;
+        addUniqueViewer({
+          id: p.userId,
+          uniqueId: p.uniqueId || baseHost?.uniqueId || p.userId,
+          username: (p.displayName || baseHost?.username || 'user').replace(/\s+/g, ''),
+          displayName: p.displayName || baseHost?.displayName || 'Alpha User',
+          avatar: p.avatar || baseHost?.avatar || '',
+          bio: baseHost?.bio || 'Alpha Mate live party member',
+          followersCount: baseHost?.followersCount || 0,
+          followingCount: baseHost?.followingCount || 0,
+          likesCount: baseHost?.likesCount || 0,
+          level: p.level || baseHost?.level || 1,
+          xp: baseHost?.xp || 0,
+          nextLevelXp: baseHost?.nextLevelXp || 1000,
+          vipTier: p.vipTier ?? baseHost?.vipTier ?? 0,
+          countryFlag: p.countryFlag || baseHost?.countryFlag,
+          coins: baseHost?.coins || 0,
+          diamonds: baseHost?.diamonds || 0,
+          isVerified: baseHost?.isVerified || false,
+          isHost: isHostPeer,
+        });
       });
-    });
 
-    (activePartyRoom.seats || []).forEach((s) => {
-      if (s.user?.id && !byId.has(s.user.id)) {
-        byId.set(s.user.id, s.user);
+      if (effectiveUserId) {
+        addUniqueViewer({
+          ...currentUser,
+          id: effectiveUserId,
+          isHost: effectiveUserId === activePartyRoom.host?.id,
+        });
       }
-    });
-
-    if (effectiveUserId && !byId.has(effectiveUserId)) {
-      byId.set(effectiveUserId, { ...currentUser, id: effectiveUserId });
+    } else {
+      if (effectiveUserId) {
+        addUniqueViewer({
+          ...currentUser,
+          id: effectiveUserId,
+          isHost: effectiveUserId === activePartyRoom.host?.id,
+        });
+      } else if (activePartyRoom.host?.id) {
+        addUniqueViewer({ ...activePartyRoom.host, isHost: true });
+      }
     }
 
     return Array.from(byId.values());
   }, [activePartyRoom, activeVoiceParticipants, effectiveUserId, currentUser]);
 
-  // Synchronize live activeViewers count from real active participants
+  // Synchronize live activeViewers count strictly from deduplicated real active participants
   useEffect(() => {
     if (!activePartyRoom?.id) {
       setActiveViewers(0);
       return;
     }
-    const realCount = Math.max(
-      realViewersList.length,
-      activeVoiceParticipants.length > 0 ? activeVoiceParticipants.length : 1
-    );
+    const realCount = Math.max(1, realViewersList.length);
     setActiveViewers(realCount);
 
     if (isHost && lastSyncedViewerCountRef.current !== realCount) {
       lastSyncedViewerCountRef.current = realCount;
       updatePartyRoomFields(activePartyRoom.id, { activeViewers: realCount }).catch(() => {});
     }
-  }, [activePartyRoom?.id, realViewersList.length, activeVoiceParticipants.length, isHost]);
+  }, [activePartyRoom?.id, realViewersList.length, isHost]);
 
   // Subscribe to real Firestore party-room comments and gift events.
   useEffect(() => {
@@ -1497,27 +1574,15 @@ export const PartyRoomsScreen: React.FC = () => {
         className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
       >
         {/* Mounted DOM Audio Outputs for Two-Way Cloudflare SFU Party Voice (Chrome + Android WebView) */}
-        <div className="sr-only" aria-hidden="true">
+        <div className="fixed -left-[9999px] top-0 w-1 h-1 opacity-0 pointer-events-none">
           {remotePartyStreams.map(({ peerId, stream }) => (
-            <audio
+            <PartyRemoteAudioPlayer
               key={peerId}
-              autoPlay
-              playsInline
-              ref={(el) => {
-                if (!el) {
-                  partyAudioElsRef.current.delete(peerId);
-                  return;
-                }
-                partyAudioElsRef.current.set(peerId, el);
-                if (el.srcObject !== stream) {
-                  el.srcObject = stream;
-                }
-                el.muted = !isSpeakerOn;
-                el.volume = 1;
-                el.play()
-                  .then(() => setPartyAudioAutoplayBlocked(false))
-                  .catch(() => setPartyAudioAutoplayBlocked(true));
-              }}
+              peerId={peerId}
+              stream={stream}
+              isSpeakerOn={isSpeakerOn}
+              onRegisterAudioEl={registerPartyAudioEl}
+              onAutoplayStateChange={handleAutoplayStateChange}
             />
           ))}
         </div>
@@ -1777,12 +1842,23 @@ export const PartyRoomsScreen: React.FC = () => {
         {partyVoiceError && (
           <div className="relative z-30 mx-3 mt-1 px-3 py-2 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[10px] flex items-start justify-between gap-2">
             <span className="leading-snug break-words">{partyVoiceError}</span>
-            <button
-              onClick={() => setPartyVoiceError(null)}
-              className="text-rose-300 hover:text-white font-bold shrink-0 cursor-pointer"
-            >
-              Dismiss
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => {
+                  setPartyVoiceError(null);
+                  setPartyVoiceRetryToken((prev) => prev + 1);
+                }}
+                className="text-amber-300 hover:text-white font-bold cursor-pointer"
+              >
+                Retry
+              </button>
+              <button
+                onClick={() => setPartyVoiceError(null)}
+                className="text-rose-300 hover:text-white font-bold cursor-pointer"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
         )}
 
@@ -2151,8 +2227,13 @@ export const PartyRoomsScreen: React.FC = () => {
               {/* Room playback control is host/moderator only */}
               {(isHost || isModerator) && <button
                 onClick={() => {
-                  setIsSpeakerOn(!isSpeakerOn);
-                  showToast(isSpeakerOn ? 'Speaker Muted 🔇' : 'Speaker Active 🔊');
+                  const nextSpeakerOn = !isSpeakerOn;
+                  isSpeakerOnRef.current = nextSpeakerOn;
+                  setIsSpeakerOn(nextSpeakerOn);
+                  if (nextSpeakerOn) {
+                    unlockAllRemoteAudioPlayback().catch(() => {});
+                  }
+                  showToast(nextSpeakerOn ? 'Speaker Active 🔊' : 'Speaker Muted 🔇');
                 }}
                 className={`h-9 sm:h-10 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer backdrop-blur-md ${
                   isSpeakerOn

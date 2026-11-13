@@ -133,8 +133,10 @@ interface PartySfuRoomSession {
   userId: string;
   profile: PartyParticipantProfile;
   joinedAtMs: number;
-  sfuSessionId: string;
-  pc: RTCPeerConnection;
+  subSfuSessionId: string;
+  subPc: RTCPeerConnection;
+  pubSfuSessionId: string | null;
+  pubPc: RTCPeerConnection | null;
   localStream: MediaStream | null;
   localTrackName: string | null;
   localMid: string | null;
@@ -142,7 +144,9 @@ interface PartySfuRoomSession {
   isMuted: boolean;
   isSpeaking: boolean;
   isClosed?: boolean;
-  connectingSinceMs: number;
+  subConnectingSinceMs: number;
+  pubConnectingSinceMs: number;
+  reconcileFailCount: number;
   unsubscribeParticipants: (() => void) | null;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   reconcileRetryTimer: ReturnType<typeof setTimeout> | null;
@@ -167,8 +171,8 @@ export const CLOUDFLARE_TURN_URLS = [
   'turns:turn.cloudflare.com:5349?transport=tcp',
 ];
 
-export const PARTY_PARTICIPANT_STALE_MS = 22_000;
-const PARTY_HEARTBEAT_INTERVAL_MS = 5000;
+export const PARTY_PARTICIPANT_STALE_MS = 15_000;
+const PARTY_HEARTBEAT_INTERVAL_MS = 4000;
 const RECONNECT_GRACE_MS = 2500;
 const MAX_RECONNECT_ATTEMPTS = 3;
 const LIVE_HEARTBEAT_INTERVAL_MS = 5000;
@@ -191,6 +195,15 @@ class RealtimeSfuStreamingEngine {
   private hostSfuSessions: Map<string, HostSfuSession> = new Map();
   private viewerSfuSessions: Map<string, ViewerSfuSession> = new Map();
   private partySfuSessions: Map<string, PartySfuRoomSession> = new Map();
+  private partyRoomCallbacks: Map<
+    string,
+    {
+      profile?: PartyParticipantProfile;
+      onError?: (err: Error) => void;
+      onConnectionStateChange?: (state: ConnectionState) => void;
+      onParticipantsChange?: (participants: PartyParticipantPresence[]) => void;
+    }
+  > = new Map();
   private sessionQueues: Map<string, Promise<unknown>> = new Map();
 
   // Auto-reconnect & heartbeat coordination
@@ -265,13 +278,46 @@ class RealtimeSfuStreamingEngine {
 
   private formatNetworkFetchError(base: string, cause: unknown): Error {
     const target = base || RealtimeSfuStreamingEngine.PRODUCTION_API_URL;
-    const detail = cause instanceof Error && cause.message && cause.message !== 'Failed to fetch'
-      ? ` (${cause.message})`
-      : '';
+    let detail = '';
+    if (cause instanceof Error) {
+      if (cause.name === 'AbortError') {
+        detail = ' (request timed out)';
+      } else if (cause.message && cause.message !== 'Failed to fetch') {
+        detail = ` (${cause.message})`;
+      }
+    }
     const msg = `Unable to reach the Live SFU backend at ${target}${detail}. Verify your internet connection and that the backend server is online.`;
     const err: any = new Error(msg);
     err.code = 'SFU_BACKEND_UNREACHABLE';
     return err;
+  }
+
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs: number
+  ): Promise<Response> {
+    if (init.keepalive || typeof AbortController === 'undefined' || timeoutMs <= 0) {
+      return fetch(url, init);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private isRetryableGatewayStatus(status: number, errorCode?: string): boolean {
+    if (errorCode === 'SFU_NOT_CONFIGURED' || errorCode === 'TURN_NOT_CONFIGURED') {
+      return false;
+    }
+    return status === 429 || status === 502 || status === 503 || status === 504 || status >= 520;
+  }
+
+  private async delayMs(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private async sfuFetch<T = any>(
@@ -283,7 +329,7 @@ class RealtimeSfuStreamingEngine {
     const base = this.getBackendApiBase();
     const url = `${base}${path}`;
 
-    const exec = async (forceTokenRefresh: boolean) => {
+    const execOnce = async (forceTokenRefresh: boolean) => {
       const idToken = await this.getFirebaseIdToken(forceTokenRefresh);
       const headers: Record<string, string> = {
         Authorization: `Bearer ${idToken}`,
@@ -293,6 +339,8 @@ class RealtimeSfuStreamingEngine {
         method,
         headers,
         keepalive,
+        mode: 'cors',
+        cache: 'no-store',
       };
       if (body !== undefined && method !== 'GET') {
         headers['Content-Type'] = 'application/json';
@@ -300,8 +348,9 @@ class RealtimeSfuStreamingEngine {
       }
       let response: Response;
       try {
-        response = await fetch(url, init);
+        response = await this.fetchWithTimeout(url, init, 12000);
       } catch (networkErr) {
+        console.warn(`[WebRTC SFU] Network error calling ${method} ${url}:`, networkErr);
         throw this.formatNetworkFetchError(base, networkErr);
       }
       const contentType = response.headers.get('content-type') || '';
@@ -312,6 +361,15 @@ class RealtimeSfuStreamingEngine {
           data = JSON.parse(rawText);
         } catch {
           if (!contentType.includes('application/json')) {
+            // Cloudflare proxy/gateway HTML error pages (e.g. 502/503/504/520-524) should be retried as transient errors
+            if (this.isRetryableGatewayStatus(response.status)) {
+              const err: any = new Error(
+                `SFU backend gateway at ${base} temporarily unavailable (${response.status}).`
+              );
+              err.status = response.status;
+              err.code = 'SFU_BACKEND_UNREACHABLE';
+              throw err;
+            }
             const msg = this.hasConfiguredRailwayUrl()
               ? `Backend API at ${base} returned non-JSON (${response.status}) for ${path}. Verify Railway is running the Express API (npm start).`
               : `No Express/SFU API server on this host (${response.status} HTML). Set VITE_RAILWAY_API_URL to your deployed Railway backend.`;
@@ -328,20 +386,50 @@ class RealtimeSfuStreamingEngine {
       return { response, data };
     };
 
-    let { response, data } = await exec(false);
-    if (response.status === 401 && !keepalive) {
-      ({ response, data } = await exec(true));
+    const maxAttempts = keepalive ? 1 : 3;
+    let lastError: any = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        let { response, data } = await execOnce(false);
+        if (response.status === 401 && !keepalive) {
+          ({ response, data } = await execOnce(true));
+        }
+
+        if (!response.ok || data?.success === false) {
+          const msg = data?.error || `SFU request failed (${response.status})`;
+          const err: any = new Error(msg);
+          err.status = response.status;
+          if (data?.code) err.code = data.code;
+          if (
+            !keepalive &&
+            attempt < maxAttempts - 1 &&
+            this.isRetryableGatewayStatus(response.status, data?.code)
+          ) {
+            lastError = err;
+            await this.delayMs(350 * (attempt + 1));
+            continue;
+          }
+          throw err;
+        }
+
+        return data as T;
+      } catch (err: any) {
+        lastError = err;
+        const canRetryNetwork =
+          !keepalive &&
+          attempt < maxAttempts - 1 &&
+          (err?.code === 'SFU_BACKEND_UNREACHABLE' ||
+            this.isRetryableGatewayStatus(Number(err?.status || 0), err?.code));
+        if (canRetryNetwork) {
+          await this.delayMs(350 * (attempt + 1));
+          continue;
+        }
+        throw err;
+      }
     }
 
-    if (!response.ok || data?.success === false) {
-      const msg = data?.error || `SFU request failed (${response.status})`;
-      const err: any = new Error(msg);
-      err.status = response.status;
-      if (data?.code) err.code = data.code;
-      throw err;
-    }
-
-    return data as T;
+    throw lastError || this.formatNetworkFetchError(base, null);
   }
 
   public async checkBackendHealth(): Promise<{
@@ -351,41 +439,67 @@ class RealtimeSfuStreamingEngine {
     sfuConfigured: boolean;
   }> {
     const base = this.getBackendApiBase();
-    let response: Response;
-    try {
-      response = await fetch(`${base}/api/health`, {
-        method: 'GET',
-        headers: { Accept: 'application/json' },
-        cache: 'no-store',
-      });
-    } catch (networkErr) {
-      throw this.formatNetworkFetchError(base, networkErr);
-    }
-    const contentType = response.headers.get('content-type') || '';
-    const rawText = await response.text().catch(() => '');
-    let data: any = null;
-    if (rawText) {
+    const maxAttempts = 3;
+    let lastError: unknown = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      let response: Response;
       try {
-        data = JSON.parse(rawText);
-      } catch {
-        data = null;
+        response = await this.fetchWithTimeout(
+          `${base}/api/health`,
+          {
+            method: 'GET',
+            headers: { Accept: 'application/json' },
+            mode: 'cors',
+            cache: 'no-store',
+          },
+          10000
+        );
+      } catch (networkErr) {
+        lastError = networkErr;
+        if (attempt < maxAttempts - 1) {
+          await this.delayMs(350 * (attempt + 1));
+          continue;
+        }
+        throw this.formatNetworkFetchError(base, networkErr);
       }
+
+      const contentType = response.headers.get('content-type') || '';
+      const rawText = await response.text().catch(() => '');
+      let data: any = null;
+      if (rawText) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          data = null;
+        }
+      }
+      if (!data || !contentType.includes('application/json')) {
+        if (this.isRetryableGatewayStatus(response.status) && attempt < maxAttempts - 1) {
+          await this.delayMs(350 * (attempt + 1));
+          continue;
+        }
+        const msg = this.hasConfiguredRailwayUrl()
+          ? `Backend API at ${base} returned non-JSON (${response.status}) for /api/health. Ensure Railway is running the Express API (npm start).`
+          : `This build is serving static frontend files without an SFU API server (${response.status}). Set VITE_RAILWAY_API_URL to your Railway backend URL and rebuild.`;
+        const err: any = new Error(msg);
+        err.status = response.status;
+        err.code = 'SFU_NOT_CONFIGURED';
+        throw err;
+      }
+      if (this.isRetryableGatewayStatus(response.status) && attempt < maxAttempts - 1) {
+        await this.delayMs(350 * (attempt + 1));
+        continue;
+      }
+      return {
+        ok: Boolean(response.ok && data?.success),
+        firebaseConfigured: Boolean(data?.firebaseConfigured),
+        turnConfigured: Boolean(data?.turnConfigured),
+        sfuConfigured: Boolean(data?.sfuConfigured),
+      };
     }
-    if (!data || !contentType.includes('application/json')) {
-      const msg = this.hasConfiguredRailwayUrl()
-        ? `Backend API at ${base} returned non-JSON (${response.status}) for /api/health. Ensure Railway is running the Express API (npm start).`
-        : `This build is serving static frontend files without an SFU API server (${response.status}). Set VITE_RAILWAY_API_URL to your Railway backend URL and rebuild.`;
-      const err: any = new Error(msg);
-      err.status = response.status;
-      err.code = 'SFU_NOT_CONFIGURED';
-      throw err;
-    }
-    return {
-      ok: Boolean(response.ok && data?.success),
-      firebaseConfigured: Boolean(data?.firebaseConfigured),
-      turnConfigured: Boolean(data?.turnConfigured),
-      sfuConfigured: Boolean(data?.sfuConfigured),
-    };
+
+    throw this.formatNetworkFetchError(base, lastError);
   }
 
   private async ensureSfuBackendConfigured(): Promise<void> {
@@ -429,31 +543,44 @@ class RealtimeSfuStreamingEngine {
     }
 
     if (auth.currentUser) {
-      try {
-        const base = this.getBackendApiBase();
-        const idToken = await auth.currentUser.getIdToken(forceRefresh);
-        const response = await fetch(`${base}/api/webrtc/turn-credentials`, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
-        });
-        const contentType = response.headers.get('content-type') || '';
-        const data = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
-        if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
-          const hasTurn = data.iceServers.some((server: RTCIceServer) =>
-            (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
-              (url) => url.startsWith('turn:') || url.startsWith('turns:')
-            )
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const base = this.getBackendApiBase();
+          const idToken = await auth.currentUser.getIdToken(forceRefresh || attempt > 0);
+          const response = await this.fetchWithTimeout(
+            `${base}/api/webrtc/turn-credentials`,
+            {
+              method: 'GET',
+              headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+              mode: 'cors',
+              cache: 'no-store',
+            },
+            8000
           );
-          if (hasTurn) {
-            this.cachedTurnServers = data.iceServers;
-            this.turnExpiresAt = now + Math.max(300, Number(data.ttl) || 3600) * 1000 - 60000;
-            this.customIceServers = data.iceServers;
-            this.hasCloudflareTurn = true;
-            return data.iceServers;
+          const contentType = response.headers.get('content-type') || '';
+          const data = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
+          if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
+            const hasTurn = data.iceServers.some((server: RTCIceServer) =>
+              (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
+                (url) => url.startsWith('turn:') || url.startsWith('turns:')
+              )
+            );
+            if (hasTurn) {
+              this.cachedTurnServers = data.iceServers;
+              this.turnExpiresAt = now + Math.max(300, Number(data.ttl) || 3600) * 1000 - 60000;
+              this.customIceServers = data.iceServers;
+              this.hasCloudflareTurn = true;
+              return data.iceServers;
+            }
           }
+          break;
+        } catch (error) {
+          if (attempt === 0) {
+            await this.delayMs(250);
+            continue;
+          }
+          console.warn('[WebRTC] Railway TURN credential request failed:', error);
         }
-      } catch (error) {
-        console.warn('[WebRTC] Railway TURN credential request failed:', error);
       }
     }
 
@@ -556,41 +683,51 @@ class RealtimeSfuStreamingEngine {
     roomId: string,
     wantPublish: boolean
   ): Promise<{ sfuSessionId: string; role: string; canPublish: boolean }> {
-    try {
-      const res = await this.sfuFetch<{
-        sfuSessionId: string;
-        role: string;
-        canPublish: boolean;
-        iceServers?: RTCIceServer[];
-        expiresAt?: number;
-      }>(`/api/sfu/party/rooms/${encodeURIComponent(roomId)}/token`, 'POST', {
-        wantPublish,
-      });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await this.sfuFetch<{
+          sfuSessionId: string;
+          role: string;
+          canPublish: boolean;
+          iceServers?: RTCIceServer[];
+          expiresAt?: number;
+        }>(`/api/sfu/party/rooms/${encodeURIComponent(roomId)}/token`, 'POST', {
+          wantPublish,
+        });
 
-      if (Array.isArray(res.iceServers) && res.iceServers.length > 0) {
-        const hasTurn = res.iceServers.some((server) =>
-          (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
-            (u) => u.startsWith('turn:') || u.startsWith('turns:')
-          )
-        );
-        if (hasTurn) {
-          this.cachedTurnServers = res.iceServers;
-          this.turnExpiresAt = (res.expiresAt || Date.now() + 3600_000) - 60_000;
-          this.setIceServers(res.iceServers);
+        if (Array.isArray(res.iceServers) && res.iceServers.length > 0) {
+          const hasTurn = res.iceServers.some((server) =>
+            (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
+              (u) => u.startsWith('turn:') || u.startsWith('turns:')
+            )
+          );
+          if (hasTurn) {
+            this.cachedTurnServers = res.iceServers;
+            this.turnExpiresAt = (res.expiresAt || Date.now() + 3600_000) - 60_000;
+            this.setIceServers(res.iceServers);
+          }
         }
-      }
 
-      if (res.sfuSessionId) {
-        return {
-          sfuSessionId: res.sfuSessionId,
-          role: res.role || (wantPublish ? 'guest' : 'viewer'),
-          canPublish: Boolean(res.canPublish),
-        };
-      }
-    } catch (err: any) {
-      // If Railway backend hasn't deployed /token route yet (404), fall back cleanly to /api/sfu/sessions
-      if (err?.status !== 404) {
-        throw err;
+        if (res.sfuSessionId) {
+          return {
+            sfuSessionId: res.sfuSessionId,
+            role: res.role || (wantPublish ? 'guest' : 'viewer'),
+            canPublish: Boolean(res.canPublish),
+          };
+        }
+        break;
+      } catch (err: any) {
+        if (err?.status === 401 || err?.status === 403 || err?.code === 'SFU_NOT_CONFIGURED') {
+          throw err;
+        }
+        if (attempt === 0) {
+          await this.delayMs(350);
+          continue;
+        }
+        console.warn(
+          '[Party SFU] Role token endpoint unavailable, falling back to /api/sfu/sessions:',
+          err?.message || err
+        );
       }
     }
 
@@ -945,10 +1082,12 @@ class RealtimeSfuStreamingEngine {
   public toggleMicrophone(enabled?: boolean): boolean {
     const partyAudioTracks = Array.from(this.partySfuSessions.values()).flatMap((s) => [
       ...(s.localStream?.getAudioTracks() || []),
-      ...s.pc
-        .getSenders()
-        .map((sender) => sender.track)
-        .filter((t): t is MediaStreamTrack => Boolean(t && t.kind === 'audio')),
+      ...(s.pubPc
+        ? s.pubPc
+            .getSenders()
+            .map((sender) => sender.track)
+            .filter((t): t is MediaStreamTrack => Boolean(t && t.kind === 'audio'))
+        : []),
     ]);
     const localAudioTracks = this.localStream?.getAudioTracks() || [];
     const allTracks = Array.from(new Set([...localAudioTracks, ...partyAudioTracks]));
@@ -1146,7 +1285,18 @@ class RealtimeSfuStreamingEngine {
       }
     });
     this.partySfuSessions.forEach((s, roomId) => {
-      if (!s.isClosed && (s.pc.connectionState === 'disconnected' || s.pc.connectionState === 'failed' || s.pc.iceConnectionState === 'disconnected' || s.pc.iceConnectionState === 'failed')) {
+      const subBroken =
+        s.subPc.connectionState === 'disconnected' ||
+        s.subPc.connectionState === 'failed' ||
+        s.subPc.iceConnectionState === 'disconnected' ||
+        s.subPc.iceConnectionState === 'failed';
+      const pubBroken =
+        s.pubPc &&
+        (s.pubPc.connectionState === 'disconnected' ||
+          s.pubPc.connectionState === 'failed' ||
+          s.pubPc.iceConnectionState === 'disconnected' ||
+          s.pubPc.iceConnectionState === 'failed');
+      if (!s.isClosed && (subBroken || pubBroken)) {
         this.autoReconnect('party', roomId).catch(() => {});
       }
     });
@@ -1475,22 +1625,26 @@ class RealtimeSfuStreamingEngine {
     const wasPublishing = existing.isPublishing;
     const wasMuted = existing.isMuted;
 
-    let newSfuSessionId = '';
-    let newPc: RTCPeerConnection | null = null;
+    let newSubSessionId = '';
+    let newSubPc: RTCPeerConnection | null = null;
+    let newPubSessionId = '';
+    let newPubPc: RTCPeerConnection | null = null;
     let newSession: PartySfuRoomSession | null = null;
 
     try {
-      const tokenInfo = await this.requestPartyRoomSessionToken(roomId, wasPublishing);
-      newSfuSessionId = tokenInfo.sfuSessionId;
-      newPc = new RTCPeerConnection(this.getRtcConfiguration());
+      const subToken = await this.requestPartyRoomSessionToken(roomId, false);
+      newSubSessionId = subToken.sfuSessionId;
+      newSubPc = new RTCPeerConnection(this.getRtcConfiguration());
 
       newSession = {
         roomId,
         userId,
         profile: existing.profile,
         joinedAtMs: existing.joinedAtMs,
-        sfuSessionId: newSfuSessionId,
-        pc: newPc,
+        subSfuSessionId: newSubSessionId,
+        subPc: newSubPc,
+        pubSfuSessionId: null,
+        pubPc: null,
         localStream: null,
         localTrackName: null,
         localMid: null,
@@ -1498,7 +1652,9 @@ class RealtimeSfuStreamingEngine {
         isMuted: wasPublishing ? wasMuted : true,
         isSpeaking: false,
         isClosed: false,
-        connectingSinceMs: Date.now(),
+        subConnectingSinceMs: Date.now(),
+        pubConnectingSinceMs: Date.now(),
+        reconcileFailCount: 0,
         unsubscribeParticipants: null,
         heartbeatTimer: null,
         reconcileRetryTimer: null,
@@ -1511,9 +1667,13 @@ class RealtimeSfuStreamingEngine {
         onParticipantsChange: existing.onParticipantsChange,
       };
 
-      this.attachPartyTrackHandlers(newSession, newPc);
+      this.attachPartyTrackHandlers(newSession, newSubPc);
 
       if (wasPublishing) {
+        const pubToken = await this.requestPartyRoomSessionToken(roomId, true);
+        newPubSessionId = pubToken.sfuSessionId;
+        newPubPc = new RTCPeerConnection(this.getRtcConfiguration());
+
         const liveAudioTrack = existing.localStream
           ?.getAudioTracks()
           .find((t) => t.readyState === 'live');
@@ -1522,38 +1682,54 @@ class RealtimeSfuStreamingEngine {
           liveAudioTrack.enabled = !wasMuted;
           const trackName = `party-${roomId}-${userId}-${Date.now().toString(36)}`;
           const published = await this.publishTracksOnSession(
-            newSfuSessionId,
-            newPc,
+            newPubSessionId,
+            newPubPc,
             [{ track: liveAudioTrack, trackName }],
             existing.localStream
           );
+          newSession.pubSfuSessionId = newPubSessionId;
+          newSession.pubPc = newPubPc;
           newSession.localStream = existing.localStream;
           newSession.localTrackName = trackName;
           newSession.localMid = published[0]?.mid || null;
           newSession.isPublishing = true;
           newSession.isMuted = wasMuted;
           this.isMuted = wasMuted;
+          await this.waitForPeerConnected(newPubPc, 15000);
+          this.attachPartyPubMonitor(newSession, newPubPc);
         } else {
+          newPubPc.close();
+          await this.deleteSfuSession(newPubSessionId);
+          newPubPc = null;
+          newPubSessionId = '';
           await this.publishPartyLocalMic(newSession, wasMuted);
         }
-        await this.waitForPeerConnected(newPc, 15000);
       }
 
       if (existing.isClosed || this.partySfuSessions.get(roomId) !== existing) {
         if (newSession.localStream && newSession.localStream !== existing.localStream) {
           newSession.localStream.getTracks().forEach((t) => t.stop());
         }
-        newPc.close();
-        await this.deleteSfuSession(newSfuSessionId);
+        newSubPc.close();
+        await this.deleteSfuSession(newSubSessionId);
+        if (newSession.pubPc) {
+          newSession.pubPc.close();
+        }
+        if (newSession.pubSfuSessionId) {
+          await this.deleteSfuSession(newSession.pubSfuSessionId);
+        }
         return false;
       }
 
       this.partySfuSessions.set(roomId, newSession);
 
-      this.monitorPeerConnection(`party:${roomId}`, newPc, {
+      this.monitorPeerConnection(`party:${roomId}`, newSubPc, {
         isSessionActive: () =>
           !newSession!.isClosed && this.partySfuSessions.get(roomId) === newSession,
         onStateChange: (state) => {
+          if (state === 'connecting') {
+            newSession!.subConnectingSinceMs = Date.now();
+          }
           newSession?.onConnectionStateChange?.(state);
         },
         onReconnectNeeded: () => this.reconnectPartyVoice(roomId),
@@ -1564,8 +1740,12 @@ class RealtimeSfuStreamingEngine {
       this.attachPartyParticipantsListener(newSession);
 
       existing.isClosed = true;
-      existing.pc.onconnectionstatechange = null;
-      existing.pc.oniceconnectionstatechange = null;
+      existing.subPc.onconnectionstatechange = null;
+      existing.subPc.oniceconnectionstatechange = null;
+      if (existing.pubPc) {
+        existing.pubPc.onconnectionstatechange = null;
+        existing.pubPc.oniceconnectionstatechange = null;
+      }
       if (existing.heartbeatTimer) {
         clearInterval(existing.heartbeatTimer);
         existing.heartbeatTimer = null;
@@ -1588,16 +1768,26 @@ class RealtimeSfuStreamingEngine {
         });
       }
       try {
-        existing.pc.close();
+        existing.subPc.close();
       } catch {
         // ignore
       }
-      this.deleteSfuSession(existing.sfuSessionId).catch(() => {});
+      if (existing.pubPc) {
+        try {
+          existing.pubPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      this.deleteSfuSession(existing.subSfuSessionId).catch(() => {});
+      if (existing.pubSfuSessionId) {
+        this.deleteSfuSession(existing.pubSfuSessionId).catch(() => {});
+      }
 
       if (wasPublishing) {
         newSession.onConnectionStateChange?.('connected');
       } else {
-        this.waitForPeerConnected(newPc, 15000)
+        this.waitForPeerConnected(newSubPc, 15000)
           .then(() => {
             if (!newSession?.isClosed) newSession?.onConnectionStateChange?.('connected');
           })
@@ -1614,15 +1804,33 @@ class RealtimeSfuStreamingEngine {
           }
         });
       }
-      if (newPc) {
+      if (newSubPc) {
         try {
-          newPc.close();
+          newSubPc.close();
         } catch {
           // ignore
         }
       }
-      if (newSfuSessionId) {
-        await this.deleteSfuSession(newSfuSessionId);
+      if (newSubSessionId) {
+        await this.deleteSfuSession(newSubSessionId);
+      }
+      if (newSession?.pubPc && newSession.pubPc !== newPubPc) {
+        try {
+          newSession.pubPc.close();
+        } catch {
+          // ignore
+        }
+      } else if (newPubPc) {
+        try {
+          newPubPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (newSession?.pubSfuSessionId && newSession.pubSfuSessionId !== newPubSessionId) {
+        await this.deleteSfuSession(newSession.pubSfuSessionId);
+      } else if (newPubSessionId) {
+        await this.deleteSfuSession(newPubSessionId);
       }
       console.warn('[Party SFU] Reconnect failed:', err);
       return false;
@@ -1689,16 +1897,47 @@ class RealtimeSfuStreamingEngine {
       if (videoTrack) videoTrack.enabled = isVideoOn;
       if (audioTrack) audioTrack.enabled = isMicOn;
 
-      sfuSessionId = await this.createSfuSession();
-      pc = new RTCPeerConnection(this.getRtcConfiguration());
+      let publishedTracks: SfuPublishedTrack[] = [];
+      for (let publishAttempt = 0; publishAttempt < 2; publishAttempt++) {
+        try {
+          sfuSessionId = await this.createSfuSession();
+          pc = new RTCPeerConnection(this.getRtcConfiguration());
 
-      const suffix = Date.now().toString(36);
-      const tracksToPublish: Array<{ track: MediaStreamTrack; trackName: string }> = [];
-      if (videoTrack) tracksToPublish.push({ track: videoTrack, trackName: `${streamId}-video-${suffix}` });
-      if (audioTrack) tracksToPublish.push({ track: audioTrack, trackName: `${streamId}-audio-${suffix}` });
+          const suffix = `${Date.now().toString(36)}${publishAttempt > 0 ? 'r' : ''}`;
+          const tracksToPublish: Array<{ track: MediaStreamTrack; trackName: string }> = [];
+          if (videoTrack) tracksToPublish.push({ track: videoTrack, trackName: `${streamId}-video-${suffix}` });
+          if (audioTrack) tracksToPublish.push({ track: audioTrack, trackName: `${streamId}-audio-${suffix}` });
 
-      const publishedTracks = await this.publishTracksOnSession(sfuSessionId, pc, tracksToPublish, stream);
-      await this.waitForPeerConnected(pc, 15000);
+          publishedTracks = await this.publishTracksOnSession(sfuSessionId, pc, tracksToPublish, stream);
+          await this.waitForPeerConnected(pc, 15000);
+          break;
+        } catch (attemptErr: any) {
+          if (pc) {
+            try {
+              pc.close();
+            } catch {
+              // ignore
+            }
+            pc = null;
+          }
+          if (sfuSessionId) {
+            await this.deleteSfuSession(sfuSessionId);
+            sfuSessionId = '';
+          }
+          const isTransientSfuFailure =
+            attemptErr?.code === 'SFU_BACKEND_UNREACHABLE' ||
+            this.isRetryableGatewayStatus(Number(attemptErr?.status || 0), attemptErr?.code);
+          if (publishAttempt === 0 && isTransientSfuFailure) {
+            await this.delayMs(400);
+            continue;
+          }
+          throw attemptErr;
+        }
+      }
+
+      if (!pc || !sfuSessionId) {
+        throw new Error('Unable to establish Live SFU peer connection.');
+      }
 
       const sessionObj: HostSfuSession = {
         streamId,
@@ -2068,8 +2307,8 @@ class RealtimeSfuStreamingEngine {
     return Boolean(
       s &&
         !s.isClosed &&
-        s.pc.connectionState !== 'closed' &&
-        s.pc.connectionState !== 'failed'
+        s.subPc.connectionState !== 'closed' &&
+        s.subPc.connectionState !== 'failed'
     );
   }
 
@@ -2085,17 +2324,17 @@ class RealtimeSfuStreamingEngine {
   public async getPartyRemoteAudioActivity(roomId: string): Promise<Set<string>> {
     const speakingPeers = new Set<string>();
     const session = this.partySfuSessions.get(roomId);
-    if (!session || session.isClosed || session.pc.connectionState === 'closed') {
+    if (!session || session.isClosed || session.subPc.connectionState === 'closed') {
       return speakingPeers;
     }
 
     try {
-      const receivers = session.pc.getReceivers();
+      const receivers = session.subPc.getReceivers();
       for (const receiver of receivers) {
         if (!receiver.track || receiver.track.kind !== 'audio' || receiver.track.readyState !== 'live') {
           continue;
         }
-        const transceiver = session.pc.getTransceivers().find((t) => t.receiver === receiver);
+        const transceiver = session.subPc.getTransceivers().find((t) => t.receiver === receiver);
         const mid = transceiver?.mid || '';
         const peerId = mid ? session.pendingMidToPeer.get(mid) : undefined;
         if (!peerId) continue;
@@ -2138,6 +2377,9 @@ class RealtimeSfuStreamingEngine {
       onParticipantsChange?: (participants: PartyParticipantPresence[]) => void;
     }
   ): Promise<MediaStream | null> {
+    if (callbacks) {
+      this.partyRoomCallbacks.set(roomId, callbacks);
+    }
     return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
       this._startPartyVoiceInternal(roomId, userId, isMuted, listenOnly, callbacks)
     );
@@ -2178,15 +2420,48 @@ class RealtimeSfuStreamingEngine {
     return undefined;
   }
 
-  private attachPartyTrackHandlers(session: PartySfuRoomSession, pc: RTCPeerConnection): void {
-    pc.ontrack = (event) => {
+  private ensureCanonicalRemoteAudioStream(
+    session: PartySfuRoomSession,
+    peerId: string,
+    track: MediaStreamTrack,
+    mid: string
+  ): MediaStream {
+    track.enabled = true;
+    const existingStream = session.activeRemoteStreams.get(peerId);
+    if (existingStream) {
+      const hasThisTrack = existingStream.getAudioTracks().some((t) => t.id === track.id);
+      if (hasThisTrack) {
+        for (const [, sub] of session.subscribedByPeerKey.entries()) {
+          if (sub.peerId === peerId && (sub.mid === mid || !sub.mid)) {
+            sub.mid = mid || sub.mid;
+            sub.stream = existingStream;
+          }
+        }
+        return existingStream;
+      }
+    }
+
+    const stream = new MediaStream([track]);
+    session.activeRemoteStreams.set(peerId, stream);
+    for (const [, sub] of session.subscribedByPeerKey.entries()) {
+      if (sub.peerId === peerId && (sub.mid === mid || !sub.mid || sub.stream.getTracks().length === 0)) {
+        sub.mid = mid || sub.mid;
+        sub.stream = stream;
+      }
+    }
+    this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
+    return stream;
+  }
+
+  private attachPartyTrackHandlers(session: PartySfuRoomSession, subPc: RTCPeerConnection): void {
+    subPc.ontrack = (event) => {
       if (session.isClosed || !event.track) return;
 
       const resolvedMid =
         event.transceiver?.mid ||
-        pc.getTransceivers().find((t) => t.receiver === event.receiver)?.mid ||
+        subPc.getTransceivers().find((t) => t.receiver === event.receiver)?.mid ||
         '';
-      const peerId = this.resolvePeerIdForTrack(session, pc, resolvedMid, event.receiver);
+      const peerId = this.resolvePeerIdForTrack(session, subPc, resolvedMid, event.receiver);
       if (!peerId) {
         console.warn('[Party SFU] Received track before mid->peer mapping was ready:', {
           roomId: session.roomId,
@@ -2196,37 +2471,58 @@ class RealtimeSfuStreamingEngine {
         return;
       }
 
-      event.track.enabled = true;
-      const stream = event.streams?.[0] || new MediaStream([event.track]);
-      if (!stream.getTracks().some((t) => t.id === event.track.id)) {
-        stream.addTrack(event.track);
-      }
-
-      for (const [, sub] of session.subscribedByPeerKey.entries()) {
-        if (sub.peerId === peerId && (sub.mid === resolvedMid || !sub.mid || sub.stream.getTracks().length === 0)) {
-          sub.mid = resolvedMid || sub.mid;
-          sub.stream = stream;
-        }
-      }
-
-      session.activeRemoteStreams.set(peerId, stream);
+      this.ensureCanonicalRemoteAudioStream(session, peerId, event.track, resolvedMid);
       console.info('[Party SFU] Remote audio track attached:', {
         roomId: session.roomId,
         peerId,
         mid: resolvedMid,
         readyState: event.track.readyState,
         muted: event.track.muted,
-        iceConnectionState: pc.iceConnectionState,
+        iceConnectionState: subPc.iceConnectionState,
       });
-      this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
 
       event.track.onunmute = () => {
         if (session.isClosed) return;
-        event.track.enabled = true;
-        session.activeRemoteStreams.set(peerId, stream);
-        this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
+        this.ensureCanonicalRemoteAudioStream(session, peerId, event.track, resolvedMid);
       };
     };
+  }
+
+  private attachPartyPubMonitor(session: PartySfuRoomSession, pubPc: RTCPeerConnection): void {
+    this.monitorPeerConnection(`party-pub:${session.roomId}`, pubPc, {
+      isSessionActive: () =>
+        !session.isClosed &&
+        this.partySfuSessions.get(session.roomId) === session &&
+        session.pubPc === pubPc,
+      onStateChange: (state) => {
+        if (state === 'connecting') {
+          session.pubConnectingSinceMs = Date.now();
+        }
+        if (state === 'connected') {
+          session.onConnectionStateChange?.('connected');
+        } else if (state === 'disconnected' || state === 'failed') {
+          session.onConnectionStateChange?.(state);
+        }
+      },
+      onReconnectNeeded: () => this.reconnectPartyPublisher(session.roomId),
+    });
+  }
+
+  private reconnectPartyPublisher(roomId: string): Promise<boolean> {
+    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, async () => {
+      const session = this.partySfuSessions.get(roomId);
+      if (!session || session.isClosed || !session.isPublishing) return false;
+      try {
+        await this.getFirebaseIdToken(true);
+        await this.fetchCloudflareTurnCredentials(true).catch(() => {});
+        await this.publishPartyLocalMic(session, session.isMuted);
+        await this.writePartyParticipantPresence(session);
+        return true;
+      } catch (err) {
+        console.warn('[Party SFU] Publisher reconnect failed:', err);
+        return false;
+      }
+    });
   }
 
   private startPartyHeartbeat(session: PartySfuRoomSession): void {
@@ -2247,15 +2543,30 @@ class RealtimeSfuStreamingEngine {
         }
       }
 
-      // Recover stalled WebRTC connections
-      const hasMediaIntent = session.isPublishing || session.subscribedByPeerKey.size > 0;
+      // Recover stalled subscriber WebRTC connections
+      const hasSubIntent = session.subscribedByPeerKey.size > 0;
       if (
-        hasMediaIntent &&
-        (session.pc.connectionState === 'failed' ||
-          (session.pc.connectionState === 'connecting' && Date.now() - session.connectingSinceMs > 18_000))
+        hasSubIntent &&
+        (session.subPc.connectionState === 'failed' ||
+          session.subPc.iceConnectionState === 'failed' ||
+          (session.subPc.connectionState === 'connecting' &&
+            Date.now() - session.subConnectingSinceMs > 18_000))
       ) {
-        session.connectingSinceMs = Date.now();
+        session.subConnectingSinceMs = Date.now();
         this.reconnectPartyVoice(session.roomId).catch(() => {});
+      }
+
+      // Recover stalled publisher WebRTC connections independently
+      if (
+        session.isPublishing &&
+        session.pubPc &&
+        (session.pubPc.connectionState === 'failed' ||
+          session.pubPc.iceConnectionState === 'failed' ||
+          (session.pubPc.connectionState === 'connecting' &&
+            Date.now() - session.pubConnectingSinceMs > 18_000))
+      ) {
+        session.pubConnectingSinceMs = Date.now();
+        this.reconnectPartyPublisher(session.roomId).catch(() => {});
       }
     }, PARTY_HEARTBEAT_INTERVAL_MS);
   }
@@ -2316,7 +2627,8 @@ class RealtimeSfuStreamingEngine {
             !data?.listenOnly &&
             typeof data?.sfuSessionId === 'string' &&
             data.sfuSessionId &&
-            data.sfuSessionId !== session.sfuSessionId &&
+            data.sfuSessionId !== session.pubSfuSessionId &&
+            data.sfuSessionId !== session.subSfuSessionId &&
             typeof data?.trackName === 'string' &&
             data.trackName
           ) {
@@ -2332,9 +2644,11 @@ class RealtimeSfuStreamingEngine {
         session.latestDesiredPeers = desiredPeers;
         session.onParticipantsChange?.(Array.from(activeParticipantsByUid.values()));
 
-        this.reconcilePartySubscriptions(session).catch((err) => {
+        this.reconcilePartySubscriptions(session).catch((err: any) => {
           console.warn('[Party SFU] Subscription reconciliation error:', err);
-          session.onError?.(err instanceof Error ? err : new Error(String(err)));
+          if (err?.status === 403 || session.reconcileFailCount >= 2) {
+            session.onError?.(err instanceof Error ? err : new Error(String(err)));
+          }
         });
       },
       (error) => {
@@ -2356,39 +2670,46 @@ class RealtimeSfuStreamingEngine {
       onParticipantsChange?: (participants: PartyParticipantPresence[]) => void;
     }
   ): Promise<MediaStream | null> {
+    const resolvedCallbacks = callbacks || this.partyRoomCallbacks.get(roomId);
     const existing = this.partySfuSessions.get(roomId);
     if (
       existing &&
       !existing.isClosed &&
       existing.userId === userId &&
-      existing.pc.connectionState !== 'closed' &&
-      existing.pc.connectionState !== 'failed'
+      existing.subPc.connectionState !== 'closed' &&
+      existing.subPc.connectionState !== 'failed'
     ) {
-      if (callbacks?.profile) {
-        existing.profile = { ...existing.profile, ...callbacks.profile };
+      if (resolvedCallbacks?.profile) {
+        existing.profile = { ...existing.profile, ...resolvedCallbacks.profile };
       }
-      existing.onError = callbacks?.onError;
-      existing.onConnectionStateChange = callbacks?.onConnectionStateChange;
-      existing.onParticipantsChange = callbacks?.onParticipantsChange;
+      if (resolvedCallbacks?.onError) existing.onError = resolvedCallbacks.onError;
+      if (resolvedCallbacks?.onConnectionStateChange) {
+        existing.onConnectionStateChange = resolvedCallbacks.onConnectionStateChange;
+      }
+      if (resolvedCallbacks?.onParticipantsChange) {
+        existing.onParticipantsChange = resolvedCallbacks.onParticipantsChange;
+      }
       return this._setPartySpeakingModeInternal(roomId, userId, !listenOnly, isMuted);
     }
 
-    await this._stopPartyVoiceInternal(roomId);
+    await this._stopPartyVoiceInternal(roomId, false, false);
     await this.getFirebaseIdToken();
     await this.ensureSfuBackendConfigured();
     await this.fetchCloudflareTurnCredentials().catch(() => {});
 
-    const tokenInfo = await this.requestPartyRoomSessionToken(roomId, !listenOnly);
-    const sfuSessionId = tokenInfo.sfuSessionId;
-    const pc = new RTCPeerConnection(this.getRtcConfiguration());
+    const subToken = await this.requestPartyRoomSessionToken(roomId, false);
+    const subSfuSessionId = subToken.sfuSessionId;
+    const subPc = new RTCPeerConnection(this.getRtcConfiguration());
 
     const session: PartySfuRoomSession = {
       roomId,
       userId,
-      profile: callbacks?.profile || {},
+      profile: resolvedCallbacks?.profile || {},
       joinedAtMs: Date.now(),
-      sfuSessionId,
-      pc,
+      subSfuSessionId,
+      subPc,
+      pubSfuSessionId: null,
+      pubPc: null,
       localStream: null,
       localTrackName: null,
       localMid: null,
@@ -2396,7 +2717,9 @@ class RealtimeSfuStreamingEngine {
       isMuted: listenOnly ? true : isMuted,
       isSpeaking: false,
       isClosed: false,
-      connectingSinceMs: Date.now(),
+      subConnectingSinceMs: Date.now(),
+      pubConnectingSinceMs: Date.now(),
+      reconcileFailCount: 0,
       unsubscribeParticipants: null,
       heartbeatTimer: null,
       reconcileRetryTimer: null,
@@ -2404,20 +2727,20 @@ class RealtimeSfuStreamingEngine {
       pendingMidToPeer: new Map(),
       latestDesiredPeers: new Map(),
       activeRemoteStreams: new Map(),
-      onError: callbacks?.onError,
-      onConnectionStateChange: callbacks?.onConnectionStateChange,
-      onParticipantsChange: callbacks?.onParticipantsChange,
+      onError: resolvedCallbacks?.onError,
+      onConnectionStateChange: resolvedCallbacks?.onConnectionStateChange,
+      onParticipantsChange: resolvedCallbacks?.onParticipantsChange,
     };
     this.partySfuSessions.set(roomId, session);
 
-    this.attachPartyTrackHandlers(session, pc);
+    this.attachPartyTrackHandlers(session, subPc);
 
-    this.monitorPeerConnection(`party:${roomId}`, pc, {
+    this.monitorPeerConnection(`party:${roomId}`, subPc, {
       isSessionActive: () =>
         !session.isClosed && this.partySfuSessions.get(roomId) === session,
       onStateChange: (state) => {
         if (state === 'connecting') {
-          session.connectingSinceMs = Date.now();
+          session.subConnectingSinceMs = Date.now();
         }
         session.onConnectionStateChange?.(state);
       },
@@ -2435,7 +2758,7 @@ class RealtimeSfuStreamingEngine {
 
       return session.localStream;
     } catch (err) {
-      await this._stopPartyVoiceInternal(roomId);
+      await this._stopPartyVoiceInternal(roomId, false, false);
       throw err;
     }
   }
@@ -2463,6 +2786,10 @@ class RealtimeSfuStreamingEngine {
     isMuted: boolean,
     profile?: PartyParticipantProfile
   ): Promise<MediaStream | null> {
+    if (profile) {
+      const prev = this.partyRoomCallbacks.get(roomId) || {};
+      this.partyRoomCallbacks.set(roomId, { ...prev, profile });
+    }
     return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
       this._setPartySpeakingModeInternal(roomId, userId, canSpeak, isMuted, profile)
     );
@@ -2477,7 +2804,11 @@ class RealtimeSfuStreamingEngine {
   ): Promise<MediaStream | null> {
     const session = this.partySfuSessions.get(roomId);
     if (!session || session.isClosed || session.userId !== userId) {
-      return this._startPartyVoiceInternal(roomId, userId, isMuted, !canSpeak, profile ? { profile } : undefined);
+      const savedCallbacks = this.partyRoomCallbacks.get(roomId) || {};
+      return this._startPartyVoiceInternal(roomId, userId, isMuted, !canSpeak, {
+        ...savedCallbacks,
+        ...(profile ? { profile } : {}),
+      });
     }
 
     if (profile) {
@@ -2501,7 +2832,7 @@ class RealtimeSfuStreamingEngine {
       const hasLiveTrack = Boolean(
         session.localStream?.getAudioTracks().some((t) => t.readyState === 'live')
       );
-      if (!hasLiveTrack) {
+      if (!hasLiveTrack && session.pubPc) {
         // Re-acquire hardware mic seamlessly if OS/Android reclaimed it
         try {
           const newStream = await navigator.mediaDevices.getUserMedia({
@@ -2515,7 +2846,9 @@ class RealtimeSfuStreamingEngine {
           const newTrack = newStream.getAudioTracks()[0];
           if (newTrack) {
             newTrack.enabled = !isMuted;
-            const audioSender = session.pc.getSenders().find((s) => s.track?.kind === 'audio' || !s.track);
+            const audioSender = session.pubPc
+              .getSenders()
+              .find((s) => s.track?.kind === 'audio' || !s.track);
             if (audioSender) {
               await audioSender.replaceTrack(newTrack);
             }
@@ -2540,7 +2873,7 @@ class RealtimeSfuStreamingEngine {
       session.localStream?.getAudioTracks().forEach((t) => {
         t.enabled = !isMuted;
       });
-      session.pc.getSenders().forEach((sender) => {
+      session.pubPc?.getSenders().forEach((sender) => {
         if (sender.track?.kind === 'audio') {
           sender.track.enabled = !isMuted;
         }
@@ -2551,7 +2884,30 @@ class RealtimeSfuStreamingEngine {
     return session.localStream;
   }
 
+  private async cleanupPartyPublisher(session: PartySfuRoomSession, keepalive: boolean = false): Promise<void> {
+    this.clearReconnectState(`party-pub:${session.roomId}`, true);
+    const oldPubPc = session.pubPc;
+    const oldPubSessionId = session.pubSfuSessionId;
+    session.pubPc = null;
+    session.pubSfuSessionId = null;
+
+    if (oldPubPc) {
+      oldPubPc.onconnectionstatechange = null;
+      oldPubPc.oniceconnectionstatechange = null;
+      try {
+        oldPubPc.close();
+      } catch {
+        // ignore
+      }
+    }
+    if (oldPubSessionId) {
+      await this.deleteSfuSession(oldPubSessionId, keepalive);
+    }
+  }
+
   private async publishPartyLocalMic(session: PartySfuRoomSession, isMuted: boolean): Promise<void> {
+    await this.cleanupPartyPublisher(session);
+
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -2570,15 +2926,25 @@ class RealtimeSfuStreamingEngine {
       throw new Error('Microphone track unavailable.');
     }
 
+    let pubSfuSessionId = '';
+    let pubPc: RTCPeerConnection | null = null;
     const trackName = `party-${session.roomId}-${session.userId}-${Date.now().toString(36)}`;
+
     try {
-      session.connectingSinceMs = Date.now();
+      const pubToken = await this.requestPartyRoomSessionToken(session.roomId, true);
+      pubSfuSessionId = pubToken.sfuSessionId;
+      pubPc = new RTCPeerConnection(this.getRtcConfiguration());
+
+      session.pubConnectingSinceMs = Date.now();
       const published = await this.publishTracksOnSession(
-        session.sfuSessionId,
-        session.pc,
+        pubSfuSessionId,
+        pubPc,
         [{ track: audioTrack, trackName }],
         stream
       );
+
+      session.pubSfuSessionId = pubSfuSessionId;
+      session.pubPc = pubPc;
       session.localStream = stream;
       session.localTrackName = trackName;
       session.localMid = published[0]?.mid || null;
@@ -2588,26 +2954,59 @@ class RealtimeSfuStreamingEngine {
       this.isMuted = isMuted;
       this.initAudioAnalyser(stream);
 
-      console.info('[Party SFU] Local mic published to Cloudflare SFU:', {
+      this.attachPartyPubMonitor(session, pubPc);
+
+      // Write presence immediately so room listeners can start pulling our track while ICE completes
+      await this.writePartyParticipantPresence(session);
+      await this.waitForPeerConnected(pubPc, 15000);
+
+      console.info('[Party SFU] Local mic published & ICE connected to Cloudflare SFU:', {
         roomId: session.roomId,
-        sfuSessionId: session.sfuSessionId,
+        pubSfuSessionId,
         trackName,
         mid: session.localMid,
         muted: isMuted,
         readyState: audioTrack.readyState,
-      });
-
-      this.waitForPeerConnected(session.pc, 15000).catch((connErr) => {
-        console.warn('[Party SFU] Publish peer ICE confirmation delayed:', connErr?.message || connErr);
+        iceConnectionState: pubPc.iceConnectionState,
       });
     } catch (err) {
-      stream.getTracks().forEach((t) => t.stop());
+      stream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
+      if (session.localStream === stream) {
+        session.localStream = null;
+      }
+      session.localTrackName = null;
+      session.localMid = null;
+      session.isPublishing = false;
+      this.stopAudioAnalyser();
+      if (pubPc) {
+        pubPc.onconnectionstatechange = null;
+        pubPc.oniceconnectionstatechange = null;
+        try {
+          pubPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (session.pubPc === pubPc) {
+        session.pubPc = null;
+      }
+      if (pubSfuSessionId) {
+        await this.deleteSfuSession(pubSfuSessionId);
+      }
+      if (session.pubSfuSessionId === pubSfuSessionId) {
+        session.pubSfuSessionId = null;
+      }
       throw err;
     }
   }
 
   private async unpublishPartyLocalMic(session: PartySfuRoomSession): Promise<void> {
-    const midToClose = session.localMid;
     if (session.localStream) {
       session.localStream.getTracks().forEach((t) => {
         try {
@@ -2625,9 +3024,7 @@ class RealtimeSfuStreamingEngine {
     session.isSpeaking = false;
     this.stopAudioAnalyser();
 
-    if (midToClose) {
-      await this.closeTracksOnSession(session.sfuSessionId, session.pc, [midToClose], false);
-    }
+    await this.cleanupPartyPublisher(session);
   }
 
   private async writePartyParticipantPresence(session: PartySfuRoomSession): Promise<void> {
@@ -2635,6 +3032,10 @@ class RealtimeSfuStreamingEngine {
     const uid = auth.currentUser?.uid || session.userId;
     if (!uid) return;
     const profile = session.profile || {};
+    const activeSfuSessionId =
+      session.isPublishing && session.pubSfuSessionId
+        ? session.pubSfuSessionId
+        : session.subSfuSessionId;
     const payload: Record<string, any> = {
       userId: uid,
       uniqueId: profile.uniqueId || uid,
@@ -2645,7 +3046,7 @@ class RealtimeSfuStreamingEngine {
       ...(profile.countryFlag ? { countryFlag: profile.countryFlag } : {}),
       isHost: Boolean(profile.isHost),
       joinedAtMs: session.joinedAtMs,
-      sfuSessionId: session.sfuSessionId,
+      sfuSessionId: activeSfuSessionId,
       trackName: session.isPublishing ? session.localTrackName : null,
       mid: session.isPublishing ? session.localMid : null,
       isPublishing: session.isPublishing,
@@ -2661,8 +3062,8 @@ class RealtimeSfuStreamingEngine {
   }
 
   private reconcilePartySubscriptions(session: PartySfuRoomSession): Promise<void> {
-    return this.enqueueSessionOp(`party-reconcile:${session.sfuSessionId}`, async () => {
-      if (session.isClosed || session.pc.signalingState === 'closed') return;
+    return this.enqueueSessionOp(`party-reconcile:${session.subSfuSessionId}`, async () => {
+      if (session.isClosed || session.subPc.signalingState === 'closed') return;
       const desiredPeers = session.latestDesiredPeers;
 
       // 1. Close tracks that left or stopped publishing
@@ -2695,7 +3096,7 @@ class RealtimeSfuStreamingEngine {
       }
       removedKeys.forEach((k) => session.subscribedByPeerKey.delete(k));
       if (midsToClose.length > 0) {
-        await this.closeTracksOnSession(session.sfuSessionId, session.pc, midsToClose, false);
+        await this.closeTracksOnSession(session.subSfuSessionId, session.subPc, midsToClose, false);
       }
 
       // 2. Subscribe to newly added remote speaker tracks
@@ -2705,14 +3106,17 @@ class RealtimeSfuStreamingEngine {
           toSubscribe.push({ peerKey, ...info });
         }
       }
-      if (toSubscribe.length === 0) return;
+      if (toSubscribe.length === 0) {
+        session.reconcileFailCount = 0;
+        return;
+      }
 
-      session.connectingSinceMs = Date.now();
+      session.subConnectingSinceMs = Date.now();
 
       try {
         const assigned = await this.subscribeTracksOnSession(
-          session.sfuSessionId,
-          session.pc,
+          session.subSfuSessionId,
+          session.subPc,
           toSubscribe.map((item) => ({
             publisherSessionId: item.publisherSessionId,
             trackName: item.trackName,
@@ -2740,34 +3144,38 @@ class RealtimeSfuStreamingEngine {
           if (mid) {
             session.pendingMidToPeer.set(mid, item.peerId);
           }
+          const existingCanonical = session.activeRemoteStreams.get(item.peerId);
           session.subscribedByPeerKey.set(item.peerKey, {
             peerId: item.peerId,
             publisherSessionId: item.publisherSessionId,
             trackName: item.trackName,
             mid,
-            stream: new MediaStream(),
+            stream: existingCanonical || new MediaStream(),
           });
         });
 
-        // Attach tracks immediately from WebRTC receivers (catches synchronous or early-fired tracks)
-        session.pc.getReceivers().forEach((receiver) => {
-          const transceiver = session.pc.getTransceivers().find((t) => t.receiver === receiver);
+        // Attach tracks immediately from WebRTC receivers if not already mapped via ontrack
+        session.subPc.getReceivers().forEach((receiver) => {
+          const transceiver = session.subPc.getTransceivers().find((t) => t.receiver === receiver);
           const mid = transceiver?.mid;
           if (!mid || !receiver.track || receiver.track.readyState !== 'live') return;
           const peerId = session.pendingMidToPeer.get(mid);
           if (!peerId) return;
-          receiver.track.enabled = true;
-          const stream = new MediaStream([receiver.track]);
-          for (const [, sub] of session.subscribedByPeerKey.entries()) {
-            if (sub.peerId === peerId && (sub.mid === mid || !sub.mid) && sub.stream.getTracks().length === 0) {
-              sub.mid = mid;
-              sub.stream = stream;
-              session.activeRemoteStreams.set(peerId, stream);
-              this.dispatchPartyRemoteStream(session.roomId, peerId, stream);
-            }
-          }
+          this.ensureCanonicalRemoteAudioStream(session, peerId, receiver.track, mid);
         });
+
+        session.reconcileFailCount = 0;
+        this.waitForPeerConnected(session.subPc, 15000)
+          .then(() => {
+            if (!session.isClosed) {
+              session.onConnectionStateChange?.('connected');
+            }
+          })
+          .catch((iceErr) => {
+            console.warn('[Party SFU] Subscriber ICE confirmation failed:', iceErr?.message || iceErr);
+          });
       } catch (err) {
+        session.reconcileFailCount += 1;
         if (!session.isClosed && !session.reconcileRetryTimer) {
           session.reconcileRetryTimer = setTimeout(() => {
             session.reconcileRetryTimer = null;
@@ -2783,22 +3191,34 @@ class RealtimeSfuStreamingEngine {
 
   public stopPartyVoice(roomId: string, keepalive: boolean = false): Promise<void> {
     if (keepalive) {
-      return this._stopPartyVoiceInternal(roomId, true);
+      return this._stopPartyVoiceInternal(roomId, true, true);
     }
     return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
-      this._stopPartyVoiceInternal(roomId, false)
+      this._stopPartyVoiceInternal(roomId, false, true)
     );
   }
 
-  private async _stopPartyVoiceInternal(roomId: string, keepalive: boolean = false): Promise<void> {
+  private async _stopPartyVoiceInternal(
+    roomId: string,
+    keepalive: boolean = false,
+    clearCallbacks: boolean = true
+  ): Promise<void> {
     this.clearReconnectState(`party:${roomId}`, true);
+    this.clearReconnectState(`party-pub:${roomId}`, true);
+    if (clearCallbacks) {
+      this.partyRoomCallbacks.delete(roomId);
+    }
     const session = this.partySfuSessions.get(roomId);
     this.partySfuSessions.delete(roomId);
 
     if (session) {
       session.isClosed = true;
-      session.pc.onconnectionstatechange = null;
-      session.pc.oniceconnectionstatechange = null;
+      session.subPc.onconnectionstatechange = null;
+      session.subPc.oniceconnectionstatechange = null;
+      if (session.pubPc) {
+        session.pubPc.onconnectionstatechange = null;
+        session.pubPc.oniceconnectionstatechange = null;
+      }
       if (session.heartbeatTimer) {
         clearInterval(session.heartbeatTimer);
         session.heartbeatTimer = null;
@@ -2823,11 +3243,21 @@ class RealtimeSfuStreamingEngine {
       }
       this.stopAudioAnalyser();
       try {
-        session.pc.close();
+        session.subPc.close();
       } catch {
         // ignore
       }
-      await this.deleteSfuSession(session.sfuSessionId, keepalive);
+      if (session.pubPc) {
+        try {
+          session.pubPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      await Promise.all([
+        this.deleteSfuSession(session.subSfuSessionId, keepalive),
+        session.pubSfuSessionId ? this.deleteSfuSession(session.pubSfuSessionId, keepalive) : Promise.resolve(),
+      ]);
     }
 
     const uid = auth.currentUser?.uid;

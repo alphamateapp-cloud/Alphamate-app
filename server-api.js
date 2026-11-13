@@ -71,6 +71,24 @@ export function createApiApp() {
     next();
   });
 
+  async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...options, signal: controller.signal });
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        const timeoutErr = new Error(`Upstream request timed out after ${timeoutMs}ms.`);
+        timeoutErr.statusCode = 504;
+        timeoutErr.code = 'UPSTREAM_TIMEOUT';
+        throw timeoutErr;
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async function generateTurnIceServers(ttlSeconds = TURN_CREDENTIAL_TTL) {
     if (!CLOUDFLARE_TURN_TOKEN_ID || !CLOUDFLARE_TURN_API_TOKEN) {
       const err = new Error(
@@ -82,7 +100,7 @@ export function createApiApp() {
     }
 
     const ttl = Math.min(Math.max(Number(ttlSeconds) || TURN_CREDENTIAL_TTL, 300), 86400);
-    const turnResponse = await fetch(
+    const turnResponse = await fetchWithTimeout(
       `${CLOUDFLARE_SFU_BASE}/turn/keys/${encodeURIComponent(CLOUDFLARE_TURN_TOKEN_ID)}/credentials/generate-ice-servers`,
       {
         method: 'POST',
@@ -92,7 +110,8 @@ export function createApiApp() {
           Accept: 'application/json',
         },
         body: JSON.stringify({ ttl }),
-      }
+      },
+      8000
     );
 
     const turnData = await turnResponse.json().catch(() => ({}));
@@ -149,13 +168,14 @@ export function createApiApp() {
           return { configured: false, valid: false, reason: 'Firebase API key or project config missing' };
         }
         try {
-          const resp = await fetch(
+          const resp = await fetchWithTimeout(
             `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
             {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ idToken: 'health-probe' }),
-            }
+            },
+            6000
           );
           const payload = await resp.json().catch(() => ({}));
           const msg = payload?.error?.message || '';
@@ -175,7 +195,7 @@ export function createApiApp() {
           return { configured: false, valid: false, reason: 'REALTIME_SFU_APP_ID or REALTIME_SFU_BEARER_TOKEN missing' };
         }
         try {
-          const resp = await fetch(
+          const resp = await fetchWithTimeout(
             `${CLOUDFLARE_SFU_BASE}/apps/${encodeURIComponent(REALTIME_SFU_APP_ID)}/sessions/health-probe`,
             {
               method: 'GET',
@@ -183,7 +203,8 @@ export function createApiApp() {
                 Authorization: `Bearer ${REALTIME_SFU_BEARER_TOKEN}`,
                 Accept: 'application/json',
               },
-            }
+            },
+            6000
           );
           // 401/403 means invalid App ID / Bearer token; 404/400/200 means credentials authenticated against Cloudflare SFU
           const authOk = resp.status !== 401 && resp.status !== 403 && resp.status < 500;
@@ -253,13 +274,14 @@ export function createApiApp() {
 
   async function verifyFirebaseIdToken(idToken) {
     if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY is not configured on the backend server.');
-    const response = await fetch(
+    const response = await fetchWithTimeout(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken }),
-      }
+      },
+      6000
     );
     if (!response.ok) return null;
     const data = await response.json();
@@ -319,10 +341,14 @@ export function createApiApp() {
     const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
       FIREBASE_PROJECT_ID
     )}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents/${documentPath}`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
-    });
+    const response = await fetchWithTimeout(
+      url,
+      {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+      },
+      6000
+    );
     if (response.status === 404) return null;
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -458,7 +484,7 @@ export function createApiApp() {
       fetchOptions.body = JSON.stringify(body);
     }
 
-    const response = await fetch(targetUrl, fetchOptions);
+    const response = await fetchWithTimeout(targetUrl, fetchOptions, 10000);
     const data = await response.json().catch(() => ({}));
 
     if (!response.ok || data?.errorCode) {
