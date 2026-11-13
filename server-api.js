@@ -397,12 +397,35 @@ export function createApiApp() {
             ).catch(() => null)
           )
         );
-        const validSessions = new Set(
+        const seats = Array.isArray(roomDoc.seats) ? roomDoc.seats : [];
+        const authorizedPeerIds = new Set([
+          ...(roomDoc.host?.id ? [roomDoc.host.id] : []),
+          ...(Array.isArray(roomDoc.moderatorIds) ? roomDoc.moderatorIds : []),
+          ...seats.map((s) => s?.user?.id).filter(Boolean),
+        ]);
+        const blockedSet = new Set([...blocked, ...kicked]);
+        const inactiveSessions = new Set(
+          checks
+            .filter((docData) => docData && docData.isPublishing === false && docData.sfuSessionId)
+            .map((docData) => docData.sfuSessionId)
+        );
+        const publishedSessions = new Set(
           checks
             .filter((docData) => docData && docData.isPublishing === true && docData.sfuSessionId)
             .map((docData) => docData.sfuSessionId)
         );
-        if (validSessions.size > 0 && targetSessionIds.some((sid) => !validSessions.has(sid))) {
+
+        const anyBlockedPeer = peerIds.some((pid) => blockedSet.has(pid));
+        if (anyBlockedPeer) {
+          return { ok: false, status: 403, error: 'Requested speaker is restricted from this party room.' };
+        }
+        const hasInactiveRequestedSession = targetSessionIds.some(
+          (sid) => inactiveSessions.has(sid) && !publishedSessions.has(sid)
+        );
+        const hasUnseatedPeer =
+          publishedSessions.size === 0 &&
+          peerIds.some((pid) => !authorizedPeerIds.has(pid));
+        if (hasInactiveRequestedSession || hasUnseatedPeer) {
           return { ok: false, status: 403, error: 'Target party speaker is not actively publishing.' };
         }
       }

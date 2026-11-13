@@ -2248,6 +2248,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ? room.seats.find((s: any) => s.user?.id === uid)
       : null;
     setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
+    setIsMicMuted(mySeat ? Boolean(mySeat.isMuted || mySeat.isHostMuted) : false);
     setCurrentScreen('party_room');
   };
 
@@ -2261,6 +2262,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setActivePartyRoom(null);
     setUserSeatIndex(null);
+    setIsMicMuted(false);
     navigateBack();
   };
 
@@ -2311,16 +2313,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const prevSeatIndex = userSeatIndex;
     const isLeaving = userSeatIndex === seatIndex;
     const effectiveUser = auth.currentUser?.uid ? { ...currentUser, id: auth.currentUser.uid } : currentUser;
+    const targetServerSeat = Array.isArray(room.seats)
+      ? room.seats.find((s: any) => Number(s.seatIndex) === seatIndex)
+      : null;
+    const nextSeatMuted = isLeaving ? false : Boolean(targetServerSeat?.isHostMuted);
 
     // Immediate optimistic update
     setUserSeatIndex(isLeaving ? null : seatIndex);
+    setIsMicMuted(nextSeatMuted);
 
     const roomSeats = Array.isArray(room.seats) ? [...room.seats] : [];
     const optimisticSeats = roomSeats.map((s: any) => {
       if (Number(s.seatIndex) === seatIndex) {
         return isLeaving
           ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
-          : { ...s, user: effectiveUser, isSpeaking: false, isMuted: isMicMuted };
+          : { ...s, user: effectiveUser, isSpeaking: false, isMuted: nextSeatMuted };
       }
       if (!isLeaving && s.user?.id === effectiveUser.id) {
         return { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false };
@@ -2338,7 +2345,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       seatIndex,
       isLeaving ? null : effectiveUser,
       effectiveUser.id,
-      isMicMuted
+      nextSeatMuted
     );
 
     if (result.success && result.seats) {
@@ -2347,12 +2354,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? verifiedRoom : item)));
       const mySeat = result.seats.find((s: any) => s.user?.id === effectiveUser.id);
       setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
+      if (mySeat) {
+        setIsMicMuted(Boolean(mySeat.isMuted || mySeat.isHostMuted));
+      } else {
+        setIsMicMuted(false);
+      }
       return { success: true };
     }
 
     console.warn('Party seat update rejected:', result.reason);
     // Revert optimistic state if transaction declined (occupied/locked/restricted)
     setUserSeatIndex(prevSeatIndex);
+    setIsMicMuted(false);
     setActivePartyRoom(room);
     setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? room : item)));
     return { success: false, reason: result.reason || 'REJECTED' };
