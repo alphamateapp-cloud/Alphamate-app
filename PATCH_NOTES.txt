@@ -1,0 +1,14 @@
+ALPHA MATE PATCH NOTES
+
+This archive is based on the user-provided latest project ZIP.
+
+Changes:
+1. server-api.js: SFU configuration presence is now reported separately from upstream Cloudflare credential validation. A transient Cloudflare probe failure will no longer be incorrectly shown as missing Railway SFU variables. The health response includes sfuValid and checks.sfu.valid for credential validation diagnostics. Actual SFU session creation still validates credentials with Cloudflare and returns its real error if invalid.
+2. src/context/AppContext.tsx: when Firebase restores an already signed-in, verified user on app boot, the app routes directly to Home. Signed-out and unverified users remain on the Welcome/auth flow. Existing Firebase UID-based profile lookup and Firestore sync behavior are preserved.
+
+Important:
+- Firebase Auth persistence is already used through Firebase getAuth/onAuthStateChanged; this patch does not change provider credentials or user IDs.
+- New users still need to complete Google sign-in from Get Started. Existing Google accounts resolve to the same Firebase UID and Firestore profile.
+- This patch does NOT claim to fix actual two-way Party audio or complete Solo Live media testing.
+- No npm build/typecheck was run because node_modules are not included in the supplied ZIP and dependencies were not installed in this environment.
+- After pushing/deploying this code, check https://api.alphamate.app/api/health?fresh=1 . Inspect checks.sfu.reason and sfuValid if the SFU credentials are rejected. Do not share secret values.

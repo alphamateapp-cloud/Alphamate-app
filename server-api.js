@@ -240,7 +240,11 @@ export function createApiApp() {
       status: 'online',
       firebaseConfigured: firebaseCheck.valid,
       turnConfigured: Boolean(firebaseCheck.valid && turnCheck.valid),
-      sfuConfigured: Boolean(firebaseCheck.valid && sfuCheck.valid),
+      // "configured" means the required server-side credentials are present.
+      // Credential validity is reported separately: transient Cloudflare probe
+      // failures must not be misreported to the client as missing Railway vars.
+      sfuConfigured: Boolean(sfuEnvPresent),
+      sfuValid: Boolean(firebaseCheck.valid && sfuCheck.valid),
       checks: {
         firebase: firebaseCheck,
         sfu: sfuCheck,
