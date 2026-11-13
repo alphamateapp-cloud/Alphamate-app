@@ -1485,8 +1485,8 @@ export const PartyRoomsScreen: React.FC = () => {
 
         {/* SFU Voice Error Notice (never masked by fake audio) */}
         {partyVoiceError && (
-          <div className="relative z-30 mx-3 mt-1 px-3 py-1.5 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[10px] flex items-center justify-between gap-2">
-            <span className="truncate">{partyVoiceError}</span>
+          <div className="relative z-30 mx-3 mt-1 px-3 py-2 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[10px] flex items-start justify-between gap-2">
+            <span className="leading-snug break-words">{partyVoiceError}</span>
             <button
               onClick={() => setPartyVoiceError(null)}
               className="text-rose-300 hover:text-white font-bold shrink-0 cursor-pointer"

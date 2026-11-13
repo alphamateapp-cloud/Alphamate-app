@@ -169,18 +169,32 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
+  private hasConfiguredRailwayUrl(): boolean {
+    const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
+    return Boolean(envUrl && !envUrl.includes('YOUR-RAILWAY-DOMAIN'));
+  }
+
   private getBackendApiBase(): string {
     const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
     if (envUrl && !envUrl.includes('YOUR-RAILWAY-DOMAIN')) {
       return envUrl.replace(/\/$/, '');
     }
+    const isCapacitorNative =
+      typeof window !== 'undefined' &&
+      Boolean((window as any).Capacitor?.isNativePlatform?.());
     if (
+      !isCapacitorNative &&
       typeof window !== 'undefined' &&
       (window.location.protocol === 'http:' || window.location.protocol === 'https:')
     ) {
       return '';
     }
-    throw new Error('VITE_RAILWAY_API_URL is not configured for backend SFU/TURN requests.');
+    const err: any = new Error(
+      'VITE_RAILWAY_API_URL is not configured. Set VITE_RAILWAY_API_URL to your Railway backend URL before building the app or APK.'
+    );
+    err.status = 503;
+    err.code = 'SFU_NOT_CONFIGURED';
+    throw err;
   }
 
   private async getFirebaseIdToken(forceRefresh: boolean = false): Promise<string> {
@@ -189,6 +203,19 @@ class RealtimeSfuStreamingEngine {
       throw new Error('Please sign in with your account before starting live video or party voice.');
     }
     return user.getIdToken(forceRefresh);
+  }
+
+  private formatNetworkFetchError(base: string, cause: unknown): Error {
+    const target = base || (typeof window !== 'undefined' ? window.location.origin : 'backend server');
+    const detail = cause instanceof Error && cause.message && cause.message !== 'Failed to fetch'
+      ? ` (${cause.message})`
+      : '';
+    const msg = this.hasConfiguredRailwayUrl()
+      ? `Unable to reach the Live SFU backend at ${target}${detail}. Verify your internet connection and that Railway is online.`
+      : `Unable to reach the Live SFU backend (${target})${detail}. Set VITE_RAILWAY_API_URL to your deployed Railway backend URL or check your connection.`;
+    const err: any = new Error(msg);
+    err.code = 'SFU_BACKEND_UNREACHABLE';
+    return err;
   }
 
   private async sfuFetch<T = any>(
@@ -215,7 +242,12 @@ class RealtimeSfuStreamingEngine {
         headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(body);
       }
-      const response = await fetch(url, init);
+      let response: Response;
+      try {
+        response = await fetch(url, init);
+      } catch (networkErr) {
+        throw this.formatNetworkFetchError(base, networkErr);
+      }
       const contentType = response.headers.get('content-type') || '';
       const rawText = await response.text().catch(() => '');
       let data: any = {};
@@ -224,10 +256,12 @@ class RealtimeSfuStreamingEngine {
           data = JSON.parse(rawText);
         } catch {
           if (!contentType.includes('application/json')) {
-            const err: any = new Error(
-              `Backend API returned non-JSON response (${response.status}) for ${path}. Ensure the Express API server or VITE_RAILWAY_API_URL is running.`
-            );
+            const msg = this.hasConfiguredRailwayUrl()
+              ? `Backend API at ${base} returned non-JSON (${response.status}) for ${path}. Verify Railway is running the Express API (npm start).`
+              : `No Express/SFU API server on this host (${response.status} HTML). Set VITE_RAILWAY_API_URL to your deployed Railway backend.`;
+            const err: any = new Error(msg);
             err.status = response.status;
+            err.code = 'SFU_NOT_CONFIGURED';
             throw err;
           }
           const err: any = new Error(`Invalid JSON response from SFU backend (${response.status}).`);
@@ -261,11 +295,16 @@ class RealtimeSfuStreamingEngine {
     sfuConfigured: boolean;
   }> {
     const base = this.getBackendApiBase();
-    const response = await fetch(`${base}/api/health`, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-      cache: 'no-store',
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${base}/api/health`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+    } catch (networkErr) {
+      throw this.formatNetworkFetchError(base, networkErr);
+    }
     const contentType = response.headers.get('content-type') || '';
     const rawText = await response.text().catch(() => '');
     let data: any = null;
@@ -277,10 +316,12 @@ class RealtimeSfuStreamingEngine {
       }
     }
     if (!data || !contentType.includes('application/json')) {
-      const err: any = new Error(
-        `Backend API returned non-JSON response (${response.status}) for /api/health. Ensure the Express API server or VITE_RAILWAY_API_URL is running.`
-      );
+      const msg = this.hasConfiguredRailwayUrl()
+        ? `Backend API at ${base} returned non-JSON (${response.status}) for /api/health. Ensure Railway is running the Express API (npm start).`
+        : `This build is serving static frontend files without an SFU API server (${response.status}). Set VITE_RAILWAY_API_URL to your Railway backend URL and rebuild.`;
+      const err: any = new Error(msg);
       err.status = response.status;
+      err.code = 'SFU_NOT_CONFIGURED';
       throw err;
     }
     return {
