@@ -22,8 +22,6 @@ import {
 } from '../types';
 import {
   CURRENT_USER,
-  MOCK_LIVE_STREAMS,
-  MOCK_PARTY_ROOMS,
   MOCK_CONVERSATIONS,
   MOCK_VIDEOS,
   MOCK_NOTIFICATIONS,
@@ -95,7 +93,9 @@ interface AppContextType {
   // Firebase Real-time Auth & Cloud Firestore
   firebaseUser: FirebaseUser | null;
   firebaseAuthLoading: boolean;
-  loginWithFirebaseGoogle: () => Promise<{ success: boolean; user?: User; error?: string }>;
+  loginWithFirebaseGoogle: (options?: {
+    skipRedirect?: boolean;
+  }) => Promise<{ success: boolean; user?: User; error?: string }>;
   loginWithFirebaseEmail: (
     email: string,
     pass: string
@@ -129,7 +129,7 @@ interface AppContextType {
   activePartyRoom: PartyRoom | null;
   openPartyRoom: (room: PartyRoom) => void;
   closePartyRoom: (shouldDelete?: boolean) => void;
-  createPartyRoom: (room: PartyRoom) => void;
+  createPartyRoom: (room: PartyRoom) => Promise<{ success: boolean; error?: string }>;
   updateActivePartyRoomLevel: (level: 1 | 2 | 3) => void;
   toggleSeat: (seatIndex: number) => Promise<{ success: boolean; reason?: string }>;
   userSeatIndex: number | null;
@@ -507,11 +507,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     const unsubscribeLiveStreams = subscribeToLiveStreams((remoteStreams) => {
-      if (remoteStreams && remoteStreams.length > 0) {
-        setLiveStreams(remoteStreams);
-      } else {
-        setLiveStreams(MOCK_LIVE_STREAMS);
-      }
+      setLiveStreams(Array.isArray(remoteStreams) ? remoteStreams : []);
     });
 
     // Real-time Firestore Reels & Cloudflare R2 Feed Subscription
@@ -569,14 +565,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [firebaseUser?.uid]);
 
   // Live Streams & PK
-  const [liveStreams, setLiveStreams] = useState<LiveStream[]>(MOCK_LIVE_STREAMS);
+  const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
   const [activeStream, setActiveStream] = useState<LiveStream | null>(null);
   const [activePKBattle, setActivePKBattle] = useState<LiveStream | null>(null);
   const [pkScores, setPkScores] = useState<{ left: number; right: number }>({ left: 3420, right: 2890 });
   const [activeGiftBanner, setActiveGiftBanner] = useState<{ gift: Gift; sender: string; recipient: string } | null>(null);
 
   // Audio Party Rooms
-  const [partyRooms, setPartyRooms] = useState<PartyRoom[]>(MOCK_PARTY_ROOMS);
+  const [partyRooms, setPartyRooms] = useState<PartyRoom[]>([]);
   const [activePartyRoom, setActivePartyRoom] = useState<PartyRoom | null>(null);
   const [userSeatIndex, setUserSeatIndex] = useState<number | null>(null);
   const [isMicMuted, setIsMicMuted] = useState<boolean>(false);
@@ -1970,7 +1966,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentScreen('home');
   };
 
-  const loginWithFirebaseGoogle = async () => {
+  const loginWithFirebaseGoogle = async (options?: { skipRedirect?: boolean }) => {
     try {
       const fbUser = await signInWithGoogle();
       if (!fbUser) return { success: false, error: 'Sign-in cancelled' };
@@ -2017,7 +2013,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       await syncUserProfileToFirestore(userObj);
       saveUserSession(userObj);
-      setCurrentScreen('home');
+      if (!options?.skipRedirect) {
+        setCurrentScreen('home');
+      }
       return { success: true, user: userObj };
     } catch (error: any) {
       console.error('Firebase Google Auth error:', error);
@@ -2266,18 +2264,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     navigateBack();
   };
 
-  const createPartyRoom = (room: PartyRoom) => {
+  const createPartyRoom = async (room: PartyRoom): Promise<{ success: boolean; error?: string }> => {
     const firebaseUid = auth.currentUser?.uid;
-    const normalizedRoom: PartyRoom = firebaseUid
-      ? {
-          ...room,
-          isActive: true,
-          host: { ...room.host, id: firebaseUid },
+    if (!firebaseUid) {
+      return { success: false, error: 'Please sign in first to host a Party Room.' };
+    }
+    const normalizedRoom: PartyRoom = {
+      ...room,
+      isActive: true,
+      host: { ...room.host, id: firebaseUid },
+    };
+    try {
+      await syncPartyRoomToFirestore(normalizedRoom);
+      setPartyRooms((prev) => [normalizedRoom, ...prev.filter((r) => r.id !== normalizedRoom.id)]);
+      openPartyRoom(normalizedRoom);
+      return { success: true };
+    } catch (err: any) {
+      console.error('Failed to create party room:', err);
+      let msg = 'Unable to save Party Room to database.';
+      if (err instanceof Error && err.message) {
+        try {
+          const parsed = JSON.parse(err.message);
+          msg = parsed.error || err.message;
+        } catch {
+          msg = err.message;
         }
-      : { ...room, isActive: true };
-    setPartyRooms((prev) => [normalizedRoom, ...prev]);
-    syncPartyRoomToFirestore(normalizedRoom).catch(() => {});
-    openPartyRoom(normalizedRoom);
+      }
+      return { success: false, error: msg };
+    }
   };
 
   const updateActivePartyRoomLevel = (level: 1 | 2 | 3) => {

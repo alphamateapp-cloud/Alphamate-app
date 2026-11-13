@@ -16,14 +16,14 @@ import {
 } from 'lucide-react';
 
 export const WelcomeScreen: React.FC = () => {
-  const { setCurrentScreen, customLogoUrl, isAuthenticated, currentUser } = useApp();
+  const { setCurrentScreen, customLogoUrl, isAuthenticated, currentUser, firebaseUser } = useApp();
 
-  // If user is already authenticated/logged in, immediately go to Home screen
+  // If user has an active Firebase session, immediately go to Home screen
   React.useEffect(() => {
-    if (isAuthenticated && currentUser) {
+    if (isAuthenticated && currentUser && firebaseUser) {
       setCurrentScreen('home');
     }
-  }, [isAuthenticated, currentUser, setCurrentScreen]);
+  }, [isAuthenticated, currentUser, firebaseUser, setCurrentScreen]);
 
   return (
     <div className="relative w-full h-full min-h-[660px] flex flex-col justify-between p-4 sm:p-5 overflow-y-auto scrollbar-none bg-[#09070F] select-none text-white">

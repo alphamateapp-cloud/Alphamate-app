@@ -22,16 +22,17 @@ export const SignInScreen: React.FC = () => {
     customLogoUrl,
     isAuthenticated,
     currentUser,
+    firebaseUser,
     loginWithFirebaseEmail,
     loginWithFirebaseGoogle,
   } = useApp();
 
-  // If already authenticated, redirect to Home
+  // Only auto-redirect if a real Firebase Auth session is already active
   React.useEffect(() => {
-    if (isAuthenticated && currentUser) {
+    if (isAuthenticated && currentUser && firebaseUser) {
       setCurrentScreen('home');
     }
-  }, [isAuthenticated, currentUser, setCurrentScreen]);
+  }, [isAuthenticated, currentUser, firebaseUser, setCurrentScreen]);
 
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
@@ -98,11 +99,13 @@ export const SignInScreen: React.FC = () => {
       const res = await loginWithFirebaseGoogle();
       setIsSubmitting(false);
       if (!res.success) {
-        setShowGoogleModal(true);
+        setErrorMessage(
+          res.error || 'Google sign-in did not complete. Please allow popups or sign in with Email.'
+        );
       }
-    } catch {
+    } catch (err: any) {
       setIsSubmitting(false);
-      setShowGoogleModal(true);
+      setErrorMessage(err?.message || 'Google sign-in failed. Please try Email & Password.');
     }
   };
 

@@ -30,6 +30,8 @@ export const HomeScreen: React.FC = () => {
     liveStreams,
     openLiveStream,
     currentUser,
+    firebaseUser,
+    loginWithFirebaseGoogle,
     setCurrentScreen,
     dailyCheckInState,
     setShowDailyCheckInModal,
@@ -46,6 +48,8 @@ export const HomeScreen: React.FC = () => {
   const [showGoLiveModal, setShowGoLiveModal] = useState<boolean>(false);
   const [showPKModal, setShowPKModal] = useState<boolean>(false);
   const [customRoomTitle, setCustomRoomTitle] = useState<string>('Party with Alex! 💜 Drop in');
+  const [goLiveAuthError, setGoLiveAuthError] = useState<string | null>(null);
+  const [isSigningInToLive, setIsSigningInToLive] = useState<boolean>(false);
 
   // Stories modal state
   const [viewingStoryFriend, setViewingStoryFriend] = useState<FriendStory | null>(null);
@@ -98,20 +102,15 @@ export const HomeScreen: React.FC = () => {
   // Remaining All Broadcasts
   const allOtherStreams = useMemo(() => rankedStreams.slice(2), [rankedStreams]);
 
-  const handleStartBroadcast = () => {
-    const fbUser = auth.currentUser;
-    if (!fbUser) {
-      setShowGoLiveModal(false);
-      setCurrentScreen('signin');
-      return;
-    }
+  const launchBroadcastWithUid = (uid: string) => {
+    setGoLiveAuthError(null);
     setShowGoLiveModal(false);
     const myStream: LiveStream = {
       id: `live_my_${Date.now()}`,
       title: customRoomTitle || 'My Live Stream',
       host: {
         ...currentUser,
-        id: fbUser.uid,
+        id: uid,
       },
       viewerCount: 1,
       thumbnail: currentUser.avatar,
@@ -122,6 +121,27 @@ export const HomeScreen: React.FC = () => {
       isActive: false,
     };
     openLiveStream(myStream);
+  };
+
+  const handleStartBroadcast = () => {
+    const fbUser = auth.currentUser;
+    if (!fbUser) {
+      setGoLiveAuthError('Sign in with Google or your Alpha Mate email account first to broadcast live.');
+      return;
+    }
+    launchBroadcastWithUid(fbUser.uid);
+  };
+
+  const handleGoogleSignInAndGoLive = async () => {
+    setIsSigningInToLive(true);
+    setGoLiveAuthError(null);
+    const res = await loginWithFirebaseGoogle({ skipRedirect: true });
+    setIsSigningInToLive(false);
+    if (!res.success || !auth.currentUser) {
+      setGoLiveAuthError(res.error || 'Google sign-in did not complete. Please allow popups or sign in with Email.');
+      return;
+    }
+    launchBroadcastWithUid(auth.currentUser.uid);
   };
 
   return (
@@ -633,9 +653,41 @@ export const HomeScreen: React.FC = () => {
                 <span className="text-[10px] text-emerald-400 font-bold uppercase">1080p HD</span>
               </div>
 
+              {!(firebaseUser || auth.currentUser) && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/35 space-y-2.5">
+                  <p className="text-[11px] text-amber-200 font-semibold leading-snug">
+                    {goLiveAuthError || 'Sign in with Google or Email to unlock Live Broadcasting.'}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isSigningInToLive}
+                      onClick={handleGoogleSignInAndGoLive}
+                      className="flex-1 h-9 rounded-lg bg-white text-zinc-900 text-[11px] font-bold hover:bg-zinc-100 disabled:opacity-60 cursor-pointer"
+                    >
+                      {isSigningInToLive ? 'Signing in...' : 'Google & Go Live'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowGoLiveModal(false);
+                        setGoLiveAuthError(null);
+                        setCurrentScreen('signin');
+                      }}
+                      className="h-9 px-3 rounded-lg bg-purple-600/30 border border-purple-400/40 text-purple-100 text-[11px] font-bold hover:bg-purple-600/50 cursor-pointer"
+                    >
+                      Email Sign In
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div className="flex items-center gap-2 pt-2">
                 <button
-                  onClick={() => setShowGoLiveModal(false)}
+                  onClick={() => {
+                    setGoLiveAuthError(null);
+                    setShowGoLiveModal(false);
+                  }}
                   className="flex-1 h-12 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-bold hover:bg-zinc-700 cursor-pointer"
                 >
                   Cancel

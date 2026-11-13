@@ -163,6 +163,8 @@ export const PartyRoomsScreen: React.FC = () => {
     isMicMuted,
     setIsMicMuted,
     currentUser,
+    firebaseUser,
+    loginWithFirebaseGoogle,
     sendLiveGift,
     coins,
     setCurrentScreen,
@@ -267,6 +269,10 @@ export const PartyRoomsScreen: React.FC = () => {
     currentUser.level >= 25 ? 3 : currentUser.level >= 10 ? 2 : 1
   );
   const [createCategory, setCreateCategory] = useState<'Music' | 'Chat' | 'Singing' | 'Gaming' | 'Dating'>('Music');
+  const [createRoomError, setCreateRoomError] = useState<string | null>(null);
+  const [isLaunchingRoom, setIsLaunchingRoom] = useState<boolean>(false);
+  const [isSigningInToHost, setIsSigningInToHost] = useState<boolean>(false);
+  const lastVoiceModeRef = useRef<{ key: string; canSpeak: boolean; muted: boolean } | null>(null);
 
   // Keep partyLevel synchronized with activePartyRoom
   useEffect(() => {
@@ -792,6 +798,7 @@ export const PartyRoomsScreen: React.FC = () => {
   useEffect(() => {
     const roomId = activePartyRoom?.id;
     if (!roomId) {
+      lastVoiceModeRef.current = null;
       setPartyVoiceError(null);
       setPartyAudioAutoplayBlocked(false);
       setIsHostSpeaking(false);
@@ -803,6 +810,13 @@ export const PartyRoomsScreen: React.FC = () => {
     const isSeatedNow = activePartyRoom.seats?.some((s: any) => s.user?.id === effectiveUserId) ?? false;
     const initialCanSpeak = isUserHost || isSeatedNow;
     const initialMuted = isUserHost ? isHostMicMuted : isMicMuted;
+
+    // Record initial voice state so Effect #2 does not redundantly re-trigger startup
+    lastVoiceModeRef.current = {
+      key: `${roomId}:${effectiveUserId}`,
+      canSpeak: initialCanSpeak,
+      muted: initialMuted,
+    };
 
     setPartyVoiceError(null);
     p2pStreamingEngine
@@ -821,7 +835,11 @@ export const PartyRoomsScreen: React.FC = () => {
         },
       })
       .catch((error: any) => {
-        console.error('[Party Voice] Unable to start SFU session:', error);
+        if (error?.code === 'SFU_NOT_CONFIGURED' || error?.status === 503) {
+          console.warn('[Party Voice] SFU unavailable:', error?.message || error);
+        } else {
+          console.error('[Party Voice] Unable to start SFU session:', error);
+        }
         setPartyVoiceError(error?.message || 'Unable to connect to Party Voice SFU.');
       });
 
@@ -850,16 +868,40 @@ export const PartyRoomsScreen: React.FC = () => {
     const isUserHost = activePartyRoom.host?.id === effectiveUserId;
     const canSpeak = isUserHost || userSeatIndex !== null;
     const muted = isUserHost ? isHostMicMuted : isMicMuted;
+    const modeKey = `${roomId}:${effectiveUserId}`;
+    const prevMode = lastVoiceModeRef.current;
 
-    p2pStreamingEngine
-      .setPartySpeakingMode(roomId, effectiveUserId, canSpeak, muted)
-      .catch((err: any) => {
-        console.error('[Party Voice] Mic publish/mode switch failed:', err);
-        showToast(err?.message || 'Microphone access is required to speak on seat.');
-        if (!isUserHost && userSeatIndex !== null) {
-          toggleSeat(userSeatIndex).catch(() => {});
-        }
-      });
+    const didModeChangeAfterInit =
+      prevMode !== null &&
+      prevMode.key === modeKey &&
+      (prevMode.canSpeak !== canSpeak || prevMode.muted !== muted);
+
+    if (didModeChangeAfterInit) {
+      lastVoiceModeRef.current = { key: modeKey, canSpeak, muted };
+      p2pStreamingEngine
+        .setPartySpeakingMode(roomId, effectiveUserId, canSpeak, muted)
+        .catch((err: any) => {
+          if (err?.code === 'SFU_NOT_CONFIGURED' || err?.status === 503) {
+            console.warn('[Party Voice] Mic publish/mode switch unavailable:', err?.message || err);
+          } else {
+            console.error('[Party Voice] Mic publish/mode switch failed:', err);
+          }
+          const msg = err?.message || 'Unable to switch voice speaking mode.';
+          const isMicHardwareError =
+            err?.name === 'NotAllowedError' ||
+            err?.name === 'NotFoundError' ||
+            err?.name === 'NotReadableError' ||
+            /microphone|permission|device/i.test(msg);
+
+          if (isMicHardwareError && !isUserHost && userSeatIndex !== null) {
+            showToast(msg);
+            toggleSeat(userSeatIndex).catch(() => {});
+          } else {
+            setPartyVoiceError(msg);
+            showToast(msg);
+          }
+        });
+    }
 
     if (!canSpeak || muted) {
       setIsHostSpeaking(false);
@@ -2851,6 +2893,14 @@ export const PartyRoomsScreen: React.FC = () => {
 
   return (
     <div className="relative w-full h-full pb-24 bg-[#09070F] text-white overflow-y-auto overscroll-contain">
+      {/* Global Lobby Toast Alert Feedback (rendered above modals at z-[70]) */}
+      {toastMessage && (
+        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-[70] px-4 py-2 rounded-full bg-[#180E2C]/95 border border-[#A855F7]/40 text-white text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 pointer-events-none">
+          <Sparkles className="w-3.5 h-3.5 text-[#EC4899]" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
       {/* Hero Party Discovery Animated Musical Banner */}
       <div className="px-4 pt-3 pb-2">
         <div className="relative rounded-3xl p-4.5 overflow-hidden bg-gradient-to-r from-[#200A45] via-[#35105E] to-[#160B2A] border border-[#EC4899]/30 shadow-2xl shadow-purple-950/60">
@@ -3169,6 +3219,28 @@ export const PartyRoomsScreen: React.FC = () => {
               );
             })}
           </div>
+
+          {filteredRooms.length === 0 && (
+            <div className="mt-3 p-6 rounded-2xl bg-[#140C26]/80 border border-[#A855F7]/20 text-center space-y-2.5">
+              <div className="w-11 h-11 rounded-2xl bg-[#7928CA]/20 border border-[#A855F7]/30 flex items-center justify-center mx-auto">
+                <Mic className="w-5 h-5 text-[#EC4899]" />
+              </div>
+              <p className="text-xs font-bold text-white">No live audio party rooms right now</p>
+              <p className="text-[11px] text-zinc-400">
+                Start your own 4, 8, or 15-seat voice lounge and invite friends.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setCreateRoomError(null);
+                  setShowCreateModal(true);
+                }}
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold shadow-md cursor-pointer"
+              >
+                + Create Party Room
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -3362,26 +3434,84 @@ export const PartyRoomsScreen: React.FC = () => {
                 </div>
               </div>
 
+              {/* Auth Warning if not signed in to Firebase */}
+              {!(firebaseUser || auth.currentUser) && (
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/35 space-y-2">
+                  <p className="text-[11px] text-amber-200 font-semibold leading-snug">
+                    {createRoomError || 'Sign in with Google or Email first to host a live Party Room.'}
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isSigningInToHost}
+                      onClick={async () => {
+                        setIsSigningInToHost(true);
+                        setCreateRoomError(null);
+                        const res = await loginWithFirebaseGoogle({ skipRedirect: true });
+                        setIsSigningInToHost(false);
+                        if (!res.success) {
+                          setCreateRoomError(
+                            res.error || 'Google sign-in did not complete. Please allow popups or sign in with Email.'
+                          );
+                        } else {
+                          showToast('Signed in! Tap Launch Room to go live.');
+                        }
+                      }}
+                      className="flex-1 h-8 rounded-lg bg-white text-zinc-900 text-[11px] font-bold hover:bg-zinc-100 disabled:opacity-60 cursor-pointer"
+                    >
+                      {isSigningInToHost ? 'Signing in...' : 'Continue with Google'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowCreateModal(false);
+                        setCreateRoomError(null);
+                        setCurrentScreen('signin');
+                      }}
+                      className="h-8 px-3 rounded-lg bg-purple-600/30 border border-purple-400/40 text-purple-100 text-[11px] font-bold hover:bg-purple-600/50 cursor-pointer"
+                    >
+                      Email Sign In
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {createRoomError && (firebaseUser || auth.currentUser) && (
+                <div className="p-2.5 rounded-xl bg-rose-500/15 border border-rose-500/40 text-rose-200 text-[11px] font-semibold">
+                  {createRoomError}
+                </div>
+              )}
+
               {/* Modal Buttons */}
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setShowCreateModal(false)}
+                  onClick={() => {
+                    setCreateRoomError(null);
+                    setShowCreateModal(false);
+                  }}
                   className="flex-1 h-11 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-semibold cursor-pointer hover:bg-zinc-700 transition-all"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
+                  disabled={isLaunchingRoom}
+                  onClick={async () => {
                     const fbUser = auth.currentUser;
                     if (!fbUser) {
-                      showToast('Please sign in first to host a Party Room.');
+                      const msg = 'Please sign in first to host a Party Room.';
+                      setCreateRoomError(msg);
+                      showToast(msg);
                       return;
                     }
-                    if (isUploadingRoomCover) { showToast('Please wait for the room cover upload to finish.'); return; }
-                    // Double check unlock requirement
-                    const selectedTier = PARTY_TIER_SETTINGS.find((t) => t.level === createRoomLevel) || PARTY_TIER_SETTINGS[0];
+                    if (isUploadingRoomCover) {
+                      showToast('Please wait for the room cover upload to finish.');
+                      return;
+                    }
+
+                    const selectedTier =
+                      PARTY_TIER_SETTINGS.find((t) => t.level === createRoomLevel) || PARTY_TIER_SETTINGS[0];
                     if (currentUser.level < selectedTier.requiredLevel) {
                       showToast(`🔒 ${selectedTier.name} is locked! Launching with 1 Host + 4 Seats.`);
                       setCreateRoomLevel(1);
@@ -3390,7 +3520,6 @@ export const PartyRoomsScreen: React.FC = () => {
                     const finalLevel = currentUser.level >= selectedTier.requiredLevel ? createRoomLevel : 1;
                     const finalTier = PARTY_TIER_SETTINGS.find((t) => t.level === finalLevel)!;
 
-                    // Host stays on the reserved Host Crown Throne; all guest seats 1..N start open
                     const initialSeats: PartySeat[] = Array.from({ length: finalTier.guestCount }, (_, i) => ({
                       seatIndex: i,
                       user: null,
@@ -3417,14 +3546,25 @@ export const PartyRoomsScreen: React.FC = () => {
                       seats: initialSeats,
                     };
 
+                    setIsLaunchingRoom(true);
+                    setCreateRoomError(null);
+                    const res = await createPartyRoom(newParty);
+                    setIsLaunchingRoom(false);
+
+                    if (!res.success) {
+                      const errMsg = res.error || 'Could not launch Party Room.';
+                      setCreateRoomError(errMsg);
+                      showToast(errMsg);
+                      return;
+                    }
+
                     setShowCreateModal(false);
-                    createPartyRoom(newParty);
                     showToast(`🎉 ${finalTier.name} Created Successfully! 🚀`);
                   }}
-                  className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold shadow-lg shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5"
+                  className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold shadow-lg shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60"
                 >
                   <Sparkles className="w-4 h-4 text-amber-300" />
-                  <span>Launch Room</span>
+                  <span>{isLaunchingRoom ? 'Launching...' : 'Launch Room'}</span>
                 </button>
               </div>
             </div>

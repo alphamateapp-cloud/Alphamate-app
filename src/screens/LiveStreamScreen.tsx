@@ -573,9 +573,13 @@ export const LiveStreamScreen: React.FC = () => {
 
           if (!isMounted) return;
           setStreamStatus('live');
-        } catch (err) {
+        } catch (err: any) {
           if (!isMounted) return;
-          console.error('[Solo Live Host] SFU publish failed:', err);
+          if (err?.code === 'SFU_NOT_CONFIGURED' || err?.status === 503) {
+            console.warn('[Solo Live Host] SFU unavailable:', err?.message || err);
+          } else {
+            console.error('[Solo Live Host] SFU publish failed:', err);
+          }
           setStreamStatus('error');
           setStreamError(
             err instanceof Error

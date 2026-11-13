@@ -180,6 +180,24 @@ export type { FirebaseUser };
 // FIRESTORE REAL-TIME DATA HELPERS
 // =========================================================================
 
+function stripUndefinedFields<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== undefined)
+      .map((item) => stripUndefinedFields(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value as Record<string, any>)) {
+      if (v !== undefined) {
+        out[k] = stripUndefinedFields(v);
+      }
+    }
+    return out as T;
+  }
+  return value;
+}
+
 /**
  * Save / Update User Profile in Firestore
  */
@@ -187,17 +205,19 @@ export async function syncUserProfileToFirestore(userData: any) {
   if (!userData?.id) return;
   const path = `users/${userData.id}`;
   try {
-    const sanitizedProfile = {
-      ...userData,
+    const { password: _omitPassword, coverImage, ...restUser } = userData;
+    const rawProfile: Record<string, any> = {
+      ...restUser,
       avatar: sanitizeAvatarString(userData.avatar),
-      // Prevent oversized base64 cover images from exceeding 1MB limit
-      coverImage:
-        typeof userData.coverImage === 'string' && userData.coverImage.length > 80000
-          ? undefined
-          : userData.coverImage,
       updatedAt: new Date().toISOString(),
     };
 
+    // Prevent oversized base64 cover images (>80KB) or undefined values from breaking setDoc
+    if (typeof coverImage === 'string' && coverImage.length > 0 && coverImage.length <= 80000) {
+      rawProfile.coverImage = coverImage;
+    }
+
+    const sanitizedProfile = stripUndefinedFields(rawProfile);
     await setDoc(doc(db, 'users', userData.id), sanitizedProfile, { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
@@ -291,7 +311,7 @@ export async function syncPartyRoomToFirestore(room: any) {
       updatedAt: new Date().toISOString(),
     };
 
-    await setDoc(doc(db, 'partyRooms', room.id), sanitizedRoom, { merge: true });
+    await setDoc(doc(db, 'partyRooms', room.id), stripUndefinedFields(sanitizedRoom), { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -304,10 +324,10 @@ export async function updatePartyRoomFields(roomId: string, fields: Record<strin
   if (!roomId) return;
   const path = `partyRooms/${roomId}`;
   try {
-    await updateDoc(doc(db, 'partyRooms', roomId), {
+    await updateDoc(doc(db, 'partyRooms', roomId), stripUndefinedFields({
       ...fields,
       updatedAt: new Date().toISOString(),
-    });
+    }));
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -554,7 +574,7 @@ export async function syncLiveStreamToFirestore(stream: any) {
       createdAt: stream.createdAt || new Date(nowMs).toISOString(),
     };
 
-    await setDoc(doc(db, 'liveStreams', stream.id), sanitizedStream, { merge: true });
+    await setDoc(doc(db, 'liveStreams', stream.id), stripUndefinedFields(sanitizedStream), { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
   }
@@ -566,10 +586,10 @@ export async function syncLiveStreamToFirestore(stream: any) {
 export async function updateLiveStreamFields(streamId: string, fields: Record<string, any>) {
   if (!streamId) return;
   try {
-    await updateDoc(doc(db, 'liveStreams', streamId), {
+    await updateDoc(doc(db, 'liveStreams', streamId), stripUndefinedFields({
       ...fields,
       updatedAt: new Date().toISOString(),
-    });
+    }));
   } catch (error) {
     console.warn('Failed to update live stream fields:', error);
   }

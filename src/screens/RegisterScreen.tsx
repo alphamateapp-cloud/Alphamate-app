@@ -36,16 +36,18 @@ export const RegisterScreen: React.FC = () => {
     registeredUsers,
     isAuthenticated,
     currentUser,
+    firebaseUser,
+    updateUserProfile,
     loginWithFirebaseGoogle,
     registerWithFirebaseEmail,
   } = useApp();
 
-  // If already authenticated, redirect directly into the app
+  // Only auto-redirect if a real Firebase Auth session is already active
   React.useEffect(() => {
-    if (isAuthenticated && currentUser) {
+    if (isAuthenticated && currentUser && firebaseUser) {
       setCurrentScreen('home');
     }
-  }, [isAuthenticated, currentUser, setCurrentScreen]);
+  }, [isAuthenticated, currentUser, firebaseUser, setCurrentScreen]);
 
   // Registration step: 'select_method' | 'google_picker' | 'profile_details'
   const [step, setStep] = useState<'select_method' | 'google_picker' | 'profile_details'>('select_method');
@@ -124,7 +126,7 @@ export const RegisterScreen: React.FC = () => {
   };
 
   // Final Registration Submission
-  const handleFinalSubmit = (e: React.FormEvent) => {
+  const handleFinalSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
 
@@ -178,23 +180,37 @@ export const RegisterScreen: React.FC = () => {
 
     setIsSubmitting(true);
 
-    setTimeout(() => {
-      const res = registerWithFullDetails({
+    if (authProvider === 'email') {
+      const fbRes = await registerWithFirebaseEmail({
+        email: email.trim().toLowerCase(),
+        pass: password,
         displayName: displayName.trim(),
         username: username.trim(),
-        email: email.trim().toLowerCase(),
-        dob,
-        password,
-        authProvider,
-        avatar: selectedAvatar,
       });
-
       setIsSubmitting(false);
-
-      if (!res.success) {
-        setErrorMessage(res.message || 'Registration failed. Please try again.');
+      if (!fbRes.success) {
+        setErrorMessage(fbRes.error || 'Registration failed. Please try again.');
+        return;
       }
-    }, 600);
+      updateUserProfile({ dob, avatar: selectedAvatar });
+      return;
+    }
+
+    const res = registerWithFullDetails({
+      displayName: displayName.trim(),
+      username: username.trim(),
+      email: email.trim().toLowerCase(),
+      dob,
+      password,
+      authProvider,
+      avatar: selectedAvatar,
+    });
+
+    setIsSubmitting(false);
+
+    if (!res.success) {
+      setErrorMessage(res.message || 'Registration failed. Please try again.');
+    }
   };
 
   return (

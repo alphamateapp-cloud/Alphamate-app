@@ -158,6 +158,7 @@ class RealtimeSfuStreamingEngine {
   private cachedTurnServers: RTCIceServer[] = [];
   private turnExpiresAt: number = 0;
   private hasCloudflareTurn: boolean = false;
+  private sfuConfiguredUntil: number = 0;
 
   constructor() {
     this.fetchCloudflareTurnCredentials().catch(() => {});
@@ -215,7 +216,25 @@ class RealtimeSfuStreamingEngine {
         init.body = JSON.stringify(body);
       }
       const response = await fetch(url, init);
-      const data = await response.json().catch(() => ({}));
+      const contentType = response.headers.get('content-type') || '';
+      const rawText = await response.text().catch(() => '');
+      let data: any = {};
+      if (rawText) {
+        try {
+          data = JSON.parse(rawText);
+        } catch {
+          if (!contentType.includes('application/json')) {
+            const err: any = new Error(
+              `Backend API returned non-JSON response (${response.status}) for ${path}. Ensure the Express API server or VITE_RAILWAY_API_URL is running.`
+            );
+            err.status = response.status;
+            throw err;
+          }
+          const err: any = new Error(`Invalid JSON response from SFU backend (${response.status}).`);
+          err.status = response.status;
+          throw err;
+        }
+      }
       return { response, data };
     };
 
@@ -228,23 +247,77 @@ class RealtimeSfuStreamingEngine {
       const msg = data?.error || `SFU request failed (${response.status})`;
       const err: any = new Error(msg);
       err.status = response.status;
+      if (data?.code) err.code = data.code;
       throw err;
     }
 
     return data as T;
   }
 
+  public async checkBackendHealth(): Promise<{
+    ok: boolean;
+    firebaseConfigured: boolean;
+    turnConfigured: boolean;
+    sfuConfigured: boolean;
+  }> {
+    const base = this.getBackendApiBase();
+    const response = await fetch(`${base}/api/health`, {
+      method: 'GET',
+      headers: { Accept: 'application/json' },
+      cache: 'no-store',
+    });
+    const contentType = response.headers.get('content-type') || '';
+    const rawText = await response.text().catch(() => '');
+    let data: any = null;
+    if (rawText) {
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = null;
+      }
+    }
+    if (!data || !contentType.includes('application/json')) {
+      const err: any = new Error(
+        `Backend API returned non-JSON response (${response.status}) for /api/health. Ensure the Express API server or VITE_RAILWAY_API_URL is running.`
+      );
+      err.status = response.status;
+      throw err;
+    }
+    return {
+      ok: Boolean(response.ok && data?.success),
+      firebaseConfigured: Boolean(data?.firebaseConfigured),
+      turnConfigured: Boolean(data?.turnConfigured),
+      sfuConfigured: Boolean(data?.sfuConfigured),
+    };
+  }
+
+  private async ensureSfuBackendConfigured(): Promise<void> {
+    if (Date.now() < this.sfuConfiguredUntil) {
+      return;
+    }
+    const health = await this.checkBackendHealth();
+    if (!health.sfuConfigured) {
+      const err: any = new Error(
+        'Cloudflare Realtime SFU is not configured on the backend server. Set REALTIME_SFU_APP_ID and REALTIME_SFU_BEARER_TOKEN on Railway (or the active backend) and set VITE_RAILWAY_API_URL.'
+      );
+      err.status = 503;
+      err.code = 'SFU_NOT_CONFIGURED';
+      throw err;
+    }
+    this.sfuConfiguredUntil = Date.now() + 60_000;
+  }
+
   private enqueueSessionOp<T>(sessionKey: string, task: () => Promise<T>): Promise<T> {
     const prev = this.sessionQueues.get(sessionKey) || Promise.resolve();
     const next = prev.catch(() => undefined).then(task);
-    this.sessionQueues.set(
-      sessionKey,
-      next.finally(() => {
-        if (this.sessionQueues.get(sessionKey) === next) {
+    const tail = next
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.sessionQueues.get(sessionKey) === tail) {
           this.sessionQueues.delete(sessionKey);
         }
-      })
-    );
+      });
+    this.sessionQueues.set(sessionKey, tail);
     return next;
   }
 
@@ -266,7 +339,8 @@ class RealtimeSfuStreamingEngine {
           method: 'GET',
           headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
         });
-        const data = await response.json().catch(() => ({}));
+        const contentType = response.headers.get('content-type') || '';
+        const data = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
         if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
           const hasTurn = data.iceServers.some((server: RTCIceServer) =>
             (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
@@ -1190,7 +1264,13 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
-  private async reconnectPartyVoice(roomId: string): Promise<boolean> {
+  private reconnectPartyVoice(roomId: string): Promise<boolean> {
+    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
+      this._reconnectPartyVoiceInternal(roomId)
+    );
+  }
+
+  private async _reconnectPartyVoiceInternal(roomId: string): Promise<boolean> {
     const existing = this.partySfuSessions.get(roomId);
     if (!existing || existing.isClosed) return false;
 
@@ -1419,7 +1499,21 @@ class RealtimeSfuStreamingEngine {
   // SOLO LIVE HOST PUBLISHING VIA CLOUDFLARE REALTIME SFU
   // =========================================================================
 
-  public async startSoloLiveHost(params: {
+  public startSoloLiveHost(params: {
+    streamId: string;
+    hostId: string;
+    facing?: 'user' | 'environment';
+    isVideoOn?: boolean;
+    isMicOn?: boolean;
+    onConnectionStateChange?: (state: ConnectionState) => void;
+    onReconnected?: (result: SoloLivePublishResult) => void;
+  }): Promise<SoloLivePublishResult> {
+    return this.enqueueSessionOp(`host-lifecycle:${params.streamId}`, () =>
+      this._startSoloLiveHostInternal(params)
+    );
+  }
+
+  private async _startSoloLiveHostInternal(params: {
     streamId: string;
     hostId: string;
     facing?: 'user' | 'environment';
@@ -1438,12 +1532,13 @@ class RealtimeSfuStreamingEngine {
       onReconnected,
     } = params;
 
-    await this.stopHostBroadcast(streamId);
+    await this._stopHostBroadcastInternal(streamId);
 
     this.isVideoPaused = !isVideoOn;
     this.isMuted = !isMicOn;
 
     await this.getFirebaseIdToken();
+    await this.ensureSfuBackendConfigured();
     await this.fetchCloudflareTurnCredentials().catch(() => {});
 
     let stream: MediaStream | null = null;
@@ -1595,7 +1690,16 @@ class RealtimeSfuStreamingEngine {
     this.setBroadcastState(streamId, { isVideoOn: prev.isVideoOn, isMicOn });
   }
 
-  public async stopHostBroadcast(streamId: string, keepalive: boolean = false): Promise<void> {
+  public stopHostBroadcast(streamId: string, keepalive: boolean = false): Promise<void> {
+    if (keepalive) {
+      return this._stopHostBroadcastInternal(streamId, true);
+    }
+    return this.enqueueSessionOp(`host-lifecycle:${streamId}`, () =>
+      this._stopHostBroadcastInternal(streamId, false)
+    );
+  }
+
+  private async _stopHostBroadcastInternal(streamId: string, keepalive: boolean = false): Promise<void> {
     this.stopLiveStreamHeartbeat(streamId);
     this.clearReconnectState(`host:${streamId}`, true);
     const hostSession = this.hostSfuSessions.get(streamId);
@@ -1659,6 +1763,7 @@ class RealtimeSfuStreamingEngine {
     }
 
     await this.getFirebaseIdToken();
+    await this.ensureSfuBackendConfigured();
     await this.fetchCloudflareTurnCredentials().catch(() => {});
 
     const viewerSessionId = await this.createSfuSession();
@@ -1824,7 +1929,32 @@ class RealtimeSfuStreamingEngine {
   // PARTY ROOM VOICE VIA CLOUDFLARE REALTIME SFU
   // =========================================================================
 
-  public async startPartyVoice(
+  public hasActivePartySession(roomId: string): boolean {
+    const s = this.partySfuSessions.get(roomId);
+    return Boolean(
+      s &&
+        !s.isClosed &&
+        s.pc.connectionState !== 'closed' &&
+        s.pc.connectionState !== 'failed'
+    );
+  }
+
+  public startPartyVoice(
+    roomId: string,
+    userId: string,
+    isMuted: boolean = false,
+    listenOnly: boolean = false,
+    callbacks?: {
+      onError?: (err: Error) => void;
+      onConnectionStateChange?: (state: ConnectionState) => void;
+    }
+  ): Promise<MediaStream | null> {
+    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
+      this._startPartyVoiceInternal(roomId, userId, isMuted, listenOnly, callbacks)
+    );
+  }
+
+  private async _startPartyVoiceInternal(
     roomId: string,
     userId: string,
     isMuted: boolean = false,
@@ -1837,17 +1967,19 @@ class RealtimeSfuStreamingEngine {
     const existing = this.partySfuSessions.get(roomId);
     if (
       existing &&
+      !existing.isClosed &&
       existing.userId === userId &&
       existing.pc.connectionState !== 'closed' &&
       existing.pc.connectionState !== 'failed'
     ) {
       existing.onError = callbacks?.onError;
       existing.onConnectionStateChange = callbacks?.onConnectionStateChange;
-      return this.setPartySpeakingMode(roomId, userId, !listenOnly, isMuted);
+      return this._setPartySpeakingModeInternal(roomId, userId, !listenOnly, isMuted);
     }
 
-    await this.stopPartyVoice(roomId);
+    await this._stopPartyVoiceInternal(roomId);
     await this.getFirebaseIdToken();
+    await this.ensureSfuBackendConfigured();
     await this.fetchCloudflareTurnCredentials().catch(() => {});
 
     const sfuSessionId = await this.createSfuSession();
@@ -1961,20 +2093,31 @@ class RealtimeSfuStreamingEngine {
 
       return session.localStream;
     } catch (err) {
-      await this.stopPartyVoice(roomId);
+      await this._stopPartyVoiceInternal(roomId);
       throw err;
     }
   }
 
-  public async setPartySpeakingMode(
+  public setPartySpeakingMode(
+    roomId: string,
+    userId: string,
+    canSpeak: boolean,
+    isMuted: boolean
+  ): Promise<MediaStream | null> {
+    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
+      this._setPartySpeakingModeInternal(roomId, userId, canSpeak, isMuted)
+    );
+  }
+
+  private async _setPartySpeakingModeInternal(
     roomId: string,
     userId: string,
     canSpeak: boolean,
     isMuted: boolean
   ): Promise<MediaStream | null> {
     const session = this.partySfuSessions.get(roomId);
-    if (!session || session.userId !== userId) {
-      return this.startPartyVoice(roomId, userId, isMuted, !canSpeak);
+    if (!session || session.isClosed || session.userId !== userId) {
+      return this._startPartyVoiceInternal(roomId, userId, isMuted, !canSpeak);
     }
 
     if (canSpeak && !session.isPublishing) {
@@ -2183,7 +2326,16 @@ class RealtimeSfuStreamingEngine {
     });
   }
 
-  public async stopPartyVoice(roomId: string, keepalive: boolean = false): Promise<void> {
+  public stopPartyVoice(roomId: string, keepalive: boolean = false): Promise<void> {
+    if (keepalive) {
+      return this._stopPartyVoiceInternal(roomId, true);
+    }
+    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
+      this._stopPartyVoiceInternal(roomId, false)
+    );
+  }
+
+  private async _stopPartyVoiceInternal(roomId: string, keepalive: boolean = false): Promise<void> {
     this.clearReconnectState(`party:${roomId}`, true);
     const session = this.partySfuSessions.get(roomId);
     this.partySfuSessions.delete(roomId);
