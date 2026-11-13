@@ -978,7 +978,7 @@ export const PartyRoomsScreen: React.FC = () => {
         },
         onError: (err) => {
           if (!cancelled) {
-            setPartyVoiceError(err.message || 'Voice audio connection interrupted.');
+            setPartyVoiceError('Alpha Mate is reconnecting your Party voice…');
           }
         },
         onConnectionStateChange: (connState) => {
@@ -988,10 +988,10 @@ export const PartyRoomsScreen: React.FC = () => {
             setPartyVoiceError(null);
           } else if (connState === 'disconnected') {
             if (voiceHasConnectedRef.current) {
-              setPartyVoiceError('Network interrupted — reconnecting voice...');
+              setPartyVoiceError('Alpha Mate Party Voice is reconnecting…');
             }
           } else if (connState === 'failed') {
-            setPartyVoiceError('Voice connection lost. Tap Retry to reconnect.');
+            setPartyVoiceError('Party Voice connection lost. Please try reconnecting.');
           }
         },
         onParticipantsChange: (participants) => {
@@ -1061,7 +1061,7 @@ export const PartyRoomsScreen: React.FC = () => {
           return;
         }
 
-        setPartyVoiceError(error?.message || 'Unable to connect to Party Voice SFU.');
+        setPartyVoiceError('Alpha Mate Party Voice is reconnecting…');
       });
 
     const handlePageHide = () => {
@@ -1125,7 +1125,9 @@ export const PartyRoomsScreen: React.FC = () => {
           } else {
             console.error('[Party Voice] Mic publish/mode switch failed:', err);
           }
-          const msg = err?.message || 'Unable to switch voice speaking mode.';
+          const msg = err?.name === 'NotAllowedError' || err?.name === 'NotFoundError' || err?.name === 'NotReadableError'
+            ? 'Please check microphone permission and try again.'
+            : 'Alpha Mate Party Voice is reconnecting…';
           const isMicHardwareError =
             err?.name === 'NotAllowedError' ||
             err?.name === 'NotFoundError' ||
@@ -1595,7 +1597,6 @@ export const PartyRoomsScreen: React.FC = () => {
         onTouchStart={handleScreenTouchOrClick}
         className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
       >
-        <div className="fixed top-[calc(env(safe-area-inset-top,8px)+8px)] right-4 z-[60] rounded-full bg-black/70 border border-pink-500/40 px-3 py-1.5 flex items-center gap-1.5 pointer-events-none shadow-lg"><Heart className="w-4 h-4 fill-pink-500 text-pink-400"/><span className="text-xs font-black tabular-nums">{totalHeartCount.toLocaleString()}</span></div>
         {/* Mounted DOM Audio Outputs for Two-Way Cloudflare SFU Party Voice (Chrome + Android WebView) */}
         <div className="fixed left-0 bottom-0 w-2 h-2 opacity-0 pointer-events-none overflow-hidden">
           {remotePartyStreams.map(({ peerId, stream }) => (
@@ -1693,6 +1694,22 @@ export const PartyRoomsScreen: React.FC = () => {
                 >
                   <Eye className="w-3 h-3 text-cyan-400" />
                   <span>{activeViewers.toLocaleString()}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    spawnHeart();
+                    if (activePartyRoom?.id) {
+                      sendLiveHeart('party', activePartyRoom.id).catch((err) => console.warn('[Party hearts]', err));
+                    }
+                  }}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-pink-500/15 border border-pink-400/40 text-pink-200 hover:bg-pink-500/25 active:scale-95 transition-all cursor-pointer shrink-0"
+                  title="Send a heart to this Party"
+                  aria-label="Send heart"
+                >
+                  <Heart className="w-3.5 h-3.5 fill-pink-500 text-pink-300" />
+                  <span className="text-[10px] font-black tabular-nums">{totalHeartCount.toLocaleString()}</span>
                 </button>
                 <span className="text-[9px] font-extrabold text-white truncate max-w-[92px]">{activePartyRoom.host.displayName}</span>
                 <span className="text-[7px] text-emerald-300 font-bold shrink-0">HOST</span>

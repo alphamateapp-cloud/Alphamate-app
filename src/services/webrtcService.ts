@@ -999,18 +999,28 @@ class RealtimeSfuStreamingEngine {
       if (withAudio) this.initAudioAnalyser(stream);
       return stream;
     } catch (err) {
-      console.error('Camera/Microphone access error:', err);
-      const fallbackStream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: withAudio
-          ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-          : false,
-      });
-      this.localStream = fallbackStream;
-      if (this.isVideoPaused) fallbackStream.getVideoTracks().forEach((t) => (t.enabled = false));
-      if (this.isMuted) fallbackStream.getAudioTracks().forEach((t) => (t.enabled = false));
-      if (withAudio) this.initAudioAnalyser(fallbackStream);
-      return fallbackStream;
+      console.warn('[Media capture] Preferred camera/microphone constraints failed; retrying with device defaults.', err);
+      // Keep voice available even when camera capture/rendering fails. Audio is
+      // requested independently as a fallback so video-off never implies mic-off.
+      if (withAudio) {
+        try {
+          const audioOnlyStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            video: false,
+          });
+          this.localStream = audioOnlyStream;
+          if (this.isMuted) audioOnlyStream.getAudioTracks().forEach((t) => (t.enabled = false));
+          this.initAudioAnalyser(audioOnlyStream);
+          return audioOnlyStream;
+        } catch (audioErr) {
+          console.error('[Media capture] Microphone-only fallback failed.', audioErr);
+        }
+      }
+      // If microphone is not requested/available, retain a camera-only path.
+      const videoOnlyStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      this.localStream = videoOnlyStream;
+      if (this.isVideoPaused) videoOnlyStream.getVideoTracks().forEach((t) => (t.enabled = false));
+      return videoOnlyStream;
     }
   }
 

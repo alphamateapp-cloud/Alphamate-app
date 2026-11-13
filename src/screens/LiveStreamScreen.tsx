@@ -460,7 +460,7 @@ export const LiveStreamScreen: React.FC = () => {
                   setStreamError(null);
                 } else if (connState === 'failed') {
                   setStreamStatus('error');
-                  setStreamError('Live broadcast connection lost after reconnect attempts. Tap Retry.');
+                  setStreamError('Network Error — Alpha Mate could not reconnect. Tap Retry.');
                 }
               },
               onStreamReconnected: (reconnectedStream) => {
@@ -509,7 +509,7 @@ export const LiveStreamScreen: React.FC = () => {
           if (!isMounted) return;
           subscribedSfuKeyRef.current = null;
           setStreamStatus('error');
-          setStreamError(err instanceof Error ? err.message : 'Unable to connect to live broadcast via SFU.');
+          setStreamError('Alpha Mate is reconnecting your Live connection…');
         }
       };
 
@@ -626,7 +626,7 @@ export const LiveStreamScreen: React.FC = () => {
           setStreamError(
             err instanceof Error
               ? err.message
-              : 'Failed to publish live broadcast to Cloudflare SFU.'
+              : 'Alpha Mate Live could not connect. Please try again.'
           );
         }
       };
@@ -1075,7 +1075,7 @@ export const LiveStreamScreen: React.FC = () => {
       {streamStatus === 'connecting' && !isBroadcastEnded && (
         <div className="absolute top-20 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-full bg-black/75 border border-[#A855F7]/40 text-purple-200 text-[11px] font-bold backdrop-blur-md flex items-center gap-2 pointer-events-none">
           <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
-          <span>{activeRole === 'host' ? 'Connecting to Cloudflare Live SFU...' : 'Connecting to Live Broadcast...'}</span>
+          <span>{activeRole === 'host' ? 'Alpha Mate is connecting your Live...' : 'Connecting to Live Broadcast...'}</span>
         </div>
       )}
 
@@ -1090,7 +1090,7 @@ export const LiveStreamScreen: React.FC = () => {
               {activeRole === 'host' ? 'Could Not Start Live Stream' : 'Stream Connection Unavailable'}
             </h3>
             <p className="text-xs text-zinc-300 leading-relaxed mb-5">
-              {streamError || 'Unable to connect to Cloudflare Realtime SFU.'}
+              {streamError || 'Network Error — please check your connection and try again.'}
             </p>
             <div className="flex gap-2">
               <button
