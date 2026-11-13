@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { acceptChatRequest, rejectOrBlockChatRequest, subscribeToMyChatRequests, subscribeToMyChats, subscribeToChatMessages, createGroupChat, sendChatMessage, sendChatRequest, setChatPresence, uploadChatMedia, markChatMessageRead, deleteChatMessage, subscribeToMyGroupInvites, respondToGroupInvite } from '../services/chatService';
+import { acceptChatRequest, rejectOrBlockChatRequest, subscribeToMyChatRequests, subscribeToMyChats, subscribeToChatMessages, createGroupChat, sendChatMessage, sendChatRequest, setChatPresence, uploadChatMedia, markChatMessageRead, deleteChatMessage, subscribeToMyGroupInvites, respondToGroupInvite, searchFirebaseUsers } from '../services/chatService';
 import { auth } from '../services/firebase';
 import { Conversation, User, ChatMessage } from '../types';
 import {
@@ -38,6 +38,8 @@ export const ChatScreen: React.FC = () => {
   const [localGroups, setLocalGroups] = useState<Conversation[]>([]);
   const [firebaseChats, setFirebaseChats] = useState<Conversation[]>([]);
   const [firebaseMessages, setFirebaseMessages] = useState<LocalMessage[]>([]);
+  const [foundUsers, setFoundUsers] = useState<User[]>([]);
+  const [userSearchLoading, setUserSearchLoading] = useState(false);
   const [groupInvites, setGroupInvites] = useState<any[]>([]);
   const fileRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
@@ -82,8 +84,23 @@ export const ChatScreen: React.FC = () => {
     const name = c.isGroup ? c.groupName : c.user?.displayName;
     return !query.trim() || (name || '').toLowerCase().includes(query.toLowerCase());
   });
-  const foundUsers = registeredUsers.filter(u => u.id !== currentUser.id &&
-    (`${u.displayName} ${u.username} ${u.uniqueId}`).toLowerCase().includes(query.toLowerCase())).slice(0, 12);
+  useEffect(() => {
+    let cancelled = false;
+    const term = query.trim();
+    if (!showSearch || term.length < 2 || !auth.currentUser?.uid || auth.currentUser.uid !== currentUser.id) {
+      setFoundUsers([]);
+      setUserSearchLoading(false);
+      return;
+    }
+    setUserSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      searchFirebaseUsers(term, currentUser.id, 12)
+        .then((items) => { if (!cancelled) setFoundUsers(items as User[]); })
+        .catch((error) => { console.warn('Firebase user search failed:', error); if (!cancelled) setFoundUsers([]); })
+        .finally(() => { if (!cancelled) setUserSearchLoading(false); });
+    }, 250);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [query, showSearch, currentUser.id]);
 
   const openUser = async (user: User) => {
     const existing = allConversations.find(c => !c.isGroup && c.user?.id === user.id);
@@ -228,7 +245,7 @@ export const ChatScreen: React.FC = () => {
       {tab==='chats' && <div className="mt-3 flex gap-2">{(['all','direct','groups'] as const).map(f => <button key={f} onClick={() => setFilter(f)} className={`rounded-full px-4 py-1.5 text-xs font-semibold capitalize ${filter===f?'bg-purple-600 text-white':'border border-purple-400/15 bg-[#1b1129] text-zinc-400'}`}>{f==='all'?'All chats':f==='direct'?'Private':'Groups'}</button>)}</div>}
     </header>
     {tab==='requests' ? <section className="space-y-3 p-4"><div className="mb-4 rounded-2xl border border-amber-400/20 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-100"><ShieldCheck size={16} className="mr-2 inline"/>Messages from people who are not in your chats appear here. Accept to start chatting, or block the sender.</div>{groupInvites.map(invite => <div key={invite.id} className="rounded-2xl border border-fuchsia-400/25 bg-[#1b102b] p-3"><p className="text-sm font-bold">{invite.groupName || 'Group invitation'}</p><p className="mt-1 text-xs text-zinc-400">You have been invited to join this group.</p><div className="mt-3 grid grid-cols-2 gap-2"><button onClick={() => respondToGroupInvite(invite.chatId, true).then(() => setGroupInvites(v => v.filter(x => x.id !== invite.id))).catch(e => window.alert(e.message))} className="rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 py-2 text-xs font-bold">Accept Group</button><button onClick={() => respondToGroupInvite(invite.chatId, false).then(() => setGroupInvites(v => v.filter(x => x.id !== invite.id))).catch(e => window.alert(e.message))} className="rounded-xl border border-rose-400/30 py-2 text-xs font-bold text-rose-300">Decline</button></div></div>)}{requests.length===0 && groupInvites.length===0 ? <EmptyState title="No message requests" subtitle="New messages from unknown users will appear here."/> : requests.map(r => <div key={r.id} className="rounded-2xl border border-purple-400/20 bg-[#160d25] p-3"><div className="flex items-center gap-3"><img src={r.user.avatar} className="h-12 w-12 rounded-full object-cover"/><div className="min-w-0 flex-1"><p className="font-bold">{r.user.displayName}</p><p className="text-[11px] text-zinc-500">@{r.user.username} · {r.time}</p><p className="mt-1 truncate text-xs text-zinc-300">{r.message}</p></div></div><div className="mt-3 grid grid-cols-2 gap-2"><button onClick={() => acceptRequest(r)} className="rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 py-2 text-xs font-bold">Accept</button><button onClick={() => { if (auth.currentUser?.uid === currentUser.id) rejectOrBlockChatRequest(r.id, true).catch(e => console.error(e)); setRequests(prev => prev.filter(x => x.id!==r.id)); }} className="rounded-xl border border-rose-400/30 py-2 text-xs font-bold text-rose-300"><Ban size={13} className="mr-1 inline"/>Block</button></div></div>)}</section> : <section className="p-3">
-      {showSearch && query.trim() && <div className="mb-3"><p className="px-2 pb-2 text-xs font-bold text-purple-200">Find people</p>{foundUsers.map(u => <button key={u.id} onClick={() => openUser(u)} className="flex w-full items-center gap-3 rounded-xl p-3 text-left hover:bg-white/5"><img src={u.avatar} className="h-10 w-10 rounded-full object-cover"/><span className="min-w-0 flex-1"><b className="block text-sm">{u.displayName}</b><small className="text-zinc-500">@{u.username} · ID {u.uniqueId}</small></span><MessageCircle size={18} className="text-purple-300"/></button>)}</div>}
+      {showSearch && query.trim().length >= 2 && <div className="mb-3"><p className="px-2 pb-2 text-xs font-bold text-purple-200">Find people</p>{userSearchLoading && <p className="px-3 py-2 text-xs text-zinc-400">Searching Alpha Mate users…</p>}{!userSearchLoading && foundUsers.length === 0 && <p className="px-3 py-2 text-xs text-zinc-500">No registered users found.</p>}{foundUsers.map(u => <button key={u.id} onClick={() => openUser(u)} className="flex w-full items-center gap-3 rounded-xl p-3 text-left hover:bg-white/5"><img src={u.avatar} className="h-10 w-10 rounded-full object-cover"/><span className="min-w-0 flex-1"><b className="block text-sm">{u.displayName}</b><small className="text-zinc-500">@{u.username}</small></span><MessageCircle size={18} className="text-purple-300"/></button>)}</div>}
       {filtered.length===0 ? <EmptyState title="No chats yet" subtitle="Search for a user or start a group conversation."/> : filtered.map(c => <button key={c.id} onClick={() => openConversation(c)} className="flex w-full items-center gap-3 border-b border-purple-400/10 px-2 py-3.5 text-left hover:bg-white/[0.03]"><div className="relative shrink-0"><img src={c.isGroup ? (c.groupMembers?.[0]?.avatar || c.user.avatar) : c.user.avatar} className="h-14 w-14 rounded-full border border-purple-400/30 object-cover"/>{!c.isGroup && <i className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-[#090510] bg-emerald-400"/>}{c.isGroup && <span className="absolute -bottom-1 -right-1 rounded-full bg-purple-600 p-1"><Users size={11}/></span>}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-2"><b className="truncate text-sm">{c.isGroup?c.groupName:c.user.displayName}</b><span className="shrink-0 text-[10px] text-zinc-500">{c.lastTimestamp}</span></div><div className="mt-1 flex items-center justify-between gap-2"><p className="truncate text-xs text-zinc-400">{c.lastMessage}</p>{c.unreadCount>0 && <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-fuchsia-500 px-1 text-[10px] font-bold">{c.unreadCount}</span>}</div></div></button>)}
     </section>}
     {showNew && <div className="fixed inset-0 z-30 flex items-end bg-black/65" onClick={() => setShowNew(false)}><div onClick={e=>e.stopPropagation()} className="w-full rounded-t-3xl border border-purple-400/30 bg-[#170d26] p-5 pb-[max(24px,env(safe-area-inset-bottom))]"><div className="mb-4 flex items-center justify-between"><h2 className="text-lg font-black">Start a conversation</h2><button onClick={() => setShowNew(false)}><X/></button></div><button onClick={() => {setShowNew(false);setShowSearch(true);setTab('chats');}} className="mb-3 flex w-full items-center gap-3 rounded-2xl border border-purple-400/20 bg-[#241436] p-4 text-left"><Search className="text-fuchsia-300"/><span><b className="block text-sm">Find a user</b><small className="text-zinc-400">Search by name or username</small></span></button><button onClick={() => {setShowGroup(true);setShowNew(false);}} className="flex w-full items-center gap-3 rounded-2xl border border-purple-400/20 bg-[#241436] p-4 text-left"><Users className="text-purple-300"/><span><b className="block text-sm">Create a group</b><small className="text-zinc-400">Add people and chat together</small></span></button></div></div>}

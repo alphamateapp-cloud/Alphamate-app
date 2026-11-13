@@ -348,7 +348,7 @@ class RealtimeSfuStreamingEngine {
       }
       let response: Response;
       try {
-        response = await this.fetchWithTimeout(url, init, 12000);
+        response = await this.fetchWithTimeout(url, init, 9000);
       } catch (networkErr) {
         console.warn(`[WebRTC SFU] Network error calling ${method} ${url}:`, networkErr);
         throw this.formatNetworkFetchError(base, networkErr);
@@ -386,7 +386,7 @@ class RealtimeSfuStreamingEngine {
       return { response, data };
     };
 
-    const maxAttempts = keepalive ? 1 : 3;
+    const maxAttempts = keepalive ? 1 : 2;
     let lastError: any = null;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -407,7 +407,7 @@ class RealtimeSfuStreamingEngine {
             this.isRetryableGatewayStatus(response.status, data?.code)
           ) {
             lastError = err;
-            await this.delayMs(350 * (attempt + 1));
+            await this.delayMs(250 * (attempt + 1));
             continue;
           }
           throw err;
@@ -439,7 +439,7 @@ class RealtimeSfuStreamingEngine {
     sfuConfigured: boolean;
   }> {
     const base = this.getBackendApiBase();
-    const maxAttempts = 3;
+    const maxAttempts = 2;
     let lastError: unknown = null;
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -453,7 +453,7 @@ class RealtimeSfuStreamingEngine {
             mode: 'cors',
             cache: 'no-store',
           },
-          10000
+          6000
         );
       } catch (networkErr) {
         lastError = networkErr;
@@ -555,7 +555,7 @@ class RealtimeSfuStreamingEngine {
               mode: 'cors',
               cache: 'no-store',
             },
-            8000
+            5000
           );
           const contentType = response.headers.get('content-type') || '';
           const data = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
@@ -721,7 +721,7 @@ class RealtimeSfuStreamingEngine {
           throw err;
         }
         if (attempt === 0) {
-          await this.delayMs(350);
+          await this.delayMs(200);
           continue;
         }
         console.warn(
@@ -757,6 +757,36 @@ class RealtimeSfuStreamingEngine {
           direction: 'sendonly',
           streams: [stream],
         });
+        // Prefer Opus for voice and reserve bandwidth for audio on constrained links.
+        if (item.track.kind === 'audio') {
+          try {
+            const audioCodecs = RTCRtpSender.getCapabilities?.('audio')?.codecs || [];
+            const opus = audioCodecs.filter((codec) => codec.mimeType.toLowerCase() === 'audio/opus');
+            const otherAudio = audioCodecs.filter((codec) => codec.mimeType.toLowerCase() !== 'audio/opus');
+            if (opus.length && 'setCodecPreferences' in transceiver) {
+              transceiver.setCodecPreferences([...opus, ...otherAudio]);
+            }
+            const params = transceiver.sender.getParameters();
+            params.encodings = params.encodings?.length ? params.encodings : [{}];
+            params.encodings[0].maxBitrate = 32_000;
+            (params.encodings[0] as any).priority = 'high';
+            (params.encodings[0] as any).networkPriority = 'high';
+            await transceiver.sender.setParameters(params);
+          } catch (codecErr) {
+            console.warn('[WebRTC] Audio codec preference/bitrate tuning unavailable; using browser defaults.', codecErr);
+          }
+        } else if (item.track.kind === 'video') {
+          try {
+            const params = transceiver.sender.getParameters();
+            params.encodings = params.encodings?.length ? params.encodings : [{}];
+            params.encodings[0].maxBitrate = 700_000;
+            params.encodings[0].maxFramerate = 30;
+            (params as any).degradationPreference = 'maintain-framerate';
+            await transceiver.sender.setParameters(params);
+          } catch (videoTuneErr) {
+            console.warn('[WebRTC] Adaptive video tuning unavailable; using browser defaults.', videoTuneErr);
+          }
+        }
         addedTransceivers.push({
           transceiver,
           trackName: item.trackName,
@@ -968,6 +998,33 @@ class RealtimeSfuStreamingEngine {
   // LOCAL HARDWARE CAPTURE (USED BY SOLO HOST & VIDEO UPLOAD PREVIEW)
   // =========================================================================
 
+  private async requestMediaWithTimeout(
+    constraints: MediaStreamConstraints,
+    timeoutMs: number,
+    label: string
+  ): Promise<MediaStream> {
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const request = navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+      if (timedOut) {
+        stream.getTracks().forEach((track) => track.stop());
+        throw new Error(`${label} request completed after its timeout.`);
+      }
+      return stream;
+    });
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`${label} request timed out.`));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([request, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   public async getLocalMediaStream(
     facing: 'user' | 'environment' = 'user',
     withAudio: boolean = true
@@ -992,7 +1049,7 @@ class RealtimeSfuStreamingEngine {
     };
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const stream = await this.requestMediaWithTimeout(constraints, 12000, 'Camera and microphone');
       this.localStream = stream;
       if (this.isVideoPaused) stream.getVideoTracks().forEach((t) => (t.enabled = false));
       if (this.isMuted) stream.getAudioTracks().forEach((t) => (t.enabled = false));
@@ -1004,10 +1061,10 @@ class RealtimeSfuStreamingEngine {
       // requested independently as a fallback so video-off never implies mic-off.
       if (withAudio) {
         try {
-          const audioOnlyStream = await navigator.mediaDevices.getUserMedia({
+          const audioOnlyStream = await this.requestMediaWithTimeout({
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             video: false,
-          });
+          }, 8000, 'Microphone');
           this.localStream = audioOnlyStream;
           if (this.isMuted) audioOnlyStream.getAudioTracks().forEach((t) => (t.enabled = false));
           this.initAudioAnalyser(audioOnlyStream);
@@ -1017,7 +1074,7 @@ class RealtimeSfuStreamingEngine {
         }
       }
       // If microphone is not requested/available, retain a camera-only path.
-      const videoOnlyStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      const videoOnlyStream = await this.requestMediaWithTimeout({ video: true, audio: false }, 8000, 'Camera');
       this.localStream = videoOnlyStream;
       if (this.isVideoPaused) videoOnlyStream.getVideoTracks().forEach((t) => (t.enabled = false));
       return videoOnlyStream;
@@ -1890,15 +1947,17 @@ class RealtimeSfuStreamingEngine {
     this.isMuted = !isMicOn;
 
     await this.getFirebaseIdToken();
-    await this.ensureSfuBackendConfigured();
-    await this.fetchCloudflareTurnCredentials().catch(() => {});
-
     let stream: MediaStream | null = null;
     let sfuSessionId = '';
     let pc: RTCPeerConnection | null = null;
 
     try {
-      stream = await this.getLocalMediaStream(facing, true);
+      const mediaAndConfig = await Promise.all([
+        this.getLocalMediaStream(facing, true),
+        this.ensureSfuBackendConfigured(),
+        this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
+      ]);
+      stream = mediaAndConfig[0];
       const videoTrack = stream.getVideoTracks()[0];
       const audioTrack = stream.getAudioTracks()[0];
       if (!videoTrack && !audioTrack) {
@@ -2146,8 +2205,10 @@ class RealtimeSfuStreamingEngine {
     }
 
     await this.getFirebaseIdToken();
-    await this.ensureSfuBackendConfigured();
-    await this.fetchCloudflareTurnCredentials().catch(() => {});
+    await Promise.all([
+      this.ensureSfuBackendConfigured(),
+      this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
+    ]);
 
     const viewerSessionId = await this.createSfuSession();
     const pc = new RTCPeerConnection(this.getRtcConfiguration());
@@ -2704,8 +2765,10 @@ class RealtimeSfuStreamingEngine {
 
     await this._stopPartyVoiceInternal(roomId, false, false);
     await this.getFirebaseIdToken();
-    await this.ensureSfuBackendConfigured();
-    await this.fetchCloudflareTurnCredentials().catch(() => {});
+    await Promise.all([
+      this.ensureSfuBackendConfigured(),
+      this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
+    ]);
 
     const subToken = await this.requestPartyRoomSessionToken(roomId, false);
     const subSfuSessionId = subToken.sfuSessionId;

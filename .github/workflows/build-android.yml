@@ -97,8 +97,8 @@ jobs:
             echo "ANDROID_KEY_PASSWORD=$RESOLVED_KEY_PW" >> $GITHUB_ENV
             echo "SIGNED_RELEASE=true" >> $GITHUB_ENV
           else
-            echo "SIGNED_RELEASE=false" >> $GITHUB_ENV
-            echo "::warning::Keystore secrets not found (expected ANDROID_KEYSTORE_BASE64 / KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD / KEYSTORE_PASSWORD). Release build will be unsigned."
+            echo "::error::Release signing secrets are missing. Configure ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD (plus alias/key password if different). Refusing to produce an unsigned release APK/AAB."
+            exit 1
           fi
 
       - name: Build Debug APK
@@ -129,9 +129,11 @@ jobs:
               exit 1
             fi
             APKSIGNER_BIN=$(ls -d ${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)
-            if [ -n "$APKSIGNER_BIN" ]; then
-              "$APKSIGNER_BIN" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+            if [ -z "$APKSIGNER_BIN" ]; then
+              echo "::error::apksigner was not found; cannot verify release APK signature."
+              exit 1
             fi
+            "$APKSIGNER_BIN" verify --verbose --print-certs android/app/build/outputs/apk/release/app-release.apk
             jarsigner -verify android/app/build/outputs/bundle/release/app-release.aab
           fi
 

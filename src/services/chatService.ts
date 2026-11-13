@@ -2,7 +2,7 @@ import { auth, db } from './firebase';
 import {
   addDoc, arrayRemove, arrayUnion, collection, deleteDoc, doc, getDoc,
   onSnapshot, orderBy, query, serverTimestamp, setDoc, updateDoc, where,
-  writeBatch, limit, Timestamp
+  writeBatch, limit, Timestamp, getDocs
 } from 'firebase/firestore';
 import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
@@ -26,6 +26,31 @@ export async function uploadPartyRoomCover(file: File): Promise<string> {
 }
 
 export type ChatProfile = { id: string; displayName: string; username?: string; avatar?: string };
+
+export async function searchFirebaseUsers(searchTerm: string, excludeUserId: string, maxResults = 12): Promise<ChatProfile[]> {
+  uid();
+  const term = searchTerm.trim().toLowerCase().replace(/^@/, '');
+  if (term.length < 2) return [];
+  const usersRef = collection(db, 'users');
+  const end = `${term}\uf8ff`;
+  const fields = ['usernameLower', 'displayNameLower', 'uniqueIdLower'];
+  const snapshots = await Promise.all(fields.map((field) =>
+    getDocs(query(usersRef, where(field, '>=', term), where(field, '<=', end), limit(maxResults)))
+  ));
+  const byId = new Map<string, ChatProfile>();
+  snapshots.forEach((snap) => snap.docs.forEach((item) => {
+    if (item.id === excludeUserId) return;
+    const data = item.data() as any;
+    byId.set(item.id, {
+      id: item.id,
+      displayName: String(data.displayName || data.name || 'Alpha Mate User'),
+      username: String(data.username || ''),
+      avatar: String(data.avatar || data.photoURL || ''),
+    });
+  }));
+  return Array.from(byId.values()).slice(0, maxResults);
+}
+
 export type ChatPayload = { text?: string; mediaUrl?: string; mediaType?: 'image'|'video'|'audio'|'file'; replyTo?: string; linkUrl?: string };
 
 export function subscribeToMyChats(callback: (items: any[]) => void, onError?: (error: Error) => void) {

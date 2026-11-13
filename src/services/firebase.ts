@@ -271,6 +271,9 @@ export async function syncUserProfileToFirestore(userData: any) {
     const { password: _omitPassword, coverImage, ...restUser } = userData;
     const rawProfile: Record<string, any> = {
       ...restUser,
+      usernameLower: String(userData.username || '').trim().toLowerCase(),
+      displayNameLower: String(userData.displayName || '').trim().toLowerCase(),
+      uniqueIdLower: String(userData.uniqueId || '').trim().toLowerCase(),
       avatar: sanitizeAvatarString(userData.avatar),
       updatedAt: new Date().toISOString(),
     };
