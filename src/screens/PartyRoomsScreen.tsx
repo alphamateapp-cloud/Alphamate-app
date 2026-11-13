@@ -6,6 +6,7 @@ import { auth, db, updatePartyRoomFields, togglePartySeatLockInFirestore } from 
 import { deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { PartyRoomAtmosphere } from '../components/party/PartyRoomAtmosphere';
 import { PartyRemoteAudioPlayer } from '../components/party/PartyRemoteAudioPlayer';
+import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } from '../services/liveHeartService';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 import { VIRTUAL_GIFTS } from '../data/mockData';
@@ -272,6 +273,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
   // Floating hearts & live audience
   const [hearts, setHearts] = useState<FloatingHeart[]>([]);
+  const [totalHeartCount, setTotalHeartCount] = useState(0);
   const [activeViewers, setActiveViewers] = useState(activePartyRoom?.activeViewers || 0);
   const [speakingGuestIndex, setSpeakingGuestIndex] = useState<number>(0);
 
@@ -321,6 +323,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
   const commentsEndRef = useRef<HTMLDivElement>(null);
   const lastTapRef = useRef<number>(0);
+  const lastHeartSentAtRef = useRef<number>(0);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -1344,6 +1347,17 @@ export const PartyRoomsScreen: React.FC = () => {
     return unsubscribe;
   }, [activePartyRoom?.id]);
 
+  // Shared real-time room heart count and incoming double-tap events.
+  useEffect(() => {
+    const roomId = activePartyRoom?.id;
+    if (!roomId) { setTotalHeartCount(0); return; }
+    const offCount = subscribeToLiveHeartCount('party', roomId, setTotalHeartCount, (e) => console.warn('[Party hearts]', e));
+    const offEvents = subscribeToLiveHeartEvents('party', roomId, (event) => {
+      if (event.senderId !== auth.currentUser?.uid) { spawnHeart(); spawnHeart(); }
+    }, (e) => console.warn('[Party heart events]', e));
+    return () => { offCount(); offEvents(); };
+  }, [activePartyRoom?.id]);
+
   // Auto-scroll chat feed
   useEffect(() => {
     commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -1367,6 +1381,8 @@ export const PartyRoomsScreen: React.FC = () => {
 
   // Screen Double Tap handler
   const handleScreenTouchOrClick = (e: React.MouseEvent | React.TouchEvent) => {
+    // A real user gesture is required by mobile browsers to unlock remote audio playback.
+    unlockAllRemoteAudioPlayback().catch(() => {});
     const now = Date.now();
     const timeDiff = now - lastTapRef.current;
     if (timeDiff < 320) {
@@ -1374,6 +1390,8 @@ export const PartyRoomsScreen: React.FC = () => {
       const clientY = 'touches' in e && e.touches[0] ? e.touches[0].clientY : (e as React.MouseEvent).clientY;
       spawnHeart(clientX, clientY);
       spawnHeart(clientX ? clientX + 15 : undefined, clientY ? clientY - 15 : undefined);
+      lastHeartSentAtRef.current = Date.now();
+      if (activePartyRoom?.id) sendLiveHeart('party', activePartyRoom.id).catch((err) => console.warn('[Party heart send]', err));
       lastTapRef.current = 0;
     } else {
       lastTapRef.current = now;
@@ -1569,12 +1587,17 @@ export const PartyRoomsScreen: React.FC = () => {
         onDoubleClick={(e) => {
           spawnHeart(e.clientX, e.clientY);
           spawnHeart(e.clientX + 10, e.clientY - 20);
+          if (Date.now() - lastHeartSentAtRef.current > 500) {
+            lastHeartSentAtRef.current = Date.now();
+            if (activePartyRoom?.id) sendLiveHeart('party', activePartyRoom.id).catch((err) => console.warn('[Party heart send]', err));
+          }
         }}
         onTouchStart={handleScreenTouchOrClick}
         className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
       >
+        <div className="fixed top-[calc(env(safe-area-inset-top,8px)+8px)] right-4 z-[60] rounded-full bg-black/70 border border-pink-500/40 px-3 py-1.5 flex items-center gap-1.5 pointer-events-none shadow-lg"><Heart className="w-4 h-4 fill-pink-500 text-pink-400"/><span className="text-xs font-black tabular-nums">{totalHeartCount.toLocaleString()}</span></div>
         {/* Mounted DOM Audio Outputs for Two-Way Cloudflare SFU Party Voice (Chrome + Android WebView) */}
-        <div className="fixed -left-[9999px] top-0 w-1 h-1 opacity-0 pointer-events-none">
+        <div className="fixed left-0 bottom-0 w-2 h-2 opacity-0 pointer-events-none overflow-hidden">
           {remotePartyStreams.map(({ peerId, stream }) => (
             <PartyRemoteAudioPlayer
               key={peerId}

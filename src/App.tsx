@@ -28,6 +28,8 @@ import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
 
+const PUBLIC_AUTH_SCREENS = new Set(['splash', 'welcome', 'register', 'signin']);
+
 const AppContent: React.FC = () => {
   const {
     currentScreen,
@@ -41,13 +43,29 @@ const AppContent: React.FC = () => {
     activeConversation,
     navigateBack,
     currentUser,
+    isAuthenticated,
+    firebaseUser,
+    firebaseAuthLoading,
+    isEmailVerified,
   } = useApp();
+
+  const isSessionReadyAndAuthed = Boolean(isAuthenticated && firebaseUser && isEmailVerified);
+
+  // Route guard: never allow unauthenticated users into protected main screens
+  useEffect(() => {
+    if (deviceMode === 'admin') return;
+    if (firebaseAuthLoading) return;
+    if (!isSessionReadyAndAuthed && !PUBLIC_AUTH_SCREENS.has(currentScreen)) {
+      setCurrentScreen('welcome');
+    }
+  }, [deviceMode, firebaseAuthLoading, isSessionReadyAndAuthed, currentScreen, setCurrentScreen]);
 
   // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
   useEffect(() => {
+    if (!isSessionReadyAndAuthed || !currentUser?.id) return;
     pushService
       .initialize({
-        onToken: (token) => {
+        onToken: () => {
           if (currentUser?.id) {
             pushService.syncTokenToUserDoc(currentUser.id).catch(() => {});
           }
@@ -60,7 +78,7 @@ const AppContent: React.FC = () => {
         },
       })
       .catch(() => {});
-  }, [currentUser?.id, setCurrentScreen, setActiveTab]);
+  }, [isSessionReadyAndAuthed, currentUser?.id, setCurrentScreen, setActiveTab]);
 
   // Android Native Hardware Back Button & Status Bar Integration (Active on Native Android/iOS)
   useEffect(() => {
@@ -82,9 +100,13 @@ const AppContent: React.FC = () => {
         closeLiveStream();
         return;
       }
+      if (currentScreen === 'signin' || currentScreen === 'register') {
+        setCurrentScreen('welcome');
+        return;
+      }
       if (currentScreen !== 'home' && currentScreen !== 'welcome' && currentScreen !== 'splash') {
         navigateBack();
-      } else if (!canGoBack) {
+      } else if (!canGoBack || currentScreen === 'welcome' || currentScreen === 'home') {
         CapApp.minimizeApp().catch(() => {});
       }
     })
@@ -98,7 +120,7 @@ const AppContent: React.FC = () => {
         listenerHandle.remove().catch(() => {});
       }
     };
-  }, [currentScreen, navigateBack, activePartyRoom, activeStream, closePartyRoom, closeLiveStream]);
+  }, [currentScreen, navigateBack, setCurrentScreen, activePartyRoom, activeStream, closePartyRoom, closeLiveStream]);
 
   // If Admin Dashboard mode is chosen
   if (deviceMode === 'admin') {
@@ -117,6 +139,14 @@ const AppContent: React.FC = () => {
   }
   if (currentScreen === 'signin') {
     return <SignInScreen />;
+  }
+
+  // Prevent flashing protected screens while auth is unresolved or unauthenticated
+  if (firebaseAuthLoading) {
+    return <SplashScreen />;
+  }
+  if (!isSessionReadyAndAuthed) {
+    return <WelcomeScreen />;
   }
   if (currentScreen === 'live_stream') {
     return <LiveStreamScreen />;

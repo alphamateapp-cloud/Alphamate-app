@@ -2,26 +2,45 @@ import React, { useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 
 export const SplashScreen: React.FC = () => {
-  const { setCurrentScreen, isAuthenticated, currentUser, customLogoUrl } = useApp();
+  const {
+    setCurrentScreen,
+    isAuthenticated,
+    firebaseUser,
+    firebaseAuthLoading,
+    isEmailVerified,
+    customLogoUrl,
+  } = useApp();
+  const [minDelayElapsed, setMinDelayElapsed] = React.useState(false);
+  const [tapPending, setTapPending] = React.useState(false);
 
-  const handleNextScreen = () => {
-    // Keep the existing navigation behavior: signed-in users go Home,
-    // while new users go to Welcome.
-    if (isAuthenticated && currentUser) {
+  const navigateNext = React.useCallback(() => {
+    if (isAuthenticated && firebaseUser && isEmailVerified) {
       setCurrentScreen('home');
     } else {
       setCurrentScreen('welcome');
     }
-  };
+  }, [isAuthenticated, firebaseUser, isEmailVerified, setCurrentScreen]);
 
   useEffect(() => {
-    // Preserve the existing automatic transition timing.
     const timer = window.setTimeout(() => {
-      handleNextScreen();
-    }, 1800);
-
+      setMinDelayElapsed(true);
+    }, 1600);
     return () => window.clearTimeout(timer);
-  }, [isAuthenticated, currentUser]);
+  }, []);
+
+  useEffect(() => {
+    if (!firebaseAuthLoading && (minDelayElapsed || tapPending)) {
+      navigateNext();
+    }
+  }, [firebaseAuthLoading, minDelayElapsed, tapPending, navigateNext]);
+
+  const handleNextScreen = () => {
+    if (!firebaseAuthLoading) {
+      navigateNext();
+    } else {
+      setTapPending(true);
+    }
+  };
 
   const logoSrc = customLogoUrl || '/alpha-mate-logo-emblem.png';
 

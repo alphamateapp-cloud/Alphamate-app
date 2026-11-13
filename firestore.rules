@@ -108,6 +108,19 @@ service cloud.firestore {
       );
       allow delete: if isSignedIn() && isValidId(roomId) && resource.data.host.id == request.auth.uid;
 
+      match /stats/{statId} {
+        allow read: if isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true;
+        allow create: if isSignedIn() && statId == 'hearts' && request.resource.data.count == 1;
+        allow update: if isSignedIn() && statId == 'hearts'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
+          && request.resource.data.count == resource.data.count + 1;
+      }
+      match /heartEvents/{eventId} {
+        allow read: if isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true;
+        allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
+      }
+
       match /messages/{messageId} {
         allow read: if isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true;
         allow create: if isSignedIn()
@@ -159,6 +172,19 @@ service cloud.firestore {
         || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount', 'totalGiftCoins', 'updatedAt'])
       );
       allow delete: if isSignedIn() && isValidId(streamId) && resource.data.host.id == request.auth.uid;
+
+      match /stats/{statId} {
+        allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;
+        allow create: if isSignedIn() && statId == 'hearts' && request.resource.data.count == 1;
+        allow update: if isSignedIn() && statId == 'hearts'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
+          && request.resource.data.count == resource.data.count + 1;
+      }
+      match /heartEvents/{eventId} {
+        allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;
+        allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
+      }
 
       match /messages/{messageId} {
         allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;

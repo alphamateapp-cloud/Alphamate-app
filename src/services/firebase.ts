@@ -3,8 +3,13 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  reload,
   signOut,
   onAuthStateChanged,
   User as FirebaseUser,
@@ -122,16 +127,52 @@ testConnection().catch(() => {});
 // AUTHENTICATION HELPER METHODS
 // =========================================================================
 
+export function isFirebaseUserVerified(fbUser: FirebaseUser | null | undefined): boolean {
+  if (!fbUser) return false;
+  const isGoogle = fbUser.providerData?.some((p) => p.providerId === 'google.com');
+  return Boolean(fbUser.emailVerified || isGoogle);
+}
+
 /**
- * Sign In with Google Popup
+ * Sign In with Google Popup (with automatic Redirect fallback if popups are blocked)
  */
 export async function signInWithGoogle() {
   try {
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error: any) {
+    const code = error?.code || '';
+    if (
+      code === 'auth/popup-blocked' ||
+      code === 'auth/operation-not-supported-in-this-environment'
+    ) {
+      try {
+        sessionStorage.setItem('alphamate_google_redirect_pending', '1');
+      } catch {}
+      await signInWithRedirect(auth, googleProvider);
+      return null;
+    }
     console.error('Google Sign-In Error:', error);
     throw error;
+  }
+}
+
+/**
+ * Resolve any pending Google redirect sign-in on boot
+ */
+export async function consumeGoogleRedirectResult(): Promise<FirebaseUser | null> {
+  try {
+    const result = await getRedirectResult(auth);
+    try {
+      sessionStorage.removeItem('alphamate_google_redirect_pending');
+    } catch {}
+    return result?.user || null;
+  } catch (error) {
+    try {
+      sessionStorage.removeItem('alphamate_google_redirect_pending');
+    } catch {}
+    console.warn('Google Redirect Result Error:', error);
+    return null;
   }
 }
 
@@ -149,16 +190,38 @@ export async function signInWithEmail(email: string, pass: string) {
 }
 
 /**
- * Register with Email & Password
+ * Register with Email & Password and send verification email
  */
 export async function registerWithEmail(email: string, pass: string) {
   try {
     const result = await createUserWithEmailAndPassword(auth, email, pass);
+    if (result.user && !result.user.emailVerified) {
+      await sendEmailVerification(result.user).catch((err) => {
+        console.warn('Could not send verification email:', err);
+      });
+    }
     return result.user;
   } catch (error: any) {
     console.error('Email Registration Error:', error);
     throw error;
   }
+}
+
+export async function resendVerificationEmail() {
+  if (!auth.currentUser) {
+    throw new Error('No active account found to verify.');
+  }
+  await sendEmailVerification(auth.currentUser);
+}
+
+export async function reloadCurrentFirebaseUser(): Promise<FirebaseUser | null> {
+  if (!auth.currentUser) return null;
+  await reload(auth.currentUser);
+  return auth.currentUser;
+}
+
+export async function sendPasswordReset(email: string) {
+  await sendPasswordResetEmail(auth, email.trim());
 }
 
 /**

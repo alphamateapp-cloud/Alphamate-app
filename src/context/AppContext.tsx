@@ -33,8 +33,12 @@ import {
   auth,
   db,
   signInWithGoogle,
+  consumeGoogleRedirectResult,
   signInWithEmail,
   registerWithEmail,
+  resendVerificationEmail,
+  reloadCurrentFirebaseUser,
+  isFirebaseUserVerified,
   logoutUser,
   onAuthStateChanged,
   syncUserProfileToFirestore,
@@ -93,19 +97,22 @@ interface AppContextType {
   // Firebase Real-time Auth & Cloud Firestore
   firebaseUser: FirebaseUser | null;
   firebaseAuthLoading: boolean;
+  isEmailVerified: boolean;
   loginWithFirebaseGoogle: (options?: {
     skipRedirect?: boolean;
-  }) => Promise<{ success: boolean; user?: User; error?: string }>;
+  }) => Promise<{ success: boolean; user?: User; error?: string; redirectPending?: boolean }>;
   loginWithFirebaseEmail: (
     email: string,
     pass: string
-  ) => Promise<{ success: boolean; user?: User; error?: string }>;
+  ) => Promise<{ success: boolean; user?: User; error?: string; needsVerification?: boolean }>;
   registerWithFirebaseEmail: (data: {
     email: string;
     pass: string;
     displayName: string;
     username: string;
-  }) => Promise<{ success: boolean; user?: User; error?: string }>;
+  }) => Promise<{ success: boolean; user?: User; error?: string; needsVerification?: boolean }>;
+  refreshFirebaseVerification: () => Promise<boolean>;
+  resendEmailVerificationLink: () => Promise<void>;
   logoutFirebase: () => Promise<void>;
 
   // Live Stream state
@@ -416,23 +423,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentScreen, setCurrentScreenState] = useState<ScreenType>('splash');
   const [screenHistory, setScreenHistory] = useState<ScreenType[]>(['splash']);
   const [activeTab, setActiveTabState] = useState<MainTabType>('home');
-  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
-    try {
-      const savedAuth = localStorage.getItem('alphamate_is_authenticated');
-      if (savedAuth !== null) return savedAuth === 'true';
-      const savedUser = localStorage.getItem('alphamate_current_user');
-      return !!savedUser || true; // Default authenticated so user directly enters app
-    } catch {
-      return true;
-    }
-  });
+  // Never default to authenticated without an active, verified Firebase session on the device.
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [currentUser, setCurrentUser] = useState<User>(() => {
     try {
       const saved = localStorage.getItem('alphamate_current_user');
       if (saved) return JSON.parse(saved);
-      // Persist default user session on first launch
-      localStorage.setItem('alphamate_current_user', JSON.stringify(CURRENT_USER));
-      localStorage.setItem('alphamate_is_authenticated', 'true');
     } catch {
       // ignore
     }
@@ -441,55 +437,129 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [firebaseAuthLoading, setFirebaseAuthLoading] = useState<boolean>(true);
+  const [isEmailVerified, setIsEmailVerified] = useState<boolean>(false);
 
-  const saveUserSession = (user: User) => {
+  const saveUserSession = (user: User, authenticated = true) => {
     setCurrentUser(user);
-    setIsAuthenticated(true);
+    setCoins(typeof user.coins === 'number' ? user.coins : CURRENT_USER.coins);
+    setDiamonds(typeof user.diamonds === 'number' ? user.diamonds : CURRENT_USER.diamonds);
+    setHeldDiamonds(typeof user.heldDiamonds === 'number' ? user.heldDiamonds : 0);
+    setIsAuthenticated(authenticated);
     try {
-      localStorage.setItem('alphamate_current_user', JSON.stringify(user));
-      localStorage.setItem('alphamate_is_authenticated', 'true');
+      if (authenticated) {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(user));
+        localStorage.setItem('alphamate_is_authenticated', 'true');
+      } else {
+        localStorage.removeItem('alphamate_current_user');
+        localStorage.setItem('alphamate_is_authenticated', 'false');
+      }
     } catch {
       // ignore
     }
   };
 
-  // Sync Firebase auth state
+  const buildNewUserFromFirebase = (fbUser: FirebaseUser, overrides?: Partial<User>): User => {
+    const cleanEmail = (fbUser.email || '').trim().toLowerCase();
+    const emailPrefix = cleanEmail.split('@')[0] || `user_${fbUser.uid.slice(0, 6)}`;
+    const suggestedName = fbUser.displayName || emailPrefix || 'Alpha Mate';
+    const suggestedUsername = emailPrefix.toLowerCase().replace(/[^a-z0-9_]/g, '_') || `user_${fbUser.uid.slice(0, 6)}`;
+    const verified = isFirebaseUserVerified(fbUser);
+    const isGoogle = fbUser.providerData?.some((p) => p.providerId === 'google.com');
+
+    return {
+      id: fbUser.uid,
+      uniqueId: `AM_${Math.floor(100000 + Math.random() * 900000)}`,
+      username: suggestedUsername,
+      displayName: suggestedName,
+      email: cleanEmail,
+      avatar:
+        fbUser.photoURL ||
+        'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
+      bio: '🌟 Alpha Mate VIP Member | LIVE • PARTY • SOCIAL 💜',
+      followersCount: 1,
+      followingCount: 4,
+      likesCount: 12,
+      level: 1,
+      xp: 150,
+      nextLevelXp: 500,
+      vipTier: 1,
+      coins: 1000,
+      diamonds: 100,
+      isVerified: verified,
+      familyCrew: 'Alpha Champions 👑',
+      isHost: false,
+      authProvider: isGoogle ? 'google' : 'email',
+      ...overrides,
+    };
+  };
+
+  // Sync Firebase auth state (runs on boot & restores persisted device session automatically)
   useEffect(() => {
+    let active = true;
+    consumeGoogleRedirectResult().catch(() => null);
+
     const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
+      if (!active) return;
       setFirebaseUser(fbUser);
-      setFirebaseAuthLoading(false);
 
       if (fbUser) {
+        const verified = isFirebaseUserVerified(fbUser);
+        setIsEmailVerified(verified);
+
         try {
           const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
-          if (remoteProfile) {
-            const mergedUser: User = {
-              ...currentUser,
-              ...remoteProfile,
-              id: fbUser.uid,
-              email: fbUser.email || remoteProfile.email || currentUser.email,
-              displayName: remoteProfile.displayName || fbUser.displayName || currentUser.displayName,
-            };
-            saveUserSession(mergedUser);
-          } else {
-            const newUserDoc: User = {
-              ...currentUser,
-              id: fbUser.uid,
-              email: fbUser.email || currentUser.email,
-              displayName: fbUser.displayName || currentUser.displayName,
-              avatar: fbUser.photoURL || currentUser.avatar,
-              isVerified: true,
-            };
-            await syncUserProfileToFirestore(newUserDoc);
-            saveUserSession(newUserDoc);
+          if (!active) return;
+
+          const mergedUser: User = remoteProfile
+            ? {
+                ...buildNewUserFromFirebase(fbUser),
+                ...remoteProfile,
+                id: fbUser.uid,
+                email: fbUser.email || remoteProfile.email || '',
+                displayName: remoteProfile.displayName || fbUser.displayName || 'Alpha Mate',
+                avatar: remoteProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
+                isVerified: verified || Boolean(remoteProfile.isVerified),
+              }
+            : buildNewUserFromFirebase(fbUser);
+
+          if (!remoteProfile) {
+            await syncUserProfileToFirestore(mergedUser).catch(() => {});
+          }
+          saveUserSession(mergedUser, verified);
+
+          // Restore an existing Firebase session directly into the app after
+          // refresh/reopen. A signed-out or unverified user still sees Welcome.
+          if (verified) {
+            setScreenHistory(['home']);
+            setCurrentScreenState('home');
           }
         } catch (e) {
           console.warn('Firestore profile sync error:', e);
+          const fallbackUser = buildNewUserFromFirebase(fbUser);
+          saveUserSession(fallbackUser, verified);
+          if (verified) {
+            setScreenHistory(['home']);
+            setCurrentScreenState('home');
+          }
+        } finally {
+          if (active) setFirebaseAuthLoading(false);
         }
+      } else {
+        setIsEmailVerified(false);
+        setIsAuthenticated(false);
+        setCurrentUser(CURRENT_USER);
+        try {
+          localStorage.removeItem('alphamate_current_user');
+          localStorage.setItem('alphamate_is_authenticated', 'false');
+        } catch {
+          // ignore
+        }
+        setFirebaseAuthLoading(false);
       }
     });
 
     return () => {
+      active = false;
       unsubscribeAuth();
     };
   }, []);
@@ -1836,7 +1906,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setScreenHistory(newHistory);
       setCurrentScreenState(prevScreen);
     } else {
-      setCurrentScreenState('home');
+      setCurrentScreenState(isAuthenticated && firebaseUser ? 'home' : 'welcome');
     }
   };
 
@@ -1969,52 +2039,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const loginWithFirebaseGoogle = async (options?: { skipRedirect?: boolean }) => {
     try {
       const fbUser = await signInWithGoogle();
-      if (!fbUser) return { success: false, error: 'Sign-in cancelled' };
+      if (!fbUser) {
+        const redirectPending = (() => {
+          try {
+            return sessionStorage.getItem('alphamate_google_redirect_pending') === '1';
+          } catch {
+            return false;
+          }
+        })();
+        return {
+          success: false,
+          redirectPending,
+          error: redirectPending ? 'Redirecting to Google Sign-In...' : 'Sign-in cancelled',
+        };
+      }
 
       const existingProfile = await getUserProfileFromFirestore(fbUser.uid);
-      const cleanEmail = (fbUser.email || '').toLowerCase();
-      const suggestedName = fbUser.displayName || cleanEmail.split('@')[0] || 'Alpha Mate';
-      const suggestedUsername = (cleanEmail.split('@')[0] || `user_${Date.now()}`).toLowerCase().replace(/[^a-z0-9_]/g, '_');
-
       const userObj: User = existingProfile
         ? {
-            ...currentUser,
+            ...buildNewUserFromFirebase(fbUser),
             ...existingProfile,
             id: fbUser.uid,
-            displayName: existingProfile.displayName || suggestedName,
-            email: cleanEmail,
-            avatar: existingProfile.avatar || fbUser.photoURL || currentUser.avatar,
+            displayName: existingProfile.displayName || fbUser.displayName || 'Alpha Mate',
+            email: (fbUser.email || existingProfile.email || '').toLowerCase(),
+            avatar: existingProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
             isVerified: true,
           }
-        : {
-            id: fbUser.uid,
-            uniqueId: `AM_${Math.floor(100000 + Math.random() * 900000)}`,
-            username: suggestedUsername,
-            displayName: suggestedName,
-            email: cleanEmail,
-            avatar:
-              fbUser.photoURL ||
-              'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
-            bio: '🌟 Alpha Mate VIP Member | LIVE • PARTY • SOCIAL 💜',
-            followersCount: 1,
-            followingCount: 4,
-            likesCount: 12,
-            level: 1,
-            xp: 150,
-            nextLevelXp: 500,
-            vipTier: 1,
-            coins: 1000,
-            diamonds: 100,
-            isVerified: true,
-            familyCrew: 'Alpha Champions 👑',
-            isHost: false,
-            authProvider: 'google',
-          };
+        : buildNewUserFromFirebase(fbUser, { isVerified: true });
 
       await syncUserProfileToFirestore(userObj);
-      saveUserSession(userObj);
+      setFirebaseUser(fbUser);
+      setIsEmailVerified(true);
+      saveUserSession(userObj, true);
       if (!options?.skipRedirect) {
-        setCurrentScreen('home');
+        setScreenHistory(['home']);
+        setCurrentScreenState('home');
       }
       return { success: true, user: userObj };
     } catch (error: any) {
@@ -2026,22 +2085,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const loginWithFirebaseEmail = async (email: string, pass: string) => {
     try {
       const fbUser = await signInWithEmail(email, pass);
+      const verified = isFirebaseUserVerified(fbUser);
+      setFirebaseUser(fbUser);
+      setIsEmailVerified(verified);
+
       const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
       const userObj: User = remoteProfile
         ? {
-            ...currentUser,
+            ...buildNewUserFromFirebase(fbUser),
             ...remoteProfile,
             id: fbUser.uid,
+            isVerified: verified,
           }
-        : {
-            ...currentUser,
-            id: fbUser.uid,
-            email: email.toLowerCase(),
-            displayName: email.split('@')[0],
-          };
+        : buildNewUserFromFirebase(fbUser, { isVerified: verified });
 
-      saveUserSession(userObj);
-      setCurrentScreen('home');
+      if (!verified) {
+        saveUserSession(userObj, false);
+        return {
+          success: false,
+          needsVerification: true,
+          user: userObj,
+          error: 'Please verify your email address using the link sent to your inbox.',
+        };
+      }
+
+      await syncUserProfileToFirestore(userObj).catch(() => {});
+      saveUserSession(userObj, true);
+      setScreenHistory(['home']);
+      setCurrentScreenState('home');
       return { success: true, user: userObj };
     } catch (error: any) {
       console.error('Firebase Email Login error:', error);
@@ -2057,33 +2128,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }) => {
     try {
       const fbUser = await registerWithEmail(data.email, data.pass);
-      const newUser: User = {
-        id: fbUser.uid,
-        uniqueId: `AM_${Math.floor(100000 + Math.random() * 900000)}`,
+      const verified = isFirebaseUserVerified(fbUser);
+      setFirebaseUser(fbUser);
+      setIsEmailVerified(verified);
+
+      const newUser = buildNewUserFromFirebase(fbUser, {
         username: data.username.trim().toLowerCase(),
         displayName: data.displayName.trim() || data.username.trim(),
         email: data.email.trim().toLowerCase(),
-        avatar:
-          'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
-        bio: '🌟 Alpha Mate VIP Member | LIVE • PARTY • SOCIAL 💜',
-        followersCount: 1,
-        followingCount: 4,
-        likesCount: 12,
-        level: 1,
-        xp: 150,
-        nextLevelXp: 500,
-        vipTier: 1,
-        coins: 1000,
-        diamonds: 100,
-        isVerified: false,
-        familyCrew: 'Alpha Champions 👑',
-        isHost: false,
+        isVerified: verified,
         authProvider: 'email',
-      };
+      });
 
       await syncUserProfileToFirestore(newUser);
-      saveUserSession(newUser);
-      setCurrentScreen('home');
+      saveUserSession(newUser, verified);
+
+      if (!verified) {
+        return { success: true, needsVerification: true, user: newUser };
+      }
+
+      setScreenHistory(['home']);
+      setCurrentScreenState('home');
       return { success: true, user: newUser };
     } catch (error: any) {
       console.error('Firebase Email Registration error:', error);
@@ -2091,19 +2156,72 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const logoutFirebase = async () => {
+  const refreshFirebaseVerification = async (): Promise<boolean> => {
+    const refreshed = await reloadCurrentFirebaseUser();
+    if (!refreshed) return false;
+    const verified = isFirebaseUserVerified(refreshed);
+    setFirebaseUser(refreshed);
+    setIsEmailVerified(verified);
+    if (verified) {
+      const remoteProfile = await getUserProfileFromFirestore(refreshed.uid).catch(() => null);
+      const userObj: User = remoteProfile
+        ? { ...buildNewUserFromFirebase(refreshed), ...remoteProfile, id: refreshed.uid, isVerified: true }
+        : buildNewUserFromFirebase(refreshed, { isVerified: true });
+      await syncUserProfileToFirestore(userObj).catch(() => {});
+      saveUserSession(userObj, true);
+      setScreenHistory(['home']);
+      setCurrentScreenState('home');
+    }
+    return verified;
+  };
+
+  const resendEmailVerificationLink = async () => {
+    await resendVerificationEmail();
+  };
+
+  const performCleanLogout = async () => {
+    if (activePartyRoom) {
+      p2pStreamingEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
+    }
+    if (activeStream) {
+      p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
+      p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+    }
+    setActivePartyRoom(null);
+    setUserSeatIndex(null);
+    setIsMicMuted(false);
+    setActiveStream(null);
+    setActiveConversation(null);
+
     try {
       await logoutUser();
     } catch (e) {
       console.warn('Firebase logout warning:', e);
     }
-    logout();
+
+    setFirebaseUser(null);
+    setIsEmailVerified(false);
+    setIsAuthenticated(false);
+    setCurrentUser(CURRENT_USER);
+    try {
+      localStorage.setItem('alphamate_is_authenticated', 'false');
+      localStorage.removeItem('alphamate_current_user');
+    } catch {
+      // ignore
+    }
+    setActiveTabState('home');
+    setScreenHistory(['welcome']);
+    setCurrentScreenState('welcome');
+  };
+
+  const logoutFirebase = async () => {
+    await performCleanLogout();
   };
 
   const updateUserProfile = (data: Partial<User>) => {
     setCurrentUser((prev) => {
       const updated = { ...prev, ...data };
-      saveUserSession(updated);
+      saveUserSession(updated, isAuthenticated);
       syncUserProfileToFirestore(updated).catch(() => {});
 
       setRegisteredUsers((users) => {
@@ -2121,14 +2239,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const logout = () => {
-    setIsAuthenticated(false);
-    try {
-      localStorage.setItem('alphamate_is_authenticated', 'false');
-      localStorage.removeItem('alphamate_current_user');
-    } catch {
-      // ignore
-    }
-    setCurrentScreen('signin');
+    performCleanLogout().catch(() => {});
   };
 
   const register = (name: string, emailOrPhone: string) => {
@@ -2848,9 +2959,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loginWithCredentials,
         firebaseUser,
         firebaseAuthLoading,
+        isEmailVerified,
         loginWithFirebaseGoogle,
         loginWithFirebaseEmail,
         registerWithFirebaseEmail,
+        refreshFirebaseVerification,
+        resendEmailVerificationLink,
         logoutFirebase,
         liveStreams,
         activeStream,

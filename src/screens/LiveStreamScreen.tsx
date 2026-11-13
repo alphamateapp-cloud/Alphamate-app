@@ -60,6 +60,7 @@ import { MOCK_ROOM_VIEWERS } from '../data/mockData';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
+import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } from '../services/liveHeartService';
 
 interface FloatingHeart {
   id: number;
@@ -130,6 +131,7 @@ export const LiveStreamScreen: React.FC = () => {
   const [viewerCount, setViewerCount] = useState(activeStream?.viewerCount || 0);
   const [durationSecs, setDurationSecs] = useState(0);
   const [hearts, setHearts] = useState<FloatingHeart[]>([]);
+  const [totalHeartCount, setTotalHeartCount] = useState(0);
   const [comments, setComments] = useState<
     Array<{
       id: string;
@@ -340,9 +342,11 @@ export const LiveStreamScreen: React.FC = () => {
   const commentsEndRef = useRef<HTMLDivElement>(null);
   const hostVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const subscribedSfuKeyRef = useRef<string | null>(null);
   const lastTapRef = useRef<number>(0);
+  const lastHeartSentAtRef = useRef<number>(0);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -360,6 +364,49 @@ export const LiveStreamScreen: React.FC = () => {
       remoteVideoRef.current.play().catch(() => {});
     }
   }, [activeRole, isRemoteVideoOn]);
+
+  // Keep viewer audio on a dedicated output so video rendering/muting cannot silence the host.
+  useEffect(() => {
+    const audioEl = remoteAudioRef.current;
+    const source = remoteStreamRef.current;
+    if (!audioEl || !source) return;
+    const audioOnly = new MediaStream(source.getAudioTracks());
+    audioEl.srcObject = audioOnly;
+    audioEl.autoplay = true;
+    audioEl.muted = isRemoteAudioMuted;
+    audioEl.volume = 1;
+    const attemptAudioPlayback = () => {
+      if (isRemoteAudioMuted) return;
+      audioEl.play().then(() => setAutoplayBlocked(false)).catch(() => setAutoplayBlocked(true));
+    };
+    const audioTracks = audioOnly.getAudioTracks();
+    audioTracks.forEach((track) => {
+      track.enabled = true;
+      track.addEventListener('unmute', attemptAudioPlayback);
+    });
+    audioEl.addEventListener('canplay', attemptAudioPlayback);
+    audioEl.addEventListener('playing', () => setAutoplayBlocked(false));
+    if (!isRemoteAudioMuted && audioTracks.length > 0) attemptAudioPlayback();
+    return () => {
+      audioTracks.forEach((track) => track.removeEventListener('unmute', attemptAudioPlayback));
+      audioEl.removeEventListener('canplay', attemptAudioPlayback);
+      audioEl.pause();
+      audioEl.srcObject = null;
+    };
+  }, [activeRole, activeStream?.id, isRemoteAudioMuted, streamStatus]);
+
+  // Real-time heart counter and incoming double-tap reactions.
+  useEffect(() => {
+    if (!activeStream?.id) return;
+    const offCount = subscribeToLiveHeartCount('live', activeStream.id, setTotalHeartCount, (e) => console.warn('[Live hearts]', e));
+    const offEvents = subscribeToLiveHeartEvents('live', activeStream.id, (event) => {
+      if (event.senderId !== auth.currentUser?.uid) {
+        spawnHeart();
+        spawnHeart();
+      }
+    }, (e) => console.warn('[Live heart events]', e));
+    return () => { offCount(); offEvents(); };
+  }, [activeStream?.id]);
 
   // =========================================================================
   // STRICT CLOUDFLARE REALTIME SFU PIPELINE: HOST PUBLISHING VS VIEWER SUBSCRIPTION
@@ -424,13 +471,8 @@ export const LiveStreamScreen: React.FC = () => {
                 const videoEl = remoteVideoRef.current;
                 if (videoEl) {
                   videoEl.srcObject = reconnectedStream;
-                  videoEl.muted = isRemoteAudioMuted;
-                  videoEl.play().catch(() => {
-                    videoEl.muted = true;
-                    setIsRemoteAudioMuted(true);
-                    setAutoplayBlocked(true);
-                    videoEl.play().catch(() => {});
-                  });
+                  videoEl.muted = true;
+                  videoEl.play().catch(() => {});
                 }
               },
             },
@@ -451,7 +493,7 @@ export const LiveStreamScreen: React.FC = () => {
           const videoEl = remoteVideoRef.current;
           if (videoEl) {
             videoEl.srcObject = stream;
-            videoEl.muted = isRemoteAudioMuted;
+            videoEl.muted = true;
             try {
               await videoEl.play();
               setAutoplayBlocked(false);
@@ -650,9 +692,10 @@ export const LiveStreamScreen: React.FC = () => {
     setIsRemoteAudioMuted(false);
     setAutoplayBlocked(false);
     if (remoteVideoRef.current) {
-      remoteVideoRef.current.muted = false;
+      remoteVideoRef.current.muted = true; // audio is rendered by the dedicated audio element
       remoteVideoRef.current.play().catch(() => {});
     }
+    if (remoteAudioRef.current) { remoteAudioRef.current.muted = false; remoteAudioRef.current.play().catch(() => setAutoplayBlocked(true)); }
     showToast('Host Audio Playing 🔊');
   };
 
@@ -701,6 +744,9 @@ export const LiveStreamScreen: React.FC = () => {
     if (activeRole === 'viewer' && remoteVideoRef.current) {
       remoteVideoRef.current.play().catch(() => {});
     }
+    if (activeRole === 'viewer' && remoteAudioRef.current && !isRemoteAudioMuted) {
+      remoteAudioRef.current.play().catch(() => setAutoplayBlocked(true));
+    }
 
     const now = Date.now();
     const timeDiff = now - lastTapRef.current;
@@ -709,6 +755,8 @@ export const LiveStreamScreen: React.FC = () => {
       const clientY = 'touches' in e && e.touches[0] ? e.touches[0].clientY : (e as React.MouseEvent).clientY;
       spawnHeart(clientX, clientY);
       spawnHeart(clientX ? clientX + 15 : undefined, clientY ? clientY - 15 : undefined);
+      lastHeartSentAtRef.current = Date.now();
+      if (activeStream?.id) sendLiveHeart('live', activeStream.id).catch((err) => console.warn('[Live heart send]', err));
       lastTapRef.current = 0;
     } else {
       lastTapRef.current = now;
@@ -894,15 +942,35 @@ export const LiveStreamScreen: React.FC = () => {
   return (
     <div
       onDoubleClick={(e) => {
-        if (activeRole === 'viewer' && remoteVideoRef.current) {
-          remoteVideoRef.current.play().catch(() => {});
-        }
+        if (activeRole === 'viewer' && remoteVideoRef.current) remoteVideoRef.current.play().catch(() => {});
         spawnHeart(e.clientX, e.clientY);
         spawnHeart(e.clientX + 10, e.clientY - 20);
+        if (Date.now() - lastHeartSentAtRef.current > 500) {
+          lastHeartSentAtRef.current = Date.now();
+          if (activeStream?.id) sendLiveHeart('live', activeStream.id).catch((err) => console.warn('[Live heart send]', err));
+        }
       }}
       onTouchStart={handleScreenTouchOrClick}
       className="relative w-full h-full h-[100dvh] max-h-[100dvh] bg-black text-white overflow-hidden flex flex-col justify-between select-none"
     >
+      {/* Dedicated remote audio output. The video element stays muted to avoid duplicate playback. */}
+      {activeRole === 'viewer' && (
+        <audio
+          ref={remoteAudioRef}
+          autoPlay
+          playsInline
+          preload="auto"
+          className="fixed w-px h-px opacity-0 pointer-events-none"
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Live heart counter shared by host and viewers */}
+      <div className="fixed top-[calc(env(safe-area-inset-top,8px)+10px)] right-4 z-[70] rounded-full bg-black/75 border border-pink-500/50 px-3 py-1.5 flex items-center gap-1.5 pointer-events-none shadow-lg">
+        <Heart className="w-4 h-4 fill-pink-500 text-pink-400" />
+        <span className="text-xs font-black tabular-nums">{totalHeartCount.toLocaleString()}</span>
+      </div>
+
       {/* Toast Alert Feedback */}
       {toastMessage && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#180E2C]/95 border border-[#A855F7]/40 text-white text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-bounce pointer-events-none">
@@ -937,7 +1005,7 @@ export const LiveStreamScreen: React.FC = () => {
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline
-                muted={isRemoteAudioMuted}
+                muted
                 className="w-full h-full object-cover"
               />
             )}
@@ -976,7 +1044,7 @@ export const LiveStreamScreen: React.FC = () => {
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline
-                muted={isRemoteAudioMuted}
+                muted
                 className="hidden"
               />
             )}

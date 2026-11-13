@@ -11,19 +11,24 @@ import {
   Plus,
   Radio,
   Flame,
-  ChevronRight,
-  Compass,
 } from 'lucide-react';
 
 export const WelcomeScreen: React.FC = () => {
-  const { setCurrentScreen, customLogoUrl, isAuthenticated, currentUser, firebaseUser } = useApp();
+  const {
+    setCurrentScreen,
+    customLogoUrl,
+    isAuthenticated,
+    firebaseUser,
+    firebaseAuthLoading,
+    isEmailVerified,
+  } = useApp();
 
-  // If user has an active Firebase session, immediately go to Home screen
+  // If user already has an active, verified Firebase session on this device, enter directly
   React.useEffect(() => {
-    if (isAuthenticated && currentUser && firebaseUser) {
+    if (!firebaseAuthLoading && isAuthenticated && firebaseUser && isEmailVerified) {
       setCurrentScreen('home');
     }
-  }, [isAuthenticated, currentUser, firebaseUser, setCurrentScreen]);
+  }, [firebaseAuthLoading, isAuthenticated, firebaseUser, isEmailVerified, setCurrentScreen]);
 
   return (
     <div className="relative w-full h-full min-h-[660px] flex flex-col justify-between p-4 sm:p-5 overflow-y-auto scrollbar-none bg-[#09070F] select-none text-white">
@@ -288,23 +293,14 @@ export const WelcomeScreen: React.FC = () => {
           </div>
         </button>
 
-        {/* Secondary Navigation Options */}
-        <div className="flex items-center justify-between w-full px-3 text-xs pt-0.5">
+        {/* Secondary Navigation Option */}
+        <div className="flex items-center justify-center w-full px-3 text-xs pt-0.5">
           <button
             onClick={() => setCurrentScreen('signin')}
-            className="text-zinc-400 hover:text-white transition-colors cursor-pointer flex items-center gap-1 py-1"
+            className="text-zinc-400 hover:text-white transition-colors cursor-pointer flex items-center gap-1.5 py-1"
           >
-            <span>Have an account?</span>
+            <span>Already have an account?</span>
             <span className="text-[#C084FC] font-bold underline underline-offset-4">Sign In</span>
-          </button>
-
-          <button
-            onClick={() => setCurrentScreen('home')}
-            className="text-zinc-400 hover:text-white transition-colors cursor-pointer flex items-center gap-1 py-1"
-          >
-            <Compass className="w-3.5 h-3.5 text-purple-400" />
-            <span className="font-semibold text-purple-300">Browse as Guest</span>
-            <ChevronRight className="w-3 h-3 text-zinc-500" />
           </button>
         </div>
       </div>

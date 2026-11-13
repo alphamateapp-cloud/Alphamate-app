@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
+import { sendPasswordReset } from '../services/firebase';
 import {
   Mail,
   Lock,
@@ -17,34 +18,31 @@ import {
 export const SignInScreen: React.FC = () => {
   const {
     setCurrentScreen,
-    loginWithCredentials,
-    loginWithGoogle,
     customLogoUrl,
     isAuthenticated,
-    currentUser,
     firebaseUser,
+    firebaseAuthLoading,
+    isEmailVerified,
     loginWithFirebaseEmail,
     loginWithFirebaseGoogle,
+    refreshFirebaseVerification,
+    resendEmailVerificationLink,
   } = useApp();
 
-  // Only auto-redirect if a real Firebase Auth session is already active
+  // Only auto-redirect if a real, verified Firebase Auth session is already active
   React.useEffect(() => {
-    if (isAuthenticated && currentUser && firebaseUser) {
+    if (!firebaseAuthLoading && isAuthenticated && firebaseUser && isEmailVerified) {
       setCurrentScreen('home');
     }
-  }, [isAuthenticated, currentUser, firebaseUser, setCurrentScreen]);
+  }, [firebaseAuthLoading, isAuthenticated, firebaseUser, isEmailVerified, setCurrentScreen]);
 
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
+  const [statusMessage, setStatusMessage] = useState('');
+  const [needsEmailVerification, setNeedsEmailVerification] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Google Selector modal
-  const [showGoogleModal, setShowGoogleModal] = useState(false);
-  const defaultGoogleEmail = 'alphamateapp@gmail.com';
-  const [customGoogleEmail, setCustomGoogleEmail] = useState('');
-  const [useOtherGoogleAccount, setUseOtherGoogleAccount] = useState(false);
 
   // Apple modal
   const [showAppleComingSoon, setShowAppleComingSoon] = useState(false);
@@ -53,13 +51,34 @@ export const SignInScreen: React.FC = () => {
   const [showForgotPassword, setShowForgotPassword] = useState(false);
   const [resetEmail, setResetEmail] = useState('');
   const [resetSent, setResetSent] = useState(false);
+  const [resetStatus, setResetStatus] = useState('');
+
+  const formatFirebaseLoginError = (raw?: string) => {
+    const msg = raw || '';
+    if (msg.includes('popup-closed-by-user')) {
+      return 'Google sign-in was cancelled. Tap Continue with Google to try again.';
+    }
+    if (msg.includes('invalid-credential') || msg.includes('wrong-password') || msg.includes('user-not-found')) {
+      return 'Invalid email or password. Please check your credentials or Continue with Google (Gmail).';
+    }
+    if (msg.includes('operation-not-allowed')) {
+      return 'Email/Password login is disabled. Please tap Continue with Google (Gmail) above.';
+    }
+    if (msg.includes('too-many-requests')) {
+      return 'Too many attempts. Please wait a moment and try again.';
+    }
+    return msg || 'Sign-in failed. Please try again.';
+  };
 
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
+    setStatusMessage('');
+    setNeedsEmailVerification(false);
 
-    if (!identifier.trim()) {
-      setErrorMessage('Please enter your email or username');
+    const emailVal = identifier.trim();
+    if (!emailVal || !emailVal.includes('@')) {
+      setErrorMessage('Please enter your registered email address (e.g. name@gmail.com)');
       return;
     }
     if (!password.trim()) {
@@ -69,75 +88,89 @@ export const SignInScreen: React.FC = () => {
 
     setIsSubmitting(true);
     try {
-      if (identifier.includes('@')) {
-        const fbRes = await loginWithFirebaseEmail(identifier.trim(), password);
-        if (fbRes.success) {
-          setIsSubmitting(false);
-          return;
+      const fbRes = await loginWithFirebaseEmail(emailVal, password);
+      setIsSubmitting(false);
+      if (!fbRes.success) {
+        if (fbRes.needsVerification) {
+          setNeedsEmailVerification(true);
         }
+        setErrorMessage(formatFirebaseLoginError(fbRes.error));
       }
-
-      const res = loginWithCredentials(identifier, password);
+    } catch (err: any) {
       setIsSubmitting(false);
-
-      if (!res.success) {
-        setErrorMessage(res.message || 'Invalid username or password');
-      }
-    } catch {
-      const res = loginWithCredentials(identifier, password);
-      setIsSubmitting(false);
-      if (!res.success) {
-        setErrorMessage(res.message || 'Invalid username or password');
-      }
+      setErrorMessage(formatFirebaseLoginError(err?.message));
     }
   };
 
   const handleDirectGoogleSignIn = async () => {
     setIsSubmitting(true);
     setErrorMessage('');
+    setStatusMessage('');
+    setNeedsEmailVerification(false);
     try {
       const res = await loginWithFirebaseGoogle();
       setIsSubmitting(false);
+      if (res.redirectPending) {
+        setStatusMessage('Opening Google Sign-In...');
+        return;
+      }
       if (!res.success) {
-        setErrorMessage(
-          res.error || 'Google sign-in did not complete. Please allow popups or sign in with Email.'
-        );
+        setErrorMessage(formatFirebaseLoginError(res.error));
       }
     } catch (err: any) {
       setIsSubmitting(false);
-      setErrorMessage(err?.message || 'Google sign-in failed. Please try Email & Password.');
+      setErrorMessage(formatFirebaseLoginError(err?.message));
     }
   };
 
-  const handleGoogleSignIn = (emailToAuth: string) => {
+  const handleVerifyAndContinue = async () => {
     setIsSubmitting(true);
     setErrorMessage('');
-
-    setTimeout(() => {
+    try {
+      const ok = await refreshFirebaseVerification();
       setIsSubmitting(false);
-      setShowGoogleModal(false);
-
-      const result = loginWithGoogle(emailToAuth);
-      if (result.isRegistered) {
-        return;
-      } else {
-        alert(
-          `No Alpha Mate account found for ${emailToAuth}. Redirecting to quick profile registration...`
-        );
-        setCurrentScreen('register');
+      if (!ok) {
+        setErrorMessage('Email not verified yet. Please click the verification link in your inbox first.');
       }
-    }, 450);
+    } catch (err: any) {
+      setIsSubmitting(false);
+      setErrorMessage(err?.message || 'Verification check failed.');
+    }
   };
 
-  const handleSendReset = (e: React.FormEvent) => {
+  const handleResendVerification = async () => {
+    setIsSubmitting(true);
+    setErrorMessage('');
+    try {
+      await resendEmailVerificationLink();
+      setStatusMessage('Verification link resent! Please check your inbox.');
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Could not resend verification link right now.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSendReset = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!resetEmail.trim()) return;
+    if (!resetEmail.trim() || !resetEmail.includes('@')) {
+      setResetStatus('Please enter a valid email address.');
+      return;
+    }
     setResetSent(true);
-    setTimeout(() => {
-      setShowForgotPassword(false);
+    setResetStatus('');
+    try {
+      await sendPasswordReset(resetEmail.trim());
+      setResetStatus('Password reset link sent! Please check your inbox.');
+      setTimeout(() => {
+        setShowForgotPassword(false);
+        setResetSent(false);
+        setResetStatus('');
+      }, 1800);
+    } catch (err: any) {
       setResetSent(false);
-      alert('Password reset link sent! Check your inbox.');
-    }, 1200);
+      setResetStatus(err?.message || 'Could not send reset email. Try Continue with Google.');
+    }
   };
 
   return (
@@ -199,8 +232,10 @@ export const SignInScreen: React.FC = () => {
                 </svg>
               </div>
               <div className="text-left">
-                <span className="text-xs sm:text-sm font-bold text-white block">Continue with Google</span>
-                <span className="text-[10px] text-[#C084FC]">Instant 1-Click Login</span>
+                <span className="text-xs sm:text-sm font-bold text-white block">
+                  {isSubmitting ? 'Connecting Gmail...' : 'Continue with Google (Gmail)'}
+                </span>
+                <span className="text-[10px] text-[#C084FC]">Instant 1-Click Verified Login</span>
               </div>
             </div>
             <ChevronRight className="w-4 h-4 text-zinc-400 group-hover:translate-x-1 transition-transform" />
@@ -229,7 +264,7 @@ export const SignInScreen: React.FC = () => {
         <div className="flex items-center gap-3 my-4">
           <div className="flex-1 h-[1px] bg-zinc-800" />
           <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold">
-            Or with Username & Password
+            Or with Email & Password
           </span>
           <div className="flex-1 h-[1px] bg-zinc-800" />
         </div>
@@ -243,12 +278,42 @@ export const SignInScreen: React.FC = () => {
             </div>
           )}
 
-          {/* Identifier Input */}
+          {statusMessage && (
+            <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
+
+          {needsEmailVerification && (
+            <div className="p-2.5 rounded-xl bg-[#1A1033] border border-[#A855F7]/40 flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleVerifyAndContinue}
+                  disabled={isSubmitting}
+                  className="flex-1 h-9 rounded-lg bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-[11px] font-bold text-white cursor-pointer"
+                >
+                  I've Verified — Sign In
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResendVerification}
+                  disabled={isSubmitting}
+                  className="px-3 h-9 rounded-lg bg-white/10 text-[11px] font-semibold text-purple-200 cursor-pointer"
+                >
+                  Resend Link
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Email Input */}
           <div className="relative">
             <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
             <input
-              type="text"
-              placeholder="Username or Email"
+              type="email"
+              placeholder="Email Address (e.g. name@gmail.com)"
               value={identifier}
               onChange={(e) => setIdentifier(e.target.value)}
               className="w-full h-11 pl-10 pr-3.5 rounded-xl bg-[#140D27] border border-[#A855F7]/30 text-white placeholder-zinc-500 text-xs sm:text-sm focus:outline-none focus:border-[#C084FC] transition-colors"
@@ -275,8 +340,7 @@ export const SignInScreen: React.FC = () => {
           </div>
 
           {/* Forgot Password */}
-          <div className="flex justify-between items-center text-xs">
-            <span className="text-[11px] text-zinc-500">Demo login: alex / password123</span>
+          <div className="flex justify-end items-center text-xs">
             <button
               type="button"
               onClick={() => setShowForgotPassword(true)}
@@ -317,94 +381,6 @@ export const SignInScreen: React.FC = () => {
         </span>
       </div>
 
-      {/* Google Account Selector Modal for Sign In */}
-      {showGoogleModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-[#17102D] border border-[#A855F7]/40 p-5 shadow-2xl animate-scale-up">
-            <div className="text-center mb-4">
-              <div className="w-11 h-11 mx-auto rounded-2xl bg-white flex items-center justify-center shadow-md mb-2.5">
-                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                  <path
-                    fill="#4285F4"
-                    d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.66v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.15z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.17 0 9.99 0 12s.45 3.83 1.25 5.42l4.03-3.15z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-                  />
-                </svg>
-              </div>
-              <h3 className="text-base font-bold text-white">Sign In with Google</h3>
-              <p className="text-xs text-zinc-400 mt-0.5">Select your registered Google account</p>
-            </div>
-
-            <div className="space-y-2">
-              {/* Primary Google Email */}
-              <button
-                onClick={() => handleGoogleSignIn(defaultGoogleEmail)}
-                className="w-full p-3 rounded-xl bg-[#1C1336] hover:bg-[#251A48] border border-[#A855F7]/40 flex items-center justify-between text-left transition cursor-pointer"
-              >
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-full bg-gradient-to-tr from-purple-500 to-pink-500 flex items-center justify-center font-bold text-white text-xs">
-                    A
-                  </div>
-                  <div>
-                    <span className="text-xs font-bold text-white block">Official Alpha Account</span>
-                    <span className="text-[10px] text-[#C084FC] font-mono">{defaultGoogleEmail}</span>
-                  </div>
-                </div>
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              </button>
-
-              {/* Custom Google Account */}
-              {!useOtherGoogleAccount ? (
-                <button
-                  onClick={() => setUseOtherGoogleAccount(true)}
-                  className="w-full py-2 px-3 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-zinc-300 text-center"
-                >
-                  + Sign in with another Google account
-                </button>
-              ) : (
-                <div className="p-2.5 rounded-xl bg-[#120B22] border border-white/10 space-y-2">
-                  <input
-                    type="email"
-                    placeholder="Enter Google email"
-                    value={customGoogleEmail}
-                    onChange={(e) => setCustomGoogleEmail(e.target.value)}
-                    className="w-full h-9 px-3 rounded-lg bg-[#0A0514] border border-zinc-700 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#A855F7]"
-                  />
-                  <button
-                    onClick={() => {
-                      if (customGoogleEmail.includes('@')) {
-                        handleGoogleSignIn(customGoogleEmail);
-                      }
-                    }}
-                    className="w-full h-8 rounded-lg bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-xs font-bold text-white"
-                  >
-                    Confirm & Sign In
-                  </button>
-                </div>
-              )}
-
-              <button
-                onClick={() => setShowGoogleModal(false)}
-                className="w-full py-2 text-xs text-zinc-400 hover:text-white text-center mt-2"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* Apple Coming Soon Modal */}
       {showAppleComingSoon && (
         <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
@@ -415,7 +391,7 @@ export const SignInScreen: React.FC = () => {
             <h3 className="text-base font-bold text-white">Apple Sign-In</h3>
             <p className="text-xs text-zinc-400 mt-1 mb-4 leading-relaxed">
               Continue with Apple is currently being finalized and will be available in the upcoming release.
-              Please use <strong className="text-white">Continue with Google</strong> or your <strong className="text-white">Username & Password</strong>.
+              Please use <strong className="text-white">Continue with Google (Gmail)</strong> or your <strong className="text-white">Email & Password</strong>.
             </p>
             <button
               onClick={() => setShowAppleComingSoon(false)}
@@ -445,10 +421,19 @@ export const SignInScreen: React.FC = () => {
                 className="w-full h-11 px-3.5 rounded-xl bg-[#110A22] border border-zinc-700 text-white placeholder-zinc-500 text-xs sm:text-sm focus:border-[#A855F7] focus:outline-none"
               />
 
+              {resetStatus && (
+                <p className="text-xs text-[#E9D5FF] bg-[#7928CA]/20 border border-[#A855F7]/30 rounded-xl px-3 py-2">
+                  {resetStatus}
+                </p>
+              )}
+
               <div className="flex items-center gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setShowForgotPassword(false)}
+                  onClick={() => {
+                    setShowForgotPassword(false);
+                    setResetStatus('');
+                  }}
                   className="flex-1 h-11 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-semibold hover:bg-zinc-700"
                 >
                   Cancel

@@ -31,27 +31,29 @@ export const RegisterScreen: React.FC = () => {
   const {
     setCurrentScreen,
     customLogoUrl,
-    loginWithGoogle,
-    registerWithFullDetails,
-    registeredUsers,
     isAuthenticated,
-    currentUser,
     firebaseUser,
+    firebaseAuthLoading,
+    isEmailVerified,
     updateUserProfile,
     loginWithFirebaseGoogle,
     registerWithFirebaseEmail,
+    refreshFirebaseVerification,
+    resendEmailVerificationLink,
   } = useApp();
 
-  // Only auto-redirect if a real Firebase Auth session is already active
-  React.useEffect(() => {
-    if (isAuthenticated && currentUser && firebaseUser) {
-      setCurrentScreen('home');
-    }
-  }, [isAuthenticated, currentUser, firebaseUser, setCurrentScreen]);
+  // Registration step: 'select_method' | 'profile_details' | 'verify_email'
+  const [step, setStep] = useState<'select_method' | 'profile_details' | 'verify_email'>('select_method');
 
-  // Registration step: 'select_method' | 'google_picker' | 'profile_details'
-  const [step, setStep] = useState<'select_method' | 'google_picker' | 'profile_details'>('select_method');
-  const [authProvider, setAuthProvider] = useState<'google' | 'email'>('google');
+  // Auto-redirect only when a real, verified Firebase Auth session is active
+  React.useEffect(() => {
+    if (!firebaseAuthLoading && isAuthenticated && firebaseUser && isEmailVerified) {
+      setCurrentScreen('home');
+    } else if (!firebaseAuthLoading && firebaseUser && !isEmailVerified) {
+      setEmail(firebaseUser.email || '');
+      setStep('verify_email');
+    }
+  }, [firebaseAuthLoading, isAuthenticated, firebaseUser, isEmailVerified, setCurrentScreen]);
 
   // Form fields
   const [displayName, setDisplayName] = useState('');
@@ -66,59 +68,56 @@ export const RegisterScreen: React.FC = () => {
 
   // Status & validation
   const [errorMessage, setErrorMessage] = useState('');
+  const [statusMessage, setStatusMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAppleComingSoon, setShowAppleComingSoon] = useState(false);
   const [showPlatformRegistrationModal, setShowPlatformRegistrationModal] = useState(false);
 
-  // Google Account Picker State
-  const defaultGoogleEmail = 'alphamateapp@gmail.com';
-  const [customGoogleEmail, setCustomGoogleEmail] = useState('');
-  const [useOtherGoogleAccount, setUseOtherGoogleAccount] = useState(false);
+  const formatFirebaseAuthError = (raw?: string) => {
+    const msg = raw || '';
+    if (msg.includes('popup-closed-by-user')) {
+      return 'Google sign-in was closed before finishing. Tap Continue with Google to try again.';
+    }
+    if (msg.includes('operation-not-allowed')) {
+      return 'Email/Password sign-up is not enabled on this server. Please tap Continue with Google (Gmail) for instant account creation.';
+    }
+    if (msg.includes('email-already-in-use')) {
+      return 'An account with this email already exists. Please tap Sign In below or Continue with Google.';
+    }
+    if (msg.includes('weak-password')) {
+      return 'Password is too weak. Please choose at least 6 characters.';
+    }
+    if (msg.includes('invalid-email')) {
+      return 'Please enter a valid email address.';
+    }
+    return msg || 'Sign-in could not complete. Please try again.';
+  };
 
-  // Handle Direct Firebase Google Sign-In
+  // Handle Direct Firebase Google (Gmail) Sign-In & Account Creation
   const handleDirectGoogleSignIn = async () => {
     setIsSubmitting(true);
     setErrorMessage('');
+    setStatusMessage('');
     try {
       const res = await loginWithFirebaseGoogle();
       setIsSubmitting(false);
+      if (res.redirectPending) {
+        setStatusMessage('Opening Google Sign-In...');
+        return;
+      }
       if (!res.success) {
-        // Fallback to Google account selector if popup closed or needs manual pick
-        setStep('google_picker');
-        if (res.error && !res.error.includes('closed-by-user')) {
-          setErrorMessage(res.error);
-        }
+        setErrorMessage(formatFirebaseAuthError(res.error));
       }
     } catch (err: any) {
       setIsSubmitting(false);
-      setStep('google_picker');
+      setErrorMessage(formatFirebaseAuthError(err?.message));
     }
-  };
-
-  // Handle Google selection fallback
-  const handleSelectGoogleAccount = (chosenEmail: string) => {
-    setIsSubmitting(true);
-    setErrorMessage('');
-
-    setTimeout(() => {
-      setIsSubmitting(false);
-      const result = loginWithGoogle(chosenEmail);
-      if (result.isRegistered) {
-        return;
-      }
-
-      setEmail(chosenEmail);
-      setAuthProvider('google');
-      const suggestedName = chosenEmail.split('@')[0];
-      setDisplayName(suggestedName.charAt(0).toUpperCase() + suggestedName.slice(1));
-      setUsername(suggestedName.toLowerCase().replace(/[^a-z0-9_]/g, '_'));
-      setStep('profile_details');
-    }, 350);
   };
 
   // Handle switching to Email Registration
   const handleStartEmailRegistration = () => {
-    setAuthProvider('email');
+    setErrorMessage('');
+    setStatusMessage('');
     setEmail('');
     setDisplayName('');
     setUsername('');
@@ -180,36 +179,53 @@ export const RegisterScreen: React.FC = () => {
 
     setIsSubmitting(true);
 
-    if (authProvider === 'email') {
-      const fbRes = await registerWithFirebaseEmail({
-        email: email.trim().toLowerCase(),
-        pass: password,
-        displayName: displayName.trim(),
-        username: username.trim(),
-      });
-      setIsSubmitting(false);
-      if (!fbRes.success) {
-        setErrorMessage(fbRes.error || 'Registration failed. Please try again.');
-        return;
-      }
-      updateUserProfile({ dob, avatar: selectedAvatar });
+    const fbRes = await registerWithFirebaseEmail({
+      email: email.trim().toLowerCase(),
+      pass: password,
+      displayName: displayName.trim(),
+      username: username.trim(),
+    });
+    setIsSubmitting(false);
+
+    if (!fbRes.success) {
+      setErrorMessage(formatFirebaseAuthError(fbRes.error));
       return;
     }
 
-    const res = registerWithFullDetails({
-      displayName: displayName.trim(),
-      username: username.trim(),
-      email: email.trim().toLowerCase(),
-      dob,
-      password,
-      authProvider,
-      avatar: selectedAvatar,
-    });
+    updateUserProfile({ dob, avatar: selectedAvatar });
 
-    setIsSubmitting(false);
+    if (fbRes.needsVerification) {
+      setStatusMessage(`Verification link sent to ${email.trim().toLowerCase()}. Please verify to enter.`);
+      setStep('verify_email');
+    }
+  };
 
-    if (!res.success) {
-      setErrorMessage(res.message || 'Registration failed. Please try again.');
+  const handleCheckEmailVerified = async () => {
+    setIsSubmitting(true);
+    setErrorMessage('');
+    setStatusMessage('');
+    try {
+      const verified = await refreshFirebaseVerification();
+      setIsSubmitting(false);
+      if (!verified) {
+        setErrorMessage('Email is not verified yet. Please click the verification link in your inbox, then tap again.');
+      }
+    } catch (err: any) {
+      setIsSubmitting(false);
+      setErrorMessage(err?.message || 'Unable to verify status right now.');
+    }
+  };
+
+  const handleResendVerification = async () => {
+    setIsSubmitting(true);
+    setErrorMessage('');
+    try {
+      await resendEmailVerificationLink();
+      setStatusMessage(`Verification email resent to ${email || firebaseUser?.email}. Check Inbox or Spam.`);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Please wait a moment before resending.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -223,9 +239,10 @@ export const RegisterScreen: React.FC = () => {
       <div className="relative z-10 flex items-center justify-between pt-1">
         <button
           onClick={() => {
-            if (step === 'profile_details' || step === 'google_picker') {
+            if (step === 'profile_details' || step === 'verify_email') {
               setStep('select_method');
               setErrorMessage('');
+              setStatusMessage('');
             } else {
               setCurrentScreen('welcome');
             }
@@ -252,27 +269,41 @@ export const RegisterScreen: React.FC = () => {
         </button>
       </div>
 
-      {/* STEP 1: SELECT METHOD (Google, Email, Apple) */}
+      {/* STEP 1: SELECT METHOD (Google Gmail, Email, Apple) */}
       {step === 'select_method' && (
         <div className="relative z-10 py-4 max-w-sm w-full mx-auto my-auto">
           <div className="text-center mb-6">
             <span className="px-3 py-1 rounded-full bg-[#7928CA]/25 border border-[#A855F7]/40 text-[10px] font-bold text-[#E9D5FF] tracking-widest uppercase">
-              STEP 1 OF 2
+              CREATE ACCOUNT
             </span>
             <h1 className="text-2xl font-black text-white tracking-tight mt-2.5">
-              Create Your Account
+              Continue with Email
             </h1>
             <p className="mt-1 text-xs text-zinc-400">
-              Join the Alpha Mate social and live streaming community
+              Sign up with your Gmail or Email to verify and enter Alpha Mate directly on future visits
             </p>
           </div>
 
+          {errorMessage && (
+            <div className="mb-3 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          {statusMessage && (
+            <div className="mb-3 p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
+
           <div className="flex flex-col gap-3">
-            {/* 1. Continue with Google (Firebase Real-time Auth) */}
+            {/* 1. Continue with Google / Gmail (Instant Verified Account) */}
             <button
               onClick={handleDirectGoogleSignIn}
               disabled={isSubmitting}
-              className="group relative w-full h-13 rounded-2xl bg-[#17102B] hover:bg-[#21173D] border-2 border-[#A855F7]/40 hover:border-[#C084FC] p-1 flex items-center justify-between px-4 transition-all shadow-lg shadow-[#7928CA]/20 active:scale-[0.98] cursor-pointer"
+              className="group relative w-full h-14 rounded-2xl bg-gradient-to-r from-[#231542] to-[#1A1033] hover:from-[#2B1952] hover:to-[#221542] border-2 border-[#A855F7]/60 hover:border-[#EC4899] p-1 flex items-center justify-between px-4 transition-all shadow-lg shadow-[#7928CA]/25 active:scale-[0.98] cursor-pointer disabled:opacity-60"
             >
               <div className="flex items-center gap-3">
                 <div className="w-9 h-9 rounded-xl bg-white flex items-center justify-center shadow-md shrink-0">
@@ -296,16 +327,21 @@ export const RegisterScreen: React.FC = () => {
                   </svg>
                 </div>
                 <div className="text-left">
-                  <span className="text-xs sm:text-sm font-bold text-white block">Continue with Google</span>
-                  <span className="text-[10px] text-[#C084FC]">Permanent Google Login & Quick Setup</span>
+                  <span className="text-xs sm:text-sm font-bold text-white block">
+                    {isSubmitting ? 'Connecting Gmail...' : 'Continue with Google (Gmail)'}
+                  </span>
+                  <span className="text-[10px] text-[#E9D5FF]">
+                    Instant verified account • Recommended
+                  </span>
                 </div>
               </div>
-              <ChevronRight className="w-4 h-4 text-zinc-400 group-hover:translate-x-1 transition-transform" />
+              <ChevronRight className="w-4 h-4 text-purple-300 group-hover:translate-x-1 transition-transform" />
             </button>
 
             {/* 2. Register with Email */}
             <button
               onClick={handleStartEmailRegistration}
+              disabled={isSubmitting}
               className="w-full h-12 rounded-2xl bg-[#140D26] hover:bg-[#1E1338] border border-white/10 hover:border-purple-400/50 flex items-center justify-between px-4 transition-all active:scale-[0.98] cursor-pointer"
             >
               <div className="flex items-center gap-3">
@@ -313,8 +349,8 @@ export const RegisterScreen: React.FC = () => {
                   <Mail className="w-4 h-4" />
                 </div>
                 <div className="text-left">
-                  <span className="text-xs sm:text-sm font-bold text-white block">Register with Email</span>
-                  <span className="text-[10px] text-zinc-400">Custom email and password</span>
+                  <span className="text-xs sm:text-sm font-bold text-white block">Continue with Email</span>
+                  <span className="text-[10px] text-zinc-400">Create password & verify inbox</span>
                 </div>
               </div>
               <ChevronRight className="w-4 h-4 text-zinc-500" />
@@ -348,152 +384,82 @@ export const RegisterScreen: React.FC = () => {
           <div className="mt-6 p-3 rounded-2xl bg-white/[0.02] border border-white/5 flex items-center gap-3">
             <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
             <p className="text-[11px] text-zinc-400 leading-snug">
-              Safe & secure login. Your Google account links directly so you can seamlessly sign in anytime.
+              Once verified, this device stays signed in so you enter Alpha Mate directly every time until you log out.
             </p>
           </div>
         </div>
       )}
 
-      {/* STEP 1.5: GOOGLE ACCOUNT SELECTION MODAL/SCREEN */}
-      {step === 'google_picker' && (
-        <div className="relative z-10 py-4 max-w-sm w-full mx-auto my-auto animate-scale-up">
-          <div className="text-center mb-5">
-            <div className="w-12 h-12 mx-auto rounded-2xl bg-white flex items-center justify-center shadow-lg mb-3">
-              <svg className="w-6 h-6" viewBox="0 0 24 24">
-                <path
-                  fill="#4285F4"
-                  d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.66v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.15z"
-                />
-                <path
-                  fill="#34A853"
-                  d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-                />
-                <path
-                  fill="#FBBC05"
-                  d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.17 0 9.99 0 12s.45 3.83 1.25 5.42l4.03-3.15z"
-                />
-                <path
-                  fill="#EA4335"
-                  d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-                />
-              </svg>
-            </div>
-            <h2 className="text-xl font-black text-white">Choose a Google Account</h2>
-            <p className="text-xs text-zinc-400 mt-1">
-              to continue to <span className="text-[#C084FC] font-bold">Alpha Mate</span>
-            </p>
+      {/* VERIFY EMAIL STEP (for Email & Password registrations) */}
+      {step === 'verify_email' && (
+        <div className="relative z-10 py-4 max-w-sm w-full mx-auto my-auto animate-scale-up text-center">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-br from-[#7928CA] to-[#EC4899] flex items-center justify-center shadow-lg shadow-[#A855F7]/30 mb-4">
+            <Mail className="w-7 h-7 text-white" />
           </div>
+          <span className="px-3 py-1 rounded-full bg-[#7928CA]/30 border border-[#A855F7]/40 text-[10px] font-bold text-[#E9D5FF] tracking-widest uppercase">
+            VERIFY YOUR EMAIL
+          </span>
+          <h2 className="text-xl font-black text-white mt-2">Check Your Inbox</h2>
+          <p className="text-xs text-zinc-400 mt-1.5 leading-relaxed">
+            We sent a verification link to{' '}
+            <span className="text-white font-semibold">{email || firebaseUser?.email}</span>. Open the email, click the link, then tap below to enter Alpha Mate.
+          </p>
 
-          <div className="space-y-2.5">
-            {/* Primary Detected Google Account */}
+          {errorMessage && (
+            <div className="mt-4 p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2 text-left">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          {statusMessage && (
+            <div className="mt-4 p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2 text-left">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
+
+          <div className="mt-5 space-y-2.5">
             <button
-              onClick={() => handleSelectGoogleAccount(defaultGoogleEmail)}
+              onClick={handleCheckEmailVerified}
               disabled={isSubmitting}
-              className="w-full p-3.5 rounded-2xl bg-[#1B1233] hover:bg-[#251A45] border border-[#A855F7]/40 flex items-center justify-between text-left transition cursor-pointer"
+              className="w-full h-12 rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] font-extrabold text-white text-xs sm:text-sm shadow-lg shadow-[#7928CA]/40 hover:opacity-95 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
             >
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-full bg-gradient-to-tr from-purple-500 to-pink-500 flex items-center justify-center font-bold text-white text-sm shadow">
-                  A
-                </div>
-                <div>
-                  <span className="text-xs font-bold text-white block">Alpha Mate Official</span>
-                  <span className="text-[11px] text-[#D8B4FE] font-mono">{defaultGoogleEmail}</span>
-                </div>
-              </div>
-              <CheckCircle2 className="w-5 h-5 text-emerald-400" />
+              <CheckCircle2 className="w-4 h-4" />
+              <span>{isSubmitting ? 'Checking...' : "I've Verified — Enter App"}</span>
             </button>
 
-            {/* Custom Google Account Option */}
-            {!useOtherGoogleAccount ? (
-              <button
-                onClick={() => setUseOtherGoogleAccount(true)}
-                className="w-full py-2.5 px-3 rounded-xl bg-white/5 hover:bg-white/10 text-xs text-zinc-300 hover:text-white transition cursor-pointer text-center"
-              >
-                + Use another Google account
-              </button>
-            ) : (
-              <div className="p-3 rounded-2xl bg-[#140D25] border border-white/10 space-y-2">
-                <input
-                  type="email"
-                  placeholder="Enter your Google email"
-                  value={customGoogleEmail}
-                  onChange={(e) => setCustomGoogleEmail(e.target.value)}
-                  className="w-full h-10 px-3 rounded-xl bg-[#0C0617] border border-zinc-700 text-xs text-white placeholder-zinc-500 focus:outline-none focus:border-[#A855F7]"
-                />
-                <button
-                  onClick={() => {
-                    if (customGoogleEmail.includes('@')) {
-                      handleSelectGoogleAccount(customGoogleEmail);
-                    } else {
-                      setErrorMessage('Please enter a valid Google email.');
-                    }
-                  }}
-                  disabled={isSubmitting}
-                  className="w-full h-9 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-xs font-bold text-white cursor-pointer"
-                >
-                  Confirm & Continue
-                </button>
-              </div>
-            )}
-          </div>
+            <button
+              onClick={handleResendVerification}
+              disabled={isSubmitting}
+              className="w-full h-11 rounded-xl bg-[#17102B] hover:bg-[#21173D] border border-[#A855F7]/30 text-xs font-bold text-[#D8B4FE] cursor-pointer"
+            >
+              Resend Verification Link
+            </button>
 
-          <p className="mt-4 text-[10px] text-center text-zinc-500 leading-relaxed">
-            By continuing, Google will share your email address and basic profile info with Alpha Mate.
-          </p>
+            <button
+              onClick={handleDirectGoogleSignIn}
+              disabled={isSubmitting}
+              className="w-full h-11 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-zinc-200 cursor-pointer"
+            >
+              Or Continue with Google (Gmail) Instead
+            </button>
+          </div>
         </div>
       )}
 
-      {/* STEP 2: PROFILE & DATA COMPLETION */}
+      {/* STEP 2: EMAIL ACCOUNT DETAILS */}
       {step === 'profile_details' && (
         <div className="relative z-10 py-2 max-w-sm w-full mx-auto">
           <div className="text-center mb-3">
             <span className="px-3 py-0.5 rounded-full bg-[#7928CA]/30 border border-[#A855F7]/40 text-[9px] font-bold text-[#E9D5FF] tracking-widest uppercase">
-              STEP 2 OF 2 • COMPLETE PROFILE
+              CREATE ACCOUNT WITH EMAIL
             </span>
             <h2 className="text-xl font-black text-white mt-1">Set Up Your Profile</h2>
             <p className="text-[11px] text-zinc-400">
-              Create your permanent Alpha Mate identity and password
+              Enter your email and password to create your verified Alpha Mate account
             </p>
           </div>
-
-          {/* Verified Google Badge Banner (if authenticated via Google) */}
-          {authProvider === 'google' && (
-            <div className="mb-3.5 p-2.5 rounded-xl bg-[#1B1233]/90 border border-emerald-500/40 flex items-center justify-between shadow-sm">
-              <div className="flex items-center gap-2">
-                <div className="w-6 h-6 rounded-lg bg-white flex items-center justify-center shrink-0">
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24">
-                    <path
-                      fill="#4285F4"
-                      d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.66v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.15z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.33 24 12 24z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.17 0 9.99 0 12s.45 3.83 1.25 5.42l4.03-3.15z"
-                    />
-                    <path
-                      fill="#EA4335"
-                      d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-                    />
-                  </svg>
-                </div>
-                <div className="leading-tight text-left">
-                  <span className="text-[10px] text-emerald-300 font-bold flex items-center gap-1">
-                    Google Email Permanently Linked <Check className="w-3 h-3 text-emerald-400 stroke-[3]" />
-                  </span>
-                  <span className="text-[11px] text-zinc-300 font-mono truncate max-w-[200px] block">
-                    {email}
-                  </span>
-                </div>
-              </div>
-              <span className="text-[9px] bg-emerald-500/20 text-emerald-300 px-2 py-0.5 rounded-full font-bold">
-                Saved
-              </span>
-            </div>
-          )}
 
           {/* Form */}
           <form onSubmit={handleFinalSubmit} className="space-y-2.5">
@@ -566,24 +532,22 @@ export const RegisterScreen: React.FC = () => {
               </div>
             </div>
 
-            {/* Email Address (if manual email registration) */}
-            {authProvider === 'email' && (
-              <div>
-                <label className="text-[10px] uppercase font-bold text-purple-300 tracking-wider block mb-1">
-                  Email Address
-                </label>
-                <div className="relative">
-                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-                  <input
-                    type="email"
-                    placeholder="you@example.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full h-10 pl-9 pr-3 rounded-xl bg-[#140D27] border border-[#A855F7]/30 text-white placeholder-zinc-500 text-xs focus:border-[#C084FC] focus:outline-none"
-                  />
-                </div>
+            {/* Email Address */}
+            <div>
+              <label className="text-[10px] uppercase font-bold text-purple-300 tracking-wider block mb-1">
+                Email Address
+              </label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                <input
+                  type="email"
+                  placeholder="you@gmail.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="w-full h-10 pl-9 pr-3 rounded-xl bg-[#140D27] border border-[#A855F7]/30 text-white placeholder-zinc-500 text-xs focus:border-[#C084FC] focus:outline-none"
+                />
               </div>
-            )}
+            </div>
 
             {/* Date of Birth */}
             <div>
