@@ -108,14 +108,14 @@ export default {
     // Provides relay connectivity for users on restricted mobile carrier networks (Symmetric NAT / CGNAT)
     // =========================================================================
     if (url.pathname === '/turn-credentials' && (method === 'GET' || method === 'POST')) {
-      const turnKeyId = env.CLOUDFLARE_TURN_KEY_ID;
+      const turnKeyId = env.CLOUDFLARE_TURN_TOKEN_ID || env.CLOUDFLARE_TURN_KEY_ID;
       const turnApiToken = env.CLOUDFLARE_TURN_API_TOKEN;
 
-      // 1. If Cloudflare Calls TURN Key credentials are set, request fresh ephemeral credentials
+      // 1. If Cloudflare Realtime TURN credentials are set, request fresh ephemeral credentials
       if (turnKeyId && turnApiToken) {
         try {
           const cfTurnRes = await fetch(
-            `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(turnKeyId)}/credentials`,
+            `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(turnKeyId)}/credentials/generate-ice-servers`,
             {
               method: 'POST',
               headers: {

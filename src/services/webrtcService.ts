@@ -169,32 +169,29 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
+  public static readonly PRODUCTION_API_URL = 'https://api.alphamate.app';
+
   private hasConfiguredRailwayUrl(): boolean {
     const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
-    return Boolean(envUrl && !envUrl.includes('YOUR-RAILWAY-DOMAIN'));
+    return Boolean(
+      envUrl &&
+        !envUrl.includes('YOUR-RAILWAY-DOMAIN') &&
+        /^https?:\/\//i.test(envUrl)
+    );
   }
 
   private getBackendApiBase(): string {
     const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
-    if (envUrl && !envUrl.includes('YOUR-RAILWAY-DOMAIN')) {
+    if (
+      envUrl &&
+      !envUrl.includes('YOUR-RAILWAY-DOMAIN') &&
+      /^https?:\/\//i.test(envUrl) &&
+      !envUrl.includes('://localhost') &&
+      !envUrl.includes('://127.0.0.1')
+    ) {
       return envUrl.replace(/\/$/, '');
     }
-    const isCapacitorNative =
-      typeof window !== 'undefined' &&
-      Boolean((window as any).Capacitor?.isNativePlatform?.());
-    if (
-      !isCapacitorNative &&
-      typeof window !== 'undefined' &&
-      (window.location.protocol === 'http:' || window.location.protocol === 'https:')
-    ) {
-      return '';
-    }
-    const err: any = new Error(
-      'VITE_RAILWAY_API_URL is not configured. Set VITE_RAILWAY_API_URL to your Railway backend URL before building the app or APK.'
-    );
-    err.status = 503;
-    err.code = 'SFU_NOT_CONFIGURED';
-    throw err;
+    return RealtimeSfuStreamingEngine.PRODUCTION_API_URL;
   }
 
   private async getFirebaseIdToken(forceRefresh: boolean = false): Promise<string> {
@@ -494,6 +491,56 @@ class RealtimeSfuStreamingEngine {
       throw new Error('Cloudflare SFU did not return a sessionId.');
     }
     return res.sessionId;
+  }
+
+  private async requestPartyRoomSessionToken(
+    roomId: string,
+    wantPublish: boolean
+  ): Promise<{ sfuSessionId: string; role: string; canPublish: boolean }> {
+    try {
+      const res = await this.sfuFetch<{
+        sfuSessionId: string;
+        role: string;
+        canPublish: boolean;
+        iceServers?: RTCIceServer[];
+        expiresAt?: number;
+      }>(`/api/sfu/party/rooms/${encodeURIComponent(roomId)}/token`, 'POST', {
+        wantPublish,
+      });
+
+      if (Array.isArray(res.iceServers) && res.iceServers.length > 0) {
+        const hasTurn = res.iceServers.some((server) =>
+          (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
+            (u) => u.startsWith('turn:') || u.startsWith('turns:')
+          )
+        );
+        if (hasTurn) {
+          this.cachedTurnServers = res.iceServers;
+          this.turnExpiresAt = (res.expiresAt || Date.now() + 3600_000) - 60_000;
+          this.setIceServers(res.iceServers);
+        }
+      }
+
+      if (res.sfuSessionId) {
+        return {
+          sfuSessionId: res.sfuSessionId,
+          role: res.role || (wantPublish ? 'guest' : 'viewer'),
+          canPublish: Boolean(res.canPublish),
+        };
+      }
+    } catch (err: any) {
+      // If Railway backend hasn't deployed /token route yet (404), fall back cleanly to /api/sfu/sessions
+      if (err?.status !== 404) {
+        throw err;
+      }
+    }
+
+    const sfuSessionId = await this.createSfuSession();
+    return {
+      sfuSessionId,
+      role: wantPublish ? 'speaker' : 'viewer',
+      canPublish: wantPublish,
+    };
   }
 
   private async publishTracksOnSession(
@@ -1335,7 +1382,8 @@ class RealtimeSfuStreamingEngine {
     let newSession: PartySfuRoomSession | null = null;
 
     try {
-      newSfuSessionId = await this.createSfuSession();
+      const tokenInfo = await this.requestPartyRoomSessionToken(roomId, wasPublishing);
+      newSfuSessionId = tokenInfo.sfuSessionId;
       newPc = new RTCPeerConnection(this.getRtcConfiguration());
 
       newSession = {
@@ -2023,7 +2071,8 @@ class RealtimeSfuStreamingEngine {
     await this.ensureSfuBackendConfigured();
     await this.fetchCloudflareTurnCredentials().catch(() => {});
 
-    const sfuSessionId = await this.createSfuSession();
+    const tokenInfo = await this.requestPartyRoomSessionToken(roomId, !listenOnly);
+    const sfuSessionId = tokenInfo.sfuSessionId;
     const pc = new RTCPeerConnection(this.getRtcConfiguration());
 
     const session: PartySfuRoomSession = {

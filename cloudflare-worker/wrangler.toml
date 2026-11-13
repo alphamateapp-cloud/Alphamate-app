@@ -10,4 +10,4 @@ bucket_name = "alpha-mate-reels"
 # Set the Railway backend base URL below. R2 remains a Cloudflare binding.
 
 [vars]
-RAILWAY_API_URL = "https://YOUR-RAILWAY-DOMAIN.up.railway.app"
+RAILWAY_API_URL = "https://api.alphamate.app"

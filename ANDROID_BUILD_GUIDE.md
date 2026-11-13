@@ -54,7 +54,8 @@ cd android
 ```
 📍 **Release APK Output Location:**
 ```
-android/app/build/outputs/apk/release/app-release-unsigned.apk
+android/app/build/outputs/apk/release/app-release.apk          (when release keystore is configured)
+android/app/build/outputs/apk/release/app-release-unsigned.apk (when built without keystore)
 ```
 
 ---
@@ -76,20 +77,24 @@ android/app/build/outputs/bundle/release/app-release.aab
 
 ---
 
-### 4. Open in Android Studio
+### 5. Open in Android Studio
 ```bash
 npm run android:open
 ```
 *Opens the `/android` folder in Android Studio for debugging in the Android Emulator or running on a connected USB device.*
 
 ---
- 
- ### 5. Automated 1-Click Cloud Build (GitHub Actions)
- If your code is hosted on GitHub, an automated workflow is included in `.github/workflows/build-android.yml`:
- - Go to **Actions** tab on your GitHub repository.
- - Select **Build Android APK and AAB**.
- - Click **Run workflow**.
- - It automatically runs on Node.js 22 LTS (required by Capacitor 8 CLI) and provides `alphamate-debug-apk`, `alphamate-release-apk`, and `alphamate-release-aab` as downloadable artifacts!
+
+### 6. Automated 1-Click Cloud Build & Signed Release (GitHub Actions)
+If your code is hosted on GitHub, an automated workflow is included in `.github/workflows/build-android.yml`:
+- Go to **Settings > Secrets and variables > Actions** on your GitHub repository and confirm these secrets exist:
+  - `ANDROID_KEYSTORE_BASE64` (or `KEYSTORE_BASE64`) — base64-encoded `.jks` keystore file
+  - `ANDROID_KEYSTORE_PASSWORD` (or `KEYSTORE_PASSWORD`) — keystore store password
+  - `ANDROID_KEY_ALIAS` (or `KEY_ALIAS`, defaults to `alphamate`) — key alias
+  - `ANDROID_KEY_PASSWORD` (or `KEY_PASSWORD`, defaults to keystore password) — key password
+  - `VITE_RAILWAY_API_URL` (Repository Secret or Variable) — your deployed Railway backend URL (`https://...up.railway.app`) for Live SFU & TURN
+- Go to **Actions** tab -> **Build Android APK and AAB** -> **Run workflow**.
+- When keystore secrets are present, `build-android.yml` builds and verifies **signed `app-release.apk`** (`alphamate-release-apk`) and **signed `app-release.aab`** (`alphamate-release-aab`).
 
 ---
 
@@ -101,7 +106,11 @@ To sign your release `.aab` or `.apk` for Google Play:
    ```bash
    keytool -genkey -v -keystore release-key.jks -keyalg RSA -keysize 2048 -validity 10000 -alias alphamate
    ```
-2. **In Android Studio:**
+2. **Encode Keystore to Base64 for GitHub Secrets:**
+   ```bash
+   base64 -w 0 release-key.jks
+   ```
+3. **In Android Studio (Local Alternative):**
    - Go to **Build** > **Generate Signed Bundle / APK...**
    - Select **Android App Bundle (.aab)**
    - Select your `release-key.jks` and enter your passwords

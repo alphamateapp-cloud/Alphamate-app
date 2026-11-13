@@ -28,6 +28,17 @@ jobs:
           npm ci || npm install --legacy-peer-deps
 
       - name: Build Web Application
+        env:
+          VITE_RAILWAY_API_URL: ${{ secrets.VITE_RAILWAY_API_URL || vars.VITE_RAILWAY_API_URL || secrets.RAILWAY_API_URL || vars.RAILWAY_API_URL || 'https://api.alphamate.app' }}
+          VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY || vars.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN || vars.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID || vars.VITE_FIREBASE_PROJECT_ID }}
+          VITE_FIREBASE_STORAGE_BUCKET: ${{ secrets.VITE_FIREBASE_STORAGE_BUCKET || vars.VITE_FIREBASE_STORAGE_BUCKET }}
+          VITE_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID || vars.VITE_FIREBASE_MESSAGING_SENDER_ID }}
+          VITE_FIREBASE_APP_ID: ${{ secrets.VITE_FIREBASE_APP_ID || vars.VITE_FIREBASE_APP_ID }}
+          VITE_FIREBASE_FIRESTORE_DATABASE_ID: ${{ secrets.VITE_FIREBASE_FIRESTORE_DATABASE_ID || vars.VITE_FIREBASE_FIRESTORE_DATABASE_ID }}
+          VITE_CLOUDFLARE_WORKER_URL: ${{ secrets.VITE_CLOUDFLARE_WORKER_URL || vars.VITE_CLOUDFLARE_WORKER_URL }}
+          VITE_R2_MEDIA_DOMAIN: ${{ secrets.VITE_R2_MEDIA_DOMAIN || vars.VITE_R2_MEDIA_DOMAIN }}
         run: npm run build
 
       - name: Set up Java JDK 21
@@ -49,6 +60,47 @@ jobs:
       - name: Grant Execute Permission for Gradlew
         run: chmod +x android/gradlew
 
+      - name: Decode Android Signing Keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 || secrets.RELEASE_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE || secrets.KEYSTORE_FILE || secrets.SIGNING_KEY_BASE64 || secrets.KEYSTORE }}
+          KS_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || secrets.STORE_PASSWORD || secrets.KEY_STORE_PASSWORD }}
+          K_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || secrets.KEY_ALIAS || secrets.KEYSTORE_ALIAS || secrets.ALIAS }}
+          K_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$KS_PASSWORD" ]; then
+            printf '%s' "$KEYSTORE_B64" | tr -d '\n\r ' | base64 --decode > android/app/release-key.jks
+            if [ ! -s android/app/release-key.jks ]; then
+              echo "::error::Decoded android/app/release-key.jks is empty. Verify your base64 keystore secret."
+              exit 1
+            fi
+            if [ -n "$K_ALIAS" ]; then
+              RESOLVED_ALIAS="$K_ALIAS"
+            else
+              DETECTED_ALIAS=$(keytool -list -keystore android/app/release-key.jks -storepass "$KS_PASSWORD" 2>/dev/null | grep 'PrivateKeyEntry' | head -n1 | cut -d',' -f1 | xargs || true)
+              RESOLVED_ALIAS="${DETECTED_ALIAS:-alphamate}"
+            fi
+            RESOLVED_KEY_PW="${K_PASSWORD:-$KS_PASSWORD}"
+            keytool -list -keystore android/app/release-key.jks -storepass "$KS_PASSWORD" -alias "$RESOLVED_ALIAS" >/dev/null
+            echo "ANDROID_KEYSTORE_PATH=release-key.jks" >> $GITHUB_ENV
+            echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASSWORD" >> $GITHUB_ENV
+            echo "ANDROID_KEY_ALIAS=$RESOLVED_ALIAS" >> $GITHUB_ENV
+            echo "ANDROID_KEY_PASSWORD=$RESOLVED_KEY_PW" >> $GITHUB_ENV
+            echo "SIGNED_RELEASE=true" >> $GITHUB_ENV
+            echo "Release signing configured cleanly with alias '$RESOLVED_ALIAS'."
+          elif [ -f android/release-key.jks ] && [ -n "$KS_PASSWORD" ]; then
+            cp android/release-key.jks android/app/release-key.jks
+            RESOLVED_ALIAS="${K_ALIAS:-alphamate}"
+            RESOLVED_KEY_PW="${K_PASSWORD:-$KS_PASSWORD}"
+            echo "ANDROID_KEYSTORE_PATH=release-key.jks" >> $GITHUB_ENV
+            echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASSWORD" >> $GITHUB_ENV
+            echo "ANDROID_KEY_ALIAS=$RESOLVED_ALIAS" >> $GITHUB_ENV
+            echo "ANDROID_KEY_PASSWORD=$RESOLVED_KEY_PW" >> $GITHUB_ENV
+            echo "SIGNED_RELEASE=true" >> $GITHUB_ENV
+          else
+            echo "SIGNED_RELEASE=false" >> $GITHUB_ENV
+            echo "::warning::Keystore secrets not found (expected ANDROID_KEYSTORE_BASE64 / KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD / KEYSTORE_PASSWORD). Release build will be unsigned."
+          fi
+
       - name: Build Debug APK
         run: |
           cd android
@@ -65,12 +117,27 @@ jobs:
           cd android
           ./gradlew --no-daemon bundleRelease --stacktrace
 
-      - name: Verify Generated Binaries
+      - name: Verify Generated & Signed Binaries
         run: |
           echo "=== Android Build Outputs Inspection ==="
           ls -la android/app/build/outputs/apk/debug/ || true
           ls -la android/app/build/outputs/apk/release/ || true
           ls -la android/app/build/outputs/bundle/release/ || true
+          if [ "${SIGNED_RELEASE}" = "true" ]; then
+            if [ ! -f android/app/build/outputs/apk/release/app-release.apk ]; then
+              echo "::error::Expected signed android/app/build/outputs/apk/release/app-release.apk was not generated."
+              exit 1
+            fi
+            APKSIGNER_BIN=$(ls -d ${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)
+            if [ -n "$APKSIGNER_BIN" ]; then
+              "$APKSIGNER_BIN" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
+            fi
+            jarsigner -verify android/app/build/outputs/bundle/release/app-release.aab
+          fi
+
+      - name: Cleanup Temporary Keystore
+        if: always()
+        run: rm -f android/app/release-key.jks
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4

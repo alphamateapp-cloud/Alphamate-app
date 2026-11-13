@@ -41,12 +41,16 @@ export function createApiApp() {
     firebaseFallback.firestoreDatabaseId ||
     'ai-studio-alphamatelivepar-88a3637b-56a3-47f2-a3ab-b67bf1702cff';
 
-  const CLOUDFLARE_TURN_KEY_ID = process.env.CLOUDFLARE_TURN_KEY_ID;
-  const CLOUDFLARE_TURN_API_TOKEN = process.env.CLOUDFLARE_TURN_API_TOKEN;
+  const CLOUDFLARE_TURN_TOKEN_ID = (
+    process.env.CLOUDFLARE_TURN_TOKEN_ID ||
+    process.env.CLOUDFLARE_TURN_KEY_ID ||
+    ''
+  ).trim();
+  const CLOUDFLARE_TURN_API_TOKEN = (process.env.CLOUDFLARE_TURN_API_TOKEN || '').trim();
   const TURN_CREDENTIAL_TTL = Math.min(Math.max(Number(process.env.TURN_CREDENTIAL_TTL || 3600), 300), 86400);
 
-  const REALTIME_SFU_APP_ID = process.env.REALTIME_SFU_APP_ID;
-  const REALTIME_SFU_BEARER_TOKEN = process.env.REALTIME_SFU_BEARER_TOKEN;
+  const REALTIME_SFU_APP_ID = (process.env.REALTIME_SFU_APP_ID || '').trim();
+  const REALTIME_SFU_BEARER_TOKEN = (process.env.REALTIME_SFU_BEARER_TOKEN || '').trim();
   const CLOUDFLARE_SFU_BASE = 'https://rtc.live.cloudflare.com/v1';
 
   const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*')
@@ -67,16 +71,185 @@ export function createApiApp() {
     next();
   });
 
-  app.get('/api/health', (_req, res) =>
-    res.json({
+  async function generateTurnIceServers(ttlSeconds = TURN_CREDENTIAL_TTL) {
+    if (!CLOUDFLARE_TURN_TOKEN_ID || !CLOUDFLARE_TURN_API_TOKEN) {
+      const err = new Error(
+        'TURN backend is not configured. Set CLOUDFLARE_TURN_TOKEN_ID and CLOUDFLARE_TURN_API_TOKEN on the backend server.'
+      );
+      err.statusCode = 503;
+      err.code = 'TURN_NOT_CONFIGURED';
+      throw err;
+    }
+
+    const ttl = Math.min(Math.max(Number(ttlSeconds) || TURN_CREDENTIAL_TTL, 300), 86400);
+    const turnResponse = await fetch(
+      `${CLOUDFLARE_SFU_BASE}/turn/keys/${encodeURIComponent(CLOUDFLARE_TURN_TOKEN_ID)}/credentials/generate-ice-servers`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${CLOUDFLARE_TURN_API_TOKEN}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify({ ttl }),
+      }
+    );
+
+    const turnData = await turnResponse.json().catch(() => ({}));
+    const rawServers = Array.isArray(turnData?.iceServers)
+      ? turnData.iceServers
+      : turnData?.iceServers
+      ? [turnData.iceServers]
+      : [];
+
+    const hasValidTurnCreds = rawServers.some((server) => {
+      const urls = Array.isArray(server?.urls) ? server.urls : server?.urls ? [server.urls] : [];
+      return (
+        urls.some((u) => typeof u === 'string' && (u.startsWith('turn:') || u.startsWith('turns:'))) &&
+        typeof server?.username === 'string' &&
+        server.username.length > 0 &&
+        typeof server?.credential === 'string' &&
+        server.credential.length > 0
+      );
+    });
+
+    if (!turnResponse.ok || !hasValidTurnCreds) {
+      const err = new Error(
+        turnData?.errorDescription ||
+          turnData?.error ||
+          `Cloudflare TURN credential generation failed (${turnResponse.status}).`
+      );
+      err.statusCode = turnResponse.status === 401 || turnResponse.status === 403 ? 502 : 502;
+      throw err;
+    }
+
+    return {
+      iceServers: rawServers,
+      ttl,
+      expiresAt: Date.now() + ttl * 1000,
+    };
+  }
+
+  let healthCache = null;
+  let healthCacheExpiresAt = 0;
+
+  async function validateSystemHealth(forceFresh = false) {
+    const now = Date.now();
+    if (!forceFresh && healthCache && now < healthCacheExpiresAt) {
+      return healthCache;
+    }
+
+    const firebaseEnvPresent = Boolean(FIREBASE_API_KEY && FIREBASE_PROJECT_ID && FIREBASE_DATABASE_ID);
+    const sfuEnvPresent = Boolean(REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN);
+    const turnEnvPresent = Boolean(CLOUDFLARE_TURN_TOKEN_ID && CLOUDFLARE_TURN_API_TOKEN);
+
+    const [firebaseCheck, sfuCheck, turnCheck] = await Promise.all([
+      (async () => {
+        if (!firebaseEnvPresent) {
+          return { configured: false, valid: false, reason: 'Firebase API key or project config missing' };
+        }
+        try {
+          const resp = await fetch(
+            `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ idToken: 'health-probe' }),
+            }
+          );
+          const payload = await resp.json().catch(() => ({}));
+          const msg = payload?.error?.message || '';
+          const keyRejected = msg.includes('API_KEY_INVALID') || resp.status === 403;
+          return {
+            configured: !keyRejected,
+            valid: !keyRejected,
+            projectId: FIREBASE_PROJECT_ID,
+            ...(keyRejected ? { reason: 'Firebase API key rejected by Identity Toolkit' } : {}),
+          };
+        } catch {
+          return { configured: false, valid: false, reason: 'Identity Toolkit unreachable' };
+        }
+      })(),
+      (async () => {
+        if (!sfuEnvPresent) {
+          return { configured: false, valid: false, reason: 'REALTIME_SFU_APP_ID or REALTIME_SFU_BEARER_TOKEN missing' };
+        }
+        try {
+          const resp = await fetch(
+            `${CLOUDFLARE_SFU_BASE}/apps/${encodeURIComponent(REALTIME_SFU_APP_ID)}/sessions/health-probe`,
+            {
+              method: 'GET',
+              headers: {
+                Authorization: `Bearer ${REALTIME_SFU_BEARER_TOKEN}`,
+                Accept: 'application/json',
+              },
+            }
+          );
+          // 401/403 means invalid App ID / Bearer token; 404/400/200 means credentials authenticated against Cloudflare SFU
+          const authOk = resp.status !== 401 && resp.status !== 403 && resp.status < 500;
+          return {
+            configured: authOk,
+            valid: authOk,
+            ...(!authOk ? { reason: `Cloudflare SFU auth check returned HTTP ${resp.status}` } : {}),
+          };
+        } catch {
+          return { configured: false, valid: false, reason: 'Cloudflare SFU API unreachable' };
+        }
+      })(),
+      (async () => {
+        if (!turnEnvPresent) {
+          return { configured: false, valid: false, reason: 'CLOUDFLARE_TURN_TOKEN_ID or CLOUDFLARE_TURN_API_TOKEN missing' };
+        }
+        try {
+          await generateTurnIceServers(300);
+          return { configured: true, valid: true };
+        } catch (err) {
+          return {
+            configured: false,
+            valid: false,
+            reason: err instanceof Error ? err.message : 'TURN credential generation failed',
+          };
+        }
+      })(),
+    ]);
+
+    const result = {
       success: true,
       service: 'alpha-mate-backend',
       status: 'online',
-      firebaseConfigured: Boolean(FIREBASE_API_KEY),
-      turnConfigured: Boolean(FIREBASE_API_KEY && CLOUDFLARE_TURN_KEY_ID && CLOUDFLARE_TURN_API_TOKEN),
-      sfuConfigured: Boolean(FIREBASE_API_KEY && REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN),
-    })
-  );
+      firebaseConfigured: firebaseCheck.valid,
+      turnConfigured: Boolean(firebaseCheck.valid && turnCheck.valid),
+      sfuConfigured: Boolean(firebaseCheck.valid && sfuCheck.valid),
+      checks: {
+        firebase: firebaseCheck,
+        sfu: sfuCheck,
+        turn: turnCheck,
+      },
+      checkedAt: new Date(now).toISOString(),
+    };
+
+    healthCache = result;
+    healthCacheExpiresAt = now + 60_000;
+    return result;
+  }
+
+  app.get('/api/health', async (req, res) => {
+    try {
+      const forceFresh = req.query?.fresh === '1' || req.query?.fresh === 'true';
+      const report = await validateSystemHealth(forceFresh);
+      return res.json(report);
+    } catch (error) {
+      console.error('[Health] Probe failed:', error);
+      return res.status(500).json({
+        success: false,
+        service: 'alpha-mate-backend',
+        status: 'degraded',
+        firebaseConfigured: false,
+        turnConfigured: false,
+        sfuConfigured: false,
+      });
+    }
+  });
 
   async function verifyFirebaseIdToken(idToken) {
     if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY is not configured on the backend server.');
@@ -292,37 +465,34 @@ export function createApiApp() {
 
   app.get('/api/webrtc/turn-credentials', requireFirebaseAuth, async (_req, res) => {
     try {
-      if (!CLOUDFLARE_TURN_KEY_ID || !CLOUDFLARE_TURN_API_TOKEN) {
-        return res.status(503).json({
-          success: false,
-          error: 'TURN backend is not configured. Set CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN on the backend server.',
-        });
-      }
+      const generated = await generateTurnIceServers(TURN_CREDENTIAL_TTL);
+      const hasStun = generated.iceServers.some((s) => {
+        const urls = Array.isArray(s?.urls) ? s.urls : s?.urls ? [s.urls] : [];
+        return urls.some((u) => typeof u === 'string' && u.startsWith('stun:'));
+      });
+      const iceServers = hasStun
+        ? generated.iceServers
+        : [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }, ...generated.iceServers];
 
-      const turnResponse = await fetch(
-        `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(CLOUDFLARE_TURN_KEY_ID)}/credentials`,
-        {
-          method: 'POST',
-          headers: { Authorization: `Bearer ${CLOUDFLARE_TURN_API_TOKEN}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL }),
-        }
-      );
-      const turnData = await turnResponse.json().catch(() => ({}));
-      if (!turnResponse.ok || !turnData.iceServers) {
-        console.error('[TURN] Cloudflare Calls credential request failed:', turnData);
-        return res.status(502).json({ success: false, error: 'Cloudflare TURN credential generation failed.' });
-      }
-      const dynamicServers = Array.isArray(turnData.iceServers) ? turnData.iceServers : [turnData.iceServers];
       return res.json({
         success: true,
-        source: 'railway-cloudflare-calls',
-        iceServers: [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] }, ...dynamicServers],
-        ttl: TURN_CREDENTIAL_TTL,
-        expiresAt: Date.now() + TURN_CREDENTIAL_TTL * 1000,
+        source: 'railway-cloudflare-realtime-turn',
+        iceServers,
+        ttl: generated.ttl,
+        expiresAt: generated.expiresAt,
       });
     } catch (error) {
-      console.error('[TURN] Credential endpoint error:', error);
-      return res.status(500).json({ success: false, error: 'Unable to issue TURN credentials.' });
+      const status = error.statusCode || 500;
+      if (status === 503) {
+        console.warn('[TURN] Credential endpoint unavailable (503):', error.message);
+      } else {
+        console.error('[TURN] Credential endpoint error:', error.message);
+      }
+      return res.status(status).json({
+        success: false,
+        code: error.code || undefined,
+        error: error.message || 'Unable to issue TURN credentials.',
+      });
     }
   });
 
@@ -336,11 +506,21 @@ export function createApiApp() {
           sdp: req.body.sessionDescription.sdp,
         };
       }
+      const queryParams = new URLSearchParams();
       if (typeof req.body?.thirdparty === 'boolean') {
-        payload.thirdparty = req.body.thirdparty;
+        queryParams.set('thirdparty', String(req.body.thirdparty));
       }
+      if (typeof req.body?.correlationId === 'string' && req.body.correlationId.trim()) {
+        queryParams.set('correlationId', req.body.correlationId.trim().slice(0, 128));
+      }
+      const qs = queryParams.toString();
+      const sfuPath = qs ? `/sessions/new?${qs}` : '/sessions/new';
 
-      const sfuData = await callCloudflareSfu('/sessions/new', 'POST', payload);
+      const sfuData = await callCloudflareSfu(
+        sfuPath,
+        'POST',
+        Object.keys(payload).length > 0 ? payload : undefined
+      );
       if (!sfuData?.sessionId) {
         return res.status(502).json({ success: false, error: 'Cloudflare SFU did not return a sessionId.' });
       }
@@ -572,6 +752,33 @@ export function createApiApp() {
     }
   });
 
+  async function closeSfuSessionById(sessionId) {
+    let sessionState;
+    try {
+      sessionState = await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}`, 'GET');
+    } catch (err) {
+      if (err.statusCode === 404) {
+        return 0;
+      }
+      throw err;
+    }
+
+    const activeMids = (Array.isArray(sessionState.tracks) ? sessionState.tracks : [])
+      .map((t) => t?.mid)
+      .filter((mid) => typeof mid === 'string' && mid.trim());
+
+    if (activeMids.length === 0) {
+      return 0;
+    }
+
+    await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}/tracks/close`, 'PUT', {
+      tracks: activeMids.map((mid) => ({ mid })),
+      force: true,
+    });
+
+    return activeMids.length;
+  }
+
   // 6. Force-close all tracks for an SFU session (cleanup on stream end / page unload)
   app.delete('/api/sfu/sessions/:sessionId', requireFirebaseAuth, async (req, res) => {
     try {
@@ -579,33 +786,11 @@ export function createApiApp() {
       if (!sessionId) {
         return res.status(400).json({ success: false, error: 'sessionId is required.' });
       }
-      let sessionState;
-      try {
-        sessionState = await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}`, 'GET');
-      } catch (err) {
-        if (err.statusCode === 404) {
-          return res.json({ success: true, sessionId, closedCount: 0 });
-        }
-        throw err;
-      }
-
-      const activeMids = (Array.isArray(sessionState.tracks) ? sessionState.tracks : [])
-        .map((t) => t?.mid)
-        .filter((mid) => typeof mid === 'string' && mid.trim());
-
-      if (activeMids.length === 0) {
-        return res.json({ success: true, sessionId, closedCount: 0 });
-      }
-
-      await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}/tracks/close`, 'PUT', {
-        tracks: activeMids.map((mid) => ({ mid })),
-        force: true,
-      });
-
+      const closedCount = await closeSfuSessionById(sessionId);
       return res.json({
         success: true,
         sessionId,
-        closedCount: activeMids.length,
+        closedCount,
       });
     } catch (error) {
       const status = error.statusCode || 500;
@@ -618,6 +803,147 @@ export function createApiApp() {
         success: false,
         code: error.code || undefined,
         error: error.message || 'Failed to close SFU session.',
+      });
+    }
+  });
+
+  // 7. Party Room SFU Provisioning & Host Session Token
+  app.post('/api/sfu/party/rooms', requireFirebaseAuth, async (req, res) => {
+    try {
+      const uid = req.firebaseUser.uid;
+      const roomId = typeof req.body?.roomId === 'string' && isValidResourceId(req.body.roomId)
+        ? req.body.roomId
+        : `party_${uid.slice(0, 8)}_${Date.now().toString(36)}`;
+      const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 120) : 'Alpha Mate Party Room';
+
+      const [sfuSession, turnCreds] = await Promise.all([
+        callCloudflareSfu('/sessions/new', 'POST'),
+        generateTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
+      ]);
+
+      if (!sfuSession?.sessionId) {
+        return res.status(502).json({ success: false, error: 'Cloudflare SFU did not return a sessionId.' });
+      }
+
+      return res.json({
+        success: true,
+        roomId,
+        title,
+        userId: uid,
+        role: 'host',
+        canPublish: true,
+        canSubscribe: true,
+        sfuSessionId: sfuSession.sessionId,
+        iceServers: turnCreds?.iceServers || [
+          { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] },
+        ],
+        turnConfigured: Boolean(turnCreds),
+        expiresAt: turnCreds?.expiresAt || Date.now() + 3600_000,
+      });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      if (status === 503) {
+        console.warn('[Party SFU] Create room session unavailable (503):', error.message);
+      } else {
+        console.error('[Party SFU] Create room failed:', error.message);
+      }
+      return res.status(status).json({
+        success: false,
+        code: error.code || undefined,
+        error: error.message || 'Unable to provision Party Room SFU session.',
+      });
+    }
+  });
+
+  // 8. Party Room Role-Aware SFU Session & Ephemeral ICE Token (Host / Moderator / Guest / Viewer)
+  app.post('/api/sfu/party/rooms/:roomId/token', requireFirebaseAuth, async (req, res) => {
+    try {
+      const { roomId } = req.params;
+      if (!isValidResourceId(roomId)) {
+        return res.status(400).json({ success: false, error: 'Valid roomId is required.' });
+      }
+
+      const uid = req.firebaseUser.uid;
+      const idToken = req.firebaseIdToken;
+      const roomDoc = await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken);
+
+      if (!roomDoc || roomDoc.isActive === false) {
+        return res.status(404).json({ success: false, error: 'Party room is closed or does not exist.' });
+      }
+
+      const blocked = Array.isArray(roomDoc.blockedUserIds) ? roomDoc.blockedUserIds : [];
+      const kicked = Array.isArray(roomDoc.kickedUserIds) ? roomDoc.kickedUserIds : [];
+      if (blocked.includes(uid) || kicked.includes(uid)) {
+        return res.status(403).json({ success: false, error: 'You are restricted from joining this party room.' });
+      }
+
+      const hostId = roomDoc.host?.id || '';
+      const moderators = Array.isArray(roomDoc.moderatorIds) ? roomDoc.moderatorIds : [];
+      const seats = Array.isArray(roomDoc.seats) ? roomDoc.seats : [];
+      const isHostUser = hostId === uid;
+      const isModUser = moderators.includes(uid);
+      const isSeatedSpeaker = seats.some((s) => s?.user?.id === uid);
+
+      let role = 'viewer';
+      if (isHostUser) role = 'host';
+      else if (isModUser) role = 'moderator';
+      else if (isSeatedSpeaker) role = 'guest';
+
+      const canPublish = isHostUser || isSeatedSpeaker || Boolean(req.body?.wantPublish && isModUser);
+
+      const [sfuSession, turnCreds] = await Promise.all([
+        callCloudflareSfu('/sessions/new', 'POST'),
+        generateTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
+      ]);
+
+      if (!sfuSession?.sessionId) {
+        return res.status(502).json({ success: false, error: 'Cloudflare SFU did not return a sessionId.' });
+      }
+
+      return res.json({
+        success: true,
+        roomId,
+        userId: uid,
+        role,
+        canPublish,
+        canSubscribe: true,
+        sfuSessionId: sfuSession.sessionId,
+        iceServers: turnCreds?.iceServers || [
+          { urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.l.google.com:19302'] },
+        ],
+        turnConfigured: Boolean(turnCreds),
+        expiresAt: turnCreds?.expiresAt || Date.now() + 3600_000,
+      });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      if (status === 503) {
+        console.warn('[Party SFU] Join token unavailable (503):', error.message);
+      } else {
+        console.error('[Party SFU] Join token failed:', error.message);
+      }
+      return res.status(status).json({
+        success: false,
+        code: error.code || undefined,
+        error: error.message || 'Unable to generate Party Room SFU token.',
+      });
+    }
+  });
+
+  // 9. Clean Party Room Leave & SFU Session Cleanup
+  app.post('/api/sfu/party/rooms/:roomId/leave', requireFirebaseAuth, async (req, res) => {
+    try {
+      const { roomId } = req.params;
+      const sessionId = typeof req.body?.sfuSessionId === 'string' ? req.body.sfuSessionId.trim() : '';
+      let closedCount = 0;
+      if (sessionId) {
+        closedCount = await closeSfuSessionById(sessionId);
+      }
+      return res.json({ success: true, roomId, closedCount });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      return res.status(status).json({
+        success: false,
+        error: error.message || 'Unable to clean up Party Room SFU session.',
       });
     }
   });

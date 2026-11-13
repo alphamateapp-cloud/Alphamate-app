@@ -20,10 +20,28 @@ android {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
+    signingConfigs {
+        release {
+            def keystorePath = System.getenv("ANDROID_KEYSTORE_PATH") ?: "release-key.jks"
+            def resolvedStoreFile = file(keystorePath).exists() ? file(keystorePath) : rootProject.file(keystorePath)
+            def ksPassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+            def kAlias = System.getenv("ANDROID_KEY_ALIAS") ?: "alphamate"
+            def kPassword = System.getenv("ANDROID_KEY_PASSWORD") ?: ksPassword
+            if (resolvedStoreFile.exists() && ksPassword) {
+                storeFile resolvedStoreFile
+                storePassword ksPassword
+                keyAlias kAlias
+                keyPassword kPassword
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (signingConfigs.release.storeFile != null && signingConfigs.release.storeFile.exists()) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }
