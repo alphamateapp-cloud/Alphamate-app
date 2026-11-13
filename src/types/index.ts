@@ -69,6 +69,12 @@ export interface User {
   activeHonorTitle?: string;
 }
 
+export interface SfuPublishedTrack {
+  trackName: string;
+  mid?: string;
+  kind: 'audio' | 'video';
+}
+
 export interface LiveStream {
   id: string;
   title: string;
@@ -79,6 +85,15 @@ export interface LiveStream {
   tag: string;
   isPK: boolean;
   durationMinutes: number;
+  isActive?: boolean;
+  sfuSessionId?: string;
+  publishedTracks?: SfuPublishedTrack[];
+  isVideoOn?: boolean;
+  isMicOn?: boolean;
+  lastSeenAtMs?: number;
+  lastSeenAt?: any;
+  createdAt?: string;
+  updatedAt?: string;
   videoUrl?: string;
   pkOpponent?: User;
   moderatorIds?: string[];
@@ -96,6 +111,7 @@ export interface PartySeat {
   user: User | null;
   isMuted: boolean;
   isHostMuted?: boolean;
+  isLocked?: boolean;
   isSpeaking: boolean;
   isHost?: boolean;
   isCoHost?: boolean;
@@ -113,6 +129,10 @@ export interface PartyRoom {
   backgroundTheme: string;
   nowPlaying?: string;
   level?: 1 | 2 | 3;
+  isActive?: boolean;
+  lastSeenAtMs?: number;
+  createdAt?: string;
+  updatedAt?: string;
   totalGiftCoins?: number;
   coverImageUrl?: string;
   country?: string;

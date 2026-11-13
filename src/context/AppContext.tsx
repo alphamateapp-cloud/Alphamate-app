@@ -57,6 +57,7 @@ import {
   toggleReelLike,
   Reel,
 } from '../services/reelsService';
+import { p2pStreamingEngine } from '../services/webrtcService';
 
 interface AppContextType {
   // Navigation & Screen state
@@ -111,6 +112,7 @@ interface AppContextType {
   liveStreams: LiveStream[];
   activeStream: LiveStream | null;
   openLiveStream: (stream: LiveStream) => void;
+  publishLiveStream: (stream: LiveStream) => Promise<void>;
   closeLiveStream: () => void;
   sendLiveGift: (gift: Gift, recipientHostId?: string) => void;
   activeGiftBanner: { gift: Gift; sender: string; recipient: string } | null;
@@ -129,7 +131,7 @@ interface AppContextType {
   closePartyRoom: (shouldDelete?: boolean) => void;
   createPartyRoom: (room: PartyRoom) => void;
   updateActivePartyRoomLevel: (level: 1 | 2 | 3) => void;
-  toggleSeat: (seatIndex: number) => Promise<void>;
+  toggleSeat: (seatIndex: number) => Promise<{ success: boolean; reason?: string }>;
   userSeatIndex: number | null;
   setUserSeatIndex: React.Dispatch<React.SetStateAction<number | null>>;
   isMicMuted: boolean;
@@ -451,7 +453,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  // Sync auth state and real-time Firestore listeners
+  // Sync Firebase auth state
   useEffect(() => {
     const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
       setFirebaseUser(fbUser);
@@ -487,29 +489,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     });
 
+    return () => {
+      unsubscribeAuth();
+    };
+  }, []);
+
+  // Real-time Firestore listeners (rebinds automatically on auth transitions)
+  useEffect(() => {
     const unsubscribeRooms = subscribeToPartyRooms((remoteRooms) => {
-      if (remoteRooms && remoteRooms.length > 0) {
-        setPartyRooms((prev) => {
-          const remoteIds = new Set(remoteRooms.map((r: any) => r.id));
-          const uniqueExisting = prev.filter((r) => !remoteIds.has(r.id));
-          return [...remoteRooms, ...uniqueExisting];
-        });
-        // Keep activePartyRoom synchronized in real-time
-        setActivePartyRoom((currentActive) => {
-          if (!currentActive) return null;
-          const fresh = remoteRooms.find((r: any) => r.id === currentActive.id);
-          return fresh ? { ...currentActive, ...fresh } : currentActive;
-        });
-      }
+      const nextRooms = Array.isArray(remoteRooms) ? remoteRooms : [];
+      setPartyRooms(nextRooms);
+      setActivePartyRoom((currentActive) => {
+        if (!currentActive) return null;
+        const fresh = nextRooms.find((r: any) => r.id === currentActive.id);
+        return fresh ? { ...currentActive, ...fresh } : currentActive;
+      });
     });
 
     const unsubscribeLiveStreams = subscribeToLiveStreams((remoteStreams) => {
       if (remoteStreams && remoteStreams.length > 0) {
-        setLiveStreams((prev) => {
-          const remoteIds = new Set(remoteStreams.map((s: any) => s.id));
-          const nonDuplicatedMocks = MOCK_LIVE_STREAMS.filter((s) => !remoteIds.has(s.id));
-          return [...remoteStreams, ...nonDuplicatedMocks];
-        });
+        setLiveStreams(remoteStreams);
       } else {
         setLiveStreams(MOCK_LIVE_STREAMS);
       }
@@ -563,12 +562,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     return () => {
-      unsubscribeAuth();
       unsubscribeRooms();
       unsubscribeLiveStreams();
       unsubscribeReels();
     };
-  }, []);
+  }, [firebaseUser?.uid]);
 
   // Live Streams & PK
   const [liveStreams, setLiveStreams] = useState<LiveStream[]>(MOCK_LIVE_STREAMS);
@@ -2158,14 +2156,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const openLiveStream = (stream: LiveStream) => {
-    // If current user is host or starting stream, sync to Firestore collection so all devices see the card
-    if (stream.host.id === currentUser.id || stream.id.startsWith('live_my_')) {
-      syncLiveStreamToFirestore(stream).catch((e) => console.warn('Failed to sync live stream:', e));
-      setLiveStreams((prev) => {
-        const withoutCurrent = prev.filter((s) => s.id !== stream.id);
-        return [stream, ...withoutCurrent];
-      });
-    }
     if (stream.isPK) {
       openPKBattle(stream);
     } else {
@@ -2174,10 +2164,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const publishLiveStream = async (publishedStream: LiveStream) => {
+    await syncLiveStreamToFirestore(publishedStream);
+    setActiveStream((prev) => (prev && prev.id === publishedStream.id ? publishedStream : prev));
+    setLiveStreams((prev) => {
+      const withoutCurrent = prev.filter((s) => s.id !== publishedStream.id);
+      return [publishedStream, ...withoutCurrent];
+    });
+  };
+
   const closeLiveStream = () => {
-    if (activeStream && (activeStream.host.id === currentUser.id || activeStream.id.startsWith('live_my_'))) {
-      deleteLiveStreamFromFirestore(activeStream.id).catch(() => {});
-      setLiveStreams((prev) => prev.filter((s) => s.id !== activeStream.id));
+    if (activeStream) {
+      const isOwnerHost =
+        activeStream.host.id === currentUser.id ||
+        (auth.currentUser?.uid && activeStream.host.id === auth.currentUser.uid) ||
+        activeStream.id.startsWith('live_my_');
+      if (isOwnerHost) {
+        p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
+        deleteLiveStreamFromFirestore(activeStream.id).catch(() => {});
+        setLiveStreams((prev) => prev.filter((s) => s.id !== activeStream.id));
+      } else {
+        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+      }
     }
     setActiveStream(null);
     navigateBack();
@@ -2236,15 +2244,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const openPartyRoom = (room: PartyRoom) => {
+    const uid = auth.currentUser?.uid || currentUser.id;
     setActivePartyRoom(room);
-    setUserSeatIndex(null);
+    const mySeat = Array.isArray(room.seats)
+      ? room.seats.find((s: any) => s.user?.id === uid)
+      : null;
+    setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
     setCurrentScreen('party_room');
   };
 
   const closePartyRoom = (shouldDelete = false) => {
-    if (activePartyRoom && shouldDelete) {
-      deletePartyRoomFromFirestore(activePartyRoom.id).catch(() => {});
-      setPartyRooms((prev) => prev.filter((r) => r.id !== activePartyRoom.id));
+    if (activePartyRoom) {
+      p2pStreamingEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
+      if (shouldDelete) {
+        deletePartyRoomFromFirestore(activePartyRoom.id).catch(() => {});
+        setPartyRooms((prev) => prev.filter((r) => r.id !== activePartyRoom.id));
+      }
     }
     setActivePartyRoom(null);
     setUserSeatIndex(null);
@@ -2252,9 +2267,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const createPartyRoom = (room: PartyRoom) => {
-    setPartyRooms((prev) => [room, ...prev]);
-    syncPartyRoomToFirestore(room).catch(() => {});
-    openPartyRoom(room);
+    const firebaseUid = auth.currentUser?.uid;
+    const normalizedRoom: PartyRoom = firebaseUid
+      ? {
+          ...room,
+          isActive: true,
+          host: { ...room.host, id: firebaseUid },
+        }
+      : { ...room, isActive: true };
+    setPartyRooms((prev) => [normalizedRoom, ...prev]);
+    syncPartyRoomToFirestore(normalizedRoom).catch(() => {});
+    openPartyRoom(normalizedRoom);
   };
 
   const updateActivePartyRoomLevel = (level: 1 | 2 | 3) => {
@@ -2265,24 +2288,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     syncPartyRoomToFirestore(updated).catch(() => {});
   };
 
-  const toggleSeat = async (seatIndex: number) => {
-    if (!activePartyRoom || !currentUser?.id) return;
+  const toggleSeat = async (seatIndex: number): Promise<{ success: boolean; reason?: string }> => {
+    if (!activePartyRoom || !currentUser?.id) {
+      return { success: false, reason: 'NO_ACTIVE_ROOM' };
+    }
 
     const room = activePartyRoom;
+    const prevSeatIndex = userSeatIndex;
     const isLeaving = userSeatIndex === seatIndex;
+    const effectiveUser = auth.currentUser?.uid ? { ...currentUser, id: auth.currentUser.uid } : currentUser;
 
-    // Immediate optimistic update so user climbs up with zero lag
+    // Immediate optimistic update
     setUserSeatIndex(isLeaving ? null : seatIndex);
 
     const roomSeats = Array.isArray(room.seats) ? [...room.seats] : [];
     const optimisticSeats = roomSeats.map((s: any) => {
       if (Number(s.seatIndex) === seatIndex) {
         return isLeaving
-          ? { ...s, user: null, isSpeaking: false, isMuted: true }
-          : { ...s, user: currentUser, isSpeaking: false, isMuted: isMicMuted };
+          ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
+          : { ...s, user: effectiveUser, isSpeaking: false, isMuted: isMicMuted };
       }
-      if (!isLeaving && s.user?.id === currentUser.id) {
-        return { ...s, user: null, isSpeaking: false, isMuted: true };
+      if (!isLeaving && s.user?.id === effectiveUser.id) {
+        return { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false };
       }
       return s;
     });
@@ -2291,26 +2318,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActivePartyRoom(optimisticRoom);
     setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? optimisticRoom : item)));
 
-    // Persist to Firestore transaction
+    // Persist atomically via Firestore transaction
     const result = await updatePartyRoomSeat(
       room.id,
       seatIndex,
-      isLeaving ? null : currentUser,
-      currentUser.id
+      isLeaving ? null : effectiveUser,
+      effectiveUser.id,
+      isMicMuted
     );
 
     if (result.success && result.seats) {
       const verifiedRoom = { ...room, seats: result.seats };
       setActivePartyRoom(verifiedRoom);
       setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? verifiedRoom : item)));
-      const mySeat = result.seats.find((s: any) => s.user?.id === currentUser.id);
+      const mySeat = result.seats.find((s: any) => s.user?.id === effectiveUser.id);
       setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
-    } else if (!result.success) {
-      console.warn('Party seat update rejected:', result.reason);
-      if (result.reason === 'SEAT_OCCUPIED') {
-        setUserSeatIndex(null);
-      }
+      return { success: true };
     }
+
+    console.warn('Party seat update rejected:', result.reason);
+    // Revert optimistic state if transaction declined (occupied/locked/restricted)
+    setUserSeatIndex(prevSeatIndex);
+    setActivePartyRoom(room);
+    setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? room : item)));
+    return { success: false, reason: result.reason || 'REJECTED' };
   };
 
   const openConversation = (conv: Conversation) => {
@@ -2797,6 +2828,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         liveStreams,
         activeStream,
         openLiveStream,
+        publishLiveStream,
         closeLiveStream,
         sendLiveGift,
         activeGiftBanner,

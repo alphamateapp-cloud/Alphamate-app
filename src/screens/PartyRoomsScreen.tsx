@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { PartyRoom, PartySeat, User, Gift } from '../types';
 import { p2pStreamingEngine } from '../services/webrtcService';
+import { auth, db, updatePartyRoomFields, togglePartySeatLockInFirestore } from '../services/firebase';
+import { deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { PartyRoomAtmosphere } from '../components/party/PartyRoomAtmosphere';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
@@ -179,7 +181,13 @@ export const PartyRoomsScreen: React.FC = () => {
   const [isSpeakerOn, setIsSpeakerOn] = useState(true);
   const [isFollowingHost, setIsFollowingHost] = useState(false);
   const [isHostMicMuted, setIsHostMicMuted] = useState(false);
-  const [isHostSpeaking, setIsHostSpeaking] = useState(true);
+  const [isHostSpeaking, setIsHostSpeaking] = useState(false);
+  const [isSelfSpeaking, setIsSelfSpeaking] = useState(false);
+  const [partyAudioAutoplayBlocked, setPartyAudioAutoplayBlocked] = useState(false);
+  const [partyVoiceError, setPartyVoiceError] = useState<string | null>(null);
+  const partyAudioByPeerRef = useRef<Map<string, HTMLAudioElement>>(new Map());
+  const roomSeenInListRef = useRef<boolean>(false);
+  const isSpeakerOnRef = useRef<boolean>(isSpeakerOn);
 
   // Music Player State
   const [isMusicPlaying, setIsMusicPlaying] = useState(true);
@@ -308,82 +316,119 @@ export const PartyRoomsScreen: React.FC = () => {
     setShowRoomPKInviteModal(true);
   };
 
-  const isHost = activePartyRoom ? activePartyRoom.host.id === currentUser.id : false;
-  const isModerator = moderatorIds.includes(currentUser.id);
+  const effectiveUserId = auth.currentUser?.uid || currentUser.id;
+  const isHost = activePartyRoom ? activePartyRoom.host.id === effectiveUserId : false;
+  const isModerator = moderatorIds.includes(effectiveUserId);
   const canModerate = isHost || isModerator;
   const hostLevel = activePartyRoom?.host.level ?? currentUser.level;
+
+  useEffect(() => {
+    isSpeakerOnRef.current = isSpeakerOn;
+  }, [isSpeakerOn]);
+
+  // Keep moderation lists synchronized from Firestore snapshot in real time
+  useEffect(() => {
+    if (!activePartyRoom) {
+      setModeratorIds([]);
+      setKickedUserIds([]);
+      setBlockedUserIds([]);
+      return;
+    }
+    setModeratorIds(Array.isArray(activePartyRoom.moderatorIds) ? activePartyRoom.moderatorIds : []);
+    setKickedUserIds(Array.isArray(activePartyRoom.kickedUserIds) ? activePartyRoom.kickedUserIds : []);
+    setBlockedUserIds(Array.isArray(activePartyRoom.blockedUserIds) ? activePartyRoom.blockedUserIds : []);
+  }, [
+    activePartyRoom?.id,
+    activePartyRoom?.moderatorIds,
+    activePartyRoom?.kickedUserIds,
+    activePartyRoom?.blockedUserIds,
+  ]);
 
   // Check if current user is blocked or kicked
   useEffect(() => {
     if (!activePartyRoom) return;
-    if (blockedUserIds.includes(currentUser.id)) {
+    if (blockedUserIds.includes(effectiveUserId)) {
       showToast('You are blocked from this room by the host! ⛔');
-      closePartyRoom();
-    } else if (kickedUserIds.includes(currentUser.id)) {
+      closePartyRoom(false);
+    } else if (kickedUserIds.includes(effectiveUserId)) {
       showToast('You have been kicked from this session! 🚫');
       closePartyRoom(false);
     }
-  }, [activePartyRoom?.id, blockedUserIds, kickedUserIds, currentUser.id]);
+  }, [activePartyRoom?.id, blockedUserIds, kickedUserIds, effectiveUserId]);
 
   // Auto-exit remote guests if Host permanently closes this lounge
   useEffect(() => {
-    if (!activePartyRoom) return;
-    const isCurrentHost = activePartyRoom.host?.id === currentUser?.id;
-    if (isCurrentHost) return;
-
+    if (!activePartyRoom?.id) {
+      roomSeenInListRef.current = false;
+      return;
+    }
     const roomStillExists = partyRooms.some((r) => r.id === activePartyRoom.id);
-    if (!roomStillExists && partyRooms.length > 0) {
+    if (roomStillExists) {
+      roomSeenInListRef.current = true;
+      return;
+    }
+    const isCurrentHost = activePartyRoom.host?.id === effectiveUserId;
+    if (!isCurrentHost && roomSeenInListRef.current) {
       showToast('The Host has closed this lounge! 🚪');
       closePartyRoom(false);
     }
-  }, [partyRooms, activePartyRoom?.id, currentUser?.id]);
+  }, [partyRooms, activePartyRoom?.id, effectiveUserId]);
 
-  const handleExitClick = () => {
-    const isRoomHost = activePartyRoom?.host?.id === currentUser?.id;
+  const handleExitClick = async () => {
+    const isRoomHost = activePartyRoom?.host?.id === effectiveUserId;
     if (isRoomHost) {
       setShowExitConfirmModal(true);
     } else {
       if (userSeatIndex !== null) {
-        toggleSeat(userSeatIndex);
+        await toggleSeat(userSeatIndex).catch(() => {});
       }
       closePartyRoom(false);
     }
   };
 
-  // Moderation Action Handlers
-  const handleToggleModerator = (targetUserId: string) => {
-    if (!isHost) {
+  // Moderation Action Handlers (persisted to Firestore for real-time enforcement across devices)
+  const handleToggleModerator = async (targetUserId: string) => {
+    if (!isHost || !activePartyRoom) {
       showToast('Only the room Host can assign moderators! 👑');
       return;
     }
-    if (moderatorIds.includes(targetUserId)) {
-      setModeratorIds((prev) => prev.filter((id) => id !== targetUserId));
-      showToast('Removed as Moderator 🛡️');
+    let nextMods: string[];
+    const removing = moderatorIds.includes(targetUserId);
+    if (removing) {
+      nextMods = moderatorIds.filter((id) => id !== targetUserId);
     } else {
       if (moderatorIds.length >= 10) {
         showToast('Maximum 10 moderators limit reached! ⚠️');
         return;
       }
-      setModeratorIds((prev) => [...prev, targetUserId]);
-      showToast('Assigned as Room Moderator! 🛡️ (Permanent until removed)');
+      nextMods = [...moderatorIds, targetUserId];
     }
+    setModeratorIds(nextMods);
+    await updatePartyRoomFields(activePartyRoom.id, { moderatorIds: nextMods }).catch(() => {});
+    showToast(removing ? 'Removed as Moderator 🛡️' : 'Assigned as Room Moderator! 🛡️');
   };
 
-  const handleKickUser = (targetUserId: string, targetDisplayName: string) => {
-    if (!canModerate) return;
-    if (activePartyRoom && (targetUserId === activePartyRoom.host.id || targetDisplayName === activePartyRoom.host.displayName)) {
+  const handleKickUser = async (targetUserId: string, targetDisplayName: string) => {
+    if (!canModerate || !activePartyRoom) return;
+    if (targetUserId === activePartyRoom.host.id || targetDisplayName === activePartyRoom.host.displayName) {
       showToast('Cannot kick the room Host! 👑');
       return;
     }
-    setKickedUserIds((prev) => [...prev, targetUserId]);
-    if (activePartyRoom) {
-      const seatIdx = activePartyRoom.seats.findIndex((s) => s.user?.id === targetUserId || s.user?.displayName === targetDisplayName);
-      if (seatIdx !== -1) {
-        const updatedSeats = [...activePartyRoom.seats];
-        updatedSeats[seatIdx] = { ...updatedSeats[seatIdx], user: null, isSpeaking: false, isMuted: false, isHostMuted: false };
-        activePartyRoom.seats = updatedSeats;
-      }
-    }
+    const nextKicked = Array.from(new Set([...kickedUserIds, targetUserId]));
+    setKickedUserIds(nextKicked);
+
+    const updatedSeats = (activePartyRoom.seats || []).map((s) =>
+      s.user?.id === targetUserId || s.user?.displayName === targetDisplayName
+        ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
+        : s
+    );
+
+    await updatePartyRoomFields(activePartyRoom.id, {
+      kickedUserIds: nextKicked,
+      seats: updatedSeats,
+    }).catch(() => {});
+    await deleteDoc(doc(db, 'partyRooms', activePartyRoom.id, 'voiceParticipants', targetUserId)).catch(() => {});
+
     showToast(`Kicked ${targetDisplayName} from this live session! 🚫`);
     setChatItems((prev) => [
       ...prev,
@@ -396,22 +441,30 @@ export const PartyRoomsScreen: React.FC = () => {
     ]);
   };
 
-  const handleBlockUser = (targetUserId: string, targetDisplayName: string) => {
-    if (!canModerate) return;
-    if (activePartyRoom && (targetUserId === activePartyRoom.host.id || targetDisplayName === activePartyRoom.host.displayName)) {
+  const handleBlockUser = async (targetUserId: string, targetDisplayName: string) => {
+    if (!canModerate || !activePartyRoom) return;
+    if (targetUserId === activePartyRoom.host.id || targetDisplayName === activePartyRoom.host.displayName) {
       showToast('Cannot block the room Host! 👑');
       return;
     }
-    setBlockedUserIds((prev) => [...prev, targetUserId]);
-    setKickedUserIds((prev) => [...prev, targetUserId]);
-    if (activePartyRoom) {
-      const seatIdx = activePartyRoom.seats.findIndex((s) => s.user?.id === targetUserId || s.user?.displayName === targetDisplayName);
-      if (seatIdx !== -1) {
-        const updatedSeats = [...activePartyRoom.seats];
-        updatedSeats[seatIdx] = { ...updatedSeats[seatIdx], user: null, isSpeaking: false, isMuted: false, isHostMuted: false };
-        activePartyRoom.seats = updatedSeats;
-      }
-    }
+    const nextBlocked = Array.from(new Set([...blockedUserIds, targetUserId]));
+    const nextKicked = Array.from(new Set([...kickedUserIds, targetUserId]));
+    setBlockedUserIds(nextBlocked);
+    setKickedUserIds(nextKicked);
+
+    const updatedSeats = (activePartyRoom.seats || []).map((s) =>
+      s.user?.id === targetUserId || s.user?.displayName === targetDisplayName
+        ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
+        : s
+    );
+
+    await updatePartyRoomFields(activePartyRoom.id, {
+      blockedUserIds: nextBlocked,
+      kickedUserIds: nextKicked,
+      seats: updatedSeats,
+    }).catch(() => {});
+    await deleteDoc(doc(db, 'partyRooms', activePartyRoom.id, 'voiceParticipants', targetUserId)).catch(() => {});
+
     showToast(`Permanently blocked ${targetDisplayName}! ⛔`);
     setChatItems((prev) => [
       ...prev,
@@ -424,23 +477,32 @@ export const PartyRoomsScreen: React.FC = () => {
     ]);
   };
 
-  const handleToggleSeatMicByHostOrMod = (seatIndex: number) => {
+  const handleToggleSeatMicByHostOrMod = async (seatIndex: number) => {
     if (!canModerate || !activePartyRoom) return;
-    const seat = activePartyRoom.seats[seatIndex];
+    const targetIdx = activePartyRoom.seats.findIndex((s) => Number(s.seatIndex) === seatIndex);
+    if (targetIdx === -1) return;
+    const seat = activePartyRoom.seats[targetIdx];
     if (!seat || !seat.user) return;
     if (seat.user.id === activePartyRoom.host.id) {
       showToast('Cannot mute the room Host! 👑');
       return;
     }
     const nextMuted = !seat.isMuted;
-    const updatedSeats = [...activePartyRoom.seats];
-    updatedSeats[seatIndex] = {
-      ...seat,
+    const updatedSeats = activePartyRoom.seats.map((s) =>
+      Number(s.seatIndex) === seatIndex
+        ? {
+            ...s,
+            isMuted: nextMuted,
+            isHostMuted: nextMuted,
+            isSpeaking: nextMuted ? false : s.isSpeaking,
+          }
+        : s
+    );
+    await updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
+    await updateDoc(doc(db, 'partyRooms', activePartyRoom.id, 'voiceParticipants', seat.user.id), {
       isMuted: nextMuted,
-      isHostMuted: nextMuted,
-      isSpeaking: nextMuted ? false : seat.isSpeaking,
-    };
-    activePartyRoom.seats = updatedSeats;
+    }).catch(() => {});
+
     showToast(
       nextMuted
         ? `Muted & locked ${seat.user.displayName}'s mic! 🔒🔇`
@@ -448,7 +510,7 @@ export const PartyRoomsScreen: React.FC = () => {
     );
   };
 
-  const handleMuteAllGuests = () => {
+  const handleMuteAllGuests = async () => {
     if (!canModerate || !activePartyRoom) return;
     const updatedSeats = activePartyRoom.seats.map((s) => {
       if (s.user && s.user.id !== activePartyRoom.host.id) {
@@ -456,7 +518,7 @@ export const PartyRoomsScreen: React.FC = () => {
       }
       return s;
     });
-    activePartyRoom.seats = updatedSeats;
+    await updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
     showToast('All guest microphones muted & locked! 🔇🔒');
     setChatItems((prev) => [
       ...prev,
@@ -469,7 +531,7 @@ export const PartyRoomsScreen: React.FC = () => {
     ]);
   };
 
-  const handleUnmuteAllGuests = () => {
+  const handleUnmuteAllGuests = async () => {
     if (!canModerate || !activePartyRoom) return;
     const updatedSeats = activePartyRoom.seats.map((s) => {
       if (s.user && s.user.id !== activePartyRoom.host.id) {
@@ -477,8 +539,18 @@ export const PartyRoomsScreen: React.FC = () => {
       }
       return s;
     });
-    activePartyRoom.seats = updatedSeats;
+    await updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
     showToast('All guest microphones unmuted! 🎙️');
+  };
+
+  const handleToggleSeatLock = async (seatIndex: number, shouldLock: boolean) => {
+    if (!canModerate || !activePartyRoom) return;
+    const res = await togglePartySeatLockInFirestore(activePartyRoom.id, seatIndex, shouldLock);
+    if (res.success) {
+      showToast(shouldLock ? `Seat ${seatIndex + 1} locked 🔒` : `Seat ${seatIndex + 1} unlocked 🔓`);
+    } else {
+      showToast('Unable to update seat lock state.');
+    }
   };
 
   const handleClearChat = () => {
@@ -512,22 +584,41 @@ export const PartyRoomsScreen: React.FC = () => {
     showToast(isNowFollowing ? `Following ${targetUser.displayName}! 💜` : `Unfollowed ${targetUser.displayName}`);
   };
 
-  const handleInviteViewerToSeat = (viewer: User) => {
-    if (!activePartyRoom) return;
-    const emptySeatIndex = activePartyRoom.seats.findIndex((s) => s.user === null);
+  const handleInviteViewerToSeat = async (viewer: User) => {
+    if (!activePartyRoom || !canModerate) return;
+    const maxSeats = partyLevel === 1 ? 4 : partyLevel === 2 ? 8 : 15;
+    const seatPool = Array.from({ length: maxSeats }, (_, idx) => {
+      const found = activePartyRoom.seats.find((s) => Number(s.seatIndex) === idx);
+      return (
+        found || {
+          seatIndex: idx,
+          user: null,
+          isMuted: false,
+          isHostMuted: false,
+          isLocked: false,
+          isSpeaking: false,
+          receivedCoins: 0,
+        }
+      );
+    });
+    const emptySeatIndex = seatPool.findIndex((s) => s.user === null && !s.isLocked);
     if (emptySeatIndex === -1) {
-      showToast('No empty seats available! Upgrade party level to add more seats.');
+      showToast('No open unlocked seats available!');
       return;
     }
-    const updatedSeats = [...activePartyRoom.seats];
-    updatedSeats[emptySeatIndex] = {
-      seatIndex: emptySeatIndex,
-      user: viewer,
-      isMuted: false,
-      isHostMuted: false,
-      isSpeaking: false,
-    };
-    activePartyRoom.seats = updatedSeats;
+    const updatedSeats = seatPool.map((s) =>
+      Number(s.seatIndex) === emptySeatIndex
+        ? {
+            ...s,
+            seatIndex: emptySeatIndex,
+            user: viewer,
+            isMuted: false,
+            isHostMuted: false,
+            isSpeaking: false,
+          }
+        : s
+    );
+    await updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
     setShowViewersModal(false);
     showToast(`Invited ${viewer.displayName} to Seat ${emptySeatIndex + 1}! 🎙️`);
     setChatItems((prev) => [
@@ -638,20 +729,23 @@ export const PartyRoomsScreen: React.FC = () => {
     for (let i = 0; i < targetSeatCount; i++) {
       const serverSeat = roomSeats.find((s: any) => Number(s.seatIndex) === i);
       if (userSeatIndex === i) {
-        // Current user is in this seat
         seats.push({
           seatIndex: i,
-          user: currentUser,
+          user: { ...currentUser, id: effectiveUserId },
           isMuted: isMicMuted,
-          isSpeaking: !isMicMuted,
-          receivedCoins: serverSeat?.receivedCoins || 350,
+          isHostMuted: !!serverSeat?.isHostMuted,
+          isLocked: !!serverSeat?.isLocked,
+          isSpeaking: !isMicMuted && isSelfSpeaking,
+          receivedCoins: Number(serverSeat?.receivedCoins) || 0,
         });
       } else if (serverSeat && serverSeat.user) {
         seats.push({
           seatIndex: i,
           user: serverSeat.user,
           isMuted: !!serverSeat.isMuted,
-          isSpeaking: !!serverSeat.isSpeaking,
+          isHostMuted: !!serverSeat.isHostMuted,
+          isLocked: !!serverSeat.isLocked,
+          isSpeaking: !serverSeat.isMuted && !!serverSeat.isSpeaking,
           receivedCoins: Number(serverSeat.receivedCoins) || 0,
         });
       } else {
@@ -659,6 +753,8 @@ export const PartyRoomsScreen: React.FC = () => {
           seatIndex: i,
           user: null,
           isMuted: false,
+          isHostMuted: false,
+          isLocked: !!serverSeat?.isLocked,
           isSpeaking: false,
           receivedCoins: 0,
         });
@@ -666,16 +762,21 @@ export const PartyRoomsScreen: React.FC = () => {
     }
 
     return seats;
-  }, [partyLevel, userSeatIndex, isMicMuted, currentUser, activePartyRoom?.seats]);
+  }, [partyLevel, userSeatIndex, isMicMuted, isSelfSpeaking, currentUser, effectiveUserId, activePartyRoom?.seats]);
 
-  // Keep userSeatIndex in sync if set by Firestore
+  // Keep userSeatIndex and host-locked mute state in sync with Firestore snapshot
   useEffect(() => {
-    if (!activePartyRoom?.seats) return;
-    const mySeat = activePartyRoom.seats.find((s: any) => s.user?.id === currentUser.id);
-    if (mySeat) {
-      setUserSeatIndex(Number(mySeat.seatIndex));
+    if (!activePartyRoom?.seats) {
+      setUserSeatIndex(null);
+      return;
     }
-  }, [activePartyRoom?.seats, currentUser.id]);
+    const mySeat = activePartyRoom.seats.find((s: any) => s.user?.id === effectiveUserId);
+    setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
+    if (mySeat?.isHostMuted && !isMicMuted) {
+      setIsMicMuted(true);
+      p2pStreamingEngine.toggleMicrophone(false);
+    }
+  }, [activePartyRoom?.seats, effectiveUserId]);
 
   // Guest seats occupancy and dynamic upgrade eligibility
   const occupiedGuestSeatsCount = useMemo(() => {
@@ -687,48 +788,96 @@ export const PartyRoomsScreen: React.FC = () => {
   const nextTargetTier = partyLevel === 1 ? PARTY_TIER_SETTINGS[1] : partyLevel === 2 ? PARTY_TIER_SETTINGS[2] : null;
   const canHostUpgrade = Boolean(isHost && nextTargetTier && currentUser.level >= nextTargetTier.requiredLevel);
 
-  // Audio Pipeline & Speaking Volume Detection for Host and Seated Guests
+  // 1. Single SFU Session Lifecycle per Room Join / Leave (never torn down on seat changes)
   useEffect(() => {
-    let animFrame: any;
-    const isUserHost = activePartyRoom?.host?.id === currentUser?.id;
-    const canSpeak = isUserHost || userSeatIndex !== null;
+    const roomId = activePartyRoom?.id;
+    if (!roomId) {
+      setPartyVoiceError(null);
+      setPartyAudioAutoplayBlocked(false);
+      setIsHostSpeaking(false);
+      setIsSelfSpeaking(false);
+      return;
+    }
 
-    if (activePartyRoom) {
-      const muted = isUserHost ? isHostMicMuted : isMicMuted;
-      p2pStreamingEngine.startPartyVoice(activePartyRoom.id, currentUser.id, muted, !canSpeak).catch((error) => {
-        console.error('[Party Voice] Unable to start real microphone/signaling:', error);
+    const isUserHost = activePartyRoom.host?.id === effectiveUserId;
+    const isSeatedNow = activePartyRoom.seats?.some((s: any) => s.user?.id === effectiveUserId) ?? false;
+    const initialCanSpeak = isUserHost || isSeatedNow;
+    const initialMuted = isUserHost ? isHostMicMuted : isMicMuted;
+
+    setPartyVoiceError(null);
+    p2pStreamingEngine
+      .startPartyVoice(roomId, effectiveUserId, initialMuted, !initialCanSpeak, {
+        onError: (err) => {
+          setPartyVoiceError(err.message || 'Voice audio connection interrupted.');
+        },
+      })
+      .catch((error: any) => {
+        console.error('[Party Voice] Unable to start SFU session:', error);
+        setPartyVoiceError(error?.message || 'Unable to connect to Party Voice SFU.');
       });
 
-      if (canSpeak) {
-        const checkVolume = () => {
-          const vol = p2pStreamingEngine.getSpeakingVolume();
-          if (isUserHost) setIsHostSpeaking(vol > 12);
-          animFrame = requestAnimationFrame(checkVolume);
-        };
-        animFrame = requestAnimationFrame(checkVolume);
-      } else if (isUserHost) setIsHostSpeaking(false);
-    } else {
-      p2pStreamingEngine.toggleMicrophone(false);
-      if (isUserHost) setIsHostSpeaking(false);
-    }
+    const handlePageHide = () => {
+      p2pStreamingEngine.stopPartyVoice(roomId, true).catch(() => {});
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
 
     return () => {
-      if (animFrame) cancelAnimationFrame(animFrame);
-      if (activePartyRoom?.id) p2pStreamingEngine.stopPartyVoice(activePartyRoom.id);
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('beforeunload', handlePageHide);
+      p2pStreamingEngine.stopPartyVoice(roomId).catch(() => {});
     };
-  }, [activePartyRoom?.id, userSeatIndex, currentUser?.id]);
+  }, [activePartyRoom?.id, effectiveUserId]);
 
-  // Mute/unmute the already-published microphone track without tearing down peer connections.
+  // 2. Sync speaking / mic publish state inside the SAME SFU session when sitting, leaving seat, or muting
   useEffect(() => {
-    const isUserHost = activePartyRoom?.host?.id === currentUser?.id;
-    if (activePartyRoom && (isUserHost || userSeatIndex !== null)) {
-      p2pStreamingEngine.toggleMicrophone(!(isUserHost ? isHostMicMuted : isMicMuted));
+    const roomId = activePartyRoom?.id;
+    if (!roomId) {
+      setIsHostSpeaking(false);
+      setIsSelfSpeaking(false);
+      return;
     }
-  }, [activePartyRoom?.id, userSeatIndex, isMicMuted, isHostMicMuted, currentUser?.id]);
 
-  // Attach real remote party microphone tracks to audio outputs on this device.
+    const isUserHost = activePartyRoom.host?.id === effectiveUserId;
+    const canSpeak = isUserHost || userSeatIndex !== null;
+    const muted = isUserHost ? isHostMicMuted : isMicMuted;
+
+    p2pStreamingEngine
+      .setPartySpeakingMode(roomId, effectiveUserId, canSpeak, muted)
+      .catch((err: any) => {
+        console.error('[Party Voice] Mic publish/mode switch failed:', err);
+        showToast(err?.message || 'Microphone access is required to speak on seat.');
+        if (!isUserHost && userSeatIndex !== null) {
+          toggleSeat(userSeatIndex).catch(() => {});
+        }
+      });
+
+    if (!canSpeak || muted) {
+      setIsHostSpeaking(false);
+      setIsSelfSpeaking(false);
+      return;
+    }
+
+    const volumeInterval = setInterval(() => {
+      const speaking = p2pStreamingEngine.getSpeakingVolume() > 12;
+      if (isUserHost) {
+        setIsHostSpeaking(speaking);
+        setIsSelfSpeaking(false);
+      } else {
+        setIsSelfSpeaking(speaking);
+        setIsHostSpeaking(false);
+      }
+    }, 150);
+
+    return () => {
+      clearInterval(volumeInterval);
+    };
+  }, [activePartyRoom?.id, effectiveUserId, isHost, userSeatIndex, isMicMuted, isHostMicMuted]);
+
+  // 3. Attach real remote SFU party microphone tracks to audio outputs with autoplay recovery
   useEffect(() => {
-    const audioByPeer = new Map<string, HTMLAudioElement>();
+    const audioByPeer = partyAudioByPeerRef.current;
+
     const handleRemotePartyStream = (event: Event) => {
       const detail = (event as CustomEvent).detail;
       if (!detail || detail.roomId !== activePartyRoom?.id || !detail.stream) return;
@@ -736,19 +885,54 @@ export const PartyRoomsScreen: React.FC = () => {
       if (!audio) {
         audio = new Audio();
         audio.autoplay = true;
-        audio.playsInline = true;
+        audio.setAttribute('playsinline', 'true');
         audioByPeer.set(detail.peerId, audio);
       }
+      audio.muted = !isSpeakerOnRef.current;
       audio.srcObject = detail.stream;
-      audio.play().catch((error) => console.warn('[Party Voice] Audio playback awaits user interaction:', error));
+      audio
+        .play()
+        .then(() => {
+          setPartyAudioAutoplayBlocked(false);
+        })
+        .catch(() => {
+          setPartyAudioAutoplayBlocked(true);
+        });
     };
+
+    const handleRemotePartyStreamRemoved = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (!detail || detail.roomId !== activePartyRoom?.id) return;
+      const audio = audioByPeer.get(detail.peerId);
+      if (audio) {
+        audio.pause();
+        audio.srcObject = null;
+        audioByPeer.delete(detail.peerId);
+      }
+    };
+
     window.addEventListener('alphamate-party-remote-stream', handleRemotePartyStream);
+    window.addEventListener('alphamate-party-remote-stream-removed', handleRemotePartyStreamRemoved);
     return () => {
       window.removeEventListener('alphamate-party-remote-stream', handleRemotePartyStream);
-      audioByPeer.forEach((audio) => { audio.pause(); audio.srcObject = null; });
+      window.removeEventListener('alphamate-party-remote-stream-removed', handleRemotePartyStreamRemoved);
+      audioByPeer.forEach((audio) => {
+        audio.pause();
+        audio.srcObject = null;
+      });
       audioByPeer.clear();
     };
   }, [activePartyRoom?.id]);
+
+  // Sync speaker mute button with all active remote audio elements
+  useEffect(() => {
+    partyAudioByPeerRef.current.forEach((audio) => {
+      audio.muted = !isSpeakerOn;
+      if (isSpeakerOn && audio.paused && audio.srcObject) {
+        audio.play().catch(() => setPartyAudioAutoplayBlocked(true));
+      }
+    });
+  }, [isSpeakerOn]);
 
   // Live room presence and speaking state must come from real room events;
   // never fabricate viewer counts or speaking indicators locally.
@@ -914,20 +1098,53 @@ export const PartyRoomsScreen: React.FC = () => {
     showToast(`Sent ${selectedGift.name} to ${recipient}! 🎁`);
   };
 
-  // Seat Click handler (take empty seat / interact with occupied seat)
-  const handleSeatClick = (seat: PartySeat) => {
+  // Seat Click handler (take empty seat / step down / lock / interact with occupied seat)
+  const handleSeatClick = async (seat: PartySeat) => {
+    if (!activePartyRoom) return;
+
     if (seat.user === null) {
-      if (kickedUserIds.includes(currentUser.id)) {
-        showToast('You cannot take a seat because you were kicked from this session! 🚫');
+      if (seat.isLocked) {
+        if (canModerate) {
+          setShowSeatActionModal(seat.seatIndex);
+        } else {
+          showToast('This seat is locked by the Host 🔒');
+        }
         return;
       }
-      toggleSeat(seat.seatIndex);
-      showToast(`Joined Seat ${seat.seatIndex + 1}! 🎙️`);
-    } else {
-      setSelectedUserForActionSheet(seat.user);
-      setSelectedUserSeatIndex(seat.seatIndex);
-      setShowUserActionSheet(true);
+
+      if (kickedUserIds.includes(effectiveUserId) || blockedUserIds.includes(effectiveUserId)) {
+        showToast('You cannot take a seat in this room! 🚫');
+        return;
+      }
+
+      if (canModerate) {
+        setShowSeatActionModal(seat.seatIndex);
+        return;
+      }
+
+      const res = await toggleSeat(seat.seatIndex);
+      if (res.success) {
+        showToast(`Joined Seat ${seat.seatIndex + 1}! 🎙️`);
+      } else if (res.reason === 'SEAT_LOCKED') {
+        showToast('This seat is locked by the Host 🔒');
+      } else if (res.reason === 'SEAT_OCCUPIED') {
+        showToast('That seat was just taken by someone else.');
+      } else if (res.reason === 'USER_RESTRICTED') {
+        showToast('You are restricted from taking a seat here. 🚫');
+      } else {
+        showToast('Unable to join seat right now.');
+      }
+      return;
     }
+
+    if (seat.user.id === effectiveUserId) {
+      setShowSeatActionModal(seat.seatIndex);
+      return;
+    }
+
+    setSelectedUserForActionSheet(seat.user);
+    setSelectedUserSeatIndex(seat.seatIndex);
+    setShowUserActionSheet(true);
   };
 
   const handleCopyHostId = async (id: string) => {
@@ -951,7 +1168,6 @@ export const PartyRoomsScreen: React.FC = () => {
   // =========================================================================
   if (activePartyRoom) {
     const currentTrack = PLAYLIST_TRACKS[currentTrackIndex];
-    const isHost = activePartyRoom.host.id === currentUser.id;
 
     return (
       <div
@@ -1193,6 +1409,39 @@ export const PartyRoomsScreen: React.FC = () => {
                 Change
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Autoplay Recovery Banner for Remote Party Voice */}
+        {partyAudioAutoplayBlocked && (
+          <div className="relative z-30 px-3 py-1.5 flex justify-center">
+            <button
+              onClick={() => {
+                setIsSpeakerOn(true);
+                partyAudioByPeerRef.current.forEach((audio) => {
+                  audio.muted = false;
+                  audio.play().catch(() => {});
+                });
+                setPartyAudioAutoplayBlocked(false);
+              }}
+              className="px-4 py-1.5 rounded-full bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-[11px] font-black shadow-lg border border-white/25 cursor-pointer flex items-center gap-1.5"
+            >
+              <Volume2 className="w-3.5 h-3.5" />
+              <span>Tap to Unmute Room Audio</span>
+            </button>
+          </div>
+        )}
+
+        {/* SFU Voice Error Notice (never masked by fake audio) */}
+        {partyVoiceError && (
+          <div className="relative z-30 mx-3 mt-1 px-3 py-1.5 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[10px] flex items-center justify-between gap-2">
+            <span className="truncate">{partyVoiceError}</span>
+            <button
+              onClick={() => setPartyVoiceError(null)}
+              className="text-rose-300 hover:text-white font-bold shrink-0 cursor-pointer"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 
@@ -1503,13 +1752,18 @@ export const PartyRoomsScreen: React.FC = () => {
               {(isHost || userSeatIndex !== null || isModerator) && <button
                 onClick={() => {
                   if (userSeatIndex !== null) {
-                    const mySeat = activePartyRoom.seats[userSeatIndex];
+                    const mySeat = activePartyRoom.seats.find((s) => Number(s.seatIndex) === userSeatIndex);
                     if (mySeat?.isHostMuted && isMicMuted) {
                       showToast('Your mic was locked by Host/Moderator! 🔒');
                       return;
                     }
-                    setIsMicMuted(!isMicMuted);
-                    showToast(isMicMuted ? 'Mic Live 🎙️' : 'Mic Muted 🔇');
+                    const nextMuted = !isMicMuted;
+                    setIsMicMuted(nextMuted);
+                    const updatedSeats = (activePartyRoom.seats || []).map((s) =>
+                      Number(s.seatIndex) === userSeatIndex ? { ...s, isMuted: nextMuted } : s
+                    );
+                    updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
+                    showToast(nextMuted ? 'Mic Muted 🔇' : 'Mic Live 🎙️');
                   } else if (isHost) {
                     setIsHostMicMuted(!isHostMicMuted);
                     showToast(isHostMicMuted ? 'Host Mic Live 🎙️' : 'Host Mic Muted 🔇');
@@ -1772,9 +2026,110 @@ export const PartyRoomsScreen: React.FC = () => {
             }}
             isFollowing={followingUserIds.has(selectedUserForActionSheet.id)}
             onToggleFollow={handleToggleFollowUser}
-            currentUserId={currentUser.id}
+            currentUserId={effectiveUserId}
           />
         )}
+
+        {/* Seat Action Modal (Step Down / Mic Mute for own seat; Lock / Unlock / Take Seat for host/mod) */}
+        {showSeatActionModal !== null && (() => {
+          const targetSeat = activeGuestSeats.find((s) => s.seatIndex === showSeatActionModal);
+          if (!targetSeat) return null;
+          const isMyOwnSeat = targetSeat.user?.id === effectiveUserId;
+
+          return (
+            <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="w-full max-w-xs rounded-3xl bg-[#171030] border border-[#A855F7]/30 p-5 shadow-2xl">
+                <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/20">
+                  <h3 className="text-sm font-bold text-white">
+                    Seat #{targetSeat.seatIndex + 1}
+                  </h3>
+                  <button
+                    onClick={() => setShowSeatActionModal(null)}
+                    className="text-zinc-400 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <div className="mt-4 space-y-2.5">
+                  {isMyOwnSeat && (
+                    <>
+                      <button
+                        onClick={() => {
+                          if (targetSeat.isHostMuted && isMicMuted) {
+                            showToast('Your mic was locked by Host/Moderator! 🔒');
+                            return;
+                          }
+                          const nextMuted = !isMicMuted;
+                          setIsMicMuted(nextMuted);
+                          const updatedSeats = (activePartyRoom.seats || []).map((s) =>
+                            Number(s.seatIndex) === targetSeat.seatIndex ? { ...s, isMuted: nextMuted } : s
+                          );
+                          updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
+                          setShowSeatActionModal(null);
+                          showToast(nextMuted ? 'Mic Muted 🔇' : 'Mic Live 🎙️');
+                        }}
+                        className="w-full h-10 rounded-xl bg-[#1F153B] border border-white/10 text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer hover:border-[#A855F7]"
+                      >
+                        {isMicMuted ? <Mic className="w-4 h-4 text-emerald-400" /> : <MicOff className="w-4 h-4 text-rose-400" />}
+                        <span>{isMicMuted ? 'Unmute My Mic' : 'Mute My Mic'}</span>
+                      </button>
+
+                      <button
+                        onClick={async () => {
+                          const seatIdx = targetSeat.seatIndex;
+                          setShowSeatActionModal(null);
+                          await toggleSeat(seatIdx);
+                          showToast(`Left Seat ${seatIdx + 1}`);
+                        }}
+                        className="w-full h-10 rounded-xl bg-rose-600/20 border border-rose-500/40 text-rose-200 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer hover:bg-rose-600/30"
+                      >
+                        <UserX className="w-4 h-4" />
+                        <span>Leave Seat (Step Down)</span>
+                      </button>
+                    </>
+                  )}
+
+                  {!isMyOwnSeat && targetSeat.user === null && canModerate && (
+                    <>
+                      {!isHost && !targetSeat.isLocked && (
+                        <button
+                          onClick={async () => {
+                            const seatIdx = targetSeat.seatIndex;
+                            setShowSeatActionModal(null);
+                            const res = await toggleSeat(seatIdx);
+                            if (res.success) {
+                              showToast(`Joined Seat ${seatIdx + 1}! 🎙️`);
+                            } else {
+                              showToast('Seat is unavailable right now.');
+                            }
+                          }}
+                          className="w-full h-10 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold flex items-center justify-center gap-2 cursor-pointer"
+                        >
+                          <Mic className="w-4 h-4" />
+                          <span>Take Seat #{targetSeat.seatIndex + 1}</span>
+                        </button>
+                      )}
+
+                      <button
+                        onClick={async () => {
+                          const seatIdx = targetSeat.seatIndex;
+                          const nextLocked = !targetSeat.isLocked;
+                          setShowSeatActionModal(null);
+                          await handleToggleSeatLock(seatIdx, nextLocked);
+                        }}
+                        className="w-full h-10 rounded-xl bg-[#1F153B] border border-amber-400/30 text-amber-200 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer hover:border-amber-400"
+                      >
+                        {targetSeat.isLocked ? <Unlock className="w-4 h-4" /> : <Lock className="w-4 h-4" />}
+                        <span>{targetSeat.isLocked ? 'Unlock Seat' : 'Lock Seat'}</span>
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Room Viewers & Audience List Modal */}
         <RoomViewersModal
@@ -2376,6 +2731,12 @@ export const PartyRoomsScreen: React.FC = () => {
               size={sizeVariant === 'sm' ? 'sm' : 'md'}
               showCrownBadge={false}
             />
+          ) : seat.isLocked ? (
+            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[62px] h-[52px] sm:w-[68px] sm:h-[56px]' : sizeVariant === 'md' ? 'w-[54px] h-[46px]' : 'w-[44px] h-[38px]'}`}>
+              <div className="w-11 h-11 rounded-full bg-zinc-900/80 border border-amber-500/40 flex items-center justify-center shadow-inner">
+                <Lock className="w-4 h-4 text-amber-400" />
+              </div>
+            </div>
           ) : (
             <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[62px] h-[52px] sm:w-[68px] sm:h-[56px]' : sizeVariant === 'md' ? 'w-[54px] h-[46px]' : 'w-[44px] h-[38px]'}`}>
               <svg viewBox="0 0 88 68" className="w-full h-full overflow-visible drop-shadow-[0_0_9px_rgba(251,191,36,0.55)]" aria-hidden="true">
@@ -2439,7 +2800,7 @@ export const PartyRoomsScreen: React.FC = () => {
         <span
           className={`text-[8.5px] sm:text-[9.5px] font-bold text-zinc-200 truncate text-center ${labelMaxWidth}`}
         >
-          {isOccupied ? (isMe ? 'You' : seat.user!.displayName.split(' ')[0]) : `Seat ${seat.seatIndex + 1}`}
+          {isOccupied ? (isMe ? 'You' : seat.user!.displayName.split(' ')[0]) : seat.isLocked ? 'Locked' : `Seat ${seat.seatIndex + 1}`}
         </span>
 
         {/* Gift Coin Value Pill */}
@@ -3004,6 +3365,11 @@ export const PartyRoomsScreen: React.FC = () => {
                 <button
                   type="button"
                   onClick={() => {
+                    const fbUser = auth.currentUser;
+                    if (!fbUser) {
+                      showToast('Please sign in first to host a Party Room.');
+                      return;
+                    }
                     if (isUploadingRoomCover) { showToast('Please wait for the room cover upload to finish.'); return; }
                     // Double check unlock requirement
                     const selectedTier = PARTY_TIER_SETTINGS.find((t) => t.level === createRoomLevel) || PARTY_TIER_SETTINGS[0];
@@ -3015,39 +3381,30 @@ export const PartyRoomsScreen: React.FC = () => {
                     const finalLevel = currentUser.level >= selectedTier.requiredLevel ? createRoomLevel : 1;
                     const finalTier = PARTY_TIER_SETTINGS.find((t) => t.level === finalLevel)!;
 
-                    // Build initial seats matching chosen tier
-                    const initialSeats: PartySeat[] = [
-                      {
-                        seatIndex: 0,
-                        user: currentUser,
-                        isMuted: false,
-                        isSpeaking: true,
-                        isHost: true,
-                        receivedCoins: 500,
-                      },
-                    ];
+                    // Host stays on the reserved Host Crown Throne; all guest seats 1..N start open
+                    const initialSeats: PartySeat[] = Array.from({ length: finalTier.guestCount }, (_, i) => ({
+                      seatIndex: i,
+                      user: null,
+                      isMuted: false,
+                      isHostMuted: false,
+                      isLocked: false,
+                      isSpeaking: false,
+                      receivedCoins: 0,
+                    }));
 
-                    for (let i = 1; i < finalTier.guestCount; i++) {
-                      initialSeats.push({
-                        seatIndex: i,
-                        user: null,
-                        isMuted: false,
-                        isSpeaking: false,
-                        receivedCoins: 0,
-                      });
-                    }
-
+                    const normalizedHost = { ...currentUser, id: fbUser.uid };
                     const newParty: PartyRoom = {
                       id: `party_${Date.now()}`,
-                      title: newRoomTitle || `${currentUser.displayName}'s Lounge 💜`,
-                      host: currentUser,
+                      title: newRoomTitle || `${normalizedHost.displayName}'s Lounge 💜`,
+                      host: normalizedHost,
                       announcement: `Welcome to our ${finalTier.name} Audio Lounge! Tap an open seat to talk.`,
                       category: createCategory,
                       activeViewers: 1,
                       backgroundTheme: 'from-[#1E103A] to-[#0A0614]',
                       level: finalLevel,
+                      isActive: true,
                       totalGiftCoins: 0,
-                      coverImageUrl: newRoomCover || currentUser.avatar,
+                      coverImageUrl: newRoomCover || normalizedHost.avatar,
                       seats: initialSeats,
                     };
 

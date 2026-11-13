@@ -7,6 +7,7 @@ import { CreateStoryModal } from '../components/story/CreateStoryModal';
 import { PKComingSoonModal } from '../components/modals/PKComingSoonModal';
 import { CoinSellerAgenciesCarousel } from '../components/home/CoinSellerAgenciesCarousel';
 import { LiveStream, FriendStory } from '../types';
+import { auth } from '../services/firebase';
 import {
   Radio,
   Users,
@@ -98,17 +99,27 @@ export const HomeScreen: React.FC = () => {
   const allOtherStreams = useMemo(() => rankedStreams.slice(2), [rankedStreams]);
 
   const handleStartBroadcast = () => {
+    const fbUser = auth.currentUser;
+    if (!fbUser) {
+      setShowGoLiveModal(false);
+      setCurrentScreen('signin');
+      return;
+    }
     setShowGoLiveModal(false);
     const myStream: LiveStream = {
       id: `live_my_${Date.now()}`,
       title: customRoomTitle || 'My Live Stream',
-      host: currentUser,
+      host: {
+        ...currentUser,
+        id: fbUser.uid,
+      },
       viewerCount: 1,
       thumbnail: currentUser.avatar,
       category: 'Chat',
       tag: 'Broadcasting',
       isPK: false,
       durationMinutes: 0,
+      isActive: false,
     };
     openLiveStream(myStream);
   };

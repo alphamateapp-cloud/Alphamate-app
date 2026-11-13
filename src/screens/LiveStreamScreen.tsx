@@ -11,7 +11,15 @@ import { p2pStreamingEngine } from '../services/webrtcService';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 import { copyToClipboard } from '../utils/clipboard';
-import { db, subscribeToLiveStreamMessages, sendLiveStreamMessage } from '../services/firebase';
+import {
+  db,
+  auth,
+  subscribeToLiveStreamMessages,
+  sendLiveStreamMessage,
+  updateLiveStreamFields,
+  updateLiveStreamHeartbeat,
+  deleteLiveStreamFromFirestore,
+} from '../services/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
 import {
   X,
@@ -64,6 +72,7 @@ interface FloatingHeart {
 export const LiveStreamScreen: React.FC = () => {
   const {
     activeStream,
+    publishLiveStream,
     closeLiveStream,
     coins,
     addCoins,
@@ -75,11 +84,17 @@ export const LiveStreamScreen: React.FC = () => {
     startDirectMessage,
   } = useApp();
 
-  // Role perspective: Host or Viewer (strictly separates Host publishing from Viewer subscription)
-  const isHostByUser =
-    activeStream?.host?.id === currentUser?.id ||
-    activeStream?.host?.displayName === currentUser?.displayName;
+  // Role perspective: Host or Viewer (only actual stream owner can be host)
+  const isHostByUser = Boolean(
+    activeStream?.host?.id &&
+      (activeStream.host.id === currentUser?.id ||
+        (auth.currentUser?.uid && activeStream.host.id === auth.currentUser.uid))
+  );
   const [activeRole, setActiveRole] = useState<'host' | 'viewer'>(isHostByUser ? 'host' : 'viewer');
+
+  useEffect(() => {
+    setActiveRole(isHostByUser ? 'host' : 'viewer');
+  }, [activeStream?.id, isHostByUser]);
 
   // Moderation & Audience state (Moderator limit: 10)
   const [moderatorIds, setModeratorIds] = useState<string[]>(
@@ -106,6 +121,10 @@ export const LiveStreamScreen: React.FC = () => {
   const [isRemoteVideoOn, setIsRemoteVideoOn] = useState(true);
   const [isRemoteMicOn, setIsRemoteMicOn] = useState(true);
   const [isRemoteAudioMuted, setIsRemoteAudioMuted] = useState(false);
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+  const [streamStatus, setStreamStatus] = useState<'connecting' | 'live' | 'error'>('connecting');
+  const [streamError, setStreamError] = useState<string | null>(null);
+  const [retryToken, setRetryToken] = useState(0);
 
   // Audience & Social interaction state
   const [isFollowing, setIsFollowing] = useState(false);
@@ -191,32 +210,38 @@ export const LiveStreamScreen: React.FC = () => {
     return () => clearTimeout(timer);
   }, [isBroadcastEnded, endCountdown, closeLiveStream]);
 
-  // Moderation Action Handlers
+  // Moderation Action Handlers (persisted to Firestore for real-time enforcement)
   const handleToggleModerator = (targetUserId: string) => {
-    if (!isHost) {
+    if (!isHost || !activeStream) {
       showToast('Only the stream Host can assign moderators! 👑');
       return;
     }
     if (moderatorIds.includes(targetUserId)) {
-      setModeratorIds((prev) => prev.filter((id) => id !== targetUserId));
+      const next = moderatorIds.filter((id) => id !== targetUserId);
+      setModeratorIds(next);
+      updateLiveStreamFields(activeStream.id, { moderatorIds: next }).catch(() => {});
       showToast('Removed as Moderator 🛡️');
     } else {
       if (moderatorIds.length >= 10) {
         showToast('Maximum 10 moderators limit reached! ⚠️');
         return;
       }
-      setModeratorIds((prev) => [...prev, targetUserId]);
+      const next = [...moderatorIds, targetUserId];
+      setModeratorIds(next);
+      updateLiveStreamFields(activeStream.id, { moderatorIds: next }).catch(() => {});
       showToast('Assigned as Live Stream Moderator! 🛡️ (Permanent until removed)');
     }
   };
 
   const handleKickUser = (targetUserId: string, targetDisplayName: string) => {
-    if (!canModerate) return;
-    if (activeStream && (targetUserId === activeStream.host.id || targetDisplayName === activeStream.host.displayName)) {
+    if (!canModerate || !activeStream) return;
+    if (targetUserId === activeStream.host.id || targetDisplayName === activeStream.host.displayName) {
       showToast('Cannot kick the stream Host! 👑');
       return;
     }
-    setKickedUserIds((prev) => [...prev, targetUserId]);
+    const nextKicked = Array.from(new Set([...kickedUserIds, targetUserId]));
+    setKickedUserIds(nextKicked);
+    updateLiveStreamFields(activeStream.id, { kickedUserIds: nextKicked }).catch(() => {});
     showToast(`Kicked ${targetDisplayName} from this live session! 🚫`);
     setComments((prev) => [
       ...prev,
@@ -229,13 +254,19 @@ export const LiveStreamScreen: React.FC = () => {
   };
 
   const handleBlockUser = (targetUserId: string, targetDisplayName: string) => {
-    if (!canModerate) return;
-    if (activeStream && (targetUserId === activeStream.host.id || targetDisplayName === activeStream.host.displayName)) {
+    if (!canModerate || !activeStream) return;
+    if (targetUserId === activeStream.host.id || targetDisplayName === activeStream.host.displayName) {
       showToast('Cannot block the stream Host! 👑');
       return;
     }
-    setBlockedUserIds((prev) => [...prev, targetUserId]);
-    setKickedUserIds((prev) => [...prev, targetUserId]);
+    const nextBlocked = Array.from(new Set([...blockedUserIds, targetUserId]));
+    const nextKicked = Array.from(new Set([...kickedUserIds, targetUserId]));
+    setBlockedUserIds(nextBlocked);
+    setKickedUserIds(nextKicked);
+    updateLiveStreamFields(activeStream.id, {
+      blockedUserIds: nextBlocked,
+      kickedUserIds: nextKicked,
+    }).catch(() => {});
     showToast(`Permanently blocked ${targetDisplayName}! ⛔`);
     setComments((prev) => [
       ...prev,
@@ -310,6 +341,8 @@ export const LiveStreamScreen: React.FC = () => {
   const commentsEndRef = useRef<HTMLDivElement>(null);
   const hostVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const subscribedSfuKeyRef = useRef<string | null>(null);
   const lastTapRef = useRef<number>(0);
 
   const showToast = (msg: string) => {
@@ -321,92 +354,219 @@ export const LiveStreamScreen: React.FC = () => {
   const isCameraActive = activeRole === 'host' ? isHostVideoOn : isRemoteVideoOn;
   const isMicActive = activeRole === 'host' ? isHostMicOn : isRemoteMicOn;
 
+  // Keep remote video element synchronized if host toggles camera off and back on
+  useEffect(() => {
+    if (activeRole === 'viewer' && isRemoteVideoOn && remoteVideoRef.current && remoteStreamRef.current) {
+      remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      remoteVideoRef.current.play().catch(() => {});
+    }
+  }, [activeRole, isRemoteVideoOn]);
+
   // =========================================================================
-  // STRICT STREAM PIPELINE: HOST PUBLISHING VS VIEWER SUBSCRIPTION
+  // STRICT CLOUDFLARE REALTIME SFU PIPELINE: HOST PUBLISHING VS VIEWER SUBSCRIPTION
   // =========================================================================
   useEffect(() => {
     if (!activeStream) return;
     let isMounted = true;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+    const handlePageHide = () => {
+      if (activeRole === 'host') {
+        p2pStreamingEngine.stopHostBroadcast(activeStream.id, true).catch(() => {});
+        deleteLiveStreamFromFirestore(activeStream.id).catch(() => {});
+      } else {
+        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id, true).catch(() => {});
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('beforeunload', handlePageHide);
 
     if (activeRole === 'viewer') {
-      // -----------------------------------------------------------------------
-      // STRICT VIEWER MODE:
-      // 1. Viewer local camera is NEVER initialized / requested.
-      // 2. Viewer local microphone is NEVER captured / unmuted.
-      // 3. Stop any existing local hardware tracks to guarantee zero leak.
-      // 4. Subscribe strictly to the host's remote broadcast.
-      // -----------------------------------------------------------------------
+      // STRICT VIEWER MODE: Camera & mic are NEVER acquired.
       p2pStreamingEngine.stopLocalMediaStream();
+      setStreamStatus('connecting');
+      setStreamError(null);
+      subscribedSfuKeyRef.current = null;
+      remoteStreamRef.current = null;
 
-      p2pStreamingEngine
-        .subscribeToRemoteBroadcast(activeStream.id, activeStream.host, (state) => {
-          if (isMounted) {
-            setIsRemoteVideoOn(state.isVideoOn);
-            setIsRemoteMicOn(state.isMicOn);
-          }
-        })
-        .then(({ stream, isVideoOn, isMicOn }) => {
-          if (isMounted) {
-            if (remoteVideoRef.current) {
-              remoteVideoRef.current.srcObject = stream;
-              remoteVideoRef.current.play().catch(() => {
-                // Browser may require user gesture for initial playback
-              });
-            }
-            setIsRemoteVideoOn(isVideoOn);
-            setIsRemoteMicOn(isMicOn);
-          }
-        })
-        .catch((err) => {
-          console.warn('Viewer remote broadcast subscription error', err);
-        });
+      const attemptViewerSubscribe = async (sfuSessionId: string, publishedTracks: any[], meta?: any) => {
+        const trackKey = `${sfuSessionId}:${publishedTracks.map((t) => t.trackName).join(',')}`;
+        if (subscribedSfuKeyRef.current === trackKey) return;
+        subscribedSfuKeyRef.current = trackKey;
+        setStreamStatus('connecting');
+        setStreamError(null);
 
-      return () => {
-        isMounted = false;
-        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id);
-      };
-    } else {
-      // -----------------------------------------------------------------------
-      // HOST MODE:
-      // 1. Acquire local camera and microphone for the host.
-      // 2. Publish stream to remote viewers and register broadcast state.
-      // -----------------------------------------------------------------------
-      const initHostCamera = async () => {
         try {
-          const stream = await p2pStreamingEngine.getLocalMediaStream(facingMode, isHostMicOn);
-          if (hostVideoRef.current && isMounted) {
-            hostVideoRef.current.srcObject = stream;
-            hostVideoRef.current.play().catch(() => {});
-          }
-          p2pStreamingEngine.registerHostBroadcast(
+          const { stream, isVideoOn, isMicOn } = await p2pStreamingEngine.subscribeToRemoteBroadcast(
             activeStream.id,
-            stream,
-            isHostVideoOn,
-            isHostMicOn,
-            currentUser.id
+            activeStream.host,
+            {
+              sfuSessionId,
+              publishedTracks,
+              isVideoOn: meta?.isVideoOn,
+              isMicOn: meta?.isMicOn,
+            },
+            (state) => {
+              if (isMounted) {
+                setIsRemoteVideoOn(state.isVideoOn);
+                setIsRemoteMicOn(state.isMicOn);
+              }
+            }
           );
-          p2pStreamingEngine.createPeerConnection(activeStream.id);
+
+          if (!isMounted) return;
+          remoteStreamRef.current = stream;
+          setIsRemoteVideoOn(isVideoOn);
+          setIsRemoteMicOn(isMicOn);
+          setStreamStatus('live');
+
+          const videoEl = remoteVideoRef.current;
+          if (videoEl) {
+            videoEl.srcObject = stream;
+            videoEl.muted = isRemoteAudioMuted;
+            try {
+              await videoEl.play();
+              setAutoplayBlocked(false);
+            } catch {
+              // Mobile/Desktop autoplay policy blocked unmuted playback -> start muted & show Tap to Unmute
+              videoEl.muted = true;
+              setIsRemoteAudioMuted(true);
+              setAutoplayBlocked(true);
+              videoEl.play().catch(() => {});
+            }
+          }
         } catch (err) {
-          console.warn('Host camera stream initialization error:', err);
+          if (!isMounted) return;
+          subscribedSfuKeyRef.current = null;
+          setStreamStatus('error');
+          setStreamError(err instanceof Error ? err.message : 'Unable to connect to live broadcast via SFU.');
         }
       };
 
-      initHostCamera();
+      // Subscribe immediately if activeStream already carries SFU session metadata, and track Firestore updates
+      if (activeStream.sfuSessionId && activeStream.publishedTracks?.length) {
+        attemptViewerSubscribe(activeStream.sfuSessionId, activeStream.publishedTracks, activeStream);
+      }
+
+      const unsubDoc = onSnapshot(doc(db, 'liveStreams', activeStream.id), (snapshot) => {
+        if (!isMounted) return;
+        if (!snapshot.exists() || snapshot.data()?.isActive === false) {
+          setIsBroadcastEnded(true);
+          p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+          return;
+        }
+        const data = snapshot.data() as any;
+        setIsRemoteVideoOn(data.isVideoOn !== false);
+        setIsRemoteMicOn(data.isMicOn !== false);
+        if (typeof data.viewerCount === 'number') setViewerCount(data.viewerCount);
+        if (Array.isArray(data.moderatorIds)) setModeratorIds(data.moderatorIds);
+        if (Array.isArray(data.kickedUserIds)) setKickedUserIds(data.kickedUserIds);
+        if (Array.isArray(data.blockedUserIds)) setBlockedUserIds(data.blockedUserIds);
+
+        if (data.sfuSessionId && Array.isArray(data.publishedTracks) && data.publishedTracks.length > 0) {
+          attemptViewerSubscribe(data.sfuSessionId, data.publishedTracks, data);
+        } else {
+          setStreamStatus('error');
+          setStreamError('Host media stream is not active yet.');
+        }
+      });
 
       return () => {
         isMounted = false;
-        p2pStreamingEngine.stopHostBroadcast(activeStream.id);
+        unsubDoc();
+        window.removeEventListener('pagehide', handlePageHide);
+        window.removeEventListener('beforeunload', handlePageHide);
+        subscribedSfuKeyRef.current = null;
+        remoteStreamRef.current = null;
+        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+      };
+    } else {
+      // STRICT HOST MODE: Acquire real camera/mic, publish to Cloudflare SFU, mark active ONLY after connected.
+      setStreamStatus('connecting');
+      setStreamError(null);
+
+      const initHostCameraAndSfu = async () => {
+        try {
+          const result = await p2pStreamingEngine.startSoloLiveHost({
+            streamId: activeStream.id,
+            hostId: auth.currentUser?.uid || currentUser.id,
+            facing: facingMode,
+            isVideoOn: isHostVideoOn,
+            isMicOn: isHostMicOn,
+            onConnectionStateChange: (connState) => {
+              if (!isMounted) return;
+              if (connState === 'failed') {
+                setStreamStatus('error');
+                setStreamError('Live WebRTC connection dropped. Attempting recovery or retry.');
+              } else if (connState === 'connected') {
+                setStreamStatus('live');
+              }
+            },
+          });
+
+          if (!isMounted) {
+            await p2pStreamingEngine.stopHostBroadcast(activeStream.id);
+            return;
+          }
+
+          if (hostVideoRef.current) {
+            hostVideoRef.current.srcObject = result.stream;
+            hostVideoRef.current.play().catch(() => {});
+          }
+
+          // Mark stream LIVE in Firestore ONLY after SFU publishing & connection succeed
+          await publishLiveStream({
+            ...activeStream,
+            host: {
+              ...activeStream.host,
+              id: auth.currentUser?.uid || activeStream.host.id,
+            },
+            isActive: true,
+            sfuSessionId: result.sfuSessionId,
+            publishedTracks: result.publishedTracks,
+            isVideoOn: isHostVideoOn,
+            isMicOn: isHostMicOn,
+            lastSeenAtMs: Date.now(),
+          });
+
+          if (!isMounted) return;
+          setStreamStatus('live');
+
+          // Heartbeat every 15s so crashed sessions are automatically filtered out
+          heartbeatTimer = setInterval(() => {
+            updateLiveStreamHeartbeat(activeStream.id).catch(() => {});
+          }, 15000);
+        } catch (err) {
+          if (!isMounted) return;
+          console.error('[Solo Live Host] SFU publish failed:', err);
+          setStreamStatus('error');
+          setStreamError(
+            err instanceof Error
+              ? err.message
+              : 'Failed to publish live broadcast to Cloudflare SFU.'
+          );
+        }
+      };
+
+      initHostCameraAndSfu();
+
+      return () => {
+        isMounted = false;
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+        window.removeEventListener('pagehide', handlePageHide);
+        window.removeEventListener('beforeunload', handlePageHide);
+        p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
       };
     }
-  }, [activeRole, activeStream?.id, facingMode]);
+  }, [activeRole, activeStream?.id, retryToken]);
 
-  // Flip / Rotate Camera for Host (Front <-> Rear)
+  // Flip / Rotate Camera for Host (Front <-> Rear via RTCRtpSender.replaceTrack)
   const handleFlipCamera = async () => {
-    if (activeRole !== 'host') return;
+    if (activeRole !== 'host' || !activeStream) return;
     const nextFacing = facingMode === 'user' ? 'environment' : 'user';
-    setFacingMode(nextFacing);
     try {
-      const newStream = await p2pStreamingEngine.flipCamera();
+      const newStream = await p2pStreamingEngine.flipCamera(activeStream.id);
+      setFacingMode(nextFacing);
       if (hostVideoRef.current) {
         hostVideoRef.current.srcObject = newStream;
         hostVideoRef.current.play().catch(() => {});
@@ -414,6 +574,7 @@ export const LiveStreamScreen: React.FC = () => {
       showToast(nextFacing === 'user' ? 'Front Camera 🤳' : 'Rear Camera 📷');
     } catch (err) {
       console.warn('Flip camera error', err);
+      showToast('Unable to switch camera on this device.');
     }
   };
 
@@ -423,6 +584,7 @@ export const LiveStreamScreen: React.FC = () => {
     const nextState = !isHostMicOn;
     setIsHostMicOn(nextState);
     p2pStreamingEngine.setHostMicState(activeStream.id, nextState);
+    updateLiveStreamFields(activeStream.id, { isMicOn: nextState }).catch(() => {});
     showToast(nextState ? 'Microphone Active 🎙️' : 'Microphone Muted 🔇');
   };
 
@@ -432,14 +594,26 @@ export const LiveStreamScreen: React.FC = () => {
     const nextState = !isHostVideoOn;
     setIsHostVideoOn(nextState);
     p2pStreamingEngine.setHostCameraState(activeStream.id, nextState);
+    updateLiveStreamFields(activeStream.id, { isVideoOn: nextState }).catch(() => {});
     showToast(nextState ? 'Camera Video Active 📹' : 'Camera is Off 📷🚫');
   };
 
-  // Switch Role Perspective (Tester / Switcher between Host and Viewer)
+  // Switch Role Perspective (Host Only)
   const handleToggleRolePerspective = () => {
+    if (!isHostByUser) return;
     const nextRole = activeRole === 'host' ? 'viewer' : 'host';
     setActiveRole(nextRole);
     showToast(nextRole === 'host' ? 'Switched to Host HUD 🎙️' : 'Switched to Viewer Mode 👁️');
+  };
+
+  const handleUnmuteRemoteAudio = () => {
+    setIsRemoteAudioMuted(false);
+    setAutoplayBlocked(false);
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.muted = false;
+      remoteVideoRef.current.play().catch(() => {});
+    }
+    showToast('Host Audio Playing 🔊');
   };
 
   // Auto-scroll comments feed
@@ -778,6 +952,60 @@ export const LiveStreamScreen: React.FC = () => {
         </div>
       )}
 
+      {/* Viewer Autoplay Unmute Prompt */}
+      {activeRole === 'viewer' && streamStatus === 'live' && autoplayBlocked && !isBroadcastEnded && (
+        <button
+          onClick={handleUnmuteRemoteAudio}
+          className="absolute top-24 left-1/2 -translate-x-1/2 z-40 px-4 py-2 rounded-full bg-gradient-to-r from-[#7928CA] to-[#EC4899] border border-white/30 text-white text-xs font-black shadow-2xl flex items-center gap-2 cursor-pointer animate-bounce"
+        >
+          <Volume2 className="w-4 h-4" />
+          <span>Tap to Unmute Host Audio</span>
+        </button>
+      )}
+
+      {/* SFU Connecting Indicator */}
+      {streamStatus === 'connecting' && !isBroadcastEnded && (
+        <div className="absolute top-20 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-full bg-black/75 border border-[#A855F7]/40 text-purple-200 text-[11px] font-bold backdrop-blur-md flex items-center gap-2 pointer-events-none">
+          <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping" />
+          <span>{activeRole === 'host' ? 'Connecting to Cloudflare Live SFU...' : 'Connecting to Live Broadcast...'}</span>
+        </div>
+      )}
+
+      {/* Real SFU / Media Error Overlay (Never fakes live state) */}
+      {streamStatus === 'error' && !isBroadcastEnded && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xl flex items-center justify-center p-4">
+          <div className="w-full max-w-sm rounded-3xl bg-[#160B2A] border border-rose-500/40 p-6 text-center shadow-2xl">
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center mx-auto mb-3">
+              <Radio className="w-6 h-6 text-rose-400" />
+            </div>
+            <h3 className="text-base font-black text-white mb-1.5">
+              {activeRole === 'host' ? 'Could Not Start Live Stream' : 'Stream Connection Unavailable'}
+            </h3>
+            <p className="text-xs text-zinc-300 leading-relaxed mb-5">
+              {streamError || 'Unable to connect to Cloudflare Realtime SFU.'}
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={closeLiveStream}
+                className="flex-1 h-11 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-bold hover:bg-zinc-700 cursor-pointer"
+              >
+                Exit
+              </button>
+              <button
+                onClick={() => {
+                  setStreamStatus('connecting');
+                  setStreamError(null);
+                  setRetryToken((n) => n + 1);
+                }}
+                className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold cursor-pointer"
+              >
+                Retry
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Floating Animated Hearts Area */}
       <div className="absolute right-6 bottom-28 z-20 pointer-events-none w-20 h-56 flex flex-col items-center justify-end">
         {hearts.map((heart) => (
@@ -878,15 +1106,17 @@ export const LiveStreamScreen: React.FC = () => {
             <span>{viewerCount.toLocaleString()}</span>
           </button>
 
-          {/* Perspective Tester Toggle (Host Mode <-> Viewer Mode) */}
-          <button
-            onClick={handleToggleRolePerspective}
-            className="px-1.5 py-1 rounded-full bg-[#180E2C]/90 border border-[#A855F7]/40 text-[9px] font-bold text-[#C084FC] hover:text-white transition-colors cursor-pointer flex items-center gap-0.5"
-            title="Toggle between Host Controls and Viewer Mode"
-          >
-            {activeRole === 'host' ? <Radio className="w-3 h-3 text-emerald-400" /> : <Eye className="w-3 h-3 text-cyan-400" />}
-            <span className="hidden xs:inline">{activeRole === 'host' ? 'Host' : 'Viewer'}</span>
-          </button>
+          {/* Perspective Tester Toggle (Host Only) */}
+          {isHostByUser && (
+            <button
+              onClick={handleToggleRolePerspective}
+              className="px-1.5 py-1 rounded-full bg-[#180E2C]/90 border border-[#A855F7]/40 text-[9px] font-bold text-[#C084FC] hover:text-white transition-colors cursor-pointer flex items-center gap-0.5"
+              title="Toggle between Host Controls and Viewer Mode"
+            >
+              {activeRole === 'host' ? <Radio className="w-3 h-3 text-emerald-400" /> : <Eye className="w-3 h-3 text-cyan-400" />}
+              <span className="hidden xs:inline">{activeRole === 'host' ? 'Host' : 'Viewer'}</span>
+            </button>
+          )}
 
           {/* Close Live Button */}
           <button

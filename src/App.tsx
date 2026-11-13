@@ -35,6 +35,9 @@ const AppContent: React.FC = () => {
     setActiveTab,
     deviceMode,
     activePartyRoom,
+    activeStream,
+    closePartyRoom,
+    closeLiveStream,
     activeConversation,
     navigateBack,
     currentUser,
@@ -71,6 +74,14 @@ const AppContent: React.FC = () => {
 
     let listenerHandle: { remove: () => Promise<void> } | null = null;
     CapApp.addListener('backButton', ({ canGoBack }) => {
+      if (activePartyRoom) {
+        closePartyRoom(false);
+        return;
+      }
+      if (currentScreen === 'live_stream' || activeStream) {
+        closeLiveStream();
+        return;
+      }
       if (currentScreen !== 'home' && currentScreen !== 'welcome' && currentScreen !== 'splash') {
         navigateBack();
       } else if (!canGoBack) {
@@ -87,7 +98,7 @@ const AppContent: React.FC = () => {
         listenerHandle.remove().catch(() => {});
       }
     };
-  }, [currentScreen, navigateBack]);
+  }, [currentScreen, navigateBack, activePartyRoom, activeStream, closePartyRoom, closeLiveStream]);
 
   // If Admin Dashboard mode is chosen
   if (deviceMode === 'admin') {

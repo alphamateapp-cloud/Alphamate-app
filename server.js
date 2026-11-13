@@ -7,35 +7,242 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Private Railway variables. Never expose the Cloudflare API token to the app client.
+// Private Railway variables. Never expose Cloudflare API tokens or secrets to the app client.
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || 'gen-lang-client-0468444352';
+const FIREBASE_DATABASE_ID =
+  process.env.FIREBASE_DATABASE_ID || 'ai-studio-alphamatelivepar-88a3637b-56a3-47f2-a3ab-b67bf1702cff';
+
 const CLOUDFLARE_TURN_KEY_ID = process.env.CLOUDFLARE_TURN_KEY_ID;
 const CLOUDFLARE_TURN_API_TOKEN = process.env.CLOUDFLARE_TURN_API_TOKEN;
 const TURN_CREDENTIAL_TTL = Math.min(Math.max(Number(process.env.TURN_CREDENTIAL_TTL || 3600), 300), 86400);
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*').split(',').map((v) => v.trim()).filter(Boolean);
+
+const REALTIME_SFU_APP_ID = process.env.REALTIME_SFU_APP_ID;
+const REALTIME_SFU_BEARER_TOKEN = process.env.REALTIME_SFU_BEARER_TOKEN;
+const CLOUDFLARE_SFU_BASE = 'https://rtc.live.cloudflare.com/v1';
+
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*')
+  .split(',')
+  .map((v) => v.trim())
+  .filter(Boolean);
+
+app.use(express.json({ limit: '1mb' }));
 
 app.use((req, res, next) => {
   const origin = req.headers.origin || '';
   const allowed = ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin);
   if (allowed) res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes('*') ? '*' : origin);
   res.header('Vary', 'Origin');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-app.get('/api/health', (_req, res) => res.json({ success: true, service: 'alpha-mate-backend', status: 'online' }));
+app.get('/api/health', (_req, res) =>
+  res.json({
+    success: true,
+    service: 'alpha-mate-backend',
+    status: 'online',
+    turnConfigured: Boolean(FIREBASE_API_KEY && CLOUDFLARE_TURN_KEY_ID && CLOUDFLARE_TURN_API_TOKEN),
+    sfuConfigured: Boolean(FIREBASE_API_KEY && REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN),
+  })
+);
 
 async function verifyFirebaseIdToken(idToken) {
   if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY is not configured in Railway.');
-  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ idToken }),
-  });
+  const response = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    }
+  );
   if (!response.ok) return null;
   const data = await response.json();
   const user = data.users?.[0];
   return user?.localId ? { uid: user.localId, email: user.email || null, emailVerified: !!user.emailVerified } : null;
+}
+
+async function requireFirebaseAuth(req, res, next) {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    if (!idToken) {
+      return res.status(401).json({ success: false, error: 'Firebase Bearer token required.' });
+    }
+    if (!FIREBASE_API_KEY) {
+      return res.status(503).json({
+        success: false,
+        error: 'FIREBASE_API_KEY is not configured in Railway Variables.',
+      });
+    }
+    const authenticatedUser = await verifyFirebaseIdToken(idToken);
+    if (!authenticatedUser) {
+      return res.status(401).json({ success: false, error: 'Firebase ID token is invalid or expired.' });
+    }
+    req.firebaseUser = authenticatedUser;
+    req.firebaseIdToken = idToken;
+    next();
+  } catch (error) {
+    console.error('[Auth] Middleware verification failed:', error);
+    return res.status(503).json({ success: false, error: 'Firebase token verification failed.' });
+  }
+}
+
+function parseFirestoreValue(val) {
+  if (!val || typeof val !== 'object') return undefined;
+  if ('stringValue' in val) return val.stringValue;
+  if ('integerValue' in val) return Number(val.integerValue);
+  if ('doubleValue' in val) return Number(val.doubleValue);
+  if ('booleanValue' in val) return Boolean(val.booleanValue);
+  if ('nullValue' in val) return null;
+  if ('timestampValue' in val) return val.timestampValue;
+  if ('arrayValue' in val) {
+    return Array.isArray(val.arrayValue?.values) ? val.arrayValue.values.map(parseFirestoreValue) : [];
+  }
+  if ('mapValue' in val) {
+    const out = {};
+    const fields = val.mapValue?.fields || {};
+    for (const [k, v] of Object.entries(fields)) {
+      out[k] = parseFirestoreValue(v);
+    }
+    return out;
+  }
+  return undefined;
+}
+
+async function fetchFirestoreDocument(documentPath, idToken) {
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    FIREBASE_PROJECT_ID
+  )}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents/${documentPath}`;
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`Firestore lookup failed (${response.status}): ${text.slice(0, 150)}`);
+  }
+  const json = await response.json();
+  const parsed = {};
+  for (const [k, v] of Object.entries(json.fields || {})) {
+    parsed[k] = parseFirestoreValue(v);
+  }
+  return parsed;
+}
+
+function isValidResourceId(value) {
+  return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
+}
+
+async function authorizeRemoteTrackSubscriptions(req, tracks) {
+  const remoteTracks = tracks.filter((t) => t.location === 'remote');
+  if (!remoteTracks.length) return { ok: true };
+
+  const contextType = req.body?.contextType;
+  const contextId = req.body?.contextId;
+  if (!contextType || !contextId) {
+    return { ok: true };
+  }
+
+  if (!isValidResourceId(contextId)) {
+    return { ok: false, status: 400, error: 'Invalid room or stream contextId.' };
+  }
+
+  const uid = req.firebaseUser.uid;
+  const idToken = req.firebaseIdToken;
+
+  if (contextType === 'live') {
+    const streamDoc = await fetchFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken);
+    if (!streamDoc || streamDoc.isActive === false) {
+      return { ok: false, status: 404, error: 'Live stream is not active or no longer exists.' };
+    }
+    const blocked = Array.isArray(streamDoc.blockedUserIds) ? streamDoc.blockedUserIds : [];
+    const kicked = Array.isArray(streamDoc.kickedUserIds) ? streamDoc.kickedUserIds : [];
+    if (blocked.includes(uid) || kicked.includes(uid)) {
+      return { ok: false, status: 403, error: 'Access to this live stream is restricted.' };
+    }
+    if (streamDoc.sfuSessionId) {
+      const invalidSession = remoteTracks.some((t) => t.sessionId !== streamDoc.sfuSessionId);
+      if (invalidSession) {
+        return { ok: false, status: 403, error: 'Requested track session does not match active host session.' };
+      }
+    }
+    return { ok: true };
+  }
+
+  if (contextType === 'party') {
+    const roomDoc = await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}`, idToken);
+    if (!roomDoc || roomDoc.isActive === false) {
+      return { ok: false, status: 404, error: 'Party room is closed or no longer exists.' };
+    }
+    const blocked = Array.isArray(roomDoc.blockedUserIds) ? roomDoc.blockedUserIds : [];
+    const kicked = Array.isArray(roomDoc.kickedUserIds) ? roomDoc.kickedUserIds : [];
+    if (blocked.includes(uid) || kicked.includes(uid)) {
+      return { ok: false, status: 403, error: 'You are restricted from this party room.' };
+    }
+    // If client includes speakerPeerIds map or publisher check, verify participant is publishing if doc is found
+    const targetSessionIds = Array.from(new Set(remoteTracks.map((t) => t.sessionId)));
+    const peerIds = Array.isArray(req.body?.speakerPeerIds) ? req.body.speakerPeerIds.filter(isValidResourceId) : [];
+    if (peerIds.length > 0) {
+      const checks = await Promise.all(
+        peerIds.map((peerId) =>
+          fetchFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}/voiceParticipants/${encodeURIComponent(peerId)}`, idToken)
+            .catch(() => null)
+        )
+      );
+      const validSessions = new Set(
+        checks
+          .filter((docData) => docData && docData.isPublishing === true && docData.sfuSessionId)
+          .map((docData) => docData.sfuSessionId)
+      );
+      if (validSessions.size > 0 && targetSessionIds.some((sid) => !validSessions.has(sid))) {
+        return { ok: false, status: 403, error: 'Target party speaker is not actively publishing.' };
+      }
+    }
+    return { ok: true };
+  }
+
+  return { ok: false, status: 400, error: 'Unsupported contextType. Expected "live" or "party".' };
+}
+
+async function callCloudflareSfu(subPath, method, body) {
+  if (!REALTIME_SFU_APP_ID || !REALTIME_SFU_BEARER_TOKEN) {
+    const err = new Error(
+      'Cloudflare Realtime SFU is not configured. Set REALTIME_SFU_APP_ID and REALTIME_SFU_BEARER_TOKEN in Railway Variables.'
+    );
+    err.statusCode = 503;
+    throw err;
+  }
+
+  const targetUrl = `${CLOUDFLARE_SFU_BASE}/apps/${encodeURIComponent(REALTIME_SFU_APP_ID)}${subPath}`;
+  const fetchOptions = {
+    method,
+    headers: {
+      Authorization: `Bearer ${REALTIME_SFU_BEARER_TOKEN}`,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    },
+  };
+  if (body !== undefined && method !== 'GET') {
+    fetchOptions.body = JSON.stringify(body);
+  }
+
+  const response = await fetch(targetUrl, fetchOptions);
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok || data?.errorCode) {
+    const description = data?.errorDescription || data?.error || `Cloudflare SFU error (${response.status})`;
+    const err = new Error(description);
+    err.statusCode = response.status === 404 || response.status === 410 ? 404 : 502;
+    err.sfuErrorCode = data?.errorCode || null;
+    throw err;
+  }
+
+  return data;
 }
 
 app.get('/api/auth/verify', async (req, res) => {
@@ -53,23 +260,23 @@ app.get('/api/auth/verify', async (req, res) => {
 });
 
 // Authenticated endpoint: Firebase ID token -> short-lived Cloudflare Calls TURN credentials.
-app.get('/api/webrtc/turn-credentials', async (req, res) => {
+app.get('/api/webrtc/turn-credentials', requireFirebaseAuth, async (_req, res) => {
   try {
-    if (!FIREBASE_API_KEY || !CLOUDFLARE_TURN_KEY_ID || !CLOUDFLARE_TURN_API_TOKEN) {
-      return res.status(503).json({ success: false, error: 'TURN backend is not configured. Set FIREBASE_API_KEY, CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN in Railway Variables.' });
+    if (!CLOUDFLARE_TURN_KEY_ID || !CLOUDFLARE_TURN_API_TOKEN) {
+      return res.status(503).json({
+        success: false,
+        error: 'TURN backend is not configured. Set CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_API_TOKEN in Railway Variables.',
+      });
     }
-    const authHeader = req.headers.authorization || '';
-    const idToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-    if (!idToken) return res.status(401).json({ success: false, error: 'Firebase Bearer token required.' });
 
-    const authenticatedUser = await verifyFirebaseIdToken(idToken);
-    if (!authenticatedUser) return res.status(401).json({ success: false, error: 'Firebase ID token is invalid or expired.' });
-
-    const turnResponse = await fetch(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(CLOUDFLARE_TURN_KEY_ID)}/credentials`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${CLOUDFLARE_TURN_API_TOKEN}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL }),
-    });
+    const turnResponse = await fetch(
+      `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(CLOUDFLARE_TURN_KEY_ID)}/credentials`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${CLOUDFLARE_TURN_API_TOKEN}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ttl: TURN_CREDENTIAL_TTL }),
+      }
+    );
     const turnData = await turnResponse.json().catch(() => ({}));
     if (!turnResponse.ok || !turnData.iceServers) {
       console.error('[TURN] Cloudflare Calls credential request failed:', turnData);
@@ -86,6 +293,251 @@ app.get('/api/webrtc/turn-credentials', async (req, res) => {
   } catch (error) {
     console.error('[TURN] Credential endpoint error:', error);
     return res.status(500).json({ success: false, error: 'Unable to issue TURN credentials.' });
+  }
+});
+
+// =========================================================================
+// CLOUDFLARE REALTIME SFU GATEWAY ENDPOINTS (FIREBASE AUTHENTICATED)
+// =========================================================================
+
+// 1. Create a new Cloudflare Realtime SFU Session
+app.post('/api/sfu/sessions', requireFirebaseAuth, async (req, res) => {
+  try {
+    const payload = {};
+    if (req.body?.sessionDescription?.sdp && req.body?.sessionDescription?.type) {
+      payload.sessionDescription = {
+        type: req.body.sessionDescription.type,
+        sdp: req.body.sessionDescription.sdp,
+      };
+    }
+    if (typeof req.body?.thirdparty === 'boolean') {
+      payload.thirdparty = req.body.thirdparty;
+    }
+
+    const sfuData = await callCloudflareSfu('/sessions/new', 'POST', payload);
+    if (!sfuData?.sessionId) {
+      return res.status(502).json({ success: false, error: 'Cloudflare SFU did not return a sessionId.' });
+    }
+
+    return res.json({
+      success: true,
+      sessionId: sfuData.sessionId,
+      sessionDescription: sfuData.sessionDescription || null,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    console.error('[SFU] Create session failed:', error.message);
+    return res.status(status).json({ success: false, error: error.message || 'Failed to create SFU session.' });
+  }
+});
+
+// 2. Publish local tracks OR subscribe to remote tracks in an SFU Session
+app.post('/api/sfu/sessions/:sessionId/tracks', requireFirebaseAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    if (!sessionId || sessionId.length > 256) {
+      return res.status(400).json({ success: false, error: 'Valid SFU sessionId is required.' });
+    }
+
+    const rawTracks = req.body?.tracks;
+    if (!Array.isArray(rawTracks) || rawTracks.length === 0) {
+      return res.status(400).json({ success: false, error: 'Non-empty tracks array is required.' });
+    }
+
+    const tracks = [];
+    for (const item of rawTracks) {
+      if (!item || (item.location !== 'local' && item.location !== 'remote') || typeof item.trackName !== 'string' || !item.trackName.trim()) {
+        return res.status(400).json({ success: false, error: 'Each track must include valid location ("local" | "remote") and trackName.' });
+      }
+      if (item.location === 'local') {
+        if (typeof item.mid !== 'string' || !item.mid.trim()) {
+          return res.status(400).json({ success: false, error: 'Local track publication requires transceiver mid.' });
+        }
+        tracks.push({
+          location: 'local',
+          mid: item.mid.trim(),
+          trackName: item.trackName.trim(),
+        });
+      } else {
+        if (typeof item.sessionId !== 'string' || !item.sessionId.trim()) {
+          return res.status(400).json({ success: false, error: 'Remote track subscription requires publisher sessionId.' });
+        }
+        if (item.sessionId.trim() === sessionId) {
+          return res.status(400).json({ success: false, error: 'Session cannot subscribe to its own local tracks.' });
+        }
+        tracks.push({
+          location: 'remote',
+          sessionId: item.sessionId.trim(),
+          trackName: item.trackName.trim(),
+        });
+      }
+    }
+
+    const authz = await authorizeRemoteTrackSubscriptions(req, tracks);
+    if (!authz.ok) {
+      return res.status(authz.status || 403).json({ success: false, error: authz.error || 'Subscription not authorized.' });
+    }
+
+    const payload = { tracks };
+    if (req.body?.sessionDescription?.sdp && req.body?.sessionDescription?.type) {
+      payload.sessionDescription = {
+        type: req.body.sessionDescription.type,
+        sdp: req.body.sessionDescription.sdp,
+      };
+    }
+
+    const sfuData = await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}/tracks/new`, 'POST', payload);
+    const returnedTracks = Array.isArray(sfuData.tracks) ? sfuData.tracks : [];
+    const failedTracks = returnedTracks.filter((t) => t?.errorCode);
+    if (failedTracks.length > 0) {
+      const msg = failedTracks.map((t) => `${t.trackName || 'track'}: ${t.errorDescription || t.errorCode}`).join('; ');
+      return res.status(422).json({
+        success: false,
+        error: `Cloudflare SFU rejected track operation: ${msg}`,
+        tracks: returnedTracks,
+      });
+    }
+
+    return res.json({
+      success: true,
+      sessionId,
+      requiresImmediateRenegotiation: Boolean(sfuData.requiresImmediateRenegotiation),
+      sessionDescription: sfuData.sessionDescription || null,
+      tracks: returnedTracks,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    console.error('[SFU] Tracks new failed:', error.message);
+    return res.status(status).json({ success: false, error: error.message || 'SFU track negotiation failed.' });
+  }
+});
+
+// 3. Complete SDP Renegotiation on an SFU Session
+app.put('/api/sfu/sessions/:sessionId/renegotiate', requireFirebaseAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const sd = req.body?.sessionDescription;
+    if (!sessionId || !sd?.sdp || !sd?.type) {
+      return res.status(400).json({ success: false, error: 'sessionId and sessionDescription { type, sdp } are required.' });
+    }
+
+    const sfuData = await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
+      sessionDescription: { type: sd.type, sdp: sd.sdp },
+    });
+
+    return res.json({
+      success: true,
+      sessionId,
+      sessionDescription: sfuData.sessionDescription || null,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    console.error('[SFU] Renegotiate failed:', error.message);
+    return res.status(status).json({ success: false, error: error.message || 'SFU renegotiation failed.' });
+  }
+});
+
+// 4. Close specific SFU tracks
+app.put('/api/sfu/sessions/:sessionId/tracks/close', requireFirebaseAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const rawTracks = req.body?.tracks;
+    if (!sessionId || !Array.isArray(rawTracks) || rawTracks.length === 0) {
+      return res.status(400).json({ success: false, error: 'sessionId and non-empty tracks array are required.' });
+    }
+
+    const tracks = rawTracks
+      .filter((t) => t && typeof t.mid === 'string' && t.mid.trim())
+      .map((t) => ({ mid: t.mid.trim() }));
+    if (tracks.length === 0) {
+      return res.status(400).json({ success: false, error: 'Each track to close must include a valid mid.' });
+    }
+
+    const payload = {
+      tracks,
+      force: Boolean(req.body?.force),
+    };
+    if (req.body?.sessionDescription?.sdp && req.body?.sessionDescription?.type) {
+      payload.sessionDescription = {
+        type: req.body.sessionDescription.type,
+        sdp: req.body.sessionDescription.sdp,
+      };
+    }
+
+    const sfuData = await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}/tracks/close`, 'PUT', payload);
+    return res.json({
+      success: true,
+      sessionId,
+      requiresImmediateRenegotiation: Boolean(sfuData.requiresImmediateRenegotiation),
+      sessionDescription: sfuData.sessionDescription || null,
+      tracks: Array.isArray(sfuData.tracks) ? sfuData.tracks : [],
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    console.error('[SFU] Close tracks failed:', error.message);
+    return res.status(status).json({ success: false, error: error.message || 'Failed to close SFU tracks.' });
+  }
+});
+
+// 5. Inspect SFU session & active tracks
+app.get('/api/sfu/sessions/:sessionId', requireFirebaseAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'sessionId is required.' });
+    }
+    const sfuData = await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}`, 'GET');
+    return res.json({
+      success: true,
+      sessionId,
+      tracks: Array.isArray(sfuData.tracks) ? sfuData.tracks : [],
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    console.error('[SFU] Get session status failed:', error.message);
+    return res.status(status).json({ success: false, error: error.message || 'Failed to inspect SFU session.' });
+  }
+});
+
+// 6. Force-close all tracks for an SFU session (cleanup on stream end / page unload)
+app.delete('/api/sfu/sessions/:sessionId', requireFirebaseAuth, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    if (!sessionId) {
+      return res.status(400).json({ success: false, error: 'sessionId is required.' });
+    }
+    let sessionState;
+    try {
+      sessionState = await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}`, 'GET');
+    } catch (err) {
+      if (err.statusCode === 404) {
+        return res.json({ success: true, sessionId, closedCount: 0 });
+      }
+      throw err;
+    }
+
+    const activeMids = (Array.isArray(sessionState.tracks) ? sessionState.tracks : [])
+      .map((t) => t?.mid)
+      .filter((mid) => typeof mid === 'string' && mid.trim());
+
+    if (activeMids.length === 0) {
+      return res.json({ success: true, sessionId, closedCount: 0 });
+    }
+
+    await callCloudflareSfu(`/sessions/${encodeURIComponent(sessionId)}/tracks/close`, 'PUT', {
+      tracks: activeMids.map((mid) => ({ mid })),
+      force: true,
+    });
+
+    return res.json({
+      success: true,
+      sessionId,
+      closedCount: activeMids.length,
+    });
+  } catch (error) {
+    const status = error.statusCode || 500;
+    console.error('[SFU] Close session failed:', error.message);
+    return res.status(status).json({ success: false, error: error.message || 'Failed to close SFU session.' });
   }
 });
 

@@ -21,7 +21,8 @@ service cloud.firestore {
 
     // Connection testing
     match /test/{docId} {
-      allow read, write: if isSignedIn() || true;
+      allow read: if true;
+      allow write: if false;
     }
 
     // User profiles
@@ -97,40 +98,75 @@ service cloud.firestore {
 
     // Party rooms
     match /partyRooms/{roomId} {
-      allow read, write: if true;
+      allow get: if isValidId(roomId) && (isSignedIn() || resource.data.isActive == true);
+      allow list: if isSignedIn() || resource.data.isActive == true;
+      allow create: if isSignedIn() && isValidId(roomId) && request.resource.data.host.id == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(roomId) && (
+        resource.data.host.id == request.auth.uid
+        || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds)
+        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seats', 'updatedAt', 'activeViewers', 'totalGiftCoins', 'lastSeenAtMs'])
+      );
+      allow delete: if isSignedIn() && isValidId(roomId) && resource.data.host.id == request.auth.uid;
 
       match /messages/{messageId} {
-        allow read, write: if true;
+        allow read: if isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true;
+        allow create: if isSignedIn()
+          && isValidId(roomId)
+          && isValidId(messageId)
+          && request.resource.data.sender.id == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 2000;
+        allow update, delete: if false;
       }
 
       match /signals/{signalId} {
-        allow read, write: if isSignedIn();
+        allow read: if isSignedIn();
+        allow write: if false;
       }
+
       match /voiceParticipants/{userId} {
         allow read: if isSignedIn();
-        allow create, update, delete: if isSignedIn() && request.auth.uid == userId;
+        allow create, update, delete: if isSignedIn() && (
+          request.auth.uid == userId
+          || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.host.id == request.auth.uid
+          || (
+            get(/databases/$(database)/documents/partyRooms/$(roomId)).data.moderatorIds is list
+            && request.auth.uid in get(/databases/$(database)/documents/partyRooms/$(roomId)).data.moderatorIds
+          )
+        );
       }
+
       match /voiceSignals/{pairId}/messages/{messageId} {
         allow read: if isSignedIn() && (resource.data.from == request.auth.uid || resource.data.to == request.auth.uid);
-        allow create: if isSignedIn()
-          && request.resource.data.from == request.auth.uid
-          && request.resource.data.to is string
-          && request.resource.data.to != request.auth.uid
-          && request.resource.data.type in ['offer', 'answer', 'candidate'];
-        allow update, delete: if false;
+        allow write: if false;
       }
     }
 
     // Live Streams (Solo Live & PK Battle broadcasts)
     match /liveStreams/{streamId} {
-      allow read, write: if true;
+      allow get: if isValidId(streamId) && (isSignedIn() || resource.data.isActive == true);
+      allow list: if isSignedIn() || resource.data.isActive == true;
+      allow create: if isSignedIn() && isValidId(streamId) && request.resource.data.host.id == request.auth.uid;
+      allow update: if isSignedIn() && isValidId(streamId) && (
+        resource.data.host.id == request.auth.uid
+        || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds)
+        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount', 'totalGiftCoins', 'updatedAt'])
+      );
+      allow delete: if isSignedIn() && isValidId(streamId) && resource.data.host.id == request.auth.uid;
 
       match /messages/{messageId} {
-        allow read, write: if true;
+        allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;
+        allow create: if isSignedIn()
+          && isValidId(streamId)
+          && isValidId(messageId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 2000;
+        allow update, delete: if false;
       }
 
       match /signals/{signalId} {
-        allow read, write: if true;
+        allow read, write: if false;
       }
     }
 

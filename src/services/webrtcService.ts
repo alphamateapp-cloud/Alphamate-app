@@ -1,28 +1,26 @@
 /**
- * Real-time Peer-to-Peer WebRTC Streaming & Multi-Seat Audio Communication Service.
- * Implements standard RTCPeerConnection, STUN/TURN ICE pipeline, Firestore Signaling,
- * MediaStream hardware acquisition, and Voice Activity Analysis for Live Broadcasts and Audio Party Rooms.
+ * Cloudflare Realtime SFU + Cloudflare TURN WebRTC Engine for Alpha Mate.
+ * Implements authentic hardware media capture, Railway-proxied Cloudflare Realtime SFU
+ * pub/sub sessions, SDP renegotiation, ICE TURN relay, heartbeat/lifecycle cleanup,
+ * and Voice Activity Analysis for Solo Live Streaming and Multi-Seat Party Voice Rooms.
  *
- * NOTE: Zero synthetic audio oscillators or simulated canvas loops.
- * All media streams are authentic browser/device WebRTC audio/video feeds.
+ * STRICT PRODUCTION GUARANTEES:
+ * - Zero fake video, zero synthetic audio oscillators, zero empty MediaStream fallbacks.
+ * - Viewer local camera & microphone are NEVER captured or used as remote fallback.
+ * - Cloudflare SFU & TURN secrets remain strictly server-side on Railway.
  */
 
 import {
   collection,
   doc,
   setDoc,
-  addDoc,
+  updateDoc,
   onSnapshot,
-  getDocs,
   deleteDoc,
   serverTimestamp,
-  query,
-  orderBy,
-  limit,
-  where,
 } from 'firebase/firestore';
 import { db, auth } from './firebase';
-import { User } from '../types';
+import { User, SfuPublishedTrack } from '../types';
 
 export interface PeerConnectionConfig {
   iceServers?: RTCIceServer[];
@@ -48,261 +46,514 @@ export type ConnectionState =
   | 'failed'
   | 'closed';
 
-interface HostBroadcastSession {
-  streamId: string;
+export interface SoloLivePublishResult {
   stream: MediaStream;
-  isVideoOn: boolean;
-  isMicOn: boolean;
-  hostId: string;
+  sfuSessionId: string;
+  publishedTracks: SfuPublishedTrack[];
 }
 
-// Global Cloudflare STUN & Google STUN fallback servers
+interface HostSfuSession {
+  streamId: string;
+  hostId: string;
+  sfuSessionId: string;
+  pc: RTCPeerConnection;
+  stream: MediaStream;
+  publishedTracks: SfuPublishedTrack[];
+  isVideoOn: boolean;
+  isMicOn: boolean;
+}
+
+interface ViewerSfuSession {
+  streamId: string;
+  sfuSessionId: string;
+  pc: RTCPeerConnection;
+  remoteStream: MediaStream;
+  subscribedMids: string[];
+}
+
+interface PartySubscribedTrack {
+  peerId: string;
+  publisherSessionId: string;
+  trackName: string;
+  mid: string;
+  stream: MediaStream;
+}
+
+interface PartySfuRoomSession {
+  roomId: string;
+  userId: string;
+  sfuSessionId: string;
+  pc: RTCPeerConnection;
+  localStream: MediaStream | null;
+  localTrackName: string | null;
+  localMid: string | null;
+  isPublishing: boolean;
+  isMuted: boolean;
+  unsubscribeParticipants: (() => void) | null;
+  heartbeatTimer: ReturnType<typeof setInterval> | null;
+  subscribedByPeerKey: Map<string, PartySubscribedTrack>;
+  pendingMidToPeer: Map<string, string>;
+  onError?: (err: Error) => void;
+  onConnectionStateChange?: (state: ConnectionState) => void;
+}
+
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.cloudflare.com:3478' },
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
 ];
 
-// Cloudflare TURN Relay Endpoints (UDP, TCP, and TLS)
 export const CLOUDFLARE_TURN_URLS = [
   'turn:turn.cloudflare.com:3478?transport=udp',
   'turn:turn.cloudflare.com:3478?transport=tcp',
   'turns:turn.cloudflare.com:5349?transport=tcp',
 ];
 
-class P2PStreamingEngine {
+const PARTY_PARTICIPANT_STALE_MS = 55_000;
+
+class RealtimeSfuStreamingEngine {
   private localStream: MediaStream | null = null;
   private peerConnections: Map<string, RTCPeerConnection> = new Map();
   private remoteStreams: Map<string, MediaStream> = new Map();
-  private dataChannels: Map<string, RTCDataChannel> = new Map();
   private audioContext: AudioContext | null = null;
   private analyser: AnalyserNode | null = null;
   private isMuted: boolean = false;
   private isVideoPaused: boolean = false;
   private facingMode: 'user' | 'environment' = 'user';
 
-  // Broadcast & Viewer State Management
-  private hostBroadcasts: Map<string, HostBroadcastSession> = new Map();
+  // Broadcast state listeners
   private broadcastStates: Map<string, BroadcastState> = new Map();
   private stateListeners: Map<string, Set<(state: BroadcastState) => void>> = new Map();
-  private broadcastChannel: BroadcastChannel | null = null;
-  private activeSignalingUnsubscribers: Map<string, Array<() => void>> = new Map();
 
-  // Cloudflare TURN and ICE server state
-  private customIceServers: RTCIceServer[] = [];
+  // Active Cloudflare SFU sessions
+  private hostSfuSessions: Map<string, HostSfuSession> = new Map();
+  private viewerSfuSessions: Map<string, ViewerSfuSession> = new Map();
+  private partySfuSessions: Map<string, PartySfuRoomSession> = new Map();
+  private sessionQueues: Map<string, Promise<unknown>> = new Map();
+
+  // TURN & ICE state
+  private customIceServers: RTCIceServer[] = [...DEFAULT_ICE_SERVERS];
   private cachedTurnServers: RTCIceServer[] = [];
   private turnExpiresAt: number = 0;
   private hasCloudflareTurn: boolean = false;
 
-  // Candidate buffering to eliminate race conditions on restricted mobile connections
-  private pendingRemoteCandidates: Map<string, RTCIceCandidateInit[]> = new Map();
-  private partyStreams: Map<string, MediaStream> = new Map();
-  private partyRoomUnsubscribers: Map<string, () => void> = new Map();
-  private partyPeerUnsubscribers: Map<string, () => void> = new Map();
-  private partyOfferStarted: Set<string> = new Set();
-  private partySessionIds: Map<string, string> = new Map();
-
   constructor() {
-    this.initTurnConfiguration();
-    // Pre-warm Cloudflare TURN credentials in background for instant live streaming
     this.fetchCloudflareTurnCredentials().catch(() => {});
+  }
 
-    // Cross-tab broadcast state synchronization
-    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
-      try {
-        this.broadcastChannel = new BroadcastChannel('alphamate_live_sync');
-        this.broadcastChannel.onmessage = (event) => {
-          const data = event.data;
-          if (data && data.type === 'BROADCAST_STATE' && data.streamId) {
-            this.handleIncomingBroadcastState(data.streamId, {
-              isVideoOn: data.isVideoOn,
-              isMicOn: data.isMicOn,
-            });
-          }
-        };
-      } catch (err) {
-        console.warn('BroadcastChannel not supported in this context', err);
+  private getBackendApiBase(): string {
+    const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
+    if (envUrl && !envUrl.includes('YOUR-RAILWAY-DOMAIN')) {
+      return envUrl.replace(/\/$/, '');
+    }
+    if (
+      typeof window !== 'undefined' &&
+      (window.location.protocol === 'http:' || window.location.protocol === 'https:')
+    ) {
+      return '';
+    }
+    throw new Error('VITE_RAILWAY_API_URL is not configured for backend SFU/TURN requests.');
+  }
+
+  private async getFirebaseIdToken(forceRefresh: boolean = false): Promise<string> {
+    const user = auth.currentUser;
+    if (!user) {
+      throw new Error('Please sign in with your account before starting live video or party voice.');
+    }
+    return user.getIdToken(forceRefresh);
+  }
+
+  private async sfuFetch<T = any>(
+    path: string,
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    body?: any,
+    keepalive: boolean = false
+  ): Promise<T> {
+    const base = this.getBackendApiBase();
+    const url = `${base}${path}`;
+
+    const exec = async (forceTokenRefresh: boolean) => {
+      const idToken = await this.getFirebaseIdToken(forceTokenRefresh);
+      const headers: Record<string, string> = {
+        Authorization: `Bearer ${idToken}`,
+        Accept: 'application/json',
+      };
+      const init: RequestInit = {
+        method,
+        headers,
+        keepalive,
+      };
+      if (body !== undefined && method !== 'GET') {
+        headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(body);
       }
+      const response = await fetch(url, init);
+      const data = await response.json().catch(() => ({}));
+      return { response, data };
+    };
+
+    let { response, data } = await exec(false);
+    if (response.status === 401 && !keepalive) {
+      ({ response, data } = await exec(true));
     }
+
+    if (!response.ok || data?.success === false) {
+      const msg = data?.error || `SFU request failed (${response.status})`;
+      const err: any = new Error(msg);
+      err.status = response.status;
+      throw err;
+    }
+
+    return data as T;
   }
 
-  /**
-   * Initialize STUN and TURN configuration from environment variables
-   */
-  private initTurnConfiguration(): void {
-    const envTurnUrl =
-      (import.meta as any).env?.VITE_CLOUDFLARE_TURN_URL ||
-      (import.meta as any).env?.VITE_TURN_URL;
-    const envTurnUser =
-      (import.meta as any).env?.VITE_CLOUDFLARE_TURN_USERNAME ||
-      (import.meta as any).env?.VITE_TURN_USERNAME;
-    const envTurnCred =
-      (import.meta as any).env?.VITE_CLOUDFLARE_TURN_CREDENTIAL ||
-      (import.meta as any).env?.VITE_TURN_CREDENTIAL;
-    const envStunServers = (import.meta as any).env?.VITE_STUN_SERVERS;
-
-    const servers: RTCIceServer[] = [...DEFAULT_ICE_SERVERS];
-
-    if (envStunServers) {
-      const extraStuns = envStunServers
-        .split(',')
-        .map((url: string) => ({ urls: url.trim() }));
-      servers.push(...extraStuns);
-    }
-
-    if (envTurnUser && envTurnCred) {
-      const turnUrls = envTurnUrl
-        ? envTurnUrl.split(',').map((u: string) => u.trim())
-        : CLOUDFLARE_TURN_URLS;
-
-      servers.push({
-        urls: turnUrls,
-        username: envTurnUser,
-        credential: envTurnCred,
-      });
-      this.hasCloudflareTurn = true;
-    }
-
-    this.customIceServers = servers;
+  private enqueueSessionOp<T>(sessionKey: string, task: () => Promise<T>): Promise<T> {
+    const prev = this.sessionQueues.get(sessionKey) || Promise.resolve();
+    const next = prev.catch(() => undefined).then(task);
+    this.sessionQueues.set(
+      sessionKey,
+      next.finally(() => {
+        if (this.sessionQueues.get(sessionKey) === next) {
+          this.sessionQueues.delete(sessionKey);
+        }
+      })
+    );
+    return next;
   }
 
-  /**
-   * Fetch Cloudflare TURN credentials dynamically:
-   * 1. First tries the Cloudflare Worker `/turn-credentials` endpoint
-   * 2. If Cloudflare Calls TURN key ID and API token are provided, queries Cloudflare Calls API
-   * 3. Falls back to static environment variables or STUN
-   */
+  // =========================================================================
+  // CLOUDFLARE TURN CREDENTIALS & ICE CONFIG
+  // =========================================================================
+
   public async fetchCloudflareTurnCredentials(forceRefresh: boolean = false): Promise<RTCIceServer[]> {
     const now = Date.now();
-    if (!forceRefresh && this.cachedTurnServers.length > 0 && now < this.turnExpiresAt) return this.cachedTurnServers;
+    if (!forceRefresh && this.cachedTurnServers.length > 0 && now < this.turnExpiresAt) {
+      return this.cachedTurnServers;
+    }
 
-    const railwayUrl = (import.meta as any).env?.VITE_RAILWAY_API_URL;
-    if (railwayUrl && auth.currentUser) {
+    if (auth.currentUser) {
       try {
+        const base = this.getBackendApiBase();
         const idToken = await auth.currentUser.getIdToken(forceRefresh);
-        const response = await fetch(`${railwayUrl.replace(/\/$/, '')}/api/webrtc/turn-credentials`, {
+        const response = await fetch(`${base}/api/webrtc/turn-credentials`, {
           method: 'GET',
           headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
         });
-        const data = await response.json();
+        const data = await response.json().catch(() => ({}));
         if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
           const hasTurn = data.iceServers.some((server: RTCIceServer) =>
-            (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some((url) => url.startsWith('turn:') || url.startsWith('turns:'))
+            (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
+              (url) => url.startsWith('turn:') || url.startsWith('turns:')
+            )
           );
           if (hasTurn) {
             this.cachedTurnServers = data.iceServers;
-            this.turnExpiresAt = now + (Math.max(300, Number(data.ttl) || 3600) * 1000) - 60000;
+            this.turnExpiresAt = now + Math.max(300, Number(data.ttl) || 3600) * 1000 - 60000;
             this.customIceServers = data.iceServers;
             this.hasCloudflareTurn = true;
             return data.iceServers;
           }
-          console.warn('[WebRTC] Railway returned STUN-only ICE servers; will retry TURN after configuration.');
-        } else {
-          console.warn('[WebRTC] Railway TURN endpoint unavailable:', data?.error || response.status);
         }
       } catch (error) {
         console.warn('[WebRTC] Railway TURN credential request failed:', error);
       }
     }
 
-    // Backward-compatible fallback to the existing Cloudflare Worker endpoint.
-    // No private TURN API token is ever read from frontend environment variables.
-    const workerUrl = (import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || 'https://alpha-mate-reels-api.alphamateapp.workers.dev';
-    try {
-      const response = await fetch(`${workerUrl.replace(/\/$/, '')}/turn-credentials`, { headers: { Accept: 'application/json' } });
-      const data = await response.json();
-      if (response.ok && data?.iceServers && Array.isArray(data.iceServers)) {
-        const hasTurn = data.iceServers.some((server: RTCIceServer) =>
-          (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some((url) => url.startsWith('turn:') || url.startsWith('turns:'))
-        );
-        if (hasTurn) {
-          this.cachedTurnServers = data.iceServers;
-          this.turnExpiresAt = now + (Math.max(300, Number(data.ttl) || 3600) * 1000) - 60000;
-          this.customIceServers = data.iceServers;
-          this.hasCloudflareTurn = true;
-          return data.iceServers;
-        }
-      }
-    } catch (error) {
-      console.warn('[WebRTC] Existing Worker TURN fallback failed:', error);
-    }
     return this.getIceServers();
   }
 
-  /**
-   * Set custom ICE servers programmatically (e.g. from backend TURN endpoint)
-   */
   public setIceServers(servers: RTCIceServer[]): void {
     this.customIceServers = servers;
     this.hasCloudflareTurn = servers.some(
-      (s) => (typeof s.urls === 'string' && s.urls.includes('turn:')) ||
-             (Array.isArray(s.urls) && s.urls.some((u) => u.includes('turn:')))
+      (s) =>
+        (typeof s.urls === 'string' && s.urls.includes('turn:')) ||
+        (Array.isArray(s.urls) && s.urls.some((u) => u.includes('turn:')))
     );
   }
 
-  /**
-   * Retrieve active ICE servers (STUN + Cloudflare TURN)
-   */
   public getIceServers(): RTCIceServer[] {
     return this.customIceServers.length > 0 ? this.customIceServers : DEFAULT_ICE_SERVERS;
   }
 
-  /**
-   * Build complete RTCConfiguration with optimizations for restricted mobile networks (4G/5G CGNAT)
-   */
   public getRtcConfiguration(): RTCConfiguration {
     return {
       iceServers: this.getIceServers(),
-      iceTransportPolicy: 'all', // Allows both direct P2P (STUN) and relay (Cloudflare TURN)
-      bundlePolicy: 'max-bundle', // Bundles audio & video into one transport for minimal NAT overhead
+      iceTransportPolicy: 'all',
+      bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
-      iceCandidatePoolSize: 2, // Pre-fetches ICE candidates for instantaneous connection setup
+      iceCandidatePoolSize: 2,
     };
   }
 
-  /**
-   * Check if Cloudflare TURN relay is actively configured
-   */
   public isCloudflareTurnActive(): boolean {
     return this.hasCloudflareTurn;
   }
 
-  /**
-   * Queue remote ICE candidate to prevent race conditions when remoteDescription is not yet set
-   */
-  private queueRemoteCandidate(connectionKey: string, candidate: RTCIceCandidateInit): void {
-    if (!this.pendingRemoteCandidates.has(connectionKey)) {
-      this.pendingRemoteCandidates.set(connectionKey, []);
+  private waitForPeerConnected(pc: RTCPeerConnection, timeoutMs: number = 15000): Promise<void> {
+    if (
+      pc.connectionState === 'connected' ||
+      pc.iceConnectionState === 'connected' ||
+      pc.iceConnectionState === 'completed'
+    ) {
+      return Promise.resolve();
     }
-    this.pendingRemoteCandidates.get(connectionKey)!.push(candidate);
+
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        pc.removeEventListener('connectionstatechange', check);
+        pc.removeEventListener('iceconnectionstatechange', check);
+      };
+
+      const fail = (reason: string) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new Error(reason));
+      };
+
+      const succeed = () => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      const check = () => {
+        if (
+          pc.connectionState === 'connected' ||
+          pc.iceConnectionState === 'connected' ||
+          pc.iceConnectionState === 'completed'
+        ) {
+          succeed();
+        } else if (
+          pc.connectionState === 'failed' ||
+          pc.connectionState === 'closed' ||
+          pc.iceConnectionState === 'failed'
+        ) {
+          fail(`WebRTC peer connection failed (${pc.connectionState || pc.iceConnectionState}).`);
+        }
+      };
+
+      const timer = setTimeout(() => {
+        fail('WebRTC SFU connection timed out. Please verify network & Cloudflare TURN/SFU settings.');
+      }, timeoutMs);
+
+      pc.addEventListener('connectionstatechange', check);
+      pc.addEventListener('iceconnectionstatechange', check);
+      check();
+    });
   }
 
-  /**
-   * Drain queued candidates once setRemoteDescription has successfully settled
-   */
-  private async drainPendingCandidates(connectionKey: string, pc: RTCPeerConnection): Promise<void> {
-    const queued = this.pendingRemoteCandidates.get(connectionKey);
-    if (queued && queued.length > 0) {
-      for (const cand of queued) {
-        try {
-          await pc.addIceCandidate(new RTCIceCandidate(cand));
-        } catch (e) {
-          console.warn('[WebRTC] Error adding drained candidate:', e);
+  private async createSfuSession(): Promise<string> {
+    const res = await this.sfuFetch<{ sessionId: string }>('/api/sfu/sessions', 'POST', {});
+    if (!res.sessionId) {
+      throw new Error('Cloudflare SFU did not return a sessionId.');
+    }
+    return res.sessionId;
+  }
+
+  private async publishTracksOnSession(
+    sessionId: string,
+    pc: RTCPeerConnection,
+    tracksWithNames: Array<{ track: MediaStreamTrack; trackName: string }>,
+    stream: MediaStream
+  ): Promise<SfuPublishedTrack[]> {
+    return this.enqueueSessionOp(sessionId, async () => {
+      const addedTransceivers: Array<{
+        transceiver: RTCRtpTransceiver;
+        trackName: string;
+        kind: 'audio' | 'video';
+      }> = [];
+
+      for (const item of tracksWithNames) {
+        const transceiver = pc.addTransceiver(item.track, {
+          direction: 'sendonly',
+          streams: [stream],
+        });
+        addedTransceivers.push({
+          transceiver,
+          trackName: item.trackName,
+          kind: item.track.kind === 'audio' ? 'audio' : 'video',
+        });
+      }
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sfuTracksPayload = addedTransceivers.map((entry) => {
+        if (!entry.transceiver.mid) {
+          throw new Error(`Unable to resolve SDP mid for local track ${entry.trackName}.`);
+        }
+        return {
+          location: 'local' as const,
+          mid: entry.transceiver.mid,
+          trackName: entry.trackName,
+        };
+      });
+
+      const trackResp = await this.sfuFetch<{
+        requiresImmediateRenegotiation: boolean;
+        sessionDescription: RTCSessionDescriptionInit | null;
+        tracks: Array<{ mid?: string; trackName?: string; errorCode?: string; errorDescription?: string }>;
+      }>(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/tracks`, 'POST', {
+        sessionDescription: {
+          type: pc.localDescription!.type,
+          sdp: pc.localDescription!.sdp,
+        },
+        tracks: sfuTracksPayload,
+      });
+
+      if (trackResp.sessionDescription?.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(trackResp.sessionDescription));
+        if (trackResp.requiresImmediateRenegotiation && trackResp.sessionDescription.type === 'offer') {
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
+            sessionDescription: {
+              type: pc.localDescription!.type,
+              sdp: pc.localDescription!.sdp,
+            },
+          });
         }
       }
-      this.pendingRemoteCandidates.delete(connectionKey);
-    }
+
+      return addedTransceivers.map((entry) => ({
+        trackName: entry.trackName,
+        mid: entry.transceiver.mid || '',
+        kind: entry.kind,
+      }));
+    });
+  }
+
+  private async subscribeTracksOnSession(
+    sessionId: string,
+    pc: RTCPeerConnection,
+    remoteTracks: Array<{ publisherSessionId: string; trackName: string; peerId?: string }>,
+    context?: { contextType: 'live' | 'party'; contextId: string; speakerPeerIds?: string[] },
+    onAssignedMids?: (assigned: Array<{ mid: string; trackName: string; publisherSessionId: string; peerId?: string }>) => void
+  ): Promise<Array<{ mid: string; trackName: string; publisherSessionId: string }>> {
+    return this.enqueueSessionOp(sessionId, async () => {
+      const resp = await this.sfuFetch<{
+        requiresImmediateRenegotiation: boolean;
+        sessionDescription: RTCSessionDescriptionInit | null;
+        tracks: Array<{
+          mid?: string;
+          trackName?: string;
+          sessionId?: string;
+          errorCode?: string;
+          errorDescription?: string;
+        }>;
+      }>(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/tracks`, 'POST', {
+        tracks: remoteTracks.map((t) => ({
+          location: 'remote',
+          sessionId: t.publisherSessionId,
+          trackName: t.trackName,
+        })),
+        ...(context || {}),
+      });
+
+      const assigned = (resp.tracks || []).map((t, idx) => ({
+        mid: String(t.mid || ''),
+        trackName: String(t.trackName || remoteTracks[idx]?.trackName || ''),
+        publisherSessionId: String(t.sessionId || remoteTracks[idx]?.publisherSessionId || ''),
+        peerId: remoteTracks.find(
+          (rt) => rt.trackName === t.trackName && (!t.sessionId || rt.publisherSessionId === t.sessionId)
+        )?.peerId,
+      }));
+
+      if (onAssignedMids) {
+        onAssignedMids(assigned);
+      }
+
+      if (resp.sessionDescription?.sdp) {
+        await pc.setRemoteDescription(new RTCSessionDescription(resp.sessionDescription));
+        if (resp.requiresImmediateRenegotiation || resp.sessionDescription.type === 'offer') {
+          const answer = await pc.createAnswer();
+          await pc.setLocalDescription(answer);
+          await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
+            sessionDescription: {
+              type: pc.localDescription!.type,
+              sdp: pc.localDescription!.sdp,
+            },
+          });
+        }
+      }
+
+      return assigned;
+    });
+  }
+
+  private async closeTracksOnSession(
+    sessionId: string,
+    pc: RTCPeerConnection,
+    mids: string[],
+    force: boolean = false
+  ): Promise<void> {
+    const validMids = mids.filter((m) => typeof m === 'string' && m.trim().length > 0);
+    if (!validMids.length) return;
+
+    return this.enqueueSessionOp(sessionId, async () => {
+      if (pc.signalingState === 'closed') {
+        await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/tracks/close`, 'PUT', {
+          tracks: validMids.map((mid) => ({ mid })),
+          force: true,
+        }).catch(() => {});
+        return;
+      }
+
+      if (!force) {
+        for (const mid of validMids) {
+          const transceiver = pc.getTransceivers().find((t) => t.mid === mid);
+          if (transceiver) {
+            try {
+              transceiver.stop();
+            } catch {
+              // ignore
+            }
+          }
+        }
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        const resp = await this.sfuFetch<{
+          requiresImmediateRenegotiation?: boolean;
+          sessionDescription?: RTCSessionDescriptionInit | null;
+        }>(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/tracks/close`, 'PUT', {
+          tracks: validMids.map((mid) => ({ mid })),
+          sessionDescription: {
+            type: pc.localDescription!.type,
+            sdp: pc.localDescription!.sdp,
+          },
+          force: false,
+        }).catch(() => null);
+
+        if (resp?.sessionDescription?.sdp) {
+          await pc.setRemoteDescription(new RTCSessionDescription(resp.sessionDescription)).catch(() => {});
+        }
+      } else {
+        await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/tracks/close`, 'PUT', {
+          tracks: validMids.map((mid) => ({ mid })),
+          force: true,
+        }).catch(() => {});
+      }
+    });
+  }
+
+  private async deleteSfuSession(sessionId: string, keepalive: boolean = false): Promise<void> {
+    if (!sessionId) return;
+    await this.sfuFetch(
+      `/api/sfu/sessions/${encodeURIComponent(sessionId)}`,
+      'DELETE',
+      undefined,
+      keepalive
+    ).catch(() => {});
   }
 
   // =========================================================================
-  // HOST MODE: LOCAL CAMERA & MICROPHONE HARDWARE ACQUISITION
+  // LOCAL HARDWARE CAPTURE (USED BY SOLO HOST & VIDEO UPLOAD PREVIEW)
   // =========================================================================
 
-  /**
-   * Acquire authentic local camera and microphone stream via MediaDevices API.
-   * Supports front ('user') and rear ('environment') camera flip.
-   */
   public async getLocalMediaStream(
     facing: 'user' | 'environment' = 'user',
     withAudio: boolean = true
@@ -329,44 +580,70 @@ class P2PStreamingEngine {
     try {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       this.localStream = stream;
-
-      // Apply initial track mute/disable state
-      if (this.isVideoPaused) {
-        stream.getVideoTracks().forEach((t) => (t.enabled = false));
-      }
-      if (this.isMuted) {
-        stream.getAudioTracks().forEach((t) => (t.enabled = false));
-      }
-
-      // Initialize real voice activity audio analyzer
-      if (withAudio) {
-        this.initAudioAnalyser(stream);
-      }
-
+      if (this.isVideoPaused) stream.getVideoTracks().forEach((t) => (t.enabled = false));
+      if (this.isMuted) stream.getAudioTracks().forEach((t) => (t.enabled = false));
+      if (withAudio) this.initAudioAnalyser(stream);
       return stream;
     } catch (err) {
       console.error('Camera/Microphone access error:', err);
-      // Fallback: If 720p/HD resolution constraint failed on low-end device, try basic constraints
-      try {
-        const fallbackStream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: withAudio,
-        });
-        this.localStream = fallbackStream;
-        if (withAudio) this.initAudioAnalyser(fallbackStream);
-        return fallbackStream;
-      } catch (fallbackErr) {
-        this.stopLocalMediaStream();
-        throw fallbackErr;
-      }
+      const fallbackStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: withAudio
+          ? { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          : false,
+      });
+      this.localStream = fallbackStream;
+      if (this.isVideoPaused) fallbackStream.getVideoTracks().forEach((t) => (t.enabled = false));
+      if (this.isMuted) fallbackStream.getAudioTracks().forEach((t) => (t.enabled = false));
+      if (withAudio) this.initAudioAnalyser(fallbackStream);
+      return fallbackStream;
     }
   }
 
   /**
-   * Rotate / Flip Camera between front and back
+   * Flip camera: if an active host SFU session exists, seamlessly replaces the
+   * outbound video track via RTCRtpSender.replaceTrack so viewers stay connected.
    */
-  public async flipCamera(): Promise<MediaStream> {
+  public async flipCamera(activeStreamId?: string): Promise<MediaStream> {
     const nextFacing = this.facingMode === 'user' ? 'environment' : 'user';
+    const hostSession = activeStreamId ? this.hostSfuSessions.get(activeStreamId) : undefined;
+
+    if (hostSession && hostSession.pc.connectionState !== 'closed') {
+      this.facingMode = nextFacing;
+      const newCamStream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: nextFacing },
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30, max: 60 },
+        },
+        audio: false,
+      });
+      const newVideoTrack = newCamStream.getVideoTracks()[0];
+      if (!newVideoTrack) {
+        throw new Error('Could not capture video track from rotated camera.');
+      }
+      newVideoTrack.enabled = hostSession.isVideoOn;
+
+      const videoSender = hostSession.pc.getSenders().find((s) => s.track?.kind === 'video');
+      if (videoSender) {
+        await videoSender.replaceTrack(newVideoTrack);
+      }
+
+      const oldVideoTracks = hostSession.stream.getVideoTracks();
+      oldVideoTracks.forEach((oldTrack) => {
+        hostSession.stream.removeTrack(oldTrack);
+        try {
+          oldTrack.stop();
+        } catch {
+          // ignore
+        }
+      });
+      hostSession.stream.addTrack(newVideoTrack);
+      this.localStream = hostSession.stream;
+      return hostSession.stream;
+    }
+
     return this.getLocalMediaStream(nextFacing, !this.isMuted);
   }
 
@@ -374,9 +651,6 @@ class P2PStreamingEngine {
     return this.facingMode;
   }
 
-  /**
-   * Stop all active local media tracks and release hardware
-   */
   public stopLocalMediaStream(): void {
     if (this.localStream) {
       this.localStream.getTracks().forEach((track) => {
@@ -388,35 +662,36 @@ class P2PStreamingEngine {
       });
       this.localStream = null;
     }
-    if (this.audioContext && this.audioContext.state !== 'closed') {
-      try {
-        this.audioContext.close().catch(() => {});
-      } catch {
-        // ignore
-      }
-      this.audioContext = null;
-      this.analyser = null;
-    }
+    this.stopAudioAnalyser();
   }
 
-  /**
-   * Toggle local microphone audio track
-   */
   public toggleMicrophone(enabled?: boolean): boolean {
-    const tracks = [
-      ...(this.localStream?.getAudioTracks() || []),
-      ...Array.from(this.partyStreams.values()).flatMap((stream) => stream.getAudioTracks()),
-    ];
-    if (!tracks.length) return false;
-    const nextEnabled = enabled !== undefined ? enabled : !tracks.some((track) => track.enabled);
+    const partyAudioTracks = Array.from(this.partySfuSessions.values())
+      .flatMap((s) => s.localStream?.getAudioTracks() || []);
+    const localAudioTracks = this.localStream?.getAudioTracks() || [];
+    const allTracks = [...localAudioTracks, ...partyAudioTracks];
+    if (!allTracks.length) return false;
+
+    const nextEnabled = enabled !== undefined ? enabled : !allTracks.some((t) => t.enabled);
     this.isMuted = !nextEnabled;
-    tracks.forEach((track) => { track.enabled = nextEnabled; });
+    allTracks.forEach((t) => {
+      t.enabled = nextEnabled;
+    });
+
+    this.partySfuSessions.forEach((session) => {
+      session.isMuted = !nextEnabled;
+      if (session.isPublishing && auth.currentUser?.uid) {
+        updateDoc(doc(db, 'partyRooms', session.roomId, 'voiceParticipants', auth.currentUser.uid), {
+          isMuted: !nextEnabled,
+          lastSeenAt: serverTimestamp(),
+          lastSeenAtMs: Date.now(),
+        }).catch(() => {});
+      }
+    });
+
     return nextEnabled;
   }
 
-  /**
-   * Toggle local camera video track
-   */
   public toggleVideo(enabled?: boolean): boolean {
     if (!this.localStream) return false;
     const videoTrack = this.localStream.getVideoTracks()[0];
@@ -429,740 +704,809 @@ class P2PStreamingEngine {
   }
 
   // =========================================================================
-  // HOST BROADCAST STATE & FIRESTORE SIGNALING
+  // SOLO LIVE HOST PUBLISHING VIA CLOUDFLARE REALTIME SFU
   // =========================================================================
 
-  /**
-   * Register host's active broadcast session and launch Firestore WebRTC signaling listener
-   */
-  public registerHostBroadcast(
-    streamId: string,
-    stream: MediaStream,
-    isVideoOn: boolean,
-    isMicOn: boolean,
-    hostId: string
-  ): void {
-    this.hostBroadcasts.set(streamId, {
+  public async startSoloLiveHost(params: {
+    streamId: string;
+    hostId: string;
+    facing?: 'user' | 'environment';
+    isVideoOn?: boolean;
+    isMicOn?: boolean;
+    onConnectionStateChange?: (state: ConnectionState) => void;
+  }): Promise<SoloLivePublishResult> {
+    const {
       streamId,
-      stream,
-      isVideoOn,
-      isMicOn,
       hostId,
-    });
-    this.setBroadcastState(streamId, { isVideoOn, isMicOn });
+      facing = 'user',
+      isVideoOn = true,
+      isMicOn = true,
+      onConnectionStateChange,
+    } = params;
 
-    // Launch real WebRTC Firestore signaling for incoming viewers
-    this.startHostSignalingListener(streamId, hostId, stream);
-  }
+    await this.stopHostBroadcast(streamId);
 
-  /**
-   * Host Firestore WebRTC Signaling:
-   * Listens for incoming viewer SDP offers and ICE candidates, generates SDP answers,
-   * and pipes local camera/microphone stream to remote viewers in real-time.
-   */
-  private startHostSignalingListener(streamId: string, hostId: string, localStream: MediaStream): void {
-    const signalsRef = collection(db, 'liveStreams', streamId, 'signals');
-    const unsubscribers: Array<() => void> = [];
+    this.isVideoPaused = !isVideoOn;
+    this.isMuted = !isMicOn;
 
-    const unsubscribeSignals = onSnapshot(
-      signalsRef,
-      async (snapshot) => {
-        for (const change of snapshot.docChanges()) {
-          if (change.type === 'added') {
-            const data = change.doc.data();
-
-            // Handle incoming Viewer SDP Offer
-            if (data.type === 'offer' && data.from && data.from !== hostId) {
-              const viewerId = data.from;
-              await this.handleIncomingViewerOffer(streamId, hostId, viewerId, data.sdp, localStream);
-            }
-
-            // Handle incoming Viewer ICE Candidates (supports direct and Cloudflare TURN relay)
-            if (data.type === 'candidate' && data.from && data.from !== hostId && data.candidate) {
-              const viewerId = data.from;
-              const connectionKey = `${streamId}_${viewerId}`;
-              const pc = this.peerConnections.get(connectionKey);
-
-              if (pc && pc.remoteDescription) {
-                try {
-                  await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-                } catch (e) {
-                  console.warn('[WebRTC] Host error adding viewer ICE candidate:', e);
-                }
-              } else {
-                // Buffer candidate until remote description is set (prevents mobile network race drops)
-                this.queueRemoteCandidate(connectionKey, data.candidate);
-              }
-            }
-          }
-        }
-      },
-      (err) => {
-        console.warn('Host signals listener error:', err);
-      }
-    );
-
-    unsubscribers.push(unsubscribeSignals);
-    this.activeSignalingUnsubscribers.set(streamId, unsubscribers);
-  }
-
-  /**
-   * Host handles a viewer's SDP offer, creates peer connection with Cloudflare TURN,
-   * drains buffered candidates, and sends SDP answer.
-   */
-  private async handleIncomingViewerOffer(
-    streamId: string,
-    hostId: string,
-    viewerId: string,
-    offerSdp: string,
-    localStream: MediaStream
-  ): Promise<void> {
-    const connectionKey = `${streamId}_${viewerId}`;
-
-    if (this.peerConnections.has(connectionKey)) {
-      this.closePeerConnection(connectionKey);
-    }
-
-    // Ensure freshest Cloudflare TURN ICE configuration
+    await this.getFirebaseIdToken();
     await this.fetchCloudflareTurnCredentials().catch(() => {});
 
-    const pc = new RTCPeerConnection(this.getRtcConfiguration());
-
-    // Attach local camera & microphone tracks for this viewer
-    localStream.getTracks().forEach((track) => {
-      try {
-        pc.addTrack(track, localStream);
-      } catch (e) {
-        console.warn('Error adding track to viewer connection:', e);
-      }
-    });
-
-    // Gather and send host ICE candidates to Firestore (logs Cloudflare TURN relay candidates)
-    pc.onicecandidate = async (event) => {
-      if (event.candidate) {
-        const isRelay = event.candidate.type === 'relay';
-        if (isRelay) {
-          console.log(
-            `[WebRTC / Cloudflare TURN] Host relay candidate gathered via Cloudflare (${event.candidate.protocol} :${event.candidate.port})`
-          );
-        }
-
-        try {
-          await addDoc(collection(db, 'liveStreams', streamId, 'signals'), {
-            type: 'candidate',
-            from: hostId,
-            to: viewerId,
-            candidate: event.candidate.toJSON(),
-            isRelay,
-            createdAt: serverTimestamp(),
-          });
-        } catch (e) {
-          console.warn('Failed to write host ICE candidate:', e);
-        }
-      }
-    };
-
-    // Connection health, ICE restart and mobile recovery handling
-    pc.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC Host ICE] Connection state for viewer ${viewerId}: ${pc.iceConnectionState}`);
-      if (pc.iceConnectionState === 'failed') {
-        console.warn(`[WebRTC Host ICE] Connection failed for viewer ${viewerId}. Attempting Cloudflare TURN ICE restart...`);
-        try {
-          if (typeof pc.restartIce === 'function') {
-            pc.restartIce();
-          }
-        } catch (e) {
-          console.warn('ICE restart error:', e);
-        }
-      } else if (pc.iceConnectionState === 'disconnected') {
-        // Wait 5s grace period for mobile carrier cell handover before closing
-        setTimeout(() => {
-          if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-            this.closePeerConnection(connectionKey);
-          }
-        }, 5000);
-      }
-    };
+    let stream: MediaStream | null = null;
+    let sfuSessionId = '';
+    let pc: RTCPeerConnection | null = null;
 
     try {
-      this.peerConnections.set(connectionKey, pc);
+      stream = await this.getLocalMediaStream(facing, true);
+      const videoTrack = stream.getVideoTracks()[0];
+      const audioTrack = stream.getAudioTracks()[0];
+      if (!videoTrack && !audioTrack) {
+        throw new Error('Camera and microphone tracks were not available.');
+      }
+      if (videoTrack) videoTrack.enabled = isVideoOn;
+      if (audioTrack) audioTrack.enabled = isMicOn;
 
-      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: offerSdp }));
+      sfuSessionId = await this.createSfuSession();
+      pc = new RTCPeerConnection(this.getRtcConfiguration());
 
-      // Immediately drain any ICE candidates that arrived before remoteDescription was set
-      await this.drainPendingCandidates(connectionKey, pc);
+      pc.onconnectionstatechange = () => {
+        if (!pc) return;
+        const st = pc.connectionState as ConnectionState;
+        onConnectionStateChange?.(st);
+        if (st === 'failed') {
+          try {
+            pc.restartIce?.();
+          } catch {
+            // ignore
+          }
+        }
+      };
+      pc.oniceconnectionstatechange = () => {
+        if (pc?.iceConnectionState === 'failed') {
+          try {
+            pc.restartIce?.();
+          } catch {
+            // ignore
+          }
+        }
+      };
 
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
+      const suffix = Date.now().toString(36);
+      const tracksToPublish: Array<{ track: MediaStreamTrack; trackName: string }> = [];
+      if (videoTrack) tracksToPublish.push({ track: videoTrack, trackName: `${streamId}-video-${suffix}` });
+      if (audioTrack) tracksToPublish.push({ track: audioTrack, trackName: `${streamId}-audio-${suffix}` });
 
-      // Write SDP Answer to Firestore signals
-      await addDoc(collection(db, 'liveStreams', streamId, 'signals'), {
-        type: 'answer',
-        from: hostId,
-        to: viewerId,
-        sdp: answer.sdp,
-        createdAt: serverTimestamp(),
-      });
+      const publishedTracks = await this.publishTracksOnSession(sfuSessionId, pc, tracksToPublish, stream);
+      await this.waitForPeerConnected(pc, 15000);
+
+      const sessionObj: HostSfuSession = {
+        streamId,
+        hostId,
+        sfuSessionId,
+        pc,
+        stream,
+        publishedTracks,
+        isVideoOn,
+        isMicOn,
+      };
+      this.hostSfuSessions.set(streamId, sessionObj);
+      this.setBroadcastState(streamId, { isVideoOn, isMicOn });
+
+      return {
+        stream,
+        sfuSessionId,
+        publishedTracks,
+      };
     } catch (err) {
-      console.error('Failed to create WebRTC answer for viewer:', err);
+      if (pc) {
+        try {
+          pc.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (sfuSessionId) {
+        await this.deleteSfuSession(sfuSessionId);
+      }
+      if (stream) {
+        stream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+        if (this.localStream === stream) {
+          this.localStream = null;
+        }
+      }
+      throw err;
     }
   }
 
   public setHostCameraState(streamId: string, isVideoOn: boolean): void {
     this.isVideoPaused = !isVideoOn;
     this.toggleVideo(isVideoOn);
-
-    const currentState = this.getBroadcastState(streamId);
-    const updatedState: BroadcastState = {
-      isVideoOn,
-      isMicOn: currentState.isMicOn,
-    };
-
-    const hostSession = this.hostBroadcasts.get(streamId);
+    const hostSession = this.hostSfuSessions.get(streamId);
     if (hostSession) {
       hostSession.isVideoOn = isVideoOn;
+      hostSession.stream.getVideoTracks().forEach((t) => (t.enabled = isVideoOn));
     }
-
-    this.setBroadcastState(streamId, updatedState);
+    const prev = this.getBroadcastState(streamId);
+    this.setBroadcastState(streamId, { isVideoOn, isMicOn: prev.isMicOn });
   }
 
   public setHostMicState(streamId: string, isMicOn: boolean): void {
     this.isMuted = !isMicOn;
     this.toggleMicrophone(isMicOn);
-
-    const currentState = this.getBroadcastState(streamId);
-    const updatedState: BroadcastState = {
-      isVideoOn: currentState.isVideoOn,
-      isMicOn,
-    };
-
-    const hostSession = this.hostBroadcasts.get(streamId);
+    const hostSession = this.hostSfuSessions.get(streamId);
     if (hostSession) {
       hostSession.isMicOn = isMicOn;
+      hostSession.stream.getAudioTracks().forEach((t) => (t.enabled = isMicOn));
     }
-
-    this.setBroadcastState(streamId, updatedState);
+    const prev = this.getBroadcastState(streamId);
+    this.setBroadcastState(streamId, { isVideoOn: prev.isVideoOn, isMicOn });
   }
 
-  public getBroadcastState(streamId: string): BroadcastState {
-    return this.broadcastStates.get(streamId) || { isVideoOn: true, isMicOn: true };
-  }
-
-  public onBroadcastStateChange(
-    streamId: string,
-    listener: (state: BroadcastState) => void
-  ): () => void {
-    if (!this.stateListeners.has(streamId)) {
-      this.stateListeners.set(streamId, new Set());
-    }
-    this.stateListeners.get(streamId)!.add(listener);
-
-    const current = this.getBroadcastState(streamId);
-    listener(current);
-
-    return () => {
-      const set = this.stateListeners.get(streamId);
-      if (set) {
-        set.delete(listener);
-        if (set.size === 0) {
-          this.stateListeners.delete(streamId);
-        }
-      }
-    };
-  }
-
-  private setBroadcastState(streamId: string, state: BroadcastState): void {
-    this.broadcastStates.set(streamId, state);
-
-    const listeners = this.stateListeners.get(streamId);
-    if (listeners) {
-      listeners.forEach((fn) => {
-        try {
-          fn(state);
-        } catch (e) {
-          console.warn('Error in broadcast state listener', e);
-        }
-      });
-    }
-
-    if (this.broadcastChannel) {
-      try {
-        this.broadcastChannel.postMessage({
-          type: 'BROADCAST_STATE',
-          streamId,
-          isVideoOn: state.isVideoOn,
-          isMicOn: state.isMicOn,
-        });
-      } catch (e) {
-        console.warn('BroadcastChannel postMessage error', e);
-      }
-    }
-  }
-
-  private handleIncomingBroadcastState(streamId: string, state: BroadcastState): void {
-    this.broadcastStates.set(streamId, state);
-    const listeners = this.stateListeners.get(streamId);
-    if (listeners) {
-      listeners.forEach((fn) => {
-        try {
-          fn(state);
-        } catch (e) {
-          console.warn('Error in broadcast state listener', e);
-        }
-      });
-    }
-  }
-
-  /**
-   * Stop Host Broadcast session, cleanup signaling listeners and peer connections
-   */
-  public stopHostBroadcast(streamId: string): void {
+  public async stopHostBroadcast(streamId: string, keepalive: boolean = false): Promise<void> {
+    const hostSession = this.hostSfuSessions.get(streamId);
+    this.hostSfuSessions.delete(streamId);
     this.stopLocalMediaStream();
-    this.hostBroadcasts.delete(streamId);
 
-    // Unsubscribe Firestore listeners
-    const unsubs = this.activeSignalingUnsubscribers.get(streamId);
-    if (unsubs) {
-      unsubs.forEach((unsub) => unsub());
-      this.activeSignalingUnsubscribers.delete(streamId);
+    if (hostSession) {
+      try {
+        hostSession.stream.getTracks().forEach((t) => t.stop());
+      } catch {
+        // ignore
+      }
+      try {
+        hostSession.pc.close();
+      } catch {
+        // ignore
+      }
+      await this.deleteSfuSession(hostSession.sfuSessionId, keepalive);
     }
-
-    // Close all viewer connections for this stream
-    Array.from(this.peerConnections.keys())
-      .filter((k) => k.startsWith(streamId))
-      .forEach((k) => this.closePeerConnection(k));
   }
 
   // =========================================================================
-  // VIEWER MODE: REMOTE STREAM SUBSCRIPTION VIA WEBRTC + FIRESTORE
+  // SOLO LIVE VIEWER SUBSCRIPTION VIA CLOUDFLARE REALTIME SFU
   // =========================================================================
 
   /**
-   * Subscribe to a Host's broadcast as a VIEWER using real WebRTC signaling.
-   *
-   * STRICT GUARANTEES:
-   * 1. Viewer local camera is NEVER touched.
-   * 2. Viewer local microphone is NEVER touched.
-   * 3. No local stream is published.
-   * 4. Real WebRTC SDP Offer is generated with recvonly transceivers.
-   * 5. Exchanges ICE candidates with host via Firestore.
+   * Subscribe as a remote viewer via Cloudflare Realtime SFU.
+   * NEVER captures local camera/mic. NEVER falls back to local host stream.
+   * NEVER resolves with an empty placeholder MediaStream.
    */
   public async subscribeToRemoteBroadcast(
     streamId: string,
-    hostUser: User,
+    _hostUser: User,
+    options: {
+      sfuSessionId: string;
+      publishedTracks: SfuPublishedTrack[];
+      isVideoOn?: boolean;
+      isMicOn?: boolean;
+    },
     onStateUpdate?: (state: BroadcastState) => void
-  ): Promise<{ stream: MediaStream; isVideoOn: boolean; isMicOn: boolean }> {
+  ): Promise<{ stream: MediaStream; isVideoOn: boolean; isMicOn: boolean; viewerSessionId: string }> {
     this.stopLocalMediaStream();
+    await this.unsubscribeFromRemoteBroadcast(streamId);
 
     if (onStateUpdate) {
       this.onBroadcastStateChange(streamId, onStateUpdate);
     }
 
-    const state = this.getBroadcastState(streamId);
+    const hostSfuSessionId = options?.sfuSessionId;
+    const publishedTracks = Array.isArray(options?.publishedTracks)
+      ? options.publishedTracks.filter((t) => Boolean(t?.trackName))
+      : [];
 
-    // If host is running in same local browser session, return active stream directly
-    const activeHostSession = this.hostBroadcasts.get(streamId);
-    if (activeHostSession && activeHostSession.stream) {
-      this.remoteStreams.set(streamId, activeHostSession.stream);
-      return {
-        stream: activeHostSession.stream,
-        isVideoOn: activeHostSession.isVideoOn,
-        isMicOn: activeHostSession.isMicOn,
-      };
+    if (!hostSfuSessionId || publishedTracks.length === 0) {
+      throw new Error('This broadcast does not have an active Cloudflare SFU media stream.');
     }
 
-    // If already subscribed and stream active, return existing
-    if (this.remoteStreams.has(streamId)) {
-      const existing = this.remoteStreams.get(streamId)!;
-      if (existing.active) {
-        return {
-          stream: existing,
-          isVideoOn: state.isVideoOn,
-          isMicOn: state.isMicOn,
-        };
-      }
-    }
-
-    const viewerId = auth.currentUser?.uid || `viewer_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const connectionKey = `${streamId}_${viewerId}`;
-
-    if (this.peerConnections.has(connectionKey)) {
-      this.closePeerConnection(connectionKey);
-    }
-
-    // Ensure freshest Cloudflare TURN ICE configuration
+    await this.getFirebaseIdToken();
     await this.fetchCloudflareTurnCredentials().catch(() => {});
 
+    const viewerSessionId = await this.createSfuSession();
     const pc = new RTCPeerConnection(this.getRtcConfiguration());
+    const remoteStream = new MediaStream();
 
-    // Add receive-only transceivers for audio & video
-    pc.addTransceiver('video', { direction: 'recvonly' });
-    pc.addTransceiver('audio', { direction: 'recvonly' });
-
-    const remoteStreamPromise = new Promise<MediaStream>((resolve) => {
-      pc.ontrack = (event) => {
-        const stream = event.streams[0] || new MediaStream([event.track]);
-        this.remoteStreams.set(streamId, stream);
-        resolve(stream);
-      };
+    let tracksReceived = 0;
+    let resolveTrackWaiter: (() => void) | null = null;
+    const firstTrackPromise = new Promise<void>((resolve) => {
+      resolveTrackWaiter = resolve;
     });
 
-    // Send Viewer ICE candidates to Firestore (logs Cloudflare TURN relay candidates)
-    pc.onicecandidate = async (event) => {
-      if (event.candidate) {
-        const isRelay = event.candidate.type === 'relay';
-        if (isRelay) {
-          console.log(
-            `[WebRTC / Cloudflare TURN] Viewer relay candidate gathered via Cloudflare (${event.candidate.protocol} :${event.candidate.port})`
-          );
-        }
-
-        try {
-          await addDoc(collection(db, 'liveStreams', streamId, 'signals'), {
-            type: 'candidate',
-            from: viewerId,
-            to: hostUser.id,
-            candidate: event.candidate.toJSON(),
-            isRelay,
-            createdAt: serverTimestamp(),
-          });
-        } catch (e) {
-          console.warn('Failed to write viewer ICE candidate:', e);
-        }
+    pc.ontrack = (event) => {
+      const track = event.track;
+      if (!track) return;
+      if (!remoteStream.getTracks().some((t) => t.id === track.id)) {
+        remoteStream.addTrack(track);
       }
+      tracksReceived += 1;
+      resolveTrackWaiter?.();
     };
 
-    // Connection health & ICE restart for restricted mobile networks
     pc.oniceconnectionstatechange = () => {
-      console.log(`[WebRTC Viewer ICE] Connection state for stream ${streamId}: ${pc.iceConnectionState}`);
       if (pc.iceConnectionState === 'failed') {
-        console.warn(`[WebRTC Viewer ICE] Connection failed for stream ${streamId}. Attempting Cloudflare TURN ICE restart...`);
         try {
-          if (typeof pc.restartIce === 'function') {
-            pc.restartIce();
-          }
-        } catch (e) {
-          console.warn('Viewer ICE restart error:', e);
-        }
-      } else if (pc.iceConnectionState === 'disconnected') {
-        setTimeout(() => {
-          if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-            this.closePeerConnection(connectionKey);
-          }
-        }, 5000);
-      }
-    };
-
-    // Create SDP Offer
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-
-    // Write Offer to Firestore signals collection
-    await addDoc(collection(db, 'liveStreams', streamId, 'signals'), {
-      type: 'offer',
-      from: viewerId,
-      to: hostUser.id,
-      sdp: offer.sdp,
-      createdAt: serverTimestamp(),
-    });
-
-    this.peerConnections.set(connectionKey, pc);
-
-    // Listen for Host's SDP Answer & ICE candidates from Firestore
-    const unsubscribers: Array<() => void> = [];
-    const signalsQuery = query(collection(db, 'liveStreams', streamId, 'signals'), limit(50));
-
-    const unsubscribeAnswers = onSnapshot(signalsQuery, async (snapshot) => {
-      for (const change of snapshot.docChanges()) {
-        if (change.type === 'added') {
-          const data = change.doc.data();
-
-          // Match answer directed to this viewer
-          if (data.type === 'answer' && data.to === viewerId && data.sdp) {
-            if (!pc.currentRemoteDescription) {
-              try {
-                await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: data.sdp }));
-                // Immediately drain any host candidates that arrived before remoteDescription was set
-                await this.drainPendingCandidates(connectionKey, pc);
-              } catch (e) {
-                console.warn('Error setting host answer on viewer:', e);
-              }
-            }
-          }
-
-          // Match candidate directed to this viewer (supports direct STUN and Cloudflare TURN relay)
-          if (data.type === 'candidate' && data.to === viewerId && data.candidate) {
-            if (pc.remoteDescription) {
-              try {
-                await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-              } catch (e) {
-                console.warn('Error adding host ICE candidate on viewer:', e);
-              }
-            } else {
-              // Buffer until host answer remoteDescription is set
-              this.queueRemoteCandidate(connectionKey, data.candidate);
-            }
-          }
-        }
-      }
-    });
-
-    unsubscribers.push(unsubscribeAnswers);
-    this.activeSignalingUnsubscribers.set(connectionKey, unsubscribers);
-
-    // Wait up to 5s for the remote tracks to arrive via WebRTC, or fallback to remote media stream
-    const timeoutPromise = new Promise<MediaStream>((resolve) => {
-      setTimeout(() => {
-        // Return active remote stream if available
-        const currentStream = this.remoteStreams.get(streamId);
-        if (currentStream) {
-          resolve(currentStream);
-        } else {
-          // Provide clean empty MediaStream placeholder while waiting for WebRTC ice connection
-          const silentStream = new MediaStream();
-          resolve(silentStream);
-        }
-      }, 5000);
-    });
-
-    const finalStream = await Promise.race([remoteStreamPromise, timeoutPromise]);
-    this.remoteStreams.set(streamId, finalStream);
-
-    return {
-      stream: finalStream,
-      isVideoOn: state.isVideoOn,
-      isMicOn: state.isMicOn,
-    };
-  }
-
-  public unsubscribeFromRemoteBroadcast(streamId: string): void {
-    const stream = this.remoteStreams.get(streamId);
-    if (stream) {
-      stream.getTracks().forEach((track) => {
-        try {
-          track.stop();
+          pc.restartIce?.();
         } catch {
           // ignore
         }
-      });
-      this.remoteStreams.delete(streamId);
-    }
-
-    // Cleanup signaling listeners for this viewer connection
-    Array.from(this.activeSignalingUnsubscribers.keys())
-      .filter((k) => k.startsWith(streamId))
-      .forEach((k) => {
-        const unsubs = this.activeSignalingUnsubscribers.get(k);
-        if (unsubs) unsubs.forEach((u) => u());
-        this.activeSignalingUnsubscribers.delete(k);
-      });
-
-    Array.from(this.peerConnections.keys())
-      .filter((k) => k.startsWith(streamId))
-      .forEach((k) => this.closePeerConnection(k));
-  }
-
-  // =========================================================================
-  // MULTI-SEAT AUDIO PARTY ROOMS (REAL WEBRTC VOICE LOUNGE)
-  // =========================================================================
-
-  /**
-   * Start Party Seat Microphone Voice:
-   * Acquires local microphone, hooks real-time audio volume analyzer,
-   * and advertises audio track via Firestore party room signals.
-   */
-  public async startPartyVoice(roomId: string, userId: string, isMuted: boolean = false, listenOnly: boolean = false): Promise<MediaStream | null> {
-    await this.stopPartyVoice(roomId);
-    let stream: MediaStream | null = null;
-    if (!listenOnly) {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }, video: false });
-      stream.getAudioTracks().forEach((track) => { track.enabled = !isMuted; });
-      this.partyStreams.set(roomId, stream);
-      this.isMuted = isMuted;
-      this.initAudioAnalyser(stream);
-    }
-
-    const sessionId = typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `${Date.now()}_${Math.random().toString(36).slice(2)}`;
-    this.partySessionIds.set(roomId, sessionId);
-    const participantsRef = collection(db, 'partyRooms', roomId, 'voiceParticipants');
-    await setDoc(doc(db, 'partyRooms', roomId, 'voiceParticipants', userId), {
-      userId, sessionId, joinedAt: serverTimestamp(), isMuted: listenOnly ? true : isMuted, listenOnly, lastSeenAt: serverTimestamp(),
-    }, { merge: true });
-
-    const roomUnsub = onSnapshot(participantsRef, (snapshot) => {
-      snapshot.docChanges().forEach((change) => {
-        const peerId = change.doc.id;
-        const connectionKey = `party:${roomId}:${peerId}`;
-        if (peerId === userId) return;
-        if (change.type === 'removed') {
-          this.partyPeerUnsubscribers.get(connectionKey)?.();
-          this.partyPeerUnsubscribers.delete(connectionKey);
-          this.partyOfferStarted.delete(connectionKey);
-          this.closePeerConnection(connectionKey);
-          return;
-        }
-        const peerSessionId = change.doc.data().sessionId;
-        if (peerSessionId) this.ensurePartyPeer(roomId, userId, peerId, peerSessionId, stream).catch((error) => console.error('[Party WebRTC] Peer setup failed:', error));
-      });
-    }, (error) => console.error('[Party WebRTC] Participant listener failed:', error));
-    this.partyRoomUnsubscribers.set(roomId, roomUnsub);
-
-    await addDoc(collection(db, 'partyRooms', roomId, 'signals'), {
-      type: 'speaker_joined', userId, isMuted, createdAt: serverTimestamp(),
-    }).catch((error) => console.warn('[Party WebRTC] Speaker presence event failed:', error));
-    return stream;
-  }
-
-  private async ensurePartyPeer(roomId: string, userId: string, peerId: string, peerSessionId: string, localStream: MediaStream | null): Promise<void> {
-    const connectionKey = `party:${roomId}:${peerId}`;
-    if (this.peerConnections.has(connectionKey)) return;
-    await this.fetchCloudflareTurnCredentials().catch(() => {});
-    const pc = new RTCPeerConnection(this.getRtcConfiguration());
-    if (localStream?.getAudioTracks().length) localStream.getAudioTracks().forEach((track) => pc.addTrack(track, localStream));
-    else pc.addTransceiver('audio', { direction: 'recvonly' });
-    this.peerConnections.set(connectionKey, pc);
-
-    const localSessionId = this.partySessionIds.get(roomId) || 'session';
-    const pairKey = [`${userId}_${localSessionId}`, `${peerId}_${peerSessionId}`].sort().join('__');
-    const messagesRef = collection(db, 'partyRooms', roomId, 'voiceSignals', pairKey, 'messages');
-    const isOfferer = userId.localeCompare(peerId) < 0;
-    const processed = new Set<string>();
-    let makingOffer = false;
-
-    pc.ontrack = (event) => {
-      const remoteStream = event.streams[0];
-      if (!remoteStream) return;
-      this.remoteStreams.set(connectionKey, remoteStream);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('alphamate-party-remote-stream', { detail: { roomId, peerId, stream: remoteStream } }));
-      }
-    };
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        addDoc(messagesRef, {
-          type: 'candidate', from: userId, to: peerId,
-          candidate: event.candidate.toJSON(), createdAt: serverTimestamp(),
-        }).catch((error) => console.warn('[Party WebRTC] ICE candidate write failed:', error));
-      }
-    };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
-        console.warn(`[Party WebRTC] ${userId} -> ${peerId}: ${pc.connectionState}`);
-      }
-    };
-
-    const unsubscribe = onSnapshot(query(messagesRef, where('to', '==', userId), limit(100)), async (snapshot) => {
-      for (const change of snapshot.docChanges()) {
-        if (change.type === 'removed' || processed.has(change.doc.id)) continue;
-        processed.add(change.doc.id);
-        const signal: any = change.doc.data();
-        if (signal.from === userId || signal.to !== userId) continue;
-        try {
-          if (signal.type === 'offer' && !isOfferer && signal.sdp) {
-            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp: signal.sdp }));
-            await this.drainPendingCandidates(connectionKey, pc);
-            const answer = await pc.createAnswer();
-            await pc.setLocalDescription(answer);
-            await addDoc(messagesRef, { type: 'answer', from: userId, to: peerId, sdp: answer.sdp, createdAt: serverTimestamp() });
-          } else if (signal.type === 'answer' && isOfferer && signal.sdp && !pc.remoteDescription) {
-            await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: signal.sdp }));
-            await this.drainPendingCandidates(connectionKey, pc);
-          } else if (signal.type === 'candidate' && signal.candidate) {
-            if (pc.remoteDescription) await pc.addIceCandidate(new RTCIceCandidate(signal.candidate));
-            else this.queueRemoteCandidate(connectionKey, signal.candidate);
-          }
-        } catch (error) {
-          console.error('[Party WebRTC] Signal processing failed:', error);
-        }
-      }
-    }, (error) => console.error('[Party WebRTC] Signal listener failed:', error));
-    this.partyPeerUnsubscribers.set(connectionKey, unsubscribe);
-
-    if (isOfferer && !this.partyOfferStarted.has(connectionKey)) {
-      this.partyOfferStarted.add(connectionKey);
-      makingOffer = true;
-      try {
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-        await addDoc(messagesRef, { type: 'offer', from: userId, to: peerId, sdp: offer.sdp, createdAt: serverTimestamp() });
-      } finally {
-        makingOffer = false;
-      }
-    }
-    void makingOffer;
-  }
-
-  public async stopPartyVoice(roomId: string): Promise<void> {
-    const roomUnsub = this.partyRoomUnsubscribers.get(roomId);
-    if (roomUnsub) roomUnsub();
-    this.partyRoomUnsubscribers.delete(roomId);
-    const stream = this.partyStreams.get(roomId);
-    stream?.getTracks().forEach((track) => track.stop());
-    this.partyStreams.delete(roomId);
-    this.partySessionIds.delete(roomId);
-    const prefix = `party:${roomId}:`;
-    Array.from(this.peerConnections.keys()).filter((key) => key.startsWith(prefix)).forEach((key) => {
-      this.partyPeerUnsubscribers.get(key)?.();
-      this.partyPeerUnsubscribers.delete(key);
-      this.partyOfferStarted.delete(key);
-      this.closePeerConnection(key);
-    });
-    const uid = auth.currentUser?.uid;
-    if (uid) await deleteDoc(doc(db, 'partyRooms', roomId, 'voiceParticipants', uid)).catch(() => {});
-  }
-
-  // =========================================================================
-  // GENERAL PEER CONNECTION & DATA CHANNELS
-  // =========================================================================
-
-  public async createPeerConnection(
-    peerId: string,
-    onRemoteStream?: (stream: MediaStream) => void
-  ): Promise<RTCPeerConnection> {
-    if (this.peerConnections.has(peerId)) {
-      this.closePeerConnection(peerId);
-    }
-
-    // Ensure freshest Cloudflare TURN ICE configuration
-    await this.fetchCloudflareTurnCredentials().catch(() => {});
-
-    const pc = new RTCPeerConnection(this.getRtcConfiguration());
-
-    if (this.localStream) {
-      this.localStream.getTracks().forEach((track) => {
-        try {
-          pc.addTrack(track, this.localStream!);
-        } catch (e) {
-          console.warn('addTrack failed', e);
-        }
-      });
-    }
-
-    pc.ontrack = (event) => {
-      const [remoteStream] = event.streams;
-      if (remoteStream) {
-        this.remoteStreams.set(peerId, remoteStream);
-        if (onRemoteStream) {
-          onRemoteStream(remoteStream);
-        }
-      }
-    };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate && event.candidate.type === 'relay') {
-        console.log(`[WebRTC / Cloudflare TURN] Direct peer relay candidate gathered: ${event.candidate.protocol} :${event.candidate.port}`);
       }
     };
 
     try {
-      const dataChannel = pc.createDataChannel('live-meta', { ordered: true });
-      this.dataChannels.set(peerId, dataChannel);
-    } catch {
-      // ignore
+      const assigned = await this.subscribeTracksOnSession(
+        viewerSessionId,
+        pc,
+        publishedTracks.map((t) => ({
+          publisherSessionId: hostSfuSessionId,
+          trackName: t.trackName,
+        })),
+        { contextType: 'live', contextId: streamId }
+      );
+
+      await Promise.all([
+        this.waitForPeerConnected(pc, 15000),
+        Promise.race([
+          firstTrackPromise,
+          new Promise<void>((_, reject) =>
+            setTimeout(() => {
+              if (tracksReceived === 0) {
+                reject(new Error('No live audio/video tracks arrived from Cloudflare SFU.'));
+              } else {
+                resolveTrackWaiter?.();
+              }
+            }, 12000)
+          ),
+        ]),
+      ]);
+
+      if (remoteStream.getTracks().length === 0) {
+        throw new Error('Remote media stream contained zero active tracks.');
+      }
+
+      this.viewerSfuSessions.set(streamId, {
+        streamId,
+        sfuSessionId: viewerSessionId,
+        pc,
+        remoteStream,
+        subscribedMids: assigned.map((a) => a.mid).filter(Boolean),
+      });
+
+      const initialState: BroadcastState = {
+        isVideoOn: options.isVideoOn !== false,
+        isMicOn: options.isMicOn !== false,
+      };
+      this.setBroadcastState(streamId, initialState);
+
+      return {
+        stream: remoteStream,
+        isVideoOn: initialState.isVideoOn,
+        isMicOn: initialState.isMicOn,
+        viewerSessionId,
+      };
+    } catch (err) {
+      try {
+        pc.close();
+      } catch {
+        // ignore
+      }
+      await this.deleteSfuSession(viewerSessionId);
+      throw err;
+    }
+  }
+
+  public async unsubscribeFromRemoteBroadcast(streamId: string, keepalive: boolean = false): Promise<void> {
+    const session = this.viewerSfuSessions.get(streamId);
+    this.viewerSfuSessions.delete(streamId);
+    if (session) {
+      session.remoteStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
+      try {
+        session.pc.close();
+      } catch {
+        // ignore
+      }
+      await this.deleteSfuSession(session.sfuSessionId, keepalive);
+    }
+    this.remoteStreams.delete(streamId);
+  }
+
+  // =========================================================================
+  // BROADCAST STATE PUB/SUB HELPERS
+  // =========================================================================
+
+  public getBroadcastState(streamId: string): BroadcastState {
+    return this.broadcastStates.get(streamId) || { isVideoOn: true, isMicOn: true };
+  }
+
+  public onBroadcastStateChange(streamId: string, listener: (state: BroadcastState) => void): () => void {
+    if (!this.stateListeners.has(streamId)) {
+      this.stateListeners.set(streamId, new Set());
+    }
+    this.stateListeners.get(streamId)!.add(listener);
+    listener(this.getBroadcastState(streamId));
+
+    return () => {
+      const set = this.stateListeners.get(streamId);
+      if (set) {
+        set.delete(listener);
+        if (set.size === 0) this.stateListeners.delete(streamId);
+      }
+    };
+  }
+
+  public setBroadcastState(streamId: string, state: BroadcastState): void {
+    this.broadcastStates.set(streamId, state);
+    const listeners = this.stateListeners.get(streamId);
+    if (listeners) {
+      listeners.forEach((fn) => {
+        try {
+          fn(state);
+        } catch {
+          // ignore
+        }
+      });
+    }
+  }
+
+  // =========================================================================
+  // PARTY ROOM VOICE VIA CLOUDFLARE REALTIME SFU
+  // =========================================================================
+
+  public async startPartyVoice(
+    roomId: string,
+    userId: string,
+    isMuted: boolean = false,
+    listenOnly: boolean = false,
+    callbacks?: {
+      onError?: (err: Error) => void;
+      onConnectionStateChange?: (state: ConnectionState) => void;
+    }
+  ): Promise<MediaStream | null> {
+    const existing = this.partySfuSessions.get(roomId);
+    if (
+      existing &&
+      existing.userId === userId &&
+      existing.pc.connectionState !== 'closed' &&
+      existing.pc.connectionState !== 'failed'
+    ) {
+      existing.onError = callbacks?.onError;
+      existing.onConnectionStateChange = callbacks?.onConnectionStateChange;
+      return this.setPartySpeakingMode(roomId, userId, !listenOnly, isMuted);
     }
 
-    this.peerConnections.set(peerId, pc);
-    return pc;
+    await this.stopPartyVoice(roomId);
+    await this.getFirebaseIdToken();
+    await this.fetchCloudflareTurnCredentials().catch(() => {});
+
+    const sfuSessionId = await this.createSfuSession();
+    const pc = new RTCPeerConnection(this.getRtcConfiguration());
+
+    const session: PartySfuRoomSession = {
+      roomId,
+      userId,
+      sfuSessionId,
+      pc,
+      localStream: null,
+      localTrackName: null,
+      localMid: null,
+      isPublishing: false,
+      isMuted: listenOnly ? true : isMuted,
+      unsubscribeParticipants: null,
+      heartbeatTimer: null,
+      subscribedByPeerKey: new Map(),
+      pendingMidToPeer: new Map(),
+      onError: callbacks?.onError,
+      onConnectionStateChange: callbacks?.onConnectionStateChange,
+    };
+    this.partySfuSessions.set(roomId, session);
+
+    pc.ontrack = (event) => {
+      const mid = event.transceiver?.mid || '';
+      const peerId = session.pendingMidToPeer.get(mid);
+      if (!peerId || !event.track) return;
+
+      const stream = event.streams?.[0] || new MediaStream([event.track]);
+      for (const [, sub] of session.subscribedByPeerKey.entries()) {
+        if (sub.peerId === peerId && (sub.mid === mid || !sub.mid)) {
+          sub.mid = mid;
+          sub.stream = stream;
+        }
+      }
+
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('alphamate-party-remote-stream', {
+            detail: { roomId, peerId, stream },
+          })
+        );
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState as ConnectionState;
+      session.onConnectionStateChange?.(state);
+      if (state === 'failed') {
+        try {
+          pc.restartIce?.();
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    try {
+      if (!listenOnly) {
+        await this.publishPartyLocalMic(session, isMuted);
+      }
+
+      await this.writePartyParticipantPresence(session);
+
+      session.heartbeatTimer = setInterval(() => {
+        this.writePartyParticipantPresence(session).catch(() => {});
+      }, 15000);
+
+      const participantsRef = collection(db, 'partyRooms', roomId, 'voiceParticipants');
+      session.unsubscribeParticipants = onSnapshot(
+        participantsRef,
+        (snapshot) => {
+          const desiredPeers = new Map<
+            string,
+            { peerId: string; publisherSessionId: string; trackName: string }
+          >();
+          const now = Date.now();
+
+          snapshot.docs.forEach((docSnap) => {
+            const peerId = docSnap.id;
+            if (peerId === userId) return; // Never subscribe to own track
+            const data = docSnap.data() as any;
+            if (
+              data?.isPublishing === true &&
+              !data?.listenOnly &&
+              typeof data?.sfuSessionId === 'string' &&
+              data.sfuSessionId &&
+              data.sfuSessionId !== sfuSessionId &&
+              typeof data?.trackName === 'string' &&
+              data.trackName &&
+              (!data?.lastSeenAtMs || now - Number(data.lastSeenAtMs) <= PARTY_PARTICIPANT_STALE_MS)
+            ) {
+              const peerKey = `${peerId}::${data.sfuSessionId}::${data.trackName}`;
+              desiredPeers.set(peerKey, {
+                peerId,
+                publisherSessionId: data.sfuSessionId,
+                trackName: data.trackName,
+              });
+            }
+          });
+
+          this.reconcilePartySubscriptions(session, desiredPeers).catch((err) => {
+            console.warn('[Party SFU] Subscription reconciliation error:', err);
+            session.onError?.(err instanceof Error ? err : new Error(String(err)));
+          });
+        },
+        (error) => {
+          console.error('[Party SFU] Participants listener error:', error);
+          session.onError?.(error);
+        }
+      );
+
+      return session.localStream;
+    } catch (err) {
+      await this.stopPartyVoice(roomId);
+      throw err;
+    }
+  }
+
+  public async setPartySpeakingMode(
+    roomId: string,
+    userId: string,
+    canSpeak: boolean,
+    isMuted: boolean
+  ): Promise<MediaStream | null> {
+    const session = this.partySfuSessions.get(roomId);
+    if (!session || session.userId !== userId) {
+      return this.startPartyVoice(roomId, userId, isMuted, !canSpeak);
+    }
+
+    if (canSpeak && !session.isPublishing) {
+      await this.publishPartyLocalMic(session, isMuted);
+      await this.writePartyParticipantPresence(session);
+      return session.localStream;
+    }
+
+    if (!canSpeak && session.isPublishing) {
+      await this.unpublishPartyLocalMic(session);
+      await this.writePartyParticipantPresence(session);
+      return null;
+    }
+
+    if (canSpeak && session.isPublishing) {
+      this.isMuted = isMuted;
+      session.isMuted = isMuted;
+      session.localStream?.getAudioTracks().forEach((t) => {
+        t.enabled = !isMuted;
+      });
+      await this.writePartyParticipantPresence(session);
+    }
+
+    return session.localStream;
+  }
+
+  private async publishPartyLocalMic(session: PartySfuRoomSession, isMuted: boolean): Promise<void> {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+      video: false,
+    });
+    stream.getAudioTracks().forEach((t) => {
+      t.enabled = !isMuted;
+    });
+
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!audioTrack) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw new Error('Microphone track unavailable.');
+    }
+
+    const trackName = `party-${session.roomId}-${session.userId}-${Date.now().toString(36)}`;
+    try {
+      const published = await this.publishTracksOnSession(
+        session.sfuSessionId,
+        session.pc,
+        [{ track: audioTrack, trackName }],
+        stream
+      );
+      session.localStream = stream;
+      session.localTrackName = trackName;
+      session.localMid = published[0]?.mid || null;
+      session.isPublishing = true;
+      session.isMuted = isMuted;
+      this.isMuted = isMuted;
+      this.initAudioAnalyser(stream);
+    } catch (err) {
+      stream.getTracks().forEach((t) => t.stop());
+      throw err;
+    }
+  }
+
+  private async unpublishPartyLocalMic(session: PartySfuRoomSession): Promise<void> {
+    const midToClose = session.localMid;
+    if (session.localStream) {
+      session.localStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
+    }
+    session.localStream = null;
+    session.localTrackName = null;
+    session.localMid = null;
+    session.isPublishing = false;
+    session.isMuted = true;
+    this.stopAudioAnalyser();
+
+    if (midToClose) {
+      await this.closeTracksOnSession(session.sfuSessionId, session.pc, [midToClose], false);
+    }
+  }
+
+  private async writePartyParticipantPresence(session: PartySfuRoomSession): Promise<void> {
+    const uid = auth.currentUser?.uid || session.userId;
+    if (!uid) return;
+    await setDoc(
+      doc(db, 'partyRooms', session.roomId, 'voiceParticipants', uid),
+      {
+        userId: uid,
+        sfuSessionId: session.sfuSessionId,
+        trackName: session.isPublishing ? session.localTrackName : null,
+        mid: session.isPublishing ? session.localMid : null,
+        isPublishing: session.isPublishing,
+        listenOnly: !session.isPublishing,
+        isMuted: session.isPublishing ? session.isMuted : true,
+        lastSeenAt: serverTimestamp(),
+        lastSeenAtMs: Date.now(),
+      },
+      { merge: true }
+    );
+  }
+
+  private async reconcilePartySubscriptions(
+    session: PartySfuRoomSession,
+    desiredPeers: Map<string, { peerId: string; publisherSessionId: string; trackName: string }>
+  ): Promise<void> {
+    // 1. Close tracks that left or stopped publishing
+    const removedKeys: string[] = [];
+    const midsToClose: string[] = [];
+    for (const [peerKey, existing] of session.subscribedByPeerKey.entries()) {
+      if (!desiredPeers.has(peerKey)) {
+        removedKeys.push(peerKey);
+        if (existing.mid) {
+          midsToClose.push(existing.mid);
+          session.pendingMidToPeer.delete(existing.mid);
+        }
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('alphamate-party-remote-stream-removed', {
+              detail: { roomId: session.roomId, peerId: existing.peerId },
+            })
+          );
+        }
+      }
+    }
+    removedKeys.forEach((k) => session.subscribedByPeerKey.delete(k));
+    if (midsToClose.length > 0) {
+      await this.closeTracksOnSession(session.sfuSessionId, session.pc, midsToClose, false);
+    }
+
+    // 2. Subscribe to newly added remote speaker tracks
+    const toSubscribe: Array<{ peerKey: string; peerId: string; publisherSessionId: string; trackName: string }> = [];
+    for (const [peerKey, info] of desiredPeers.entries()) {
+      if (!session.subscribedByPeerKey.has(peerKey)) {
+        toSubscribe.push({ peerKey, ...info });
+      }
+    }
+    if (toSubscribe.length === 0) return;
+
+    const assigned = await this.subscribeTracksOnSession(
+      session.sfuSessionId,
+      session.pc,
+      toSubscribe.map((item) => ({
+        publisherSessionId: item.publisherSessionId,
+        trackName: item.trackName,
+        peerId: item.peerId,
+      })),
+      {
+        contextType: 'party',
+        contextId: session.roomId,
+        speakerPeerIds: Array.from(new Set(toSubscribe.map((i) => i.peerId))),
+      },
+      (mappedTracks) => {
+        for (const mt of mappedTracks) {
+          if (mt.mid && mt.peerId) {
+            session.pendingMidToPeer.set(mt.mid, mt.peerId);
+          }
+        }
+      }
+    );
+
+    toSubscribe.forEach((item, idx) => {
+      const matched =
+        assigned.find((a) => a.trackName === item.trackName && a.publisherSessionId === item.publisherSessionId) ||
+        assigned[idx];
+      const mid = matched?.mid || '';
+      if (mid) {
+        session.pendingMidToPeer.set(mid, item.peerId);
+      }
+      session.subscribedByPeerKey.set(item.peerKey, {
+        peerId: item.peerId,
+        publisherSessionId: item.publisherSessionId,
+        trackName: item.trackName,
+        mid,
+        stream: new MediaStream(),
+      });
+    });
+
+    // Attach tracks if pc.ontrack already fired before map population
+    session.pc.getReceivers().forEach((receiver) => {
+      const transceiver = session.pc.getTransceivers().find((t) => t.receiver === receiver);
+      const mid = transceiver?.mid;
+      if (!mid || !receiver.track || receiver.track.readyState !== 'live') return;
+      const peerId = session.pendingMidToPeer.get(mid);
+      if (!peerId) return;
+      const stream = new MediaStream([receiver.track]);
+      for (const [, sub] of session.subscribedByPeerKey.entries()) {
+        if (sub.peerId === peerId && sub.mid === mid && sub.stream.getTracks().length === 0) {
+          sub.stream = stream;
+          if (typeof window !== 'undefined') {
+            window.dispatchEvent(
+              new CustomEvent('alphamate-party-remote-stream', {
+                detail: { roomId: session.roomId, peerId, stream },
+              })
+            );
+          }
+        }
+      }
+    });
+  }
+
+  public async stopPartyVoice(roomId: string, keepalive: boolean = false): Promise<void> {
+    const session = this.partySfuSessions.get(roomId);
+    this.partySfuSessions.delete(roomId);
+
+    if (session) {
+      if (session.heartbeatTimer) {
+        clearInterval(session.heartbeatTimer);
+        session.heartbeatTimer = null;
+      }
+      if (session.unsubscribeParticipants) {
+        session.unsubscribeParticipants();
+        session.unsubscribeParticipants = null;
+      }
+      if (session.localStream) {
+        session.localStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      this.stopAudioAnalyser();
+      try {
+        session.pc.close();
+      } catch {
+        // ignore
+      }
+      await this.deleteSfuSession(session.sfuSessionId, keepalive);
+    }
+
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      await deleteDoc(doc(db, 'partyRooms', roomId, 'voiceParticipants', uid)).catch(() => {});
+    }
+  }
+
+  // =========================================================================
+  // AUDIO ANALYSIS (REAL VOICE DETECTION VIA WEBAUDIO ANALYSER)
+  // =========================================================================
+
+  private initAudioAnalyser(stream: MediaStream): void {
+    this.stopAudioAnalyser();
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      this.audioContext = new AudioCtx();
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
+
+      const source = this.audioContext.createMediaStreamSource(stream);
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 256;
+      this.analyser.smoothingTimeConstant = 0.4;
+      source.connect(this.analyser);
+    } catch {
+      // AudioContext may require user gesture on mobile
+    }
+  }
+
+  private stopAudioAnalyser(): void {
+    if (this.audioContext && this.audioContext.state !== 'closed') {
+      try {
+        this.audioContext.close().catch(() => {});
+      } catch {
+        // ignore
+      }
+    }
+    this.audioContext = null;
+    this.analyser = null;
+  }
+
+  public getSpeakingVolume(): number {
+    if (!this.analyser || this.isMuted) return 0;
+    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    this.analyser.getByteFrequencyData(dataArray);
+    let sum = 0;
+    for (let i = 0; i < dataArray.length; i++) {
+      sum += dataArray[i];
+    }
+    const average = sum / dataArray.length;
+    return Math.min(100, Math.round((average / 128) * 100));
   }
 
   public closePeerConnection(peerId: string): void {
@@ -1176,63 +1520,8 @@ class P2PStreamingEngine {
       this.peerConnections.delete(peerId);
     }
     this.remoteStreams.delete(peerId);
-    this.dataChannels.delete(peerId);
-    this.pendingRemoteCandidates.delete(peerId);
-  }
-
-  public broadcastData(data: Record<string, any>): void {
-    const payload = JSON.stringify(data);
-    this.dataChannels.forEach((channel) => {
-      if (channel.readyState === 'open') {
-        try {
-          channel.send(payload);
-        } catch (e) {
-          console.warn('Failed to broadcast through channel', e);
-        }
-      }
-    });
-  }
-
-  // =========================================================================
-  // AUDIO ANALYSIS (REAL VOICE DETECTION VIA WEBAUDIO ANALYSER)
-  // =========================================================================
-
-  private initAudioAnalyser(stream: MediaStream): void {
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-
-      this.audioContext = new AudioCtx();
-      // On mobile browsers, resume AudioContext if suspended
-      if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume().catch(() => {});
-      }
-
-      const source = this.audioContext.createMediaStreamSource(stream);
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 256;
-      this.analyser.smoothingTimeConstant = 0.4;
-      source.connect(this.analyser);
-    } catch {
-      // AudioContext may require user interaction gesture on mobile
-    }
-  }
-
-  /**
-   * Get real speaking volume level (0 to 100) from the user's active microphone
-   */
-  public getSpeakingVolume(): number {
-    if (!this.analyser || this.isMuted) return 0;
-    const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
-    this.analyser.getByteFrequencyData(dataArray);
-
-    let sum = 0;
-    for (let i = 0; i < dataArray.length; i++) {
-      sum += dataArray[i];
-    }
-    const average = sum / dataArray.length;
-    return Math.min(100, Math.round((average / 128) * 100));
   }
 }
 
-export const p2pStreamingEngine = new P2PStreamingEngine();
+export const p2pStreamingEngine = new RealtimeSfuStreamingEngine();
+export const realtimeSfuEngine = p2pStreamingEngine;
