@@ -13,6 +13,7 @@
 import {
   collection,
   doc,
+  getDoc,
   setDoc,
   updateDoc,
   onSnapshot,
@@ -59,16 +60,27 @@ interface HostSfuSession {
   pc: RTCPeerConnection;
   stream: MediaStream;
   publishedTracks: SfuPublishedTrack[];
+  facing: 'user' | 'environment';
   isVideoOn: boolean;
   isMicOn: boolean;
+  isClosed?: boolean;
+  onConnectionStateChange?: (state: ConnectionState) => void;
+  onReconnected?: (result: SoloLivePublishResult) => void;
 }
 
 interface ViewerSfuSession {
   streamId: string;
   sfuSessionId: string;
+  hostSfuSessionId: string;
+  publishedTracks: SfuPublishedTrack[];
   pc: RTCPeerConnection;
   remoteStream: MediaStream;
   subscribedMids: string[];
+  isVideoOn: boolean;
+  isMicOn: boolean;
+  isClosed?: boolean;
+  onConnectionStateChange?: (state: ConnectionState) => void;
+  onStreamReconnected?: (stream: MediaStream) => void;
 }
 
 interface PartySubscribedTrack {
@@ -89,6 +101,7 @@ interface PartySfuRoomSession {
   localMid: string | null;
   isPublishing: boolean;
   isMuted: boolean;
+  isClosed?: boolean;
   unsubscribeParticipants: (() => void) | null;
   heartbeatTimer: ReturnType<typeof setInterval> | null;
   subscribedByPeerKey: Map<string, PartySubscribedTrack>;
@@ -110,6 +123,9 @@ export const CLOUDFLARE_TURN_URLS = [
 ];
 
 const PARTY_PARTICIPANT_STALE_MS = 55_000;
+const RECONNECT_GRACE_MS = 2500;
+const MAX_RECONNECT_ATTEMPTS = 3;
+const LIVE_HEARTBEAT_INTERVAL_MS = 5000;
 
 class RealtimeSfuStreamingEngine {
   private localStream: MediaStream | null = null;
@@ -131,6 +147,12 @@ class RealtimeSfuStreamingEngine {
   private partySfuSessions: Map<string, PartySfuRoomSession> = new Map();
   private sessionQueues: Map<string, Promise<unknown>> = new Map();
 
+  // Auto-reconnect & heartbeat coordination
+  private reconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private reconnectInFlight: Map<string, Promise<boolean>> = new Map();
+  private reconnectAttempts: Map<string, number> = new Map();
+  private hostHeartbeatTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+
   // TURN & ICE state
   private customIceServers: RTCIceServer[] = [...DEFAULT_ICE_SERVERS];
   private cachedTurnServers: RTCIceServer[] = [];
@@ -139,6 +161,11 @@ class RealtimeSfuStreamingEngine {
 
   constructor() {
     this.fetchCloudflareTurnCredentials().catch(() => {});
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => {
+        this.autoReconnectAllDisconnected();
+      });
+    }
   }
 
   private getBackendApiBase(): string {
@@ -704,6 +731,691 @@ class RealtimeSfuStreamingEngine {
   }
 
   // =========================================================================
+  // AUTO-RECONNECT & SFU SESSION RECOVERY
+  // =========================================================================
+
+  private clearReconnectState(sessionKey: string, resetAttempts: boolean = true): void {
+    const timer = this.reconnectTimers.get(sessionKey);
+    if (timer) {
+      clearTimeout(timer);
+      this.reconnectTimers.delete(sessionKey);
+    }
+    if (resetAttempts) {
+      this.reconnectAttempts.delete(sessionKey);
+    }
+  }
+
+  private monitorPeerConnection(
+    sessionKey: string,
+    pc: RTCPeerConnection,
+    opts: {
+      isSessionActive: () => boolean;
+      onStateChange?: (state: ConnectionState) => void;
+      onReconnectNeeded: () => Promise<boolean>;
+    }
+  ): void {
+    const evaluateState = () => {
+      if (!opts.isSessionActive()) {
+        this.clearReconnectState(sessionKey);
+        return;
+      }
+
+      const connState = pc.connectionState as ConnectionState;
+      const iceState = pc.iceConnectionState;
+
+      if (connState === 'connected' || iceState === 'connected' || iceState === 'completed') {
+        this.clearReconnectState(sessionKey, true);
+        opts.onStateChange?.('connected');
+        return;
+      }
+
+      if (connState === 'disconnected' || iceState === 'disconnected') {
+        opts.onStateChange?.('disconnected');
+        this.scheduleAutoReconnect(sessionKey, pc, RECONNECT_GRACE_MS, opts);
+        return;
+      }
+
+      if (connState === 'failed' || iceState === 'failed') {
+        this.scheduleAutoReconnect(sessionKey, pc, 500, opts);
+      }
+    };
+
+    pc.onconnectionstatechange = evaluateState;
+    pc.oniceconnectionstatechange = evaluateState;
+  }
+
+  private scheduleAutoReconnect(
+    sessionKey: string,
+    pc: RTCPeerConnection,
+    delayMs: number,
+    opts: {
+      isSessionActive: () => boolean;
+      onStateChange?: (state: ConnectionState) => void;
+      onReconnectNeeded: () => Promise<boolean>;
+    }
+  ): void {
+    if (!opts.isSessionActive()) return;
+    if (this.reconnectTimers.has(sessionKey) || this.reconnectInFlight.has(sessionKey)) return;
+
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(sessionKey);
+      if (!opts.isSessionActive()) return;
+
+      // If ICE/Peer recovered naturally during the grace window, cancel reconnect
+      if (
+        pc.connectionState === 'connected' ||
+        pc.iceConnectionState === 'connected' ||
+        pc.iceConnectionState === 'completed'
+      ) {
+        this.clearReconnectState(sessionKey, true);
+        opts.onStateChange?.('connected');
+        return;
+      }
+
+      this.runAutoReconnectWithBackoff(sessionKey, opts).catch(() => {});
+    }, delayMs);
+
+    this.reconnectTimers.set(sessionKey, timer);
+  }
+
+  private async runAutoReconnectWithBackoff(
+    sessionKey: string,
+    opts: {
+      isSessionActive: () => boolean;
+      onStateChange?: (state: ConnectionState) => void;
+      onReconnectNeeded: () => Promise<boolean>;
+    }
+  ): Promise<boolean> {
+    const existingFlight = this.reconnectInFlight.get(sessionKey);
+    if (existingFlight) return existingFlight;
+
+    const runner = (async () => {
+      try {
+        const attempt = (this.reconnectAttempts.get(sessionKey) || 0) + 1;
+        this.reconnectAttempts.set(sessionKey, attempt);
+
+        if (!opts.isSessionActive()) return false;
+        opts.onStateChange?.('connecting');
+
+        try {
+          const ok = await opts.onReconnectNeeded();
+          if (ok) {
+            this.clearReconnectState(sessionKey, true);
+            return true;
+          }
+        } catch (err) {
+          console.warn(`[WebRTC SFU] Auto-reconnect attempt ${attempt} failed for ${sessionKey}:`, err);
+        }
+
+        if (!opts.isSessionActive()) return false;
+
+        if (attempt < MAX_RECONNECT_ATTEMPTS) {
+          const nextDelay = Math.min(8000, RECONNECT_GRACE_MS * attempt);
+          const retryTimer = setTimeout(() => {
+            this.reconnectTimers.delete(sessionKey);
+            if (opts.isSessionActive()) {
+              this.runAutoReconnectWithBackoff(sessionKey, opts).catch(() => {});
+            }
+          }, nextDelay);
+          this.reconnectTimers.set(sessionKey, retryTimer);
+          return false;
+        }
+
+        // Retries exhausted -> surface genuine failed state without faking success
+        this.reconnectAttempts.delete(sessionKey);
+        opts.onStateChange?.('failed');
+        return false;
+      } finally {
+        this.reconnectInFlight.delete(sessionKey);
+      }
+    })();
+
+    this.reconnectInFlight.set(sessionKey, runner);
+    return runner;
+  }
+
+  private autoReconnectAllDisconnected(): void {
+    this.hostSfuSessions.forEach((s, streamId) => {
+      if (!s.isClosed && (s.pc.connectionState === 'disconnected' || s.pc.connectionState === 'failed' || s.pc.iceConnectionState === 'disconnected' || s.pc.iceConnectionState === 'failed')) {
+        this.autoReconnect('host', streamId).catch(() => {});
+      }
+    });
+    this.viewerSfuSessions.forEach((s, streamId) => {
+      if (!s.isClosed && (s.pc.connectionState === 'disconnected' || s.pc.connectionState === 'failed' || s.pc.iceConnectionState === 'disconnected' || s.pc.iceConnectionState === 'failed')) {
+        this.autoReconnect('viewer', streamId).catch(() => {});
+      }
+    });
+    this.partySfuSessions.forEach((s, roomId) => {
+      if (!s.isClosed && (s.pc.connectionState === 'disconnected' || s.pc.connectionState === 'failed' || s.pc.iceConnectionState === 'disconnected' || s.pc.iceConnectionState === 'failed')) {
+        this.autoReconnect('party', roomId).catch(() => {});
+      }
+    });
+  }
+
+  /**
+   * Public auto-reconnect entrypoint that re-establishes an active SFU session
+   * (Host, Viewer, or Party Room) after a transient disconnection or network switch.
+   */
+  public async autoReconnect(
+    targetType: 'host' | 'viewer' | 'party',
+    id: string
+  ): Promise<boolean> {
+    if (targetType === 'host') {
+      return this.reconnectHostBroadcast(id);
+    }
+    if (targetType === 'viewer') {
+      return this.reconnectViewerBroadcast(id);
+    }
+    return this.reconnectPartyVoice(id);
+  }
+
+  private async reconnectHostBroadcast(streamId: string): Promise<boolean> {
+    const existing = this.hostSfuSessions.get(streamId);
+    if (!existing || existing.isClosed) return false;
+
+    const sessionKey = `host:${streamId}`;
+    console.info(`[Solo Live Host] Re-establishing Cloudflare SFU session for ${streamId}...`);
+
+    try {
+      await this.getFirebaseIdToken(true);
+      await this.fetchCloudflareTurnCredentials(true).catch(() => {});
+    } catch {
+      return false;
+    }
+
+    if (existing.isClosed || this.hostSfuSessions.get(streamId) !== existing) return false;
+
+    let stream = existing.stream;
+    const hasLiveHardwareTrack = stream
+      .getTracks()
+      .some((t) => t.readyState === 'live');
+
+    if (!hasLiveHardwareTrack) {
+      try {
+        stream = await this.getLocalMediaStream(existing.facing, true);
+      } catch (err) {
+        console.error('[Solo Live Host] Failed to re-acquire camera/mic during reconnect:', err);
+        return false;
+      }
+    }
+
+    const videoTrack = stream.getVideoTracks()[0];
+    const audioTrack = stream.getAudioTracks()[0];
+    if (!videoTrack && !audioTrack) return false;
+    if (videoTrack) videoTrack.enabled = existing.isVideoOn;
+    if (audioTrack) audioTrack.enabled = existing.isMicOn;
+
+    let newSfuSessionId = '';
+    let newPc: RTCPeerConnection | null = null;
+
+    try {
+      newSfuSessionId = await this.createSfuSession();
+      newPc = new RTCPeerConnection(this.getRtcConfiguration());
+
+      const suffix = Date.now().toString(36);
+      const tracksToPublish: Array<{ track: MediaStreamTrack; trackName: string }> = [];
+      if (videoTrack) tracksToPublish.push({ track: videoTrack, trackName: `${streamId}-video-${suffix}` });
+      if (audioTrack) tracksToPublish.push({ track: audioTrack, trackName: `${streamId}-audio-${suffix}` });
+
+      const publishedTracks = await this.publishTracksOnSession(newSfuSessionId, newPc, tracksToPublish, stream);
+      await this.waitForPeerConnected(newPc, 15000);
+
+      if (existing.isClosed || this.hostSfuSessions.get(streamId) !== existing) {
+        newPc.close();
+        await this.deleteSfuSession(newSfuSessionId);
+        return false;
+      }
+
+      const oldPc = existing.pc;
+      const oldSfuSessionId = existing.sfuSessionId;
+
+      const updatedSession: HostSfuSession = {
+        ...existing,
+        sfuSessionId: newSfuSessionId,
+        pc: newPc,
+        stream,
+        publishedTracks,
+      };
+      this.hostSfuSessions.set(streamId, updatedSession);
+
+      this.monitorPeerConnection(sessionKey, newPc, {
+        isSessionActive: () =>
+          !updatedSession.isClosed && this.hostSfuSessions.get(streamId) === updatedSession,
+        onStateChange: updatedSession.onConnectionStateChange,
+        onReconnectNeeded: () => this.reconnectHostBroadcast(streamId),
+      });
+
+      // Detach old handlers and tear down stale peer & SFU session without stopping live tracks
+      oldPc.onconnectionstatechange = null;
+      oldPc.oniceconnectionstatechange = null;
+      try {
+        oldPc.close();
+      } catch {
+        // ignore
+      }
+      this.deleteSfuSession(oldSfuSessionId).catch(() => {});
+
+      // Publish updated SFU session metadata + fresh lastHeartbeat to Firestore so viewers resubscribe seamlessly
+      const nowMs = Date.now();
+      await updateDoc(doc(db, 'liveStreams', streamId), {
+        sfuSessionId: newSfuSessionId,
+        publishedTracks,
+        isVideoOn: updatedSession.isVideoOn,
+        isMicOn: updatedSession.isMicOn,
+        lastHeartbeat: serverTimestamp(),
+        lastHeartbeatMs: nowMs,
+        lastSeenAt: serverTimestamp(),
+        lastSeenAtMs: nowMs,
+        updatedAt: new Date(nowMs).toISOString(),
+      }).catch(() => {});
+
+      updatedSession.onReconnected?.({
+        stream,
+        sfuSessionId: newSfuSessionId,
+        publishedTracks,
+      });
+      updatedSession.onConnectionStateChange?.('connected');
+      return true;
+    } catch (err) {
+      if (newPc) {
+        try {
+          newPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (newSfuSessionId) {
+        await this.deleteSfuSession(newSfuSessionId);
+      }
+      console.warn('[Solo Live Host] SFU reconnect failed:', err);
+      return false;
+    }
+  }
+
+  private async reconnectViewerBroadcast(streamId: string): Promise<boolean> {
+    const existing = this.viewerSfuSessions.get(streamId);
+    if (!existing || existing.isClosed) return false;
+
+    const sessionKey = `viewer:${streamId}`;
+    console.info(`[Solo Live Viewer] Re-establishing Cloudflare SFU session for ${streamId}...`);
+
+    try {
+      await this.getFirebaseIdToken(true);
+      await this.fetchCloudflareTurnCredentials(true).catch(() => {});
+    } catch {
+      return false;
+    }
+
+    if (existing.isClosed || this.viewerSfuSessions.get(streamId) !== existing) return false;
+
+    let hostSfuSessionId = existing.hostSfuSessionId;
+    let publishedTracks = existing.publishedTracks;
+    let isVideoOn = existing.isVideoOn;
+    let isMicOn = existing.isMicOn;
+
+    // Fetch freshest host session metadata from Firestore in case host also reconnected
+    try {
+      const snap = await getDoc(doc(db, 'liveStreams', streamId));
+      if (!snap.exists() || snap.data()?.isActive === false) {
+        return false;
+      }
+      const data = snap.data() as any;
+      if (typeof data.sfuSessionId === 'string' && data.sfuSessionId) {
+        hostSfuSessionId = data.sfuSessionId;
+      }
+      if (Array.isArray(data.publishedTracks) && data.publishedTracks.length > 0) {
+        publishedTracks = data.publishedTracks.filter((t: any) => Boolean(t?.trackName));
+      }
+      isVideoOn = data.isVideoOn !== false;
+      isMicOn = data.isMicOn !== false;
+    } catch {
+      // Fallback to cached host SFU metadata on transient read errors
+    }
+
+    if (!hostSfuSessionId || !publishedTracks.length) return false;
+
+    let newViewerSessionId = '';
+    let newPc: RTCPeerConnection | null = null;
+    const remoteStream = new MediaStream();
+
+    try {
+      newViewerSessionId = await this.createSfuSession();
+      newPc = new RTCPeerConnection(this.getRtcConfiguration());
+
+      let tracksReceived = 0;
+      let resolveTrackWaiter: (() => void) | null = null;
+      const firstTrackPromise = new Promise<void>((resolve) => {
+        resolveTrackWaiter = resolve;
+      });
+
+      newPc.ontrack = (event) => {
+        const track = event.track;
+        if (!track) return;
+        if (!remoteStream.getTracks().some((t) => t.id === track.id)) {
+          remoteStream.addTrack(track);
+        }
+        tracksReceived += 1;
+        resolveTrackWaiter?.();
+      };
+
+      const assigned = await this.subscribeTracksOnSession(
+        newViewerSessionId,
+        newPc,
+        publishedTracks.map((t) => ({
+          publisherSessionId: hostSfuSessionId,
+          trackName: t.trackName,
+        })),
+        { contextType: 'live', contextId: streamId }
+      );
+
+      await Promise.all([
+        this.waitForPeerConnected(newPc, 15000),
+        Promise.race([
+          firstTrackPromise,
+          new Promise<void>((_, reject) =>
+            setTimeout(() => {
+              if (tracksReceived === 0) {
+                reject(new Error('No live audio/video tracks arrived after SFU reconnect.'));
+              } else {
+                resolveTrackWaiter?.();
+              }
+            }, 12000)
+          ),
+        ]),
+      ]);
+
+      if (existing.isClosed || this.viewerSfuSessions.get(streamId) !== existing) {
+        newPc.close();
+        await this.deleteSfuSession(newViewerSessionId);
+        return false;
+      }
+
+      const oldPc = existing.pc;
+      const oldSfuSessionId = existing.sfuSessionId;
+      const oldStream = existing.remoteStream;
+
+      const updatedSession: ViewerSfuSession = {
+        ...existing,
+        sfuSessionId: newViewerSessionId,
+        hostSfuSessionId,
+        publishedTracks,
+        pc: newPc,
+        remoteStream,
+        subscribedMids: assigned.map((a) => a.mid).filter(Boolean),
+        isVideoOn,
+        isMicOn,
+      };
+      this.viewerSfuSessions.set(streamId, updatedSession);
+
+      this.monitorPeerConnection(sessionKey, newPc, {
+        isSessionActive: () =>
+          !updatedSession.isClosed && this.viewerSfuSessions.get(streamId) === updatedSession,
+        onStateChange: updatedSession.onConnectionStateChange,
+        onReconnectNeeded: () => this.reconnectViewerBroadcast(streamId),
+      });
+
+      oldPc.onconnectionstatechange = null;
+      oldPc.oniceconnectionstatechange = null;
+      try {
+        oldPc.close();
+      } catch {
+        // ignore
+      }
+      oldStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
+      this.deleteSfuSession(oldSfuSessionId).catch(() => {});
+
+      this.setBroadcastState(streamId, { isVideoOn, isMicOn });
+      updatedSession.onStreamReconnected?.(remoteStream);
+      updatedSession.onConnectionStateChange?.('connected');
+      return true;
+    } catch (err) {
+      if (newPc) {
+        try {
+          newPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (newViewerSessionId) {
+        await this.deleteSfuSession(newViewerSessionId);
+      }
+      console.warn('[Solo Live Viewer] SFU reconnect failed:', err);
+      return false;
+    }
+  }
+
+  private async reconnectPartyVoice(roomId: string): Promise<boolean> {
+    const existing = this.partySfuSessions.get(roomId);
+    if (!existing || existing.isClosed) return false;
+
+    console.info(`[Party SFU] Re-establishing Cloudflare SFU session for room ${roomId}...`);
+
+    try {
+      await this.getFirebaseIdToken(true);
+      await this.fetchCloudflareTurnCredentials(true).catch(() => {});
+    } catch {
+      return false;
+    }
+
+    if (existing.isClosed || this.partySfuSessions.get(roomId) !== existing) return false;
+
+    const userId = existing.userId;
+    const wasPublishing = existing.isPublishing;
+    const wasMuted = existing.isMuted;
+
+    let newSfuSessionId = '';
+    let newPc: RTCPeerConnection | null = null;
+    let newSession: PartySfuRoomSession | null = null;
+
+    try {
+      newSfuSessionId = await this.createSfuSession();
+      newPc = new RTCPeerConnection(this.getRtcConfiguration());
+
+      newSession = {
+        roomId,
+        userId,
+        sfuSessionId: newSfuSessionId,
+        pc: newPc,
+        localStream: null,
+        localTrackName: null,
+        localMid: null,
+        isPublishing: false,
+        isMuted: wasPublishing ? wasMuted : true,
+        isClosed: false,
+        unsubscribeParticipants: null,
+        heartbeatTimer: null,
+        subscribedByPeerKey: new Map(),
+        pendingMidToPeer: new Map(),
+        onError: existing.onError,
+        onConnectionStateChange: existing.onConnectionStateChange,
+      };
+
+      newPc.ontrack = (event) => {
+        const mid = event.transceiver?.mid || '';
+        const peerId = newSession!.pendingMidToPeer.get(mid);
+        if (!peerId || !event.track) return;
+
+        const stream = event.streams?.[0] || new MediaStream([event.track]);
+        for (const [, sub] of newSession!.subscribedByPeerKey.entries()) {
+          if (sub.peerId === peerId && (sub.mid === mid || !sub.mid)) {
+            sub.mid = mid;
+            sub.stream = stream;
+          }
+        }
+
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(
+            new CustomEvent('alphamate-party-remote-stream', {
+              detail: { roomId, peerId, stream },
+            })
+          );
+        }
+      };
+
+      if (wasPublishing) {
+        const liveAudioTrack = existing.localStream
+          ?.getAudioTracks()
+          .find((t) => t.readyState === 'live');
+
+        if (liveAudioTrack && existing.localStream) {
+          liveAudioTrack.enabled = !wasMuted;
+          const trackName = `party-${roomId}-${userId}-${Date.now().toString(36)}`;
+          const published = await this.publishTracksOnSession(
+            newSfuSessionId,
+            newPc,
+            [{ track: liveAudioTrack, trackName }],
+            existing.localStream
+          );
+          newSession.localStream = existing.localStream;
+          newSession.localTrackName = trackName;
+          newSession.localMid = published[0]?.mid || null;
+          newSession.isPublishing = true;
+          newSession.isMuted = wasMuted;
+          this.isMuted = wasMuted;
+        } else {
+          await this.publishPartyLocalMic(newSession, wasMuted);
+        }
+        await this.waitForPeerConnected(newPc, 15000);
+      }
+
+      if (existing.isClosed || this.partySfuSessions.get(roomId) !== existing) {
+        if (newSession.localStream && newSession.localStream !== existing.localStream) {
+          newSession.localStream.getTracks().forEach((t) => t.stop());
+        }
+        newPc.close();
+        await this.deleteSfuSession(newSfuSessionId);
+        return false;
+      }
+
+      this.partySfuSessions.set(roomId, newSession);
+
+      this.monitorPeerConnection(`party:${roomId}`, newPc, {
+        isSessionActive: () =>
+          !newSession!.isClosed && this.partySfuSessions.get(roomId) === newSession,
+        onStateChange: (state) => {
+          newSession?.onConnectionStateChange?.(state);
+        },
+        onReconnectNeeded: () => this.reconnectPartyVoice(roomId),
+      });
+
+      await this.writePartyParticipantPresence(newSession);
+      newSession.heartbeatTimer = setInterval(() => {
+        this.writePartyParticipantPresence(newSession!).catch(() => {});
+      }, 15000);
+
+      const participantsRef = collection(db, 'partyRooms', roomId, 'voiceParticipants');
+      newSession.unsubscribeParticipants = onSnapshot(
+        participantsRef,
+        (snapshot) => {
+          const desiredPeers = new Map<
+            string,
+            { peerId: string; publisherSessionId: string; trackName: string }
+          >();
+          const now = Date.now();
+
+          snapshot.docs.forEach((docSnap) => {
+            const peerId = docSnap.id;
+            if (peerId === userId) return;
+            const data = docSnap.data() as any;
+            if (
+              data?.isPublishing === true &&
+              !data?.listenOnly &&
+              typeof data?.sfuSessionId === 'string' &&
+              data.sfuSessionId &&
+              data.sfuSessionId !== newSfuSessionId &&
+              typeof data?.trackName === 'string' &&
+              data.trackName &&
+              (!data?.lastSeenAtMs || now - Number(data.lastSeenAtMs) <= PARTY_PARTICIPANT_STALE_MS)
+            ) {
+              const peerKey = `${peerId}::${data.sfuSessionId}::${data.trackName}`;
+              desiredPeers.set(peerKey, {
+                peerId,
+                publisherSessionId: data.sfuSessionId,
+                trackName: data.trackName,
+              });
+            }
+          });
+
+          this.reconcilePartySubscriptions(newSession!, desiredPeers).catch((err) => {
+            console.warn('[Party SFU] Subscription reconciliation error:', err);
+            newSession?.onError?.(err instanceof Error ? err : new Error(String(err)));
+          });
+        },
+        (error) => {
+          console.error('[Party SFU] Participants listener error:', error);
+          newSession?.onError?.(error);
+        }
+      );
+
+      existing.isClosed = true;
+      existing.pc.onconnectionstatechange = null;
+      existing.pc.oniceconnectionstatechange = null;
+      if (existing.heartbeatTimer) {
+        clearInterval(existing.heartbeatTimer);
+        existing.heartbeatTimer = null;
+      }
+      if (existing.unsubscribeParticipants) {
+        existing.unsubscribeParticipants();
+        existing.unsubscribeParticipants = null;
+      }
+      if (existing.localStream && existing.localStream !== newSession.localStream) {
+        existing.localStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      try {
+        existing.pc.close();
+      } catch {
+        // ignore
+      }
+      this.deleteSfuSession(existing.sfuSessionId).catch(() => {});
+
+      if (wasPublishing) {
+        newSession.onConnectionStateChange?.('connected');
+      } else {
+        this.waitForPeerConnected(newPc, 15000)
+          .then(() => {
+            if (!newSession?.isClosed) newSession?.onConnectionStateChange?.('connected');
+          })
+          .catch(() => {});
+      }
+      return true;
+    } catch (err) {
+      if (newSession?.localStream && newSession.localStream !== existing.localStream) {
+        newSession.localStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      if (newPc) {
+        try {
+          newPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (newSfuSessionId) {
+        await this.deleteSfuSession(newSfuSessionId);
+      }
+      console.warn('[Party SFU] Reconnect failed:', err);
+      return false;
+    }
+  }
+
+  // =========================================================================
   // SOLO LIVE HOST PUBLISHING VIA CLOUDFLARE REALTIME SFU
   // =========================================================================
 
@@ -714,6 +1426,7 @@ class RealtimeSfuStreamingEngine {
     isVideoOn?: boolean;
     isMicOn?: boolean;
     onConnectionStateChange?: (state: ConnectionState) => void;
+    onReconnected?: (result: SoloLivePublishResult) => void;
   }): Promise<SoloLivePublishResult> {
     const {
       streamId,
@@ -722,6 +1435,7 @@ class RealtimeSfuStreamingEngine {
       isVideoOn = true,
       isMicOn = true,
       onConnectionStateChange,
+      onReconnected,
     } = params;
 
     await this.stopHostBroadcast(streamId);
@@ -749,28 +1463,6 @@ class RealtimeSfuStreamingEngine {
       sfuSessionId = await this.createSfuSession();
       pc = new RTCPeerConnection(this.getRtcConfiguration());
 
-      pc.onconnectionstatechange = () => {
-        if (!pc) return;
-        const st = pc.connectionState as ConnectionState;
-        onConnectionStateChange?.(st);
-        if (st === 'failed') {
-          try {
-            pc.restartIce?.();
-          } catch {
-            // ignore
-          }
-        }
-      };
-      pc.oniceconnectionstatechange = () => {
-        if (pc?.iceConnectionState === 'failed') {
-          try {
-            pc.restartIce?.();
-          } catch {
-            // ignore
-          }
-        }
-      };
-
       const suffix = Date.now().toString(36);
       const tracksToPublish: Array<{ track: MediaStreamTrack; trackName: string }> = [];
       if (videoTrack) tracksToPublish.push({ track: videoTrack, trackName: `${streamId}-video-${suffix}` });
@@ -786,11 +1478,22 @@ class RealtimeSfuStreamingEngine {
         pc,
         stream,
         publishedTracks,
+        facing,
         isVideoOn,
         isMicOn,
+        isClosed: false,
+        onConnectionStateChange,
+        onReconnected,
       };
       this.hostSfuSessions.set(streamId, sessionObj);
+      this.monitorPeerConnection(`host:${streamId}`, pc, {
+        isSessionActive: () =>
+          !sessionObj.isClosed && this.hostSfuSessions.get(streamId) === sessionObj,
+        onStateChange: onConnectionStateChange,
+        onReconnectNeeded: () => this.reconnectHostBroadcast(streamId),
+      });
       this.setBroadcastState(streamId, { isVideoOn, isMicOn });
+      this.startLiveStreamHeartbeat(streamId);
 
       return {
         stream,
@@ -824,6 +1527,50 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
+  public startLiveStreamHeartbeat(streamId: string): void {
+    if (!streamId) return;
+    this.stopLiveStreamHeartbeat(streamId);
+
+    const timer = setInterval(() => {
+      const session = this.hostSfuSessions.get(streamId);
+      if (!session || session.isClosed) {
+        this.stopLiveStreamHeartbeat(streamId);
+        return;
+      }
+      this.sendLiveStreamHeartbeat(streamId).catch(() => {});
+    }, LIVE_HEARTBEAT_INTERVAL_MS);
+
+    this.hostHeartbeatTimers.set(streamId, timer);
+  }
+
+  public stopLiveStreamHeartbeat(streamId: string): void {
+    const timer = this.hostHeartbeatTimers.get(streamId);
+    if (timer) {
+      clearInterval(timer);
+      this.hostHeartbeatTimers.delete(streamId);
+    }
+  }
+
+  public async sendLiveStreamHeartbeat(streamId: string): Promise<void> {
+    if (!streamId || !auth.currentUser) return;
+    const session = this.hostSfuSessions.get(streamId);
+    if (!session || session.isClosed) return;
+
+    const nowMs = Date.now();
+    try {
+      await updateDoc(doc(db, 'liveStreams', streamId), {
+        lastHeartbeat: serverTimestamp(),
+        lastHeartbeatMs: nowMs,
+        lastSeenAt: serverTimestamp(),
+        lastSeenAtMs: nowMs,
+        updatedAt: new Date(nowMs).toISOString(),
+      });
+    } catch (err: any) {
+      if (err?.code === 'not-found') return;
+      console.warn(`[WebRTC SFU] Live heartbeat update failed for ${streamId}:`, err);
+    }
+  }
+
   public setHostCameraState(streamId: string, isVideoOn: boolean): void {
     this.isVideoPaused = !isVideoOn;
     this.toggleVideo(isVideoOn);
@@ -849,11 +1596,16 @@ class RealtimeSfuStreamingEngine {
   }
 
   public async stopHostBroadcast(streamId: string, keepalive: boolean = false): Promise<void> {
+    this.stopLiveStreamHeartbeat(streamId);
+    this.clearReconnectState(`host:${streamId}`, true);
     const hostSession = this.hostSfuSessions.get(streamId);
     this.hostSfuSessions.delete(streamId);
     this.stopLocalMediaStream();
 
     if (hostSession) {
+      hostSession.isClosed = true;
+      hostSession.pc.onconnectionstatechange = null;
+      hostSession.pc.oniceconnectionstatechange = null;
       try {
         hostSession.stream.getTracks().forEach((t) => t.stop());
       } catch {
@@ -885,6 +1637,8 @@ class RealtimeSfuStreamingEngine {
       publishedTracks: SfuPublishedTrack[];
       isVideoOn?: boolean;
       isMicOn?: boolean;
+      onConnectionStateChange?: (state: ConnectionState) => void;
+      onStreamReconnected?: (stream: MediaStream) => void;
     },
     onStateUpdate?: (state: BroadcastState) => void
   ): Promise<{ stream: MediaStream; isVideoOn: boolean; isMicOn: boolean; viewerSessionId: string }> {
@@ -927,16 +1681,6 @@ class RealtimeSfuStreamingEngine {
       resolveTrackWaiter?.();
     };
 
-    pc.oniceconnectionstatechange = () => {
-      if (pc.iceConnectionState === 'failed') {
-        try {
-          pc.restartIce?.();
-        } catch {
-          // ignore
-        }
-      }
-    };
-
     try {
       const assigned = await this.subscribeTracksOnSession(
         viewerSessionId,
@@ -968,18 +1712,32 @@ class RealtimeSfuStreamingEngine {
         throw new Error('Remote media stream contained zero active tracks.');
       }
 
-      this.viewerSfuSessions.set(streamId, {
-        streamId,
-        sfuSessionId: viewerSessionId,
-        pc,
-        remoteStream,
-        subscribedMids: assigned.map((a) => a.mid).filter(Boolean),
-      });
-
       const initialState: BroadcastState = {
         isVideoOn: options.isVideoOn !== false,
         isMicOn: options.isMicOn !== false,
       };
+      const viewerSessionObj: ViewerSfuSession = {
+        streamId,
+        sfuSessionId: viewerSessionId,
+        hostSfuSessionId,
+        publishedTracks,
+        pc,
+        remoteStream,
+        subscribedMids: assigned.map((a) => a.mid).filter(Boolean),
+        isVideoOn: initialState.isVideoOn,
+        isMicOn: initialState.isMicOn,
+        isClosed: false,
+        onConnectionStateChange: options.onConnectionStateChange,
+        onStreamReconnected: options.onStreamReconnected,
+      };
+      this.viewerSfuSessions.set(streamId, viewerSessionObj);
+      this.monitorPeerConnection(`viewer:${streamId}`, pc, {
+        isSessionActive: () =>
+          !viewerSessionObj.isClosed && this.viewerSfuSessions.get(streamId) === viewerSessionObj,
+        onStateChange: options.onConnectionStateChange,
+        onReconnectNeeded: () => this.reconnectViewerBroadcast(streamId),
+      });
+
       this.setBroadcastState(streamId, initialState);
 
       return {
@@ -1000,9 +1758,13 @@ class RealtimeSfuStreamingEngine {
   }
 
   public async unsubscribeFromRemoteBroadcast(streamId: string, keepalive: boolean = false): Promise<void> {
+    this.clearReconnectState(`viewer:${streamId}`, true);
     const session = this.viewerSfuSessions.get(streamId);
     this.viewerSfuSessions.delete(streamId);
     if (session) {
+      session.isClosed = true;
+      session.pc.onconnectionstatechange = null;
+      session.pc.oniceconnectionstatechange = null;
       session.remoteStream.getTracks().forEach((t) => {
         try {
           t.stop();
@@ -1101,6 +1863,7 @@ class RealtimeSfuStreamingEngine {
       localMid: null,
       isPublishing: false,
       isMuted: listenOnly ? true : isMuted,
+      isClosed: false,
       unsubscribeParticipants: null,
       heartbeatTimer: null,
       subscribedByPeerKey: new Map(),
@@ -1132,17 +1895,14 @@ class RealtimeSfuStreamingEngine {
       }
     };
 
-    pc.onconnectionstatechange = () => {
-      const state = pc.connectionState as ConnectionState;
-      session.onConnectionStateChange?.(state);
-      if (state === 'failed') {
-        try {
-          pc.restartIce?.();
-        } catch {
-          // ignore
-        }
-      }
-    };
+    this.monitorPeerConnection(`party:${roomId}`, pc, {
+      isSessionActive: () =>
+        !session.isClosed && this.partySfuSessions.get(roomId) === session,
+      onStateChange: (state) => {
+        session.onConnectionStateChange?.(state);
+      },
+      onReconnectNeeded: () => this.reconnectPartyVoice(roomId),
+    });
 
     try {
       if (!listenOnly) {
@@ -1424,10 +2184,14 @@ class RealtimeSfuStreamingEngine {
   }
 
   public async stopPartyVoice(roomId: string, keepalive: boolean = false): Promise<void> {
+    this.clearReconnectState(`party:${roomId}`, true);
     const session = this.partySfuSessions.get(roomId);
     this.partySfuSessions.delete(roomId);
 
     if (session) {
+      session.isClosed = true;
+      session.pc.onconnectionstatechange = null;
+      session.pc.oniceconnectionstatechange = null;
       if (session.heartbeatTimer) {
         clearInterval(session.heartbeatTimer);
         session.heartbeatTimer = null;

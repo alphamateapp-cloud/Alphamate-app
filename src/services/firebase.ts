@@ -502,7 +502,7 @@ export async function togglePartySeatLockInFirestore(
 // REAL-TIME LIVE STREAMS (SOLO & PK BROADCASTS)
 // =========================================================================
 
-export const LIVE_STREAM_STALE_MS = 55_000;
+export const LIVE_STREAM_STALE_MS = 30_000;
 
 /**
  * Sync active Live Stream to Firestore ONLY with verified SFU session metadata
@@ -546,6 +546,8 @@ export async function syncLiveStreamToFirestore(stream: any) {
         vipTier: Number(stream.host?.vipTier) || 0,
         isVerified: !!stream.host?.isVerified,
       },
+      lastHeartbeat: serverTimestamp(),
+      lastHeartbeatMs: stream.lastHeartbeatMs || nowMs,
       lastSeenAt: serverTimestamp(),
       lastSeenAtMs: stream.lastSeenAtMs || nowMs,
       updatedAt: new Date(nowMs).toISOString(),
@@ -578,13 +580,21 @@ export async function updateLiveStreamFields(streamId: string, fields: Record<st
  */
 export async function updateLiveStreamHeartbeat(streamId: string) {
   if (!streamId) return;
+  const path = `liveStreams/${streamId}`;
   try {
+    const nowMs = Date.now();
     await updateDoc(doc(db, 'liveStreams', streamId), {
+      lastHeartbeat: serverTimestamp(),
+      lastHeartbeatMs: nowMs,
       lastSeenAt: serverTimestamp(),
-      lastSeenAtMs: Date.now(),
-      updatedAt: new Date().toISOString(),
+      lastSeenAtMs: nowMs,
+      updatedAt: new Date(nowMs).toISOString(),
     });
-  } catch (error) {
+  } catch (error: any) {
+    if (error?.code === 'not-found') return;
+    if (error?.code === 'permission-denied') {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
     console.warn('Failed to send live stream heartbeat:', error);
   }
 }
@@ -629,7 +639,15 @@ export function subscribeToLiveStreams(onUpdate: (streams: any[]) => void) {
         .filter((s: any) => {
           if (s.isActive !== true) return false;
           if (!s.sfuSessionId || typeof s.sfuSessionId !== 'string') return false;
-          if (typeof s.lastSeenAtMs === 'number' && now - s.lastSeenAtMs > LIVE_STREAM_STALE_MS) {
+          const heartbeatMs =
+            typeof s.lastHeartbeat?.toMillis === 'function'
+              ? s.lastHeartbeat.toMillis()
+              : typeof s.lastHeartbeatMs === 'number'
+                ? s.lastHeartbeatMs
+                : typeof s.lastSeenAt?.toMillis === 'function'
+                  ? s.lastSeenAt.toMillis()
+                  : s.lastSeenAtMs;
+          if (typeof heartbeatMs === 'number' && now - heartbeatMs > LIVE_STREAM_STALE_MS) {
             return false;
           }
           return true;

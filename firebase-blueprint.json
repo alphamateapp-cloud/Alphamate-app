@@ -75,6 +75,14 @@
         "category": { "type": "string", "maxLength": 64 },
         "isActive": { "type": "boolean" },
         "isPK": { "type": "boolean" },
+        "sfuSessionId": { "type": "string", "maxLength": 256 },
+        "isVideoOn": { "type": "boolean" },
+        "isMicOn": { "type": "boolean" },
+        "lastHeartbeat": { "type": "string", "format": "date-time" },
+        "lastHeartbeatMs": { "type": "number" },
+        "lastSeenAt": { "type": "string", "format": "date-time" },
+        "lastSeenAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "title", "hostId"]

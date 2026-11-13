@@ -146,10 +146,16 @@ service cloud.firestore {
     match /liveStreams/{streamId} {
       allow get: if isValidId(streamId) && (isSignedIn() || resource.data.isActive == true);
       allow list: if isSignedIn() || resource.data.isActive == true;
-      allow create: if isSignedIn() && isValidId(streamId) && request.resource.data.host.id == request.auth.uid;
+      allow create: if isSignedIn()
+        && isValidId(streamId)
+        && request.resource.data.host.id == request.auth.uid
+        && (!('lastHeartbeat' in request.resource.data) || request.resource.data.lastHeartbeat == request.time);
       allow update: if isSignedIn() && isValidId(streamId) && (
-        resource.data.host.id == request.auth.uid
-        || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds)
+        (resource.data.host.id == request.auth.uid
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastHeartbeat'])
+              || request.resource.data.lastHeartbeat == request.time))
+        || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds
+            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastHeartbeat', 'lastHeartbeatMs']))
         || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount', 'totalGiftCoins', 'updatedAt'])
       );
       allow delete: if isSignedIn() && isValidId(streamId) && resource.data.host.id == request.auth.uid;

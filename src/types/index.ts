@@ -90,6 +90,8 @@ export interface LiveStream {
   publishedTracks?: SfuPublishedTrack[];
   isVideoOn?: boolean;
   isMicOn?: boolean;
+  lastHeartbeat?: any;
+  lastHeartbeatMs?: number;
   lastSeenAtMs?: number;
   lastSeenAt?: any;
   createdAt?: string;

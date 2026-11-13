@@ -810,6 +810,15 @@ export const PartyRoomsScreen: React.FC = () => {
         onError: (err) => {
           setPartyVoiceError(err.message || 'Voice audio connection interrupted.');
         },
+        onConnectionStateChange: (connState) => {
+          if (connState === 'disconnected' || connState === 'connecting') {
+            setPartyVoiceError('Network interrupted — reconnecting voice...');
+          } else if (connState === 'connected') {
+            setPartyVoiceError(null);
+          } else if (connState === 'failed') {
+            setPartyVoiceError('Voice connection lost after reconnect attempts. Rejoin room to retry.');
+          }
+        },
       })
       .catch((error: any) => {
         console.error('[Party Voice] Unable to start SFU session:', error);

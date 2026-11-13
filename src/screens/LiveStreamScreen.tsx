@@ -17,7 +17,6 @@ import {
   subscribeToLiveStreamMessages,
   sendLiveStreamMessage,
   updateLiveStreamFields,
-  updateLiveStreamHeartbeat,
   deleteLiveStreamFromFirestore,
 } from '../services/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
@@ -368,7 +367,6 @@ export const LiveStreamScreen: React.FC = () => {
   useEffect(() => {
     if (!activeStream) return;
     let isMounted = true;
-    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     const handlePageHide = () => {
       if (activeRole === 'host') {
@@ -405,6 +403,36 @@ export const LiveStreamScreen: React.FC = () => {
               publishedTracks,
               isVideoOn: meta?.isVideoOn,
               isMicOn: meta?.isMicOn,
+              onConnectionStateChange: (connState) => {
+                if (!isMounted) return;
+                if (connState === 'disconnected' || connState === 'connecting') {
+                  setStreamStatus('connecting');
+                  setStreamError(null);
+                } else if (connState === 'connected') {
+                  setStreamStatus('live');
+                  setStreamError(null);
+                } else if (connState === 'failed') {
+                  setStreamStatus('error');
+                  setStreamError('Live broadcast connection lost after reconnect attempts. Tap Retry.');
+                }
+              },
+              onStreamReconnected: (reconnectedStream) => {
+                if (!isMounted) return;
+                remoteStreamRef.current = reconnectedStream;
+                setStreamStatus('live');
+                setStreamError(null);
+                const videoEl = remoteVideoRef.current;
+                if (videoEl) {
+                  videoEl.srcObject = reconnectedStream;
+                  videoEl.muted = isRemoteAudioMuted;
+                  videoEl.play().catch(() => {
+                    videoEl.muted = true;
+                    setIsRemoteAudioMuted(true);
+                    setAutoplayBlocked(true);
+                    videoEl.play().catch(() => {});
+                  });
+                }
+              },
             },
             (state) => {
               if (isMounted) {
@@ -495,12 +523,26 @@ export const LiveStreamScreen: React.FC = () => {
             isMicOn: isHostMicOn,
             onConnectionStateChange: (connState) => {
               if (!isMounted) return;
-              if (connState === 'failed') {
-                setStreamStatus('error');
-                setStreamError('Live WebRTC connection dropped. Attempting recovery or retry.');
+              if (connState === 'disconnected' || connState === 'connecting') {
+                setStreamStatus('connecting');
+                setStreamError(null);
               } else if (connState === 'connected') {
                 setStreamStatus('live');
+                setStreamError(null);
+              } else if (connState === 'failed') {
+                setStreamStatus('error');
+                setStreamError('Live WebRTC connection lost after reconnect attempts. Tap Retry.');
               }
+            },
+            onReconnected: ({ stream }) => {
+              if (!isMounted) return;
+              if (hostVideoRef.current) {
+                hostVideoRef.current.srcObject = stream;
+                hostVideoRef.current.play().catch(() => {});
+              }
+              setStreamStatus('live');
+              setStreamError(null);
+              showToast('Live stream reconnected!');
             },
           });
 
@@ -531,11 +573,6 @@ export const LiveStreamScreen: React.FC = () => {
 
           if (!isMounted) return;
           setStreamStatus('live');
-
-          // Heartbeat every 15s so crashed sessions are automatically filtered out
-          heartbeatTimer = setInterval(() => {
-            updateLiveStreamHeartbeat(activeStream.id).catch(() => {});
-          }, 15000);
         } catch (err) {
           if (!isMounted) return;
           console.error('[Solo Live Host] SFU publish failed:', err);
@@ -552,7 +589,6 @@ export const LiveStreamScreen: React.FC = () => {
 
       return () => {
         isMounted = false;
-        if (heartbeatTimer) clearInterval(heartbeatTimer);
         window.removeEventListener('pagehide', handlePageHide);
         window.removeEventListener('beforeunload', handlePageHide);
         p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
