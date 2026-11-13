@@ -965,12 +965,6 @@ export const LiveStreamScreen: React.FC = () => {
         />
       )}
 
-      {/* Live heart counter shared by host and viewers */}
-      <div className="fixed top-[calc(env(safe-area-inset-top,8px)+10px)] right-4 z-[70] rounded-full bg-black/75 border border-pink-500/50 px-3 py-1.5 flex items-center gap-1.5 pointer-events-none shadow-lg">
-        <Heart className="w-4 h-4 fill-pink-500 text-pink-400" />
-        <span className="text-xs font-black tabular-nums">{totalHeartCount.toLocaleString()}</span>
-      </div>
-
       {/* Toast Alert Feedback */}
       {toastMessage && (
         <div className="fixed top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#180E2C]/95 border border-[#A855F7]/40 text-white text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-bounce pointer-events-none">
@@ -1212,6 +1206,24 @@ export const LiveStreamScreen: React.FC = () => {
           >
             <Users className="w-3 h-3 text-[#C084FC]" />
             <span>{viewerCount.toLocaleString()}</span>
+          </button>
+
+          {/* Heart action is grouped with the audience controls, never over Exit. */}
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              spawnHeart();
+              if (activeStream?.id) {
+                sendLiveHeart('live', activeStream.id).catch((err) => console.warn('[Live heart send]', err));
+              }
+            }}
+            className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-black/75 backdrop-blur-md border border-pink-500/50 text-pink-200 hover:bg-pink-500/20 active:scale-95 transition-all cursor-pointer shrink-0 shadow-lg"
+            title="Send a heart"
+            aria-label={`Send a heart. ${totalHeartCount.toLocaleString()} hearts`}
+          >
+            <Heart className="w-3.5 h-3.5 fill-pink-500 text-pink-400" />
+            <span className="text-[10px] font-black tabular-nums">{totalHeartCount.toLocaleString()}</span>
           </button>
 
           {/* Perspective Tester Toggle (Host Only) */}

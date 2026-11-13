@@ -58,7 +58,8 @@ export const PartyRemoteAudioPlayer: React.FC<PartyRemoteAudioPlayerProps> = Rea
       };
       const audioTracks = stream.getAudioTracks();
       const handleUnmute = () => {
-        audioTracks.forEach((track) => { track.enabled = true; });
+        // Receiver track state is owned by WebRTC/SFU and the publisher mute state.
+        // Never force-enable it here; only resume the local audio output element.
         attemptPlay();
       };
       audioTracks.forEach((track) => {
