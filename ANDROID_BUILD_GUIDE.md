@@ -186,10 +186,13 @@ After pushing this ZIP, GitHub Actions must install the added package and run
 release APK; source-level checks alone do not prove the native OAuth flow works.
 
 
-## Railway dependency-lock alignment
+## Railway root-level package manager fix
 
-The Capacitor Firebase Authentication dependency is pinned to the compatible 8.6.x
-line and recorded in package-lock.json. The stale bun.lock has been removed so
-Railway/Railpack selects npm and uses the matching package-lock.json rather than
-running `bun install --frozen-lockfile` against an out-of-date Bun lock. GitHub
-Actions also uses npm ci, so both build paths use the same npm lockfile.
+This archive is flattened: app files are directly at archive root. Copy the
+archive contents into the GitHub repository root (or exact Railway Root Directory),
+not into a nested `alphamate_safe_work/` folder.
+
+`package.json` explicitly selects `npm@10.9.2`; `package-lock.json` includes
+`@capacitor-firebase/authentication` 8.6.0. The stale root Bun lockfile is absent.
+After syncing, verify root package.json has `packageManager: npm@10.9.2` and
+the root bun.lock/bun.lockb files are deleted. Railway should detect npm.
