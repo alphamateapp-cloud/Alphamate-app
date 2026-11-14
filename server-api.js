@@ -516,6 +516,194 @@ export function createApiApp() {
     }
   });
 
+
+  // ---------------------------------------------------------------------------
+  // Alpha Mate Admin API (read-only)
+  // Uses the same Firebase project + named Firestore database as the app.
+  // Configure FIREBASE_SERVICE_ACCOUNT_JSON and ADMIN_EMAILS in Railway.
+  // ---------------------------------------------------------------------------
+  const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'alphamateapp@gmail.com')
+    .split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
+  const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '';
+  const ADMIN_READABLE_COLLECTIONS = new Set(['users', 'partyRooms', 'liveStreams', 'reels', 'presence']);
+  let adminAccessTokenCache = null;
+  let adminAccessTokenExpiresAt = 0;
+
+  function base64UrlJson(value) {
+    return Buffer.from(JSON.stringify(value)).toString('base64url');
+  }
+
+  function readServiceAccount() {
+    if (!FIREBASE_SERVICE_ACCOUNT_JSON) {
+      const error = new Error('FIREBASE_SERVICE_ACCOUNT_JSON is not configured on Railway.');
+      error.statusCode = 503;
+      throw error;
+    }
+    let account;
+    try { account = JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON); }
+    catch {
+      const error = new Error('FIREBASE_SERVICE_ACCOUNT_JSON is not valid JSON.');
+      error.statusCode = 503;
+      throw error;
+    }
+    if (!account.client_email || !account.private_key || !account.project_id) {
+      const error = new Error('Firebase service account is missing required fields.');
+      error.statusCode = 503;
+      throw error;
+    }
+    if (account.project_id !== FIREBASE_PROJECT_ID) {
+      const error = new Error('Firebase service account project does not match FIREBASE_PROJECT_ID.');
+      error.statusCode = 503;
+      throw error;
+    }
+    return account;
+  }
+
+  async function getFirestoreAdminAccessToken() {
+    if (adminAccessTokenCache && Date.now() < adminAccessTokenExpiresAt - 60000) return adminAccessTokenCache;
+    const account = readServiceAccount();
+    const now = Math.floor(Date.now() / 1000);
+    const unsigned = `${base64UrlJson({ alg: 'RS256', typ: 'JWT' })}.${base64UrlJson({
+      iss: account.client_email,
+      scope: 'https://www.googleapis.com/auth/datastore',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    })}`;
+    const { createSign } = await import('node:crypto');
+    const signer = createSign('RSA-SHA256');
+    signer.update(unsigned);
+    signer.end();
+    const assertion = `${unsigned}.${signer.sign(account.private_key, 'base64url')}`;
+    const response = await fetchWithTimeout('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer', assertion,
+      }).toString(),
+    }, 8000);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok || !payload.access_token) {
+      const error = new Error('Could not obtain a Google access token for Firestore Admin API.');
+      error.statusCode = 502;
+      throw error;
+    }
+    adminAccessTokenCache = payload.access_token;
+    adminAccessTokenExpiresAt = Date.now() + Number(payload.expires_in || 3600) * 1000;
+    return adminAccessTokenCache;
+  }
+
+  async function firestoreAdminRequest(resourcePath, options = {}) {
+    const token = await getFirestoreAdminAccessToken();
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents/${resourcePath}`;
+    const response = await fetchWithTimeout(url, {
+      ...options,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(options.headers || {}),
+      },
+    }, 12000);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(payload.error?.message || `Firestore Admin API failed (${response.status}).`);
+      error.statusCode = response.status === 403 ? 403 : response.status === 404 ? 404 : 502;
+      throw error;
+    }
+    return payload;
+  }
+
+  function decodeFirestoreDocument(document) {
+    const fields = {};
+    for (const [key, value] of Object.entries(document.fields || {})) fields[key] = parseFirestoreValue(value);
+    // Never expose credential-like fields through the Admin read API.
+    for (const key of Object.keys(fields)) {
+      if (/password|private.?key|refresh.?token|access.?token|secret|fcm.?token/i.test(key)) delete fields[key];
+    }
+    const nameParts = String(document.name || '').split('/');
+    return {
+      id: nameParts[nameParts.length - 1] || '',
+      ...fields,
+      _createdTime: document.createTime || null,
+      _updatedTime: document.updateTime || null,
+    };
+  }
+
+  async function requireAdmin(req, res, next) {
+    const email = String(req.firebaseUser?.email || '').trim().toLowerCase();
+    if (!email || req.firebaseUser?.emailVerified !== true || !ADMIN_EMAILS.includes(email)) {
+      return res.status(403).json({ success: false, error: 'Admin access denied.' });
+    }
+    next();
+  }
+
+  function sendAdminError(res, error, operation) {
+    const status = error.statusCode || 500;
+    console.error(`[Admin API] ${operation} failed:`, error.message || error);
+    return res.status(status).json({
+      success: false,
+      error: status === 503 ? 'admin_firestore_not_configured' : 'admin_firestore_request_failed',
+      message: error.message || 'Unable to read Alpha Mate data.',
+    });
+  }
+
+  app.get('/api/admin/status', requireFirebaseAuth, requireAdmin, async (_req, res) => {
+    try {
+      const account = readServiceAccount();
+      await getFirestoreAdminAccessToken();
+      return res.json({ success: true, connected: true, projectId: FIREBASE_PROJECT_ID,
+        databaseId: FIREBASE_DATABASE_ID, serviceAccountProjectMatches: account.project_id === FIREBASE_PROJECT_ID,
+        mode: 'read_only', collections: Array.from(ADMIN_READABLE_COLLECTIONS) });
+    } catch (error) { return sendAdminError(res, error, 'status'); }
+  });
+
+  app.get('/api/admin/collections/:collectionName', requireFirebaseAuth, requireAdmin, async (req, res) => {
+    try {
+      const collectionName = String(req.params.collectionName || '');
+      if (!ADMIN_READABLE_COLLECTIONS.has(collectionName)) {
+        return res.status(400).json({ success: false, error: 'unsupported_collection',
+          allowedCollections: Array.from(ADMIN_READABLE_COLLECTIONS) });
+      }
+      const pageSize = Math.min(Math.max(Number.parseInt(req.query.pageSize, 10) || 50, 1), 100);
+      const query = new URLSearchParams({ pageSize: String(pageSize) });
+      if (typeof req.query.pageToken === 'string' && req.query.pageToken.length < 4096) query.set('pageToken', req.query.pageToken);
+      const result = await firestoreAdminRequest(`${encodeURIComponent(collectionName)}?${query.toString()}`);
+      return res.json({ success: true, collection: collectionName,
+        documents: (result.documents || []).map(decodeFirestoreDocument),
+        nextPageToken: result.nextPageToken || null, pageSize, readOnly: true });
+    } catch (error) { return sendAdminError(res, error, `list ${req.params.collectionName}`); }
+  });
+
+  app.get('/api/admin/dashboard', requireFirebaseAuth, requireAdmin, async (_req, res) => {
+    try {
+      const token = await getFirestoreAdminAccessToken();
+      const parent = `projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents`;
+      const names = ['users', 'partyRooms', 'liveStreams', 'reels'];
+      const totals = await Promise.all(names.map(async (name) => {
+        try {
+          const response = await fetchWithTimeout(`https://firestore.googleapis.com/v1/${parent}:runAggregationQuery`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ structuredAggregationQuery: {
+              structuredQuery: { from: [{ collectionId: name }] },
+              aggregations: [{ count: {}, alias: 'total' }],
+            } }),
+          }, 12000);
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error?.message || `Count query failed (${response.status}).`);
+          const count = result[0]?.aggregateFields?.total?.integerValue;
+          return [name, count === undefined ? null : Number(count)];
+        } catch (error) {
+          console.warn(`[Admin API] Count unavailable for ${name}:`, error.message);
+          return [name, null];
+        }
+      }));
+      return res.json({ success: true, counts: Object.fromEntries(totals), generatedAt: new Date().toISOString(),
+        readOnly: true, note: 'Counts are read from the Alpha Mate Firestore database. Null means this collection count could not be read; it is not a fabricated zero.' });
+    } catch (error) { return sendAdminError(res, error, 'dashboard'); }
+  });
+
   app.get('/api/webrtc/turn-credentials', requireFirebaseAuth, async (_req, res) => {
     try {
       const generated = await generateTurnIceServers(TURN_CREDENTIAL_TTL);
