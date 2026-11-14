@@ -70,6 +70,8 @@ interface AppContextType {
   setActiveTab: (tab: MainTabType) => void;
   navigateBack: () => void;
   screenHistory: ScreenType[];
+  legalConsent: { terms: boolean; privacy: boolean };
+  setLegalConsent: React.Dispatch<React.SetStateAction<{ terms: boolean; privacy: boolean }>>;
 
   // Auth state
   isAuthenticated: boolean;
@@ -421,9 +423,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return INITIAL_REGISTERED_USERS;
   });
 
-  const [currentScreen, setCurrentScreenState] = useState<ScreenType>('splash');
-  const [screenHistory, setScreenHistory] = useState<ScreenType[]>(['splash']);
+  const getLegalScreenFromPath = (pathname?: string): ScreenType | null => {
+    if (typeof window === 'undefined') return null;
+    const normalized = (pathname ?? window.location.pathname).replace(/\/+$/, '').toLowerCase();
+    if (normalized === '/privacy' || normalized === '/privacy-policy') return 'privacy_policy';
+    if (normalized === '/terms' || normalized === '/terms-and-conditions' || normalized === '/terms-of-service') {
+      return 'terms_conditions';
+    }
+    return null;
+  };
+
+  const syncBrowserUrlForScreen = (screen: ScreenType) => {
+    if (typeof window === 'undefined') return;
+    try {
+      const protocol = window.location.protocol;
+      if (protocol !== 'http:' && protocol !== 'https:') return;
+      const targetPath =
+        screen === 'privacy_policy'
+          ? '/privacy'
+          : screen === 'terms_conditions'
+          ? '/terms'
+          : null;
+      const currentPath = window.location.pathname.replace(/\/+$/, '').toLowerCase();
+      if (targetPath && currentPath !== targetPath) {
+        window.history.pushState({ screen }, '', targetPath);
+      } else if (!targetPath && (currentPath === '/privacy' || currentPath === '/privacy-policy' || currentPath === '/terms' || currentPath === '/terms-and-conditions' || currentPath === '/terms-of-service')) {
+        window.history.pushState({ screen }, '', '/');
+      }
+    } catch {
+      // ignore history errors in restricted webviews
+    }
+  };
+
+  const initialLegalScreen = getLegalScreenFromPath();
+  const [currentScreen, setCurrentScreenState] = useState<ScreenType>(initialLegalScreen || 'splash');
+  const [screenHistory, setScreenHistory] = useState<ScreenType[]>(
+    initialLegalScreen ? ['welcome', initialLegalScreen] : ['splash']
+  );
+  const currentScreenRef = React.useRef<ScreenType>(initialLegalScreen || 'splash');
+  React.useEffect(() => {
+    currentScreenRef.current = currentScreen;
+  }, [currentScreen]);
   const [activeTab, setActiveTabState] = useState<MainTabType>('home');
+  const [legalConsent, setLegalConsent] = useState<{ terms: boolean; privacy: boolean }>({
+    terms: false,
+    privacy: false,
+  });
   // Never default to authenticated without an active, verified Firebase session on the device.
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
   const [currentUser, setCurrentUser] = useState<User>(() => {
@@ -529,18 +574,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveUserSession(mergedUser, verified);
 
           // Restore an existing Firebase session directly into the app after
-          // refresh/reopen. A signed-out or unverified user still sees Welcome.
+          // refresh/reopen. Preserve direct visits to /privacy or /terms.
           if (verified) {
-            setScreenHistory(['home']);
-            setCurrentScreenState('home');
+            const activeLegal =
+              currentScreenRef.current === 'privacy_policy' || currentScreenRef.current === 'terms_conditions'
+                ? currentScreenRef.current
+                : getLegalScreenFromPath();
+            if (activeLegal) {
+              setScreenHistory(['home', activeLegal]);
+              setCurrentScreenState(activeLegal);
+            } else {
+              setScreenHistory(['home']);
+              setCurrentScreenState('home');
+            }
           }
         } catch (e) {
           console.warn('Firestore profile sync error:', e);
           const fallbackUser = buildNewUserFromFirebase(fbUser);
           saveUserSession(fallbackUser, verified);
           if (verified) {
-            setScreenHistory(['home']);
-            setCurrentScreenState('home');
+            const activeLegal =
+              currentScreenRef.current === 'privacy_policy' || currentScreenRef.current === 'terms_conditions'
+                ? currentScreenRef.current
+                : getLegalScreenFromPath();
+            if (activeLegal) {
+              setScreenHistory(['home', activeLegal]);
+              setCurrentScreenState(activeLegal);
+            } else {
+              setScreenHistory(['home']);
+              setCurrentScreenState('home');
+            }
           }
         } finally {
           if (active) setFirebaseAuthLoading(false);
@@ -1995,9 +2058,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handlePopState = () => {
+      const legal = getLegalScreenFromPath();
+      if (legal) {
+        setCurrentScreenState(legal);
+        return;
+      }
+      if (
+        currentScreenRef.current === 'privacy_policy' ||
+        currentScreenRef.current === 'terms_conditions'
+      ) {
+        setCurrentScreenState(isAuthenticated && firebaseUser && isEmailVerified ? 'home' : 'welcome');
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [isAuthenticated, firebaseUser, isEmailVerified]);
+
   const setCurrentScreen = (screen: ScreenType) => {
-    setScreenHistory((prev) => [...prev, screen]);
+    setScreenHistory((prev) => (prev[prev.length - 1] === screen ? prev : [...prev, screen]));
     setCurrentScreenState(screen);
+    syncBrowserUrlForScreen(screen);
   };
 
   const navigateBack = () => {
@@ -2007,8 +2090,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const prevScreen = newHistory[newHistory.length - 1];
       setScreenHistory(newHistory);
       setCurrentScreenState(prevScreen);
+      syncBrowserUrlForScreen(prevScreen);
     } else {
-      setCurrentScreenState(isAuthenticated && firebaseUser ? 'home' : 'welcome');
+      const fallbackScreen: ScreenType = isAuthenticated && firebaseUser ? 'home' : 'welcome';
+      setCurrentScreenState(fallbackScreen);
+      syncBrowserUrlForScreen(fallbackScreen);
     }
   };
 
@@ -2304,6 +2390,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setFirebaseUser(null);
     setIsEmailVerified(false);
     setIsAuthenticated(false);
+    setLegalConsent({ terms: false, privacy: false });
     setCurrentUser(CURRENT_USER);
     try {
       localStorage.setItem('alphamate_is_authenticated', 'false');
@@ -3060,6 +3147,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveTab,
         navigateBack,
         screenHistory,
+        legalConsent,
+        setLegalConsent,
         isAuthenticated,
         currentUser,
         setCurrentUser,

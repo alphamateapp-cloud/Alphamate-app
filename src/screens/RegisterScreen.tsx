@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
+import { LegalConsentCheckboxes } from '../components/legal/LegalConsentCheckboxes';
 import {
   Mail,
   Lock,
@@ -40,6 +41,8 @@ export const RegisterScreen: React.FC = () => {
     registerWithFirebaseEmail,
     refreshFirebaseVerification,
     resendEmailVerificationLink,
+    legalConsent,
+    setLegalConsent,
   } = useApp();
 
   // Registration step: 'select_method' | 'profile_details' | 'verify_email'
@@ -64,7 +67,29 @@ export const RegisterScreen: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [selectedAvatar, setSelectedAvatar] = useState(PRESET_AVATARS[0]);
-  const [agreedToTerms, setAgreedToTerms] = useState(true);
+  const agreedToTerms = legalConsent.terms;
+  const agreedToPrivacy = legalConsent.privacy;
+  const setAgreedToTerms = (next: boolean) => {
+    setLegalConsent((prev) => {
+      const updated = { ...prev, terms: next };
+      if (updated.terms && updated.privacy) {
+        setConsentError(false);
+        setErrorMessage('');
+      }
+      return updated;
+    });
+  };
+  const setAgreedToPrivacy = (next: boolean) => {
+    setLegalConsent((prev) => {
+      const updated = { ...prev, privacy: next };
+      if (updated.terms && updated.privacy) {
+        setConsentError(false);
+        setErrorMessage('');
+      }
+      return updated;
+    });
+  };
+  const [consentError, setConsentError] = useState(false);
 
   // Status & validation
   const [errorMessage, setErrorMessage] = useState('');
@@ -72,6 +97,18 @@ export const RegisterScreen: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showAppleComingSoon, setShowAppleComingSoon] = useState(false);
   const [showPlatformRegistrationModal, setShowPlatformRegistrationModal] = useState(false);
+
+  const ensureLegalConsent = () => {
+    if (!agreedToTerms || !agreedToPrivacy) {
+      setConsentError(true);
+      setErrorMessage(
+        'Please check both boxes to accept our Terms & Conditions and Privacy Policy before creating an account.'
+      );
+      return false;
+    }
+    setConsentError(false);
+    return true;
+  };
 
   const formatFirebaseAuthError = (raw?: string) => {
     const msg = raw || '';
@@ -95,6 +132,7 @@ export const RegisterScreen: React.FC = () => {
 
   // Handle Direct Firebase Google (Gmail) Sign-In & Account Creation
   const handleDirectGoogleSignIn = async () => {
+    if (!ensureLegalConsent()) return;
     setIsSubmitting(true);
     setErrorMessage('');
     setStatusMessage('');
@@ -116,6 +154,7 @@ export const RegisterScreen: React.FC = () => {
 
   // Handle switching to Email Registration
   const handleStartEmailRegistration = () => {
+    if (!ensureLegalConsent()) return;
     setErrorMessage('');
     setStatusMessage('');
     setEmail('');
@@ -172,8 +211,11 @@ export const RegisterScreen: React.FC = () => {
       return;
     }
 
-    if (!agreedToTerms) {
-      setErrorMessage('You must accept the Terms of Service & Privacy Policy');
+    if (!agreedToTerms || !agreedToPrivacy) {
+      setConsentError(true);
+      setErrorMessage(
+        'Please check both boxes to accept our Terms & Conditions and Privacy Policy before creating an account.'
+      );
       return;
     }
 
@@ -201,6 +243,7 @@ export const RegisterScreen: React.FC = () => {
   };
 
   const handleCheckEmailVerified = async () => {
+    if (!ensureLegalConsent()) return;
     setIsSubmitting(true);
     setErrorMessage('');
     setStatusMessage('');
@@ -380,8 +423,19 @@ export const RegisterScreen: React.FC = () => {
             </div>
           </div>
 
+          {/* Mandatory Legal Consent Checkboxes (Step 1) */}
+          <div className="mt-4">
+            <LegalConsentCheckboxes
+              agreedToTerms={agreedToTerms}
+              onToggleTerms={setAgreedToTerms}
+              agreedToPrivacy={agreedToPrivacy}
+              onTogglePrivacy={setAgreedToPrivacy}
+              hasError={consentError}
+            />
+          </div>
+
           {/* Security & Benefits Badge */}
-          <div className="mt-6 p-3 rounded-2xl bg-white/[0.02] border border-white/5 flex items-center gap-3">
+          <div className="mt-4 p-3 rounded-2xl bg-white/[0.02] border border-white/5 flex items-center gap-3">
             <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
             <p className="text-[11px] text-zinc-400 leading-snug">
               Once verified, this device stays signed in so you enter Alpha Mate directly every time until you log out.
@@ -436,6 +490,18 @@ export const RegisterScreen: React.FC = () => {
             >
               Resend Verification Link
             </button>
+
+            {(!agreedToTerms || !agreedToPrivacy) && (
+              <div className="text-left pt-1">
+                <LegalConsentCheckboxes
+                  agreedToTerms={agreedToTerms}
+                  onToggleTerms={setAgreedToTerms}
+                  agreedToPrivacy={agreedToPrivacy}
+                  onTogglePrivacy={setAgreedToPrivacy}
+                  hasError={consentError}
+                />
+              </div>
+            )}
 
             <button
               onClick={handleDirectGoogleSignIn}
@@ -607,24 +673,16 @@ export const RegisterScreen: React.FC = () => {
               </div>
             </div>
 
-            {/* Terms checkbox */}
-            <label className="flex items-start gap-2 pt-1 cursor-pointer select-none">
-              <div
-                onClick={() => setAgreedToTerms(!agreedToTerms)}
-                className={`w-4 h-4 mt-0.5 rounded flex items-center justify-center shrink-0 border transition ${
-                  agreedToTerms
-                    ? 'bg-gradient-to-r from-[#7928CA] to-[#A855F7] border-[#A855F7]'
-                    : 'border-zinc-700 bg-[#120B22]'
-                }`}
-              >
-                {agreedToTerms && <Check className="w-3 h-3 text-white stroke-[3]" />}
-              </div>
-              <span className="text-[10px] text-zinc-400 leading-tight">
-                I agree to Alpha Mate's{' '}
-                <span className="text-[#C084FC] underline">Community Guidelines</span> &{' '}
-                <span className="text-[#C084FC] underline">Terms of Service</span>.
-              </span>
-            </label>
+            {/* Mandatory Terms & Privacy Checkboxes */}
+            <div className="pt-1">
+              <LegalConsentCheckboxes
+                agreedToTerms={agreedToTerms}
+                onToggleTerms={setAgreedToTerms}
+                agreedToPrivacy={agreedToPrivacy}
+                onTogglePrivacy={setAgreedToPrivacy}
+                hasError={consentError}
+              />
+            </div>
 
             {/* Submit Button */}
             <button

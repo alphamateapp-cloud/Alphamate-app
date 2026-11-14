@@ -24,11 +24,20 @@ import { MomentsScreen } from './screens/MomentsScreen';
 import { StoreScreen } from './screens/StoreScreen';
 import { AdminDashboard } from './screens/AdminDashboard';
 import { AgencyManagementScreen } from './screens/AgencyManagementScreen';
+import { PrivacyPolicyScreen } from './screens/PrivacyPolicyScreen';
+import { TermsConditionsScreen } from './screens/TermsConditionsScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
 
-const PUBLIC_AUTH_SCREENS = new Set(['splash', 'welcome', 'register', 'signin']);
+const PUBLIC_AUTH_SCREENS = new Set([
+  'splash',
+  'welcome',
+  'register',
+  'signin',
+  'privacy_policy',
+  'terms_conditions',
+]);
 
 const AppContent: React.FC = () => {
   const {
@@ -139,6 +148,12 @@ const AppContent: React.FC = () => {
   }
   if (currentScreen === 'signin') {
     return <SignInScreen />;
+  }
+  if (currentScreen === 'privacy_policy') {
+    return <PrivacyPolicyScreen />;
+  }
+  if (currentScreen === 'terms_conditions') {
+    return <TermsConditionsScreen />;
   }
 
   // Prevent flashing protected screens while auth is unresolved or unauthenticated

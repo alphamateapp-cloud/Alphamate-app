@@ -18,6 +18,8 @@ import {
   ChevronRight,
   Sparkles,
   Smartphone,
+  FileText,
+  ShieldCheck,
 } from 'lucide-react';
 import { AndroidSetupModal } from '../components/modals/AndroidSetupModal';
 import { PushNotificationSettingsModal } from '../components/modals/PushNotificationSettingsModal';
@@ -264,6 +266,30 @@ export const SettingsScreen: React.FC = () => {
               </div>
               <ChevronRight className="w-4 h-4 text-zinc-500" />
             </div>
+
+            <button
+              type="button"
+              onClick={() => setCurrentScreen('terms_conditions')}
+              className="w-full min-h-[44px] p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer text-left"
+            >
+              <div className="flex items-center gap-3">
+                <FileText className="w-4 h-4 text-[#C084FC]" />
+                <span className="text-xs font-medium text-white">Terms &amp; Conditions</span>
+              </div>
+              <ChevronRight className="w-4 h-4 text-zinc-500" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setCurrentScreen('privacy_policy')}
+              className="w-full min-h-[44px] p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer text-left"
+            >
+              <div className="flex items-center gap-3">
+                <ShieldCheck className="w-4 h-4 text-[#EC4899]" />
+                <span className="text-xs font-medium text-white">Privacy Policy</span>
+              </div>
+              <ChevronRight className="w-4 h-4 text-zinc-500" />
+            </button>
           </div>
         </div>
 

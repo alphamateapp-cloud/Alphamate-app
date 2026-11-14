@@ -7,7 +7,12 @@ interface DeviceFrameProps {
 }
 
 export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
-  const { deviceMode, setDeviceMode } = useApp();
+  const { deviceMode, setDeviceMode, currentScreen } = useApp();
+
+  // Public legal pages (/privacy and /terms) render cleanly as full responsive web/mobile pages
+  if (currentScreen === 'privacy_policy' || currentScreen === 'terms_conditions') {
+    return <div className="w-full h-[100dvh] min-h-[100dvh] bg-[#09070F] overflow-hidden flex flex-col">{children}</div>;
+  }
 
   // If in admin dashboard mode, the AdminDashboard screen handles the full layout
   if (deviceMode === 'admin') {

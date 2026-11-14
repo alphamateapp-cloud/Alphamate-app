@@ -21,7 +21,9 @@ export type ScreenType =
   | 'settings'
   | 'store'
   | 'admin_dashboard'
-  | 'agency_management';
+  | 'agency_management'
+  | 'privacy_policy'
+  | 'terms_conditions';
 
 export type MainTabType = 'home' | 'party' | 'moments' | 'store' | 'chat' | 'me';
 

@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
+import { LegalConsentCheckboxes } from '../components/legal/LegalConsentCheckboxes';
 import { sendPasswordReset } from '../services/firebase';
 import {
   Mail,
@@ -27,6 +28,8 @@ export const SignInScreen: React.FC = () => {
     loginWithFirebaseGoogle,
     refreshFirebaseVerification,
     resendEmailVerificationLink,
+    legalConsent,
+    setLegalConsent,
   } = useApp();
 
   // Only auto-redirect if a real, verified Firebase Auth session is already active
@@ -43,6 +46,41 @@ export const SignInScreen: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState('');
   const [needsEmailVerification, setNeedsEmailVerification] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const agreedToTerms = legalConsent.terms;
+  const agreedToPrivacy = legalConsent.privacy;
+  const setAgreedToTerms = (next: boolean) => {
+    setLegalConsent((prev) => {
+      const updated = { ...prev, terms: next };
+      if (updated.terms && updated.privacy) {
+        setConsentError(false);
+        setErrorMessage('');
+      }
+      return updated;
+    });
+  };
+  const setAgreedToPrivacy = (next: boolean) => {
+    setLegalConsent((prev) => {
+      const updated = { ...prev, privacy: next };
+      if (updated.terms && updated.privacy) {
+        setConsentError(false);
+        setErrorMessage('');
+      }
+      return updated;
+    });
+  };
+  const [consentError, setConsentError] = useState(false);
+
+  const ensureLegalConsent = () => {
+    if (!agreedToTerms || !agreedToPrivacy) {
+      setConsentError(true);
+      setErrorMessage(
+        'Please check both boxes to accept our Terms & Conditions and Privacy Policy before signing in.'
+      );
+      return false;
+    }
+    setConsentError(false);
+    return true;
+  };
 
   // Apple modal
   const [showAppleComingSoon, setShowAppleComingSoon] = useState(false);
@@ -76,6 +114,8 @@ export const SignInScreen: React.FC = () => {
     setStatusMessage('');
     setNeedsEmailVerification(false);
 
+    if (!ensureLegalConsent()) return;
+
     const emailVal = identifier.trim();
     if (!emailVal || !emailVal.includes('@')) {
       setErrorMessage('Please enter your registered email address (e.g. name@gmail.com)');
@@ -103,6 +143,7 @@ export const SignInScreen: React.FC = () => {
   };
 
   const handleDirectGoogleSignIn = async () => {
+    if (!ensureLegalConsent()) return;
     setIsSubmitting(true);
     setErrorMessage('');
     setStatusMessage('');
@@ -124,6 +165,7 @@ export const SignInScreen: React.FC = () => {
   };
 
   const handleVerifyAndContinue = async () => {
+    if (!ensureLegalConsent()) return;
     setIsSubmitting(true);
     setErrorMessage('');
     try {
@@ -196,11 +238,36 @@ export const SignInScreen: React.FC = () => {
 
       {/* Main Sign In Content */}
       <div className="relative z-10 py-4 max-w-sm w-full mx-auto my-auto">
-        <div className="text-center mb-5">
+        <div className="text-center mb-4">
           <h1 className="text-2xl font-black text-white tracking-tight">Welcome Back</h1>
           <p className="mt-1 text-xs text-zinc-400">
             Sign in to continue your live entertainment journey
           </p>
+        </div>
+
+        {/* Mandatory Legal Consent Checkboxes (Required before Google or Email Sign In) */}
+        <div className="mb-4 space-y-2.5">
+          {errorMessage && (
+            <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
+              <span>{errorMessage}</span>
+            </div>
+          )}
+
+          {statusMessage && (
+            <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
+              <span>{statusMessage}</span>
+            </div>
+          )}
+
+          <LegalConsentCheckboxes
+            agreedToTerms={agreedToTerms}
+            onToggleTerms={setAgreedToTerms}
+            agreedToPrivacy={agreedToPrivacy}
+            onTogglePrivacy={setAgreedToPrivacy}
+            hasError={consentError}
+          />
         </div>
 
         {/* 1. Fast Google One-Tap Sign In */}
@@ -271,19 +338,6 @@ export const SignInScreen: React.FC = () => {
 
         {/* Manual Form */}
         <form onSubmit={handleSignIn} className="flex flex-col gap-3">
-          {errorMessage && (
-            <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/40 text-rose-300 text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0 text-rose-400" />
-              <span>{errorMessage}</span>
-            </div>
-          )}
-
-          {statusMessage && (
-            <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/40 text-emerald-300 text-xs flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-400" />
-              <span>{statusMessage}</span>
-            </div>
-          )}
 
           {needsEmailVerification && (
             <div className="p-2.5 rounded-xl bg-[#1A1033] border border-[#A855F7]/40 flex flex-col gap-2">

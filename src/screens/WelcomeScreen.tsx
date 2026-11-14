@@ -303,6 +303,25 @@ export const WelcomeScreen: React.FC = () => {
             <span className="text-[#C084FC] font-bold underline underline-offset-4">Sign In</span>
           </button>
         </div>
+
+        {/* Legal Links (Onboarding) */}
+        <div className="flex items-center justify-center gap-3 text-[11px] text-zinc-400">
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('terms_conditions')}
+            className="min-h-[44px] px-1.5 text-[#C084FC] hover:text-white underline underline-offset-4 cursor-pointer"
+          >
+            Terms &amp; Conditions
+          </button>
+          <span className="text-zinc-600">&bull;</span>
+          <button
+            type="button"
+            onClick={() => setCurrentScreen('privacy_policy')}
+            className="min-h-[44px] px-1.5 text-[#C084FC] hover:text-white underline underline-offset-4 cursor-pointer"
+          >
+            Privacy Policy
+          </button>
+        </div>
       </div>
     </div>
   );
