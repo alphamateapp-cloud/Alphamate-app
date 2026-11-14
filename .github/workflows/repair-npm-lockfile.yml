@@ -2,6 +2,12 @@ name: Repair npm lockfile and verify build
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "package.json"
+      - ".github/workflows/repair-npm-lockfile.yml"
 
 permissions:
   contents: write
