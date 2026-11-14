@@ -1,8 +1,10 @@
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { createApiApp } from './server-api.js';
+import { attachRealtimeWebSocketServer } from './server-realtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,8 +26,14 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Alpha Mate] Dev & API Server running on port ${PORT}`);
+  const server = http.createServer(app);
+  attachRealtimeWebSocketServer(server, {
+    app,
+    verifyFirebaseIdToken: app.locals.verifyFirebaseIdToken,
+  });
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Alpha Mate] Dev & API + WebSocket Server running on port ${PORT}`);
   });
 }
 

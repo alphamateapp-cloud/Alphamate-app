@@ -56,28 +56,33 @@ export const PartyRemoteAudioPlayer: React.FC<PartyRemoteAudioPlayerProps> = Rea
       const handlePlaying = () => {
         onAutoplayStateChange(false);
       };
-      const audioTracks = stream.getAudioTracks();
       const handleUnmute = () => {
-        // A remote receiver track is owned by WebRTC; do not mutate its enabled state.
         attemptPlay();
       };
-      audioTracks.forEach((track) => {
-        // A remote WebRTC receiver can start muted until the first RTP packet arrives.
+      const bindTrackListeners = (track: MediaStreamTrack) => {
         track.addEventListener('unmute', handleUnmute);
-        track.addEventListener('ended', () => {
-          console.warn('[Party audio] Remote audio track ended:', peerId);
-        });
-      });
+      };
+      const audioTracks = stream.getAudioTracks();
+      audioTracks.forEach(bindTrackListeners);
+
+      const handleAddTrack = (e: MediaStreamTrackEvent) => {
+        if (e.track?.kind === 'audio') {
+          bindTrackListeners(e.track);
+          attemptPlay();
+        }
+      };
+      stream.addEventListener('addtrack', handleAddTrack);
       el.addEventListener('canplay', handleCanPlay);
       el.addEventListener('loadedmetadata', handleCanPlay);
       el.addEventListener('playing', handlePlaying);
       attemptPlay();
 
       return () => {
+        stream.removeEventListener('addtrack', handleAddTrack);
         el.removeEventListener('canplay', handleCanPlay);
         el.removeEventListener('loadedmetadata', handleCanPlay);
         el.removeEventListener('playing', handlePlaying);
-        audioTracks.forEach((track) => {
+        stream.getAudioTracks().forEach((track) => {
           track.removeEventListener('unmute', handleUnmute);
         });
       };

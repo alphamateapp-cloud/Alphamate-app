@@ -2,79 +2,197 @@ import {
   addDoc,
   collection,
   doc,
+  limit,
   onSnapshot,
+  orderBy,
+  query,
   runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { realtimeSocket } from './realtimeSocket';
 
-export type HeartSurface = 'live' | 'party';
+export type LiveRoomType = 'live' | 'party';
 
-function surfacePath(surface: HeartSurface, roomId: string) {
-  return surface === 'live' ? ['liveStreams', roomId] : ['partyRooms', roomId];
+export interface LiveHeartEvent {
+  id: string;
+  senderId: string;
+  createdAt?: any;
 }
 
-/** Broadcast one double-tap reaction and atomically increment the persistent room counter. */
-export async function sendLiveHeart(surface: HeartSurface, roomId: string): Promise<void> {
-  const user = auth.currentUser;
-  if (!user) throw new Error('Sign in is required to send hearts.');
-  const base = surfacePath(surface, roomId);
-  const statsRef = doc(db, ...base, 'stats', 'hearts');
-  const eventsRef = collection(db, ...base, 'heartEvents');
-
-  await runTransaction(db, async (tx) => {
-    const snap = await tx.get(statsRef);
-    const current = Number(snap.data()?.count || 0);
-    tx.set(statsRef, { count: current + 1, updatedAt: serverTimestamp() }, { merge: true });
-  });
-
-  await addDoc(eventsRef, {
-    senderId: user.uid,
-    senderName: user.displayName || 'Alpha Mate User',
-    createdAt: serverTimestamp(),
-  });
+function getParentCollection(type: LiveRoomType): string {
+  return type === 'live' ? 'liveStreams' : 'partyRooms';
 }
 
+/**
+ * Send a heart reaction to a Solo Live stream or Party Room.
+ * Emits immediately over WebSocket for <50ms cross-device delivery AND persists to Firestore.
+ */
+export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<void> {
+  if (!id) return;
+  const uid = auth.currentUser?.uid;
+  if (!uid) return;
+
+  // 1. Instant WebSocket broadcast for sub-50ms counter & animation sync
+  realtimeSocket.sendHeartTap(type, id);
+
+  const parentCol = getParentCollection(type);
+  const statsRef = doc(db, parentCol, id, 'stats', 'hearts');
+  const eventsColRef = collection(db, parentCol, id, 'heartEvents');
+
+  // 2. Persistent Firestore counter + event doc matching firestore.rules
+  await Promise.all([
+    runTransaction(db, async (tx) => {
+      const snap = await tx.get(statsRef);
+      if (!snap.exists()) {
+        tx.set(statsRef, {
+          count: 1,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        const currentCount = Number(snap.data()?.count) || 0;
+        tx.update(statsRef, {
+          count: currentCount + 1,
+          updatedAt: serverTimestamp(),
+        });
+      }
+    }).catch((err: any) => {
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.WRITE, `${parentCol}/${id}/stats/hearts`);
+      }
+    }),
+    addDoc(eventsColRef, {
+      senderId: uid,
+      createdAt: serverTimestamp(),
+    }).catch((err: any) => {
+      if (err?.code === 'permission-denied') {
+        handleFirestoreError(err, OperationType.CREATE, `${parentCol}/${id}/heartEvents`);
+      }
+    }),
+  ]);
+}
+
+/**
+ * Subscribe to the shared real-time heart count from both WebSocket and Firestore.
+ */
 export function subscribeToLiveHeartCount(
-  surface: HeartSurface,
-  roomId: string,
-  callback: (count: number) => void,
-  onError?: (error: Error) => void,
+  type: LiveRoomType,
+  id: string,
+  onCount: (count: number) => void,
+  onError?: (err: Error) => void
 ): () => void {
-  const base = surfacePath(surface, roomId);
-  return onSnapshot(
-    doc(db, ...base, 'stats', 'hearts'),
-    (snap) => callback(Number(snap.data()?.count || 0)),
-    (error) => onError?.(error),
+  if (!id) {
+    onCount(0);
+    return () => {};
+  }
+
+  let firestoreCount = 0;
+  let wsCount = 0;
+
+  const emitMax = () => {
+    onCount(Math.max(firestoreCount, wsCount));
+  };
+
+  const parentCol = getParentCollection(type);
+  const statsRef = doc(db, parentCol, id, 'stats', 'hearts');
+
+  const unsubFirestore = onSnapshot(
+    statsRef,
+    (snapshot) => {
+      firestoreCount = snapshot.exists() ? Number(snapshot.data()?.count) || 0 : 0;
+      emitMax();
+    },
+    (error) => {
+      onError?.(error);
+    }
   );
+
+  const unsubWs = realtimeSocket.onRoomEvent(type, id, (event) => {
+    if (event.type === 'room:state_init') {
+      wsCount = Math.max(wsCount, Number(event.heartCount) || 0);
+      emitMax();
+    } else if (event.type === 'room:heart') {
+      wsCount = Math.max(wsCount + 1, Number(event.heartCount) || 0);
+      emitMax();
+    }
+  });
+
+  return () => {
+    unsubFirestore();
+    unsubWs();
+  };
 }
 
+/**
+ * Subscribe to incoming heart burst events from remote participants in real time.
+ * Combines WebSocket instant bursts and Firestore heartEvents with deduplication.
+ */
 export function subscribeToLiveHeartEvents(
-  surface: HeartSurface,
-  roomId: string,
-  callback: (event: { id: string; senderId: string }) => void,
-  onError?: (error: Error) => void,
+  type: LiveRoomType,
+  id: string,
+  onEvent: (event: LiveHeartEvent) => void,
+  onError?: (err: Error) => void
 ): () => void {
-  const base = surfacePath(surface, roomId);
-  let seen = new Set<string>();
-  let initialized = false;
-  return onSnapshot(
-    collection(db, ...base, 'heartEvents'),
+  if (!id) return () => {};
+
+  const parentCol = getParentCollection(type);
+  const eventsQuery = query(
+    collection(db, parentCol, id, 'heartEvents'),
+    orderBy('createdAt', 'desc'),
+    limit(15)
+  );
+
+  let initialSnapshotHandled = false;
+  const seenDocIds = new Set<string>();
+  const recentWsTimestamps = new Map<string, number>();
+
+  const unsubWs = realtimeSocket.onRoomEvent(type, id, (event) => {
+    if (event.type === 'room:heart') {
+      recentWsTimestamps.set(event.senderId, Date.now());
+      onEvent({
+        id: event.eventId,
+        senderId: event.senderId,
+        createdAt: event.createdAtMs,
+      });
+    }
+  });
+
+  const unsubFirestore = onSnapshot(
+    eventsQuery,
     (snapshot) => {
-      if (!initialized) {
-        snapshot.docs.forEach((item) => seen.add(item.id));
-        initialized = true;
+      if (!initialSnapshotHandled) {
+        initialSnapshotHandled = true;
+        snapshot.docs.forEach((d) => seenDocIds.add(d.id));
         return;
       }
+
       snapshot.docChanges().forEach((change) => {
-        if (change.type !== 'added' || seen.has(change.doc.id)) return;
-        seen.add(change.doc.id);
-        const data = change.doc.data();
-        callback({ id: change.doc.id, senderId: String(data.senderId || '') });
+        if (change.type !== 'added' || seenDocIds.has(change.doc.id)) return;
+        seenDocIds.add(change.doc.id);
+        const data = change.doc.data() as any;
+        const senderId = String(data?.senderId || '');
+        if (!senderId) return;
+
+        // Avoid double-spawning floating hearts if WS already delivered this user's tap within 1.5s
+        const lastWsAt = recentWsTimestamps.get(senderId) || 0;
+        if (Date.now() - lastWsAt < 1500) {
+          return;
+        }
+
+        onEvent({
+          id: change.doc.id,
+          senderId,
+          createdAt: data?.createdAt,
+        });
       });
-      // Bound client memory; Firestore remains the durable counter source.
-      if (seen.size > 500) seen = new Set(Array.from(seen).slice(-250));
     },
-    (error) => onError?.(error),
+    (error) => {
+      onError?.(error);
+    }
   );
+
+  return () => {
+    unsubWs();
+    unsubFirestore();
+  };
 }

@@ -50,6 +50,20 @@ googleProvider.setCustomParameters({
 // =========================================================================
 // ERROR HANDLER CONFORMING TO FirestoreErrorInfo
 // =========================================================================
+async function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs: number = 9000, label: string = 'Firestore operation'): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(timeoutMs / 1000)}s. Please check your internet connection.`));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -378,7 +392,11 @@ export async function syncPartyRoomToFirestore(room: any) {
       updatedAt: new Date().toISOString(),
     };
 
-    await setDoc(doc(db, 'partyRooms', room.id), stripUndefinedFields(sanitizedRoom), { merge: true });
+    await withFirestoreTimeout(
+      setDoc(doc(db, 'partyRooms', room.id), stripUndefinedFields(sanitizedRoom), { merge: true }),
+      9000,
+      'Party Room sync'
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
     // Do not swallow persistence failures: callers must not open a room locally
@@ -592,7 +610,7 @@ export async function togglePartySeatLockInFirestore(
 // REAL-TIME LIVE STREAMS (SOLO & PK BROADCASTS)
 // =========================================================================
 
-export const LIVE_STREAM_STALE_MS = 30_000;
+export const LIVE_STREAM_STALE_MS = 65_000;
 
 /**
  * Sync active Live Stream to Firestore ONLY with verified SFU session metadata
@@ -644,7 +662,11 @@ export async function syncLiveStreamToFirestore(stream: any) {
       createdAt: stream.createdAt || new Date(nowMs).toISOString(),
     };
 
-    await setDoc(doc(db, 'liveStreams', stream.id), stripUndefinedFields(sanitizedStream), { merge: true });
+    await withFirestoreTimeout(
+      setDoc(doc(db, 'liveStreams', stream.id), stripUndefinedFields(sanitizedStream), { merge: true }),
+      9000,
+      'Live Stream sync'
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
     // A Live card is discoverable only after its Firestore record is committed.
@@ -793,5 +815,77 @@ export async function sendLiveStreamMessage(streamId: string, message: any) {
     console.warn('Failed to send live stream message:', error);
   }
 }
+
+export async function joinLiveStreamViewer(streamId: string, viewer: any) {
+  if (!streamId || !auth.currentUser?.uid) return;
+  const uid = auth.currentUser.uid;
+  const path = `liveStreams/${streamId}/viewers/${uid}`;
+  try {
+    const nowMs = Date.now();
+    await setDoc(
+      doc(db, 'liveStreams', streamId, 'viewers', uid),
+      stripUndefinedFields({
+        id: uid,
+        uniqueId: viewer?.uniqueId || uid,
+        username: viewer?.username || viewer?.displayName || 'viewer',
+        displayName: viewer?.displayName || 'Viewer',
+        avatar: sanitizeAvatarString(viewer?.avatar),
+        level: Number(viewer?.level) || 1,
+        vipTier: Number(viewer?.vipTier) || 0,
+        countryFlag: viewer?.countryFlag,
+        isVerified: !!viewer?.isVerified,
+        isHost: !!viewer?.isHost,
+        joinedAtMs: viewer?.joinedAtMs || nowMs,
+        lastSeenAt: serverTimestamp(),
+        lastSeenAtMs: nowMs,
+      }),
+      { merge: true }
+    );
+  } catch (error: any) {
+    if (error?.code === 'permission-denied') {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  }
+}
+
+export async function leaveLiveStreamViewer(streamId: string, userId?: string) {
+  const uid = userId || auth.currentUser?.uid;
+  if (!streamId || !uid) return;
+  try {
+    await deleteDoc(doc(db, 'liveStreams', streamId, 'viewers', uid));
+  } catch {
+    // ignore cleanup errors
+  }
+}
+
+export function subscribeToLiveStreamViewers(
+  streamId: string,
+  onUpdate: (viewers: any[]) => void
+) {
+  if (!streamId) return () => {};
+  const viewersRef = collection(db, 'liveStreams', streamId, 'viewers');
+  return onSnapshot(
+    viewersRef,
+    (snapshot) => {
+      const now = Date.now();
+      const active = snapshot.docs
+        .map((d) => ({ id: d.id, ...(d.data() as any) }))
+        .filter((v) => {
+          const seenMs =
+            typeof v.lastSeenAt?.toMillis === 'function'
+              ? v.lastSeenAt.toMillis()
+              : typeof v.lastSeenAtMs === 'number'
+                ? v.lastSeenAtMs
+                : now;
+          return now - seenMs <= 75_000;
+        });
+      onUpdate(active);
+    },
+    (error) => {
+      console.warn('Live viewers subscription warning:', error);
+    }
+  );
+}
+
 
 

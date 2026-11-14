@@ -1,7 +1,9 @@
+import http from 'http';
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createApiApp } from './server-api.js';
+import { attachRealtimeWebSocketServer } from './server-realtime.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,4 +17,10 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
-app.listen(PORT, '0.0.0.0', () => console.log(`[Alpha Mate] Server running on port ${PORT}`));
+const server = http.createServer(app);
+attachRealtimeWebSocketServer(server, {
+  app,
+  verifyFirebaseIdToken: app.locals.verifyFirebaseIdToken,
+});
+
+server.listen(PORT, '0.0.0.0', () => console.log(`[Alpha Mate] Server + WebSocket running on port ${PORT}`));

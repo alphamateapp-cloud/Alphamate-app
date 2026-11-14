@@ -108,6 +108,56 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "videoKey", "videoUrl", "status", "visibility"]
+    },
+    "HeartStat": {
+      "title": "HeartStat",
+      "description": "Shared real-time heart count for a live stream or party room",
+      "type": "object",
+      "properties": {
+        "count": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["count"]
+    },
+    "HeartEvent": {
+      "title": "HeartEvent",
+      "description": "Double-tap heart event dispatched inside a live stream or party room",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderId"]
+    },
+    "LiveViewer": {
+      "title": "LiveViewer",
+      "description": "Active viewer presence in a Solo Live stream",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "uniqueId": { "type": "string", "maxLength": 64 },
+        "displayName": { "type": "string", "maxLength": 64 },
+        "avatar": { "type": "string", "maxLength": 1024 },
+        "level": { "type": "number" },
+        "vipTier": { "type": "number" },
+        "lastSeenAtMs": { "type": "number" }
+      },
+      "required": ["id", "displayName"]
+    },
+    "VoiceParticipant": {
+      "title": "VoiceParticipant",
+      "description": "Active speaker/listener WebRTC SFU state in a Party Room",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "displayName": { "type": "string", "maxLength": 64 },
+        "sfuSessionId": { "type": "string", "maxLength": 256 },
+        "isPublishing": { "type": "boolean" },
+        "isMuted": { "type": "boolean" },
+        "isSpeaking": { "type": "boolean" },
+        "lastSeenAtMs": { "type": "number" }
+      },
+      "required": ["userId", "sfuSessionId"]
     }
   },
   "firestore": {
@@ -127,9 +177,33 @@
       "schema": "RoomMessage",
       "description": "Chat messages inside a party room"
     },
+    "/partyRooms/{roomId}/stats/{statId}": {
+      "schema": "HeartStat",
+      "description": "Shared heart counter for a party room"
+    },
+    "/partyRooms/{roomId}/heartEvents/{eventId}": {
+      "schema": "HeartEvent",
+      "description": "Double-tap heart events inside a party room"
+    },
+    "/partyRooms/{roomId}/voiceParticipants/{userId}": {
+      "schema": "VoiceParticipant",
+      "description": "SFU audio presence for a party room participant"
+    },
     "/liveStreams/{streamId}": {
       "schema": "LiveStream",
       "description": "Active live video broadcasts"
+    },
+    "/liveStreams/{streamId}/stats/{statId}": {
+      "schema": "HeartStat",
+      "description": "Shared heart counter for a live stream"
+    },
+    "/liveStreams/{streamId}/heartEvents/{eventId}": {
+      "schema": "HeartEvent",
+      "description": "Double-tap heart events inside a live stream"
+    },
+    "/liveStreams/{streamId}/viewers/{viewerId}": {
+      "schema": "LiveViewer",
+      "description": "Active viewers inside a Solo Live stream"
     }
   }
 }

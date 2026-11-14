@@ -197,6 +197,11 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
+      match /viewers/{viewerId} {
+        allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;
+        allow create, update, delete: if isOwner(viewerId);
+      }
+
       match /signals/{signalId} {
         allow read, write: if false;
       }

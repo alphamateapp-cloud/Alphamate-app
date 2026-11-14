@@ -60,6 +60,7 @@ import {
   Reel,
 } from '../services/reelsService';
 import { p2pStreamingEngine } from '../services/webrtcService';
+import { realtimeSocket } from '../services/realtimeSocket';
 
 interface AppContextType {
   // Navigation & Screen state
@@ -564,20 +565,120 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  // Real-time Firestore listeners (rebinds automatically on auth transitions)
+  // Real-time Firestore + WebSocket discovery listeners (rebinds automatically on auth transitions)
   useEffect(() => {
-    const unsubscribeRooms = subscribeToPartyRooms((remoteRooms) => {
-      const nextRooms = Array.isArray(remoteRooms) ? remoteRooms : [];
+    let firestoreRooms: PartyRoom[] = [];
+    let firestoreStreams: LiveStream[] = [];
+    const wsPartyMap = new Map<string, PartyRoom>();
+    const wsLiveMap = new Map<string, LiveStream>();
+    const removedPartyUntil = new Map<string, number>();
+    const removedLiveUntil = new Map<string, number>();
+
+    const mergeAndPublishRooms = () => {
+      const now = Date.now();
+      const merged = new Map<string, PartyRoom>();
+      firestoreRooms.forEach((r) => {
+        if (!r?.id) return;
+        const removedAt = removedPartyUntil.get(r.id);
+        if (removedAt && now - removedAt < 15_000) return;
+        merged.set(r.id, r);
+      });
+      wsPartyMap.forEach((r, id) => {
+        const removedAt = removedPartyUntil.get(id);
+        if (removedAt && now - removedAt < 15_000) return;
+        const existing = merged.get(id);
+        merged.set(id, existing ? { ...existing, ...r } : r);
+      });
+      const nextRooms = Array.from(merged.values());
       setPartyRooms(nextRooms);
       setActivePartyRoom((currentActive) => {
         if (!currentActive) return null;
-        const fresh = nextRooms.find((r: any) => r.id === currentActive.id);
+        const fresh = nextRooms.find((r) => r.id === currentActive.id);
         return fresh ? { ...currentActive, ...fresh } : currentActive;
       });
+    };
+
+    const mergeAndPublishStreams = () => {
+      const now = Date.now();
+      const merged = new Map<string, LiveStream>();
+      firestoreStreams.forEach((s) => {
+        if (!s?.id) return;
+        const removedAt = removedLiveUntil.get(s.id);
+        if (removedAt && now - removedAt < 15_000) return;
+        merged.set(s.id, s);
+      });
+      wsLiveMap.forEach((s, id) => {
+        const removedAt = removedLiveUntil.get(id);
+        if (removedAt && now - removedAt < 15_000) return;
+        const existing = merged.get(id);
+        merged.set(id, existing ? { ...existing, ...s } : s);
+      });
+      setLiveStreams(Array.from(merged.values()));
+    };
+
+    if (firebaseUser?.uid) {
+      realtimeSocket.ensureConnected();
+    } else {
+      realtimeSocket.disconnect();
+    }
+
+    const unsubscribeWs = realtimeSocket.onDiscoveryUpdate((event) => {
+      if (event.type === 'discovery:snapshot') {
+        wsLiveMap.clear();
+        wsPartyMap.clear();
+        event.liveStreams.forEach((s) => {
+          if (s?.id && s.isActive !== false && s.sfuSessionId) wsLiveMap.set(s.id, s);
+        });
+        event.partyRooms.forEach((r) => {
+          if (r?.id && r.isActive !== false) wsPartyMap.set(r.id, r);
+        });
+        mergeAndPublishStreams();
+        mergeAndPublishRooms();
+      } else if (event.type === 'live:upsert' && event.stream?.id) {
+        removedLiveUntil.delete(event.stream.id);
+        wsLiveMap.set(event.stream.id, event.stream);
+        mergeAndPublishStreams();
+      } else if (event.type === 'live:remove' && event.streamId) {
+        wsLiveMap.delete(event.streamId);
+        removedLiveUntil.set(event.streamId, Date.now());
+        mergeAndPublishStreams();
+      } else if (event.type === 'party:upsert' && event.room?.id) {
+        removedPartyUntil.delete(event.room.id);
+        wsPartyMap.set(event.room.id, event.room);
+        mergeAndPublishRooms();
+      } else if (event.type === 'party:remove' && event.roomId) {
+        wsPartyMap.delete(event.roomId);
+        removedPartyUntil.set(event.roomId, Date.now());
+        mergeAndPublishRooms();
+      }
+    });
+
+    const unsubscribeRooms = subscribeToPartyRooms((remoteRooms) => {
+      firestoreRooms = Array.isArray(remoteRooms) ? remoteRooms : [];
+      const activeIds = new Set(firestoreRooms.map((r) => r.id));
+      for (const id of Array.from(wsPartyMap.keys())) {
+        if (!activeIds.has(id)) {
+          const item = wsPartyMap.get(id) as any;
+          if (item?.lastSeenAtMs && Date.now() - item.lastSeenAtMs > 20_000) {
+            wsPartyMap.delete(id);
+          }
+        }
+      }
+      mergeAndPublishRooms();
     });
 
     const unsubscribeLiveStreams = subscribeToLiveStreams((remoteStreams) => {
-      setLiveStreams(Array.isArray(remoteStreams) ? remoteStreams : []);
+      firestoreStreams = Array.isArray(remoteStreams) ? remoteStreams : [];
+      const activeIds = new Set(firestoreStreams.map((s) => s.id));
+      for (const id of Array.from(wsLiveMap.keys())) {
+        if (!activeIds.has(id)) {
+          const item = wsLiveMap.get(id) as any;
+          if (item?.lastSeenAtMs && Date.now() - item.lastSeenAtMs > 20_000) {
+            wsLiveMap.delete(id);
+          }
+        }
+      }
+      mergeAndPublishStreams();
     });
 
     // Real-time Firestore Reels & Cloudflare R2 Feed Subscription
@@ -628,6 +729,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     return () => {
+      unsubscribeWs();
       unsubscribeRooms();
       unsubscribeLiveStreams();
       unsubscribeReels();
@@ -2274,12 +2376,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const publishLiveStream = async (publishedStream: LiveStream) => {
-    await syncLiveStreamToFirestore(publishedStream);
+    realtimeSocket.announceLiveStream(publishedStream);
     setActiveStream((prev) => (prev && prev.id === publishedStream.id ? publishedStream : prev));
     setLiveStreams((prev) => {
       const withoutCurrent = prev.filter((s) => s.id !== publishedStream.id);
       return [publishedStream, ...withoutCurrent];
     });
+    try {
+      await syncLiveStreamToFirestore(publishedStream);
+    } catch (err) {
+      realtimeSocket.removeLiveStream(publishedStream.id);
+      throw err;
+    }
   };
 
   const closeLiveStream = () => {
@@ -2288,7 +2396,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeStream.host.id === currentUser.id ||
         (auth.currentUser?.uid && activeStream.host.id === auth.currentUser.uid) ||
         activeStream.id.startsWith('live_my_');
+      realtimeSocket.leaveRoom('live', activeStream.id);
       if (isOwnerHost) {
+        realtimeSocket.removeLiveStream(activeStream.id);
         p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
         deleteLiveStreamFromFirestore(activeStream.id).catch(() => {});
         setLiveStreams((prev) => prev.filter((s) => s.id !== activeStream.id));
@@ -2365,8 +2475,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const closePartyRoom = (shouldDelete = false) => {
     if (activePartyRoom) {
+      realtimeSocket.leaveRoom('party', activePartyRoom.id);
       p2pStreamingEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
       if (shouldDelete) {
+        realtimeSocket.removePartyRoom(activePartyRoom.id);
         deletePartyRoomFromFirestore(activePartyRoom.id).catch(() => {});
         setPartyRooms((prev) => prev.filter((r) => r.id !== activePartyRoom.id));
       }
@@ -2388,11 +2500,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       host: { ...room.host, id: firebaseUid },
     };
     try {
+      realtimeSocket.announcePartyRoom(normalizedRoom);
       await syncPartyRoomToFirestore(normalizedRoom);
       setPartyRooms((prev) => [normalizedRoom, ...prev.filter((r) => r.id !== normalizedRoom.id)]);
       openPartyRoom(normalizedRoom);
       return { success: true };
     } catch (err: any) {
+      realtimeSocket.removePartyRoom(normalizedRoom.id);
       console.error('Failed to create party room:', err);
       let msg = 'Unable to save Party Room to database.';
       if (err instanceof Error && err.message) {

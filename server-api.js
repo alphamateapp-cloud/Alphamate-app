@@ -151,13 +151,10 @@ export function createApiApp() {
 
   let healthCache = null;
   let healthCacheExpiresAt = 0;
+  let healthRefreshInFlight = null;
 
-  async function validateSystemHealth(forceFresh = false) {
+  async function runHealthChecks() {
     const now = Date.now();
-    if (!forceFresh && healthCache && now < healthCacheExpiresAt) {
-      return healthCache;
-    }
-
     const firebaseEnvPresent = Boolean(FIREBASE_API_KEY && FIREBASE_PROJECT_ID && FIREBASE_DATABASE_ID);
     const sfuEnvPresent = Boolean(REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN);
     const turnEnvPresent = Boolean(CLOUDFLARE_TURN_TOKEN_ID && CLOUDFLARE_TURN_API_TOKEN);
@@ -175,7 +172,7 @@ export function createApiApp() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ idToken: 'health-probe' }),
             },
-            6000
+            2500
           );
           const payload = await resp.json().catch(() => ({}));
           const msg = payload?.error?.message || '';
@@ -204,7 +201,7 @@ export function createApiApp() {
                 Accept: 'application/json',
               },
             },
-            6000
+            2500
           );
           // 401/403 means invalid App ID / Bearer token; 404/400/200 means credentials authenticated against Cloudflare SFU
           const authOk = resp.status !== 401 && resp.status !== 403 && resp.status < 500;
@@ -222,7 +219,10 @@ export function createApiApp() {
           return { configured: false, valid: false, reason: 'CLOUDFLARE_TURN_TOKEN_ID or CLOUDFLARE_TURN_API_TOKEN missing' };
         }
         try {
-          await generateTurnIceServers(300);
+          await Promise.race([
+            generateTurnIceServers(300),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('TURN health probe timed out')), 2500)),
+          ]);
           return { configured: true, valid: true };
         } catch (err) {
           return {
@@ -256,6 +256,27 @@ export function createApiApp() {
     healthCache = result;
     healthCacheExpiresAt = now + 60_000;
     return result;
+  }
+
+  async function validateSystemHealth(forceFresh = false) {
+    const now = Date.now();
+    if (!forceFresh && healthCache && now < healthCacheExpiresAt) {
+      return healthCache;
+    }
+    if (!forceFresh && healthCache) {
+      if (!healthRefreshInFlight) {
+        healthRefreshInFlight = runHealthChecks().finally(() => {
+          healthRefreshInFlight = null;
+        });
+      }
+      return healthCache;
+    }
+    if (!healthRefreshInFlight) {
+      healthRefreshInFlight = runHealthChecks().finally(() => {
+        healthRefreshInFlight = null;
+      });
+    }
+    return healthRefreshInFlight;
   }
 
   app.get('/api/health', async (req, res) => {
@@ -407,7 +428,10 @@ export function createApiApp() {
     }
 
     if (contextType === 'party') {
-      const roomDoc = await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}`, idToken);
+      const roomDoc =
+        (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}`, idToken).catch(() => null)) ||
+        app.locals.realtimeRegistry?.getPartyRoom?.(contextId) ||
+        null;
       if (!roomDoc || roomDoc.isActive === false) {
         return { ok: false, status: 404, error: 'Party room is closed or no longer exists.' };
       }
@@ -416,47 +440,12 @@ export function createApiApp() {
       if (blocked.includes(uid) || kicked.includes(uid)) {
         return { ok: false, status: 403, error: 'You are restricted from this party room.' };
       }
-      const targetSessionIds = Array.from(new Set(remoteTracks.map((t) => t.sessionId)));
       const peerIds = Array.isArray(req.body?.speakerPeerIds) ? req.body.speakerPeerIds.filter(isValidResourceId) : [];
       if (peerIds.length > 0) {
-        const checks = await Promise.all(
-          peerIds.map((peerId) =>
-            fetchFirestoreDocument(
-              `partyRooms/${encodeURIComponent(contextId)}/voiceParticipants/${encodeURIComponent(peerId)}`,
-              idToken
-            ).catch(() => null)
-          )
-        );
-        const seats = Array.isArray(roomDoc.seats) ? roomDoc.seats : [];
-        const authorizedPeerIds = new Set([
-          ...(roomDoc.host?.id ? [roomDoc.host.id] : []),
-          ...(Array.isArray(roomDoc.moderatorIds) ? roomDoc.moderatorIds : []),
-          ...seats.map((s) => s?.user?.id).filter(Boolean),
-        ]);
         const blockedSet = new Set([...blocked, ...kicked]);
-        const inactiveSessions = new Set(
-          checks
-            .filter((docData) => docData && docData.isPublishing === false && docData.sfuSessionId)
-            .map((docData) => docData.sfuSessionId)
-        );
-        const publishedSessions = new Set(
-          checks
-            .filter((docData) => docData && docData.isPublishing === true && docData.sfuSessionId)
-            .map((docData) => docData.sfuSessionId)
-        );
-
         const anyBlockedPeer = peerIds.some((pid) => blockedSet.has(pid));
         if (anyBlockedPeer) {
           return { ok: false, status: 403, error: 'Requested speaker is restricted from this party room.' };
-        }
-        const hasInactiveRequestedSession = targetSessionIds.some(
-          (sid) => inactiveSessions.has(sid) && !publishedSessions.has(sid)
-        );
-        const hasUnseatedPeer =
-          publishedSessions.size === 0 &&
-          peerIds.some((pid) => !authorizedPeerIds.has(pid));
-        if (hasInactiveRequestedSession || hasUnseatedPeer) {
-          return { ok: false, status: 403, error: 'Target party speaker is not actively publishing.' };
         }
       }
       return { ok: true };
@@ -464,6 +453,8 @@ export function createApiApp() {
 
     return { ok: false, status: 400, error: 'Unsupported contextType. Expected "live" or "party".' };
   }
+
+  app.locals.verifyFirebaseIdToken = verifyFirebaseIdToken;
 
   async function callCloudflareSfu(subPath, method, body) {
     if (!REALTIME_SFU_APP_ID || !REALTIME_SFU_BEARER_TOKEN) {
@@ -1106,7 +1097,10 @@ export function createApiApp() {
 
       const uid = req.firebaseUser.uid;
       const idToken = req.firebaseIdToken;
-      const roomDoc = await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken);
+      const roomDoc =
+        (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
+        app.locals.realtimeRegistry?.getPartyRoom?.(roomId) ||
+        null;
 
       if (!roomDoc || roomDoc.isActive === false) {
         return res.status(404).json({ success: false, error: 'Party room is closed or does not exist.' });
@@ -1187,6 +1181,12 @@ export function createApiApp() {
         error: error.message || 'Unable to clean up Party Room SFU session.',
       });
     }
+  });
+
+  // 10. Realtime discovery HTTP fallback snapshot
+  app.get('/api/realtime/rooms', requireFirebaseAuth, (_req, res) => {
+    const snap = app.locals.realtimeRegistry?.getSnapshot?.() || { liveStreams: [], partyRooms: [] };
+    return res.json({ success: true, ...snap });
   });
 
   // Ensure unmatched /api/* endpoints return JSON 404 instead of falling through to SPA HTML

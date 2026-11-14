@@ -13,6 +13,7 @@ import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
 import { uploadPartyRoomCover } from '../services/chatService';
 import { sendPartyRoomMessage, subscribeToPartyRoomMessages } from '../services/partyChatService';
+import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
 import { getHdImageUrl } from '../utils/imageHd';
 import {
   Radio,
@@ -192,6 +193,7 @@ export const PartyRoomsScreen: React.FC = () => {
   const [partyVoiceRetryToken, setPartyVoiceRetryToken] = useState(0);
   const [remotePartyStreams, setRemotePartyStreams] = useState<Array<{ peerId: string; stream: MediaStream }>>([]);
   const [activeVoiceParticipants, setActiveVoiceParticipants] = useState<PartyParticipantPresence[]>([]);
+  const [wsPartyViewers, setWsPartyViewers] = useState<RealtimeViewerProfile[]>([]);
   const [remoteSpeakingPeerIds, setRemoteSpeakingPeerIds] = useState<Set<string>>(new Set());
   const [joinNotification, setJoinNotification] = useState<{ id: string; name: string } | null>(null);
   const partyAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
@@ -293,10 +295,15 @@ export const PartyRoomsScreen: React.FC = () => {
   const [isSigningInToHost, setIsSigningInToHost] = useState<boolean>(false);
   const lastVoiceModeRef = useRef<{ key: string; canSpeak: boolean; muted: boolean } | null>(null);
 
-  // Keep partyLevel synchronized with activePartyRoom
+  // Keep partyLevel synchronized with activePartyRoom and auto-reset launch modal when room opens
   useEffect(() => {
     if (activePartyRoom?.level) {
       setPartyLevel(activePartyRoom.level as 1 | 2 | 3);
+    }
+    if (activePartyRoom?.id) {
+      setIsLaunchingRoom(false);
+      setShowCreateModal(false);
+      setCreateRoomError(null);
     }
   }, [activePartyRoom?.id, activePartyRoom?.level]);
 
@@ -920,6 +927,7 @@ export const PartyRoomsScreen: React.FC = () => {
       setIsSelfSpeaking(false);
       setRemotePartyStreams([]);
       setActiveVoiceParticipants([]);
+      setWsPartyViewers([]);
       setRemoteSpeakingPeerIds(new Set());
       setJoinNotification(null);
       initialParticipantsSeededRef.current = false;
@@ -1064,7 +1072,29 @@ export const PartyRoomsScreen: React.FC = () => {
         setPartyVoiceError('Alpha Mate Party Voice is reconnecting…');
       });
 
+    const wsJoinProfile: RealtimeViewerProfile = {
+      id: effectiveUserId,
+      uniqueId: currentUser.uniqueId || effectiveUserId,
+      username: currentUser.username || currentUser.displayName,
+      displayName: currentUser.displayName,
+      avatar: currentUser.avatar,
+      level: currentUser.level,
+      vipTier: currentUser.vipTier,
+      countryFlag: currentUser.countryFlag,
+      isVerified: currentUser.isVerified,
+      isHost: isUserHost,
+      joinedAtMs: Date.now(),
+    };
+    realtimeSocket.joinRoom('party', roomId, wsJoinProfile, totalHeartCount);
+    const unsubWsPartyRoom = realtimeSocket.onRoomEvent('party', roomId, (ev) => {
+      if (cancelled) return;
+      if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
+        setWsPartyViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
+      }
+    });
+
     const handlePageHide = () => {
+      realtimeSocket.leaveRoom('party', roomId);
       p2pStreamingEngine.stopPartyVoice(roomId, true).catch(() => {});
     };
     window.addEventListener('pagehide', handlePageHide);
@@ -1072,6 +1102,8 @@ export const PartyRoomsScreen: React.FC = () => {
 
     return () => {
       cancelled = true;
+      unsubWsPartyRoom();
+      realtimeSocket.leaveRoom('party', roomId);
       if (startupRetryTimerRef.current) {
         clearTimeout(startupRetryTimerRef.current);
         startupRetryTimerRef.current = null;
@@ -1292,6 +1324,31 @@ export const PartyRoomsScreen: React.FC = () => {
         });
       });
 
+      wsPartyViewers.forEach((v) => {
+        const isHostPeer = v.isHost || v.id === activePartyRoom.host?.id;
+        const baseHost = isHostPeer ? activePartyRoom.host : undefined;
+        addUniqueViewer({
+          id: v.id,
+          uniqueId: v.uniqueId || baseHost?.uniqueId || v.id,
+          username: (v.displayName || baseHost?.username || 'user').replace(/\s+/g, ''),
+          displayName: v.displayName || baseHost?.displayName || 'Alpha User',
+          avatar: v.avatar || baseHost?.avatar || '',
+          bio: baseHost?.bio || 'Alpha Mate live party member',
+          followersCount: baseHost?.followersCount || 0,
+          followingCount: baseHost?.followingCount || 0,
+          likesCount: baseHost?.likesCount || 0,
+          level: v.level || baseHost?.level || 1,
+          xp: baseHost?.xp || 0,
+          nextLevelXp: baseHost?.nextLevelXp || 1000,
+          vipTier: v.vipTier ?? baseHost?.vipTier ?? 0,
+          countryFlag: v.countryFlag || baseHost?.countryFlag,
+          coins: baseHost?.coins || 0,
+          diamonds: baseHost?.diamonds || 0,
+          isVerified: baseHost?.isVerified || false,
+          isHost: isHostPeer,
+        });
+      });
+
       if (effectiveUserId) {
         addUniqueViewer({
           ...currentUser,
@@ -1300,6 +1357,19 @@ export const PartyRoomsScreen: React.FC = () => {
         });
       }
     } else {
+      wsPartyViewers.forEach((v) => {
+        const isHostPeer = v.isHost || v.id === activePartyRoom.host?.id;
+        addUniqueViewer({
+          ...currentUser,
+          id: v.id,
+          uniqueId: v.uniqueId || v.id,
+          displayName: v.displayName || 'Alpha User',
+          avatar: v.avatar || '',
+          level: v.level || 1,
+          vipTier: v.vipTier || 0,
+          isHost: isHostPeer,
+        });
+      });
       if (effectiveUserId) {
         addUniqueViewer({
           ...currentUser,
@@ -1312,7 +1382,7 @@ export const PartyRoomsScreen: React.FC = () => {
     }
 
     return Array.from(byId.values());
-  }, [activePartyRoom, activeVoiceParticipants, effectiveUserId, currentUser]);
+  }, [activePartyRoom, activeVoiceParticipants, wsPartyViewers, effectiveUserId, currentUser]);
 
   // Synchronize live activeViewers count strictly from deduplicated real active participants
   useEffect(() => {
@@ -1589,7 +1659,7 @@ export const PartyRoomsScreen: React.FC = () => {
         onDoubleClick={(e) => {
           spawnHeart(e.clientX, e.clientY);
           spawnHeart(e.clientX + 10, e.clientY - 20);
-          if (Date.now() - lastHeartSentAtRef.current > 500) {
+          if (Date.now() - lastHeartSentAtRef.current > 180) {
             lastHeartSentAtRef.current = Date.now();
             if (activePartyRoom?.id) sendLiveHeart('party', activePartyRoom.id).catch((err) => console.warn('[Party heart send]', err));
           }
@@ -1597,18 +1667,20 @@ export const PartyRoomsScreen: React.FC = () => {
         onTouchStart={handleScreenTouchOrClick}
         className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
       >
-        {/* Mounted DOM Audio Outputs for Two-Way Cloudflare SFU Party Voice (Chrome + Android WebView) */}
+        {/* Mounted DOM Audio Outputs for Two-Way Cloudflare SFU Party Voice (strict self-echo filter) */}
         <div className="fixed left-0 bottom-0 w-2 h-2 opacity-0 pointer-events-none overflow-hidden">
-          {remotePartyStreams.map(({ peerId, stream }) => (
-            <PartyRemoteAudioPlayer
-              key={peerId}
-              peerId={peerId}
-              stream={stream}
-              isSpeakerOn={isSpeakerOn}
-              onRegisterAudioEl={registerPartyAudioEl}
-              onAutoplayStateChange={handleAutoplayStateChange}
-            />
-          ))}
+          {remotePartyStreams
+            .filter(({ peerId }) => peerId !== effectiveUserId && peerId !== auth.currentUser?.uid)
+            .map(({ peerId, stream }) => (
+              <PartyRemoteAudioPlayer
+                key={peerId}
+                peerId={peerId}
+                stream={stream}
+                isSpeakerOn={isSpeakerOn}
+                onRegisterAudioEl={registerPartyAudioEl}
+                onAutoplayStateChange={handleAutoplayStateChange}
+              />
+            ))}
         </div>
 
         {/* =====================================================================
@@ -3975,18 +4047,24 @@ export const PartyRoomsScreen: React.FC = () => {
 
                     setIsLaunchingRoom(true);
                     setCreateRoomError(null);
-                    const res = await createPartyRoom(newParty);
-                    setIsLaunchingRoom(false);
+                    try {
+                      const res = await createPartyRoom(newParty);
+                      if (!res.success) {
+                        const errMsg = res.error || 'Could not launch Party Room.';
+                        setCreateRoomError(errMsg);
+                        showToast(errMsg);
+                        return;
+                      }
 
-                    if (!res.success) {
-                      const errMsg = res.error || 'Could not launch Party Room.';
+                      setShowCreateModal(false);
+                      showToast(`🎉 ${finalTier.name} Created Successfully! 🚀`);
+                    } catch (launchErr: any) {
+                      const errMsg = launchErr?.message || 'Could not launch Party Room. Please try again.';
                       setCreateRoomError(errMsg);
                       showToast(errMsg);
-                      return;
+                    } finally {
+                      setIsLaunchingRoom(false);
                     }
-
-                    setShowCreateModal(false);
-                    showToast(`🎉 ${finalTier.name} Created Successfully! 🚀`);
                   }}
                   className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold shadow-lg shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all cursor-pointer flex items-center justify-center gap-1.5 disabled:opacity-60"
                 >

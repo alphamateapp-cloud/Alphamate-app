@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { VIRTUAL_GIFTS } from '../data/mockData';
 import { Gift } from '../types';
@@ -18,8 +18,12 @@ import {
   sendLiveStreamMessage,
   updateLiveStreamFields,
   deleteLiveStreamFromFirestore,
+  joinLiveStreamViewer,
+  leaveLiveStreamViewer,
+  subscribeToLiveStreamViewers,
 } from '../services/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
+import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
 import {
   X,
   Heart,
@@ -56,7 +60,6 @@ import {
 import { User } from '../types';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
-import { MOCK_ROOM_VIEWERS } from '../data/mockData';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
@@ -129,7 +132,11 @@ export const LiveStreamScreen: React.FC = () => {
 
   // Audience & Social interaction state
   const [isFollowing, setIsFollowing] = useState(false);
-  const [viewerCount, setViewerCount] = useState(activeStream?.viewerCount || 0);
+  const [viewerCount, setViewerCount] = useState(Math.max(1, activeStream?.viewerCount || 1));
+  const [firestoreViewers, setFirestoreViewers] = useState<any[]>([]);
+  const [wsViewers, setWsViewers] = useState<RealtimeViewerProfile[]>([]);
+  const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
+  const [remoteTrackTick, setRemoteTrackTick] = useState(0);
   const [durationSecs, setDurationSecs] = useState(0);
   const [hearts, setHearts] = useState<FloatingHeart[]>([]);
   const [totalHeartCount, setTotalHeartCount] = useState(0);
@@ -360,41 +367,185 @@ export const LiveStreamScreen: React.FC = () => {
 
   // Keep remote video element synchronized if host toggles camera off and back on
   useEffect(() => {
-    if (activeRole === 'viewer' && isRemoteVideoOn && remoteVideoRef.current && remoteStreamRef.current) {
-      remoteVideoRef.current.srcObject = remoteStreamRef.current;
+    if (activeRole === 'viewer' && isRemoteVideoOn && remoteVideoRef.current && remoteMediaStream) {
+      if (remoteVideoRef.current.srcObject !== remoteMediaStream) {
+        remoteVideoRef.current.srcObject = remoteMediaStream;
+      }
+      remoteVideoRef.current.muted = true;
       remoteVideoRef.current.play().catch(() => {});
     }
-  }, [activeRole, isRemoteVideoOn]);
+  }, [activeRole, isRemoteVideoOn, remoteMediaStream, remoteTrackTick]);
 
-  // Keep viewer audio on a dedicated output so video rendering/muting cannot silence the host.
+  // Listen for late-arriving WebRTC tracks (e.g., audio track arriving right after video track)
   useEffect(() => {
-    const audioEl = remoteAudioRef.current;
-    const source = remoteStreamRef.current;
-    if (!audioEl || !source) return;
-    const audioOnly = new MediaStream(source.getAudioTracks());
-    audioEl.srcObject = audioOnly;
-    audioEl.autoplay = true;
-    audioEl.muted = isRemoteAudioMuted;
-    audioEl.volume = 1;
-    const attemptAudioPlayback = () => {
-      if (isRemoteAudioMuted) return;
-      audioEl.play().then(() => setAutoplayBlocked(false)).catch(() => setAutoplayBlocked(true));
+    const streamId = activeStream?.id;
+    if (!streamId || activeRole !== 'viewer') return;
+    const handleTrackEvent = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail || detail.streamId !== streamId || !detail.stream) return;
+      remoteStreamRef.current = detail.stream;
+      setRemoteMediaStream(detail.stream);
+      setRemoteTrackTick((t) => t + 1);
     };
-    const audioTracks = audioOnly.getAudioTracks();
-    audioTracks.forEach((track) => {
-      track.enabled = true;
-      track.addEventListener('unmute', attemptAudioPlayback);
-    });
+    window.addEventListener('alphamate-live-remote-track', handleTrackEvent);
+    return () => window.removeEventListener('alphamate-live-remote-track', handleTrackEvent);
+  }, [activeStream?.id, activeRole]);
+
+  // Keep viewer audio on a dedicated output so video rendering/muting or camera-off DP fallback never silences host.
+  useEffect(() => {
+    if (activeRole !== 'viewer') return;
+    const audioEl = remoteAudioRef.current;
+    const source = remoteMediaStream || remoteStreamRef.current;
+    if (!audioEl || !source) return;
+
+    let audioOnly = new MediaStream(source.getAudioTracks());
+    const syncAudioTracks = () => {
+      const currentAudioTracks = source.getAudioTracks();
+      audioOnly = new MediaStream(currentAudioTracks);
+      audioEl.srcObject = audioOnly;
+      audioEl.autoplay = true;
+      audioEl.muted = isRemoteAudioMuted;
+      audioEl.volume = 1;
+      currentAudioTracks.forEach((track) => {
+        track.enabled = true;
+      });
+    };
+
+    const attemptAudioPlayback = () => {
+      if (isRemoteAudioMuted) {
+        setAutoplayBlocked(false);
+        return;
+      }
+      if (source.getAudioTracks().length === 0) return;
+      audioEl.muted = false;
+      audioEl.volume = 1;
+      audioEl
+        .play()
+        .then(() => setAutoplayBlocked(false))
+        .catch(() => setAutoplayBlocked(true));
+    };
+
+    const onAddTrack = () => {
+      syncAudioTracks();
+      setRemoteTrackTick((t) => t + 1);
+      attemptAudioPlayback();
+    };
+    const onPlaying = () => setAutoplayBlocked(false);
+
+    syncAudioTracks();
+    source.getAudioTracks().forEach((track) => track.addEventListener('unmute', attemptAudioPlayback));
+    source.addEventListener('addtrack', onAddTrack);
     audioEl.addEventListener('canplay', attemptAudioPlayback);
-    audioEl.addEventListener('playing', () => setAutoplayBlocked(false));
-    if (!isRemoteAudioMuted && audioTracks.length > 0) attemptAudioPlayback();
+    audioEl.addEventListener('playing', onPlaying);
+    attemptAudioPlayback();
+
     return () => {
-      audioTracks.forEach((track) => track.removeEventListener('unmute', attemptAudioPlayback));
+      source.removeEventListener('addtrack', onAddTrack);
+      source.getAudioTracks().forEach((track) => track.removeEventListener('unmute', attemptAudioPlayback));
       audioEl.removeEventListener('canplay', attemptAudioPlayback);
+      audioEl.removeEventListener('playing', onPlaying);
       audioEl.pause();
       audioEl.srcObject = null;
     };
-  }, [activeRole, activeStream?.id, isRemoteAudioMuted, streamStatus]);
+  }, [activeRole, activeStream?.id, isRemoteAudioMuted, remoteMediaStream, remoteTrackTick, streamStatus]);
+
+  // Real-time viewer presence & accurate viewer list (WebSocket + Firestore liveStreams/{id}/viewers)
+  useEffect(() => {
+    const streamId = activeStream?.id;
+    if (!streamId) return;
+    const uid = auth.currentUser?.uid || currentUser.id;
+    const profile: RealtimeViewerProfile = {
+      id: uid,
+      uniqueId: currentUser.uniqueId || uid,
+      username: currentUser.username || currentUser.displayName,
+      displayName: currentUser.displayName,
+      avatar: currentUser.avatar,
+      level: currentUser.level,
+      vipTier: currentUser.vipTier,
+      countryFlag: currentUser.countryFlag,
+      isVerified: currentUser.isVerified,
+      isHost: activeStream.host?.id === uid,
+      joinedAtMs: Date.now(),
+    };
+
+    realtimeSocket.joinRoom('live', streamId, profile, totalHeartCount);
+    joinLiveStreamViewer(streamId, profile).catch(() => {});
+
+    const heartbeatTimer = setInterval(() => {
+      joinLiveStreamViewer(streamId, profile).catch(() => {});
+    }, 25_000);
+
+    const unsubWsRoom = realtimeSocket.onRoomEvent('live', streamId, (ev) => {
+      if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
+        setWsViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
+      } else if (ev.type === 'room:signal' && ev.signal?.type === 'stream_ended' && !isHost) {
+        setIsBroadcastEnded(true);
+      }
+    });
+
+    const unsubFirestoreViewers = subscribeToLiveStreamViewers(streamId, (list) => {
+      setFirestoreViewers(list);
+    });
+
+    const handleLeavePage = () => {
+      leaveLiveStreamViewer(streamId, uid).catch(() => {});
+    };
+    window.addEventListener('pagehide', handleLeavePage);
+
+    return () => {
+      clearInterval(heartbeatTimer);
+      window.removeEventListener('pagehide', handleLeavePage);
+      unsubWsRoom();
+      unsubFirestoreViewers();
+      realtimeSocket.leaveRoom('live', streamId);
+      leaveLiveStreamViewer(streamId, uid).catch(() => {});
+    };
+  }, [activeStream?.id, currentUser.id, isHost]);
+
+  const realViewersList: User[] = useMemo(() => {
+    if (!activeStream) return [];
+    const byId = new Map<string, User>();
+    const addEntry = (raw: any) => {
+      if (!raw?.id || byId.has(raw.id)) return;
+      byId.set(raw.id, {
+        id: raw.id,
+        uniqueId: raw.uniqueId || raw.id,
+        username: raw.username || (raw.displayName || 'viewer').replace(/\s+/g, '_'),
+        displayName: raw.displayName || 'Viewer',
+        avatar: raw.avatar || '',
+        bio: 'Alpha Mate live viewer',
+        followersCount: 0,
+        followingCount: 0,
+        likesCount: 0,
+        level: Number(raw.level) || 1,
+        xp: 0,
+        nextLevelXp: 1000,
+        vipTier: Number(raw.vipTier) || 0,
+        countryFlag: raw.countryFlag,
+        coins: 0,
+        diamonds: 0,
+        isVerified: Boolean(raw.isVerified),
+        isHost: raw.id === activeStream.host?.id || Boolean(raw.isHost),
+      });
+    };
+    if (activeStream.host) addEntry({ ...activeStream.host, isHost: true });
+    wsViewers.forEach(addEntry);
+    firestoreViewers.forEach(addEntry);
+    const selfId = auth.currentUser?.uid || currentUser.id;
+    if (selfId) {
+      addEntry({ ...currentUser, id: selfId, isHost: selfId === activeStream.host?.id });
+    }
+    return Array.from(byId.values());
+  }, [activeStream, wsViewers, firestoreViewers, currentUser]);
+
+  useEffect(() => {
+    if (!activeStream?.id) return;
+    const count = Math.max(1, realViewersList.length);
+    setViewerCount(count);
+    if (isHost && activeStream.viewerCount !== count) {
+      updateLiveStreamFields(activeStream.id, { viewerCount: count }).catch(() => {});
+    }
+  }, [activeStream?.id, realViewersList.length, isHost]);
 
   // Real-time heart counter and incoming double-tap reactions.
   useEffect(() => {
@@ -467,6 +618,8 @@ export const LiveStreamScreen: React.FC = () => {
               onStreamReconnected: (reconnectedStream) => {
                 if (!isMounted) return;
                 remoteStreamRef.current = reconnectedStream;
+                setRemoteMediaStream(reconnectedStream);
+                setRemoteTrackTick((t) => t + 1);
                 setStreamStatus('live');
                 setStreamError(null);
                 const videoEl = remoteVideoRef.current;
@@ -475,6 +628,12 @@ export const LiveStreamScreen: React.FC = () => {
                   videoEl.muted = true;
                   videoEl.play().catch(() => {});
                 }
+              },
+              onTrackAdded: (_track, updatedStream) => {
+                if (!isMounted) return;
+                remoteStreamRef.current = updatedStream;
+                setRemoteMediaStream(updatedStream);
+                setRemoteTrackTick((t) => t + 1);
               },
             },
             (state) => {
@@ -487,6 +646,8 @@ export const LiveStreamScreen: React.FC = () => {
 
           if (!isMounted) return;
           remoteStreamRef.current = stream;
+          setRemoteMediaStream(stream);
+          setRemoteTrackTick((t) => t + 1);
           setIsRemoteVideoOn(isVideoOn);
           setIsRemoteMicOn(isMicOn);
           setStreamStatus('live');
@@ -495,16 +656,7 @@ export const LiveStreamScreen: React.FC = () => {
           if (videoEl) {
             videoEl.srcObject = stream;
             videoEl.muted = true;
-            try {
-              await videoEl.play();
-              setAutoplayBlocked(false);
-            } catch {
-              // Mobile/Desktop autoplay policy blocked unmuted playback -> start muted & show Tap to Unmute
-              videoEl.muted = true;
-              setIsRemoteAudioMuted(true);
-              setAutoplayBlocked(true);
-              videoEl.play().catch(() => {});
-            }
+            videoEl.play().catch(() => {});
           }
         } catch (err) {
           if (!isMounted) return;
@@ -529,7 +681,9 @@ export const LiveStreamScreen: React.FC = () => {
         const data = snapshot.data() as any;
         setIsRemoteVideoOn(data.isVideoOn !== false);
         setIsRemoteMicOn(data.isMicOn !== false);
-        if (typeof data.viewerCount === 'number') setViewerCount(data.viewerCount);
+        if (typeof data.viewerCount === 'number' && realViewersList.length <= 1) {
+          setViewerCount((prev) => Math.max(prev, data.viewerCount));
+        }
         if (Array.isArray(data.moderatorIds)) setModeratorIds(data.moderatorIds);
         if (Array.isArray(data.kickedUserIds)) setKickedUserIds(data.kickedUserIds);
         if (Array.isArray(data.blockedUserIds)) setBlockedUserIds(data.blockedUserIds);
@@ -549,12 +703,37 @@ export const LiveStreamScreen: React.FC = () => {
         window.removeEventListener('beforeunload', handlePageHide);
         subscribedSfuKeyRef.current = null;
         remoteStreamRef.current = null;
+        setRemoteMediaStream(null);
         p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
       };
     } else {
-      // STRICT HOST MODE: Acquire real camera/mic, publish to Cloudflare SFU, mark active ONLY after connected.
+      // STRICT HOST MODE: Acquire real camera/mic, publish to Cloudflare SFU, mark active & announce card.
       setStreamStatus('connecting');
       setStreamError(null);
+
+      let earlyPublishedKey = '';
+      const announceStreamReady = async (sfuSessionId: string, publishedTracks: any[], stream: MediaStream) => {
+        const key = `${sfuSessionId}:${publishedTracks.map((t) => t.trackName).join(',')}`;
+        if (earlyPublishedKey === key || !isMounted) return;
+        earlyPublishedKey = key;
+        if (hostVideoRef.current) {
+          hostVideoRef.current.srcObject = stream;
+          hostVideoRef.current.play().catch(() => {});
+        }
+        await publishLiveStream({
+          ...activeStream,
+          host: {
+            ...activeStream.host,
+            id: auth.currentUser?.uid || activeStream.host.id,
+          },
+          isActive: true,
+          sfuSessionId,
+          publishedTracks,
+          isVideoOn: isHostVideoOn,
+          isMicOn: isHostMicOn,
+          lastSeenAtMs: Date.now(),
+        });
+      };
 
       const initHostCameraAndSfu = async () => {
         try {
@@ -564,6 +743,9 @@ export const LiveStreamScreen: React.FC = () => {
             facing: facingMode,
             isVideoOn: isHostVideoOn,
             isMicOn: isHostMicOn,
+            onPublishedEarly: (early) => {
+              announceStreamReady(early.sfuSessionId, early.publishedTracks, early.stream).catch(() => {});
+            },
             onConnectionStateChange: (connState) => {
               if (!isMounted) return;
               if (connState === 'disconnected' || connState === 'connecting') {
@@ -594,25 +776,7 @@ export const LiveStreamScreen: React.FC = () => {
             return;
           }
 
-          if (hostVideoRef.current) {
-            hostVideoRef.current.srcObject = result.stream;
-            hostVideoRef.current.play().catch(() => {});
-          }
-
-          // Mark stream LIVE in Firestore ONLY after SFU publishing & connection succeed
-          await publishLiveStream({
-            ...activeStream,
-            host: {
-              ...activeStream.host,
-              id: auth.currentUser?.uid || activeStream.host.id,
-            },
-            isActive: true,
-            sfuSessionId: result.sfuSessionId,
-            publishedTracks: result.publishedTracks,
-            isVideoOn: isHostVideoOn,
-            isMicOn: isHostMicOn,
-            lastSeenAtMs: Date.now(),
-          });
+          await announceStreamReady(result.sfuSessionId, result.publishedTracks, result.stream);
 
           if (!isMounted) return;
           setStreamStatus('live');
@@ -944,9 +1108,12 @@ export const LiveStreamScreen: React.FC = () => {
     <div
       onDoubleClick={(e) => {
         if (activeRole === 'viewer' && remoteVideoRef.current) remoteVideoRef.current.play().catch(() => {});
+        if (activeRole === 'viewer' && remoteAudioRef.current && !isRemoteAudioMuted) {
+          remoteAudioRef.current.play().then(() => setAutoplayBlocked(false)).catch(() => {});
+        }
         spawnHeart(e.clientX, e.clientY);
         spawnHeart(e.clientX + 10, e.clientY - 20);
-        if (Date.now() - lastHeartSentAtRef.current > 500) {
+        if (Date.now() - lastHeartSentAtRef.current > 180) {
           lastHeartSentAtRef.current = Date.now();
           if (activeStream?.id) sendLiveHeart('live', activeStream.id).catch((err) => console.warn('[Live heart send]', err));
         }
@@ -1800,7 +1967,7 @@ export const LiveStreamScreen: React.FC = () => {
       <RoomViewersModal
         isOpen={showViewersModal}
         onClose={() => setShowViewersModal(false)}
-        viewers={MOCK_ROOM_VIEWERS}
+        viewers={realViewersList}
         hostUser={activeStream.host}
         moderatorIds={moderatorIds}
         totalViewerCount={viewerCount}
