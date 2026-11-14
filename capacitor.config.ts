@@ -19,6 +19,12 @@ const config: CapacitorConfig = {
     },
   },
   plugins: {
+    FirebaseAuthentication: {
+      // Use the native Android Google account chooser and Firebase SDK.
+      // The web Firebase JS SDK session is synchronized after native sign-in.
+      skipNativeAuth: false,
+      providers: ['google.com'],
+    },
     StatusBar: {
       style: 'DARK',
       backgroundColor: '#09070F',

@@ -1,6 +1,11 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
+import { Capacitor } from '@capacitor/core';
+import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import {
   getAuth,
+  initializeAuth,
+  indexedDBLocalPersistence,
+  signInWithCredential,
   GoogleAuthProvider,
   signInWithPopup,
   signInWithRedirect,
@@ -44,7 +49,22 @@ const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // CRITICAL: The app will break without passing firestoreDatabaseId
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-export const auth = getAuth(app);
+
+// Capacitor WebViews need durable JS-SDK auth persistence so the native Google
+// credential can be exchanged into the same JS Firebase session used by Firestore.
+function createFirebaseAuth() {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      return initializeAuth(app, { persistence: indexedDBLocalPersistence });
+    } catch (error) {
+      // Safe fallback if another module initialized Auth first.
+      console.warn('Firebase Auth already initialized; using existing instance.', error);
+      return getAuth(app);
+    }
+  }
+  return getAuth(app);
+}
+export const auth = createFirebaseAuth();
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
@@ -152,17 +172,32 @@ export function isFirebaseUserVerified(fbUser: FirebaseUser | null | undefined):
 }
 
 /**
- * Sign In with Google Popup (with automatic Redirect fallback if popups are blocked)
+ * Google Sign-In:
+ * - Android/iOS Capacitor: use native Google account chooser, then exchange its
+ *   ID token into the Firebase JavaScript Auth session used by Firestore/app state.
+ * - Web: preserve the existing Firebase popup + redirect fallback flow.
  */
 export async function signInWithGoogle() {
   try {
+    if (Capacitor.isNativePlatform()) {
+      const nativeResult = await FirebaseAuthentication.signInWithGoogle();
+      const idToken = nativeResult.credential?.idToken;
+      if (!idToken) {
+        throw new Error('Google Sign-In did not return an ID token. Check the Android OAuth client and signing SHA fingerprints in Firebase.');
+      }
+      const credential = GoogleAuthProvider.credential(idToken);
+      const webResult = await signInWithCredential(auth, credential);
+      return webResult.user;
+    }
+
     const result = await signInWithPopup(auth, googleProvider);
     return result.user;
   } catch (error: any) {
     const code = error?.code || '';
     if (
-      code === 'auth/popup-blocked' ||
-      code === 'auth/operation-not-supported-in-this-environment'
+      !Capacitor.isNativePlatform() &&
+      (code === 'auth/popup-blocked' ||
+       code === 'auth/operation-not-supported-in-this-environment')
     ) {
       try {
         sessionStorage.setItem('alphamate_google_redirect_pending', '1');
@@ -179,6 +214,8 @@ export async function signInWithGoogle() {
  * Resolve any pending Google redirect sign-in on boot
  */
 export async function consumeGoogleRedirectResult(): Promise<FirebaseUser | null> {
+  // Native Capacitor Google Sign-In does not use Firebase web redirect handlers.
+  if (Capacitor.isNativePlatform()) return null;
   try {
     const result = await getRedirectResult(auth);
     try {
@@ -247,6 +284,12 @@ export async function sendPasswordReset(email: string) {
  */
 export async function logoutUser() {
   try {
+    if (Capacitor.isNativePlatform()) {
+      // Clear both native Firebase Auth and the JS Auth session.
+      await FirebaseAuthentication.signOut().catch((nativeError) => {
+        console.warn('Native Firebase sign-out warning:', nativeError);
+      });
+    }
     await signOut(auth);
   } catch (error: any) {
     console.error('Sign-Out Error:', error);

@@ -167,3 +167,20 @@ private key material, and repository secrets are never printed or uploaded as ar
 After adding fingerprints, download the refreshed `google-services.json`, replace
 `android/app/google-services.json`, and build again.
 \n\nThe SHA fingerprint step uses the existing ALPHAMATE_STORE_PASSWORD and ALPHAMATE_KEY_ALIAS repository secrets explicitly. It reads only the public certificate details with keytool and prints SHA-1/SHA-256 to the Actions log and run summary. It does not print passwords or private key material.\n
+
+## Native Google Sign-In (Capacitor Android)
+
+The Android app now uses `@capacitor-firebase/authentication` 8.x with the
+native Google account chooser (`google.com` provider). After native sign-in,
+the returned Google ID token is exchanged with Firebase JS Auth using
+`GoogleAuthProvider.credential()` and `signInWithCredential()`. This keeps the
+same JavaScript Firebase Auth session used by the existing Firestore, chat,
+search, and profile code. Web builds continue to use the existing Firebase
+popup flow. Native sign-out clears both native and JS Auth sessions.
+
+Android Google provider build flags are enabled in `android/variables.gradle`:
+`rgcfaIncludeGoogle = true` and `androidxCredentialsVersion = '1.3.0'`.
+
+After pushing this ZIP, GitHub Actions must install the added package and run
+`npx cap sync android` before building. Verify Google Sign-In on an installed
+release APK; source-level checks alone do not prove the native OAuth flow works.
