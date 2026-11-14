@@ -184,3 +184,12 @@ Android Google provider build flags are enabled in `android/variables.gradle`:
 After pushing this ZIP, GitHub Actions must install the added package and run
 `npx cap sync android` before building. Verify Google Sign-In on an installed
 release APK; source-level checks alone do not prove the native OAuth flow works.
+
+
+## Railway dependency-lock alignment
+
+The Capacitor Firebase Authentication dependency is pinned to the compatible 8.6.x
+line and recorded in package-lock.json. The stale bun.lock has been removed so
+Railway/Railpack selects npm and uses the matching package-lock.json rather than
+running `bun install --frozen-lockfile` against an out-of-date Bun lock. GitHub
+Actions also uses npm ci, so both build paths use the same npm lockfile.
