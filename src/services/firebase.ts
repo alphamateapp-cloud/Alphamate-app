@@ -338,6 +338,7 @@ export async function syncPartyRoomToFirestore(room: any) {
       level: Number(room.level) || 1,
       totalGiftCoins: Number(room.totalGiftCoins) || 0,
       isActive: room.isActive !== false,
+      roomStatus: room.isActive !== false ? 'ready' : 'ended',
       coverImageUrl: typeof room.coverImageUrl === 'string' && room.coverImageUrl.startsWith('https://') ? room.coverImageUrl : '',
       backgroundTheme: room.backgroundTheme || 'from-[#1E103A] to-[#0A0614]',
       nowPlaying: room.nowPlaying || '',
@@ -380,6 +381,9 @@ export async function syncPartyRoomToFirestore(room: any) {
     await setDoc(doc(db, 'partyRooms', room.id), stripUndefinedFields(sanitizedRoom), { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+    // Do not swallow persistence failures: callers must not open a room locally
+    // when the room was never committed for discovery by other devices.
+    throw error;
   }
 }
 
@@ -643,6 +647,8 @@ export async function syncLiveStreamToFirestore(stream: any) {
     await setDoc(doc(db, 'liveStreams', stream.id), stripUndefinedFields(sanitizedStream), { merge: true });
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, path);
+    // A Live card is discoverable only after its Firestore record is committed.
+    throw error;
   }
 }
 
