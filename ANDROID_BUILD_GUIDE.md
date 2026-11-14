@@ -87,7 +87,7 @@ npm run android:open
 
 ### 6. Automated 1-Click Cloud Build & Signed Release (GitHub Actions)
 If your code is hosted on GitHub, an automated workflow is included in `.github/workflows/build-android.yml`:
-- Go to **Settings > Secrets and variables > Actions** on your GitHub repository and confirm these secrets exist:
+- Go to **Settings > Secrets and variables > Actions** on your GitHub repository and confirm these secrets exist. The workflow reads only the four explicitly named signing secrets below; it does not enumerate or dump all repository secrets:
   - `ANDROID_KEYSTORE_BASE64` (or `KEYSTORE_BASE64`) — base64-encoded `.jks` keystore file
   - `ANDROID_KEYSTORE_PASSWORD` (or `KEYSTORE_PASSWORD`) — keystore store password
   - `ANDROID_KEY_ALIAS` (or `KEY_ALIAS`, defaults to `alphamate`) — key alias

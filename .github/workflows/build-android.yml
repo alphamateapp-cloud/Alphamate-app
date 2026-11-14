@@ -68,152 +68,67 @@ jobs:
 
       - name: Prepare Android Signing Keystore
         env:
-          SECRETS_JSON: ${{ toJSON(secrets) }}
-          VARS_JSON: ${{ toJSON(vars) }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || secrets.KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD }}
+        shell: bash
         run: |
-          node -e '
-            const fs = require("fs");
-            const { execFileSync } = require("child_process");
+          set -euo pipefail
 
-            let secrets = {};
-            let vars = {};
-            try { secrets = JSON.parse(process.env.SECRETS_JSON || "{}"); } catch {}
-            try { vars = JSON.parse(process.env.VARS_JSON || "{}"); } catch {}
+          if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" ]]; then
+            echo "::error::Missing ANDROID_KEYSTORE_BASE64 (or KEYSTORE_BASE64) repository secret."
+            exit 1
+          fi
+          if [[ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]]; then
+            echo "::error::Missing ANDROID_KEYSTORE_PASSWORD (or KEYSTORE_PASSWORD) repository secret."
+            exit 1
+          fi
 
-            const pool = [];
-            for (const [k, v] of Object.entries(secrets)) {
-              if (k.toLowerCase() === "github_token") continue;
-              if (typeof v === "string" && v.length > 0) pool.push({ source: "secret", key: k, val: v });
-            }
-            for (const [k, v] of Object.entries(vars)) {
-              if (typeof v === "string" && v.length > 0) pool.push({ source: "var", key: k, val: v });
-            }
+          mkdir -p android/app
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 --decode > android/app/release-key.jks
+          if [[ ! -s android/app/release-key.jks ]]; then
+            echo "::error::Decoded Android keystore is empty. Check the base64 secret."
+            exit 1
+          fi
 
-            const visibleSecretNames = pool.filter(p => p.source === "secret").map(p => p.key);
-            const visibleVarNames = pool.filter(p => p.source === "var").map(p => p.key);
-            console.log("Available repository secret names:", visibleSecretNames.length ? visibleSecretNames.join(", ") : "(none)");
-            console.log("Available repository variable names:", visibleVarNames.length ? visibleVarNames.join(", ") : "(none)");
+          STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+          KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$STORE_PASSWORD}"
+          REQUESTED_ALIAS="${ANDROID_KEY_ALIAS:-}"
 
-            const pickExact = (names) => {
-              for (const name of names) {
-                const hit = pool.find(p => p.key === name || p.key.toUpperCase() === name);
-                if (hit) return hit;
-              }
-              return null;
-            };
+          echo "::add-mask::$STORE_PASSWORD"
+          echo "::add-mask::$KEY_PASSWORD"
 
-            const pickPattern = (regex, excludeRegex) => {
-              return pool.find(p => regex.test(p.key) && (!excludeRegex || !excludeRegex.test(p.key))) || null;
-            };
+          KEYTOOL_LIST=$(keytool -list -keystore android/app/release-key.jks -storepass "$STORE_PASSWORD" 2>/dev/null) || {
+            echo "::error::Could not open the uploaded keystore. Verify the keystore password."
+            exit 1
+          }
+          DETECTED_ALIAS=$(printf '%s\n' "$KEYTOOL_LIST" | awk -F, '/PrivateKeyEntry/ {gsub(/^ +| +$/, "", $1); print $1; exit}')
+          RESOLVED_ALIAS="${REQUESTED_ALIAS:-$DETECTED_ALIAS}"
+          if [[ -z "$RESOLVED_ALIAS" ]]; then
+            echo "::error::No private-key alias was found in the keystore. Set ANDROID_KEY_ALIAS."
+            exit 1
+          fi
 
-            const b64Match = pickExact([
-              "ANDROID_KEYSTORE_BASE64", "KEYSTORE_BASE64", "RELEASE_KEYSTORE_BASE64",
-              "ANDROID_KEYSTORE", "KEYSTORE_FILE", "SIGNING_KEY", "SIGNING_KEY_BASE64",
-              "ANDROID_SIGNING_KEY", "ANDROID_SIGNING_KEY_BASE64", "SIGNING_KEYSTORE",
-              "SIGNING_KEYSTORE_BASE64", "ANDROID_KEYSTORE_B64", "KEYSTORE_B64",
-              "RELEASE_SIGNING_KEY", "RELEASE_KEY_BASE64", "PLAYSTORE_KEYSTORE_BASE64",
-              "PLAYSTORE_KEYSTORE", "UPLOAD_KEYSTORE_BASE64", "UPLOAD_KEYSTORE",
-              "JKS_BASE64", "ANDROID_JKS_BASE64", "KEYSTORE"
-            ]) || pickPattern(/(keystore|jks|upload_key|playstore_key|signing_key)/i, /(pass|pwd|alias|email|token|url|api_key)/i);
+          keytool -list -keystore android/app/release-key.jks -storepass "$STORE_PASSWORD" -alias "$RESOLVED_ALIAS" >/dev/null 2>&1 || {
+            echo "::error::The configured alias does not exist in the keystore. Check ANDROID_KEY_ALIAS."
+            exit 1
+          }
 
-            const ksPwMatch = pickExact([
-              "ANDROID_KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD", "STORE_PASSWORD",
-              "KEY_STORE_PASSWORD", "KEYSTORE_PASS", "ANDROID_KEYSTORE_PASS",
-              "RELEASE_KEYSTORE_PASSWORD", "RELEASE_STORE_PASSWORD", "SIGNING_STORE_PASSWORD",
-              "SIGNING_KEYSTORE_PASSWORD", "ANDROID_STORE_PASSWORD", "JKS_PASSWORD",
-              "KS_PASSWORD", "STORE_PASS", "PLAYSTORE_KEYSTORE_PASSWORD",
-              "SIGNING_KEY_PASSWORD", "ANDROID_KEY_PASSWORD", "KEY_PASSWORD", "KEY_PASS"
-            ]) || pickPattern(/(store|keystore|jks|signing).*?(pass|pwd|pw)/i, /(b64|base64|alias)/i);
+          {
+            echo "ANDROID_KEYSTORE_PATH=release-key.jks"
+            echo "ANDROID_KEYSTORE_PASSWORD<<AM_STORE_PASSWORD_EOF"
+            printf '%s\n' "$STORE_PASSWORD"
+            echo "AM_STORE_PASSWORD_EOF"
+            echo "ANDROID_KEY_ALIAS=$RESOLVED_ALIAS"
+            echo "ANDROID_KEY_PASSWORD<<AM_KEY_PASSWORD_EOF"
+            printf '%s\n' "$KEY_PASSWORD"
+            echo "AM_KEY_PASSWORD_EOF"
+            echo "SIGNED_RELEASE=true"
+            echo "PREVIEW_SIGNED=false"
+          } >> "$GITHUB_ENV"
 
-            const aliasMatch = pickExact([
-              "ANDROID_KEY_ALIAS", "KEY_ALIAS", "KEYSTORE_ALIAS", "ALIAS",
-              "SIGNING_KEY_ALIAS", "RELEASE_KEY_ALIAS", "ANDROID_ALIAS"
-            ]) || pickPattern(/alias/i, /(pass|pwd|b64|base64)/i);
-
-            const keyPwMatch = pickExact([
-              "ANDROID_KEY_PASSWORD", "KEY_PASSWORD", "KEY_PASS",
-              "SIGNING_KEY_PASSWORD", "RELEASE_KEY_PASSWORD",
-              "ANDROID_KEYSTORE_PASSWORD", "KEYSTORE_PASSWORD", "STORE_PASSWORD", "KEY_STORE_PASSWORD"
-            ]) || pickPattern(/(key|signing).*?(pass|pwd|pw)/i, /(b64|base64|alias|api_key)/i) || ksPwMatch;
-
-            console.log(
-              "Signing secret resolution -> event=" + (process.env.GITHUB_EVENT_NAME || "unknown") +
-              ", keystore_b64=" + (b64Match ? b64Match.key : "missing") +
-              ", store_password=" + (ksPwMatch ? ksPwMatch.key : "missing") +
-              ", key_alias=" + (aliasMatch ? aliasMatch.key : "auto") +
-              ", key_password=" + (keyPwMatch ? keyPwMatch.key : "missing")
-            );
-
-            const envFile = process.env.GITHUB_ENV;
-            const summaryFile = process.env.GITHUB_STEP_SUMMARY;
-            const writeEnv = (lines) => fs.appendFileSync(envFile, lines.join("\n") + "\n");
-
-            const hasOfficialSecrets = Boolean(b64Match && ksPwMatch) ||
-              (fs.existsSync("android/release-key.jks") && Boolean(ksPwMatch)) ||
-              (fs.existsSync("android/app/release-key.jks") && Boolean(ksPwMatch));
-
-            if (hasOfficialSecrets) {
-              if (b64Match && ksPwMatch) {
-                const cleaned = b64Match.val.replace(/[\s"\x27]/g, "").replace(/-/g, "+").replace(/_/g, "/");
-                const buf = Buffer.from(cleaned, "base64");
-                if (!buf.length) {
-                  console.error("::error::Decoded android/app/release-key.jks is empty. Verify your base64 keystore secret (" + b64Match.key + ").");
-                  process.exit(1);
-                }
-                fs.writeFileSync("android/app/release-key.jks", buf);
-              } else if (fs.existsSync("android/release-key.jks")) {
-                fs.copyFileSync("android/release-key.jks", "android/app/release-key.jks");
-              }
-
-              const ksPassword = ksPwMatch.val;
-              const kAlias = aliasMatch ? aliasMatch.val.trim() : "";
-              const keyPassword = (keyPwMatch ? keyPwMatch.val : "") || ksPassword;
-
-              console.log("::add-mask::" + ksPassword);
-              console.log("::add-mask::" + keyPassword);
-
-              let detectedAlias = "";
-              try {
-                const listOut = execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword], { encoding: "utf8" });
-                const line = listOut.split(/\r?\n/).find(l => l.includes("PrivateKeyEntry"));
-                if (line) detectedAlias = line.split(",")[0].trim();
-              } catch {}
-
-              let resolvedAlias = detectedAlias || kAlias || "alphamate";
-              if (kAlias) {
-                try {
-                  execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword, "-alias", kAlias], { stdio: "ignore" });
-                  resolvedAlias = kAlias;
-                } catch {}
-              }
-
-              try {
-                execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword, "-alias", resolvedAlias], { stdio: "inherit" });
-              } catch {
-                console.error("::error::Failed to open android/app/release-key.jks with alias " + resolvedAlias + ". Check keystore password and alias.");
-                process.exit(1);
-              }
-
-              const ksMarker = "__AM_KS_" + Math.random().toString(36).slice(2) + "__";
-              const kpMarker = "__AM_KP_" + Math.random().toString(36).slice(2) + "__";
-              writeEnv([
-                "ANDROID_KEYSTORE_PATH=release-key.jks",
-                "ANDROID_KEYSTORE_PASSWORD<<" + ksMarker,
-                ksPassword,
-                ksMarker,
-                "ANDROID_KEY_ALIAS=" + resolvedAlias,
-                "ANDROID_KEY_PASSWORD<<" + kpMarker,
-                keyPassword,
-                kpMarker,
-                "SIGNED_RELEASE=true",
-                "PREVIEW_SIGNED=false"
-              ]);
-              console.log("Official Play Store release signing configured cleanly with alias: " + resolvedAlias);
-            } else {
-              console.error("::error::Official Android release signing is not configured. Add ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD to GitHub Actions Repository Secrets. Optional: ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD (key password defaults to store password). A temporary preview key is not accepted for Play Store release artifacts.");
-              process.exit(1);
-            }
-          '
+          echo "Official release keystore validated. Alias: $RESOLVED_ALIAS"
 
       - name: Build Release APK
         run: |
