@@ -1,0 +1,7 @@
+ALPHA MATE - CLOUDFLARE BUILD FIX
+
+package.json and package-lock.json are at the repository root. The npm lockfile includes @capacitor-firebase/authentication. No bun.lock or bun.lockb is included.
+
+IMPORTANT: When updating GitHub, delete the OLD root-level bun.lock (and bun.lockb if present). Uploading a ZIP does not automatically delete old repository files. If the old bun.lock remains, Cloudflare can keep selecting Bun and run bun install --frozen-lockfile, reproducing the reported error.
+
+Cloudflare settings: Build command npm run build; output directory dist; root directory blank / repository root.
