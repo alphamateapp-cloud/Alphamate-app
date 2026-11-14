@@ -1,0 +1,30 @@
+ALPHA MATE - TARGETED UPDATE NOTES
+
+Included code changes
+1) Android status bar safe area:
+   - Capacitor StatusBar overlay is disabled on native platforms.
+   - The WebView reserves the Android status-bar area, so app controls begin below
+     the time, signal and battery icons while the app remains full-height.
+   - Applies globally rather than only to Home, Live or Party.
+
+2) Stable Google/Firebase account identity:
+   - The Firebase UID remains the canonical user document ID.
+   - New Firebase profiles derive a deterministic public AM_ ID from the Firebase UID.
+   - Existing Firestore profiles are merged over defaults, preserving an already
+     stored uniqueId, coins, diamonds, levels, XP and other saved fields.
+   - The same Firebase account therefore resolves to the same profile on another device.
+
+Important: Live/Party voice is NOT certified fixed in this archive.
+The supplied screenshot explicitly reports that https://api.alphamate.app cannot be
+reached. The app's solo-live and party voice both require the deployed Railway API
+and Cloudflare Realtime SFU/TURN configuration. A frontend-only change cannot bring
+an offline/unreachable backend online or verify two-way audio. After deployment,
+check GET https://api.alphamate.app/api/health and test two physical devices with
+microphone permission granted, one host/speaker and one listener. If health is not
+OK for SFU and TURN, fix the Railway service/environment variables before audio QA.
+
+Build status:
+- Source edits are included.
+- A production Android APK/AAB build was not run in this environment.
+- Run the repository's normal npm install/build and Android release workflow before
+  submitting to Google Play.

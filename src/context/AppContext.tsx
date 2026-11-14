@@ -587,10 +587,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const suggestedUsername = emailPrefix.toLowerCase().replace(/[^a-z0-9_]/g, '_') || `user_${fbUser.uid.slice(0, 6)}`;
     const verified = isFirebaseUserVerified(fbUser);
     const isGoogle = fbUser.providerData?.some((p) => p.providerId === 'google.com');
+    // A Firebase UID is stable for the same account on every device. Derive a
+    // repeatable public ID from it instead of generating a new random ID per login.
+    // Existing Firestore profiles are merged over this default below, so their
+    // already-issued uniqueId, coins, levels and other saved data remain unchanged.
+    let uidHash = 2166136261;
+    for (let i = 0; i < fbUser.uid.length; i += 1) {
+      uidHash = Math.imul(uidHash ^ fbUser.uid.charCodeAt(i), 16777619);
+    }
+    const stableUniqueId = `AM_${10000000 + ((uidHash >>> 0) % 90000000)}`;
 
     return {
       id: fbUser.uid,
-      uniqueId: `AM_${Math.floor(100000 + Math.random() * 900000)}`,
+      uniqueId: stableUniqueId,
       username: suggestedUsername,
       displayName: suggestedName,
       email: cleanEmail,

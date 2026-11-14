@@ -123,6 +123,10 @@ const AppContent: React.FC = () => {
     if (!Capacitor.isNativePlatform()) return;
 
     try {
+      // Keep the native status bar visible and reserve its system inset above the WebView.
+      // App content (including Home, Live and Party controls) therefore starts below
+      // the time / signal / battery area instead of being drawn underneath it.
+      StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
       StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
       StatusBar.setBackgroundColor({ color: '#09070F' }).catch(() => {});
     } catch {}
