@@ -62,44 +62,67 @@ jobs:
 
       - name: Decode Android Signing Keystore
         env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 || secrets.RELEASE_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE || secrets.KEYSTORE_FILE || secrets.SIGNING_KEY_BASE64 || secrets.KEYSTORE }}
-          KS_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || secrets.STORE_PASSWORD || secrets.KEY_STORE_PASSWORD }}
-          K_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || secrets.KEY_ALIAS || secrets.KEYSTORE_ALIAS || secrets.ALIAS }}
-          K_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD }}
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 || secrets.RELEASE_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE || secrets.KEYSTORE_FILE || secrets.SIGNING_KEY || secrets.SIGNING_KEY_BASE64 || secrets.ANDROID_SIGNING_KEY || secrets.ANDROID_SIGNING_KEY_BASE64 || secrets.SIGNING_KEYSTORE || secrets.SIGNING_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE_B64 || secrets.KEYSTORE_B64 || secrets.RELEASE_SIGNING_KEY || secrets.RELEASE_KEY_BASE64 || secrets.PLAYSTORE_KEYSTORE_BASE64 || secrets.PLAYSTORE_KEYSTORE || secrets.UPLOAD_KEYSTORE_BASE64 || secrets.UPLOAD_KEYSTORE || secrets.JKS_BASE64 || secrets.ANDROID_JKS_BASE64 || secrets.KEYSTORE || vars.ANDROID_KEYSTORE_BASE64 || vars.KEYSTORE_BASE64 || vars.SIGNING_KEY }}
+          KS_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || secrets.STORE_PASSWORD || secrets.KEY_STORE_PASSWORD || secrets.KEYSTORE_PASS || secrets.ANDROID_KEYSTORE_PASS || secrets.RELEASE_KEYSTORE_PASSWORD || secrets.RELEASE_STORE_PASSWORD || secrets.SIGNING_STORE_PASSWORD || secrets.SIGNING_KEYSTORE_PASSWORD || secrets.ANDROID_STORE_PASSWORD || secrets.JKS_PASSWORD || secrets.KS_PASSWORD || secrets.STORE_PASS || secrets.PLAYSTORE_KEYSTORE_PASSWORD || secrets.SIGNING_KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD || secrets.KEY_PASS || vars.ANDROID_KEYSTORE_PASSWORD || vars.KEYSTORE_PASSWORD }}
+          K_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || secrets.KEY_ALIAS || secrets.KEYSTORE_ALIAS || secrets.ALIAS || secrets.SIGNING_KEY_ALIAS || secrets.RELEASE_KEY_ALIAS || secrets.ANDROID_ALIAS || vars.ANDROID_KEY_ALIAS || vars.KEY_ALIAS || vars.ALIAS }}
+          K_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD || secrets.KEY_PASS || secrets.SIGNING_KEY_PASSWORD || secrets.RELEASE_KEY_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD || secrets.STORE_PASSWORD || secrets.KEY_STORE_PASSWORD || vars.ANDROID_KEY_PASSWORD || vars.KEY_PASSWORD }}
         run: |
+          HAS_B64=$([ -n "$KEYSTORE_B64" ] && echo "true" || echo "false")
+          HAS_PW=$([ -n "$KS_PASSWORD" ] && echo "true" || echo "false")
+          HAS_ALIAS=$([ -n "$K_ALIAS" ] && echo "true" || echo "false")
+          HAS_KPW=$([ -n "$K_PASSWORD" ] && echo "true" || echo "false")
+          echo "Signing secret check -> event=${GITHUB_EVENT_NAME}, keystore_b64=${HAS_B64}, store_password=${HAS_PW}, key_alias=${HAS_ALIAS}, key_password=${HAS_KPW}"
+
           if [ -n "$KEYSTORE_B64" ] && [ -n "$KS_PASSWORD" ]; then
-            printf '%s' "$KEYSTORE_B64" | tr -d '\n\r ' | base64 --decode > android/app/release-key.jks
+            printf '%s' "$KEYSTORE_B64" | tr -d '[:space:]"' | tr '_-' '/+' | base64 --decode > android/app/release-key.jks
             if [ ! -s android/app/release-key.jks ]; then
               echo "::error::Decoded android/app/release-key.jks is empty. Verify your base64 keystore secret."
               exit 1
             fi
-            if [ -n "$K_ALIAS" ]; then
-              RESOLVED_ALIAS="$K_ALIAS"
-            else
-              DETECTED_ALIAS=$(keytool -list -keystore android/app/release-key.jks -storepass "$KS_PASSWORD" 2>/dev/null | grep 'PrivateKeyEntry' | head -n1 | cut -d',' -f1 | xargs || true)
-              RESOLVED_ALIAS="${DETECTED_ALIAS:-alphamate}"
-            fi
-            RESOLVED_KEY_PW="${K_PASSWORD:-$KS_PASSWORD}"
-            keytool -list -keystore android/app/release-key.jks -storepass "$KS_PASSWORD" -alias "$RESOLVED_ALIAS" >/dev/null
-            echo "ANDROID_KEYSTORE_PATH=release-key.jks" >> $GITHUB_ENV
-            echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASSWORD" >> $GITHUB_ENV
-            echo "ANDROID_KEY_ALIAS=$RESOLVED_ALIAS" >> $GITHUB_ENV
-            echo "ANDROID_KEY_PASSWORD=$RESOLVED_KEY_PW" >> $GITHUB_ENV
-            echo "SIGNED_RELEASE=true" >> $GITHUB_ENV
-            echo "Release signing configured cleanly with alias '$RESOLVED_ALIAS'."
           elif [ -f android/release-key.jks ] && [ -n "$KS_PASSWORD" ]; then
             cp android/release-key.jks android/app/release-key.jks
-            RESOLVED_ALIAS="${K_ALIAS:-alphamate}"
-            RESOLVED_KEY_PW="${K_PASSWORD:-$KS_PASSWORD}"
-            echo "ANDROID_KEYSTORE_PATH=release-key.jks" >> $GITHUB_ENV
-            echo "ANDROID_KEYSTORE_PASSWORD=$KS_PASSWORD" >> $GITHUB_ENV
-            echo "ANDROID_KEY_ALIAS=$RESOLVED_ALIAS" >> $GITHUB_ENV
-            echo "ANDROID_KEY_PASSWORD=$RESOLVED_KEY_PW" >> $GITHUB_ENV
-            echo "SIGNED_RELEASE=true" >> $GITHUB_ENV
+          elif [ -f android/app/release-key.jks ] && [ -n "$KS_PASSWORD" ]; then
+            echo "Using existing android/app/release-key.jks."
           else
-            echo "::error::Release signing secrets are missing. Configure ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD (plus alias/key password if different). Refusing to produce an unsigned release APK/AAB."
+            if [ "$HAS_B64" = "false" ] && [ "$HAS_PW" = "false" ]; then
+              echo "::error::Both keystore base64 secret and keystore password secret are unavailable (keystore_b64=false, store_password=false, event=${GITHUB_EVENT_NAME}). Ensure ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD (or SIGNING_KEY / KEY_STORE_PASSWORD) are set in GitHub Repository Secrets (not Environment-only secrets or a fork PR)."
+            elif [ "$HAS_B64" = "false" ]; then
+              echo "::error::Keystore base64 secret is missing (keystore_b64=false, store_password=true). Add ANDROID_KEYSTORE_BASE64 (or SIGNING_KEY / KEYSTORE_BASE64) to GitHub Repository Secrets."
+            else
+              echo "::error::Keystore password secret is missing (keystore_b64=true, store_password=false). Add ANDROID_KEYSTORE_PASSWORD (or KEYSTORE_PASSWORD / KEY_STORE_PASSWORD) to GitHub Repository Secrets."
+            fi
             exit 1
           fi
+
+          DETECTED_ALIAS=$(keytool -list -keystore android/app/release-key.jks -storepass "$KS_PASSWORD" 2>/dev/null | grep 'PrivateKeyEntry' | head -n1 | cut -d',' -f1 | xargs || true)
+          if [ -n "$K_ALIAS" ] && keytool -list -keystore android/app/release-key.jks -storepass "$KS_PASSWORD" -alias "$K_ALIAS" >/dev/null 2>&1; then
+            RESOLVED_ALIAS="$K_ALIAS"
+          elif [ -n "$DETECTED_ALIAS" ]; then
+            RESOLVED_ALIAS="$DETECTED_ALIAS"
+          else
+            RESOLVED_ALIAS="${K_ALIAS:-alphamate}"
+          fi
+          RESOLVED_KEY_PW="${K_PASSWORD:-$KS_PASSWORD}"
+
+          if ! keytool -list -keystore android/app/release-key.jks -storepass "$KS_PASSWORD" -alias "$RESOLVED_ALIAS" >/dev/null; then
+            echo "::error::Failed to open keystore android/app/release-key.jks with alias '$RESOLVED_ALIAS'. Verify keystore password and alias."
+            exit 1
+          fi
+
+          echo "::add-mask::$KS_PASSWORD"
+          echo "::add-mask::$RESOLVED_KEY_PW"
+          {
+            echo "ANDROID_KEYSTORE_PATH=release-key.jks"
+            echo "ANDROID_KEYSTORE_PASSWORD<<__AM_KS_EOF__"
+            printf '%s\n' "$KS_PASSWORD"
+            echo "__AM_KS_EOF__"
+            echo "ANDROID_KEY_ALIAS=$RESOLVED_ALIAS"
+            echo "ANDROID_KEY_PASSWORD<<__AM_KEY_EOF__"
+            printf '%s\n' "$RESOLVED_KEY_PW"
+            echo "__AM_KEY_EOF__"
+            echo "SIGNED_RELEASE=true"
+          } >> "$GITHUB_ENV"
+          echo "Release signing configured cleanly with alias '$RESOLVED_ALIAS'."
 
       - name: Build Debug APK
         run: |
@@ -124,8 +147,16 @@ jobs:
           ls -la android/app/build/outputs/apk/release/ || true
           ls -la android/app/build/outputs/bundle/release/ || true
           if [ "${SIGNED_RELEASE}" = "true" ]; then
+            if [ -f android/app/build/outputs/apk/release/app-release-unsigned.apk ]; then
+              echo "::error::Unsigned release APK was generated instead of a signed release APK."
+              exit 1
+            fi
             if [ ! -f android/app/build/outputs/apk/release/app-release.apk ]; then
               echo "::error::Expected signed android/app/build/outputs/apk/release/app-release.apk was not generated."
+              exit 1
+            fi
+            if [ ! -f android/app/build/outputs/bundle/release/app-release.aab ]; then
+              echo "::error::Expected signed android/app/build/outputs/bundle/release/app-release.aab was not generated."
               exit 1
             fi
             APKSIGNER_BIN=$(ls -d ${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)
@@ -134,7 +165,12 @@ jobs:
               exit 1
             fi
             "$APKSIGNER_BIN" verify --verbose --print-certs android/app/build/outputs/apk/release/app-release.apk
-            jarsigner -verify android/app/build/outputs/bundle/release/app-release.aab
+            AAB_VERIFY=$(jarsigner -verify -verbose -certs android/app/build/outputs/bundle/release/app-release.aab 2>&1)
+            echo "$AAB_VERIFY"
+            if ! echo "$AAB_VERIFY" | grep -q "jar verified."; then
+              echo "::error::app-release.aab signature verification failed (jar is not verified)."
+              exit 1
+            fi
           fi
 
       - name: Cleanup Temporary Keystore
