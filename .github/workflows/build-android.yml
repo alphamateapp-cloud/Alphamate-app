@@ -68,20 +68,20 @@ jobs:
 
       - name: Prepare Android Signing Keystore
         env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS || secrets.KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ALPHAMATE_UPLOAD_KEYSTORE_BASE64 || secrets.ANDROID_KEYSTORE_BASE64 || secrets.KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ALPHAMATE_STORE_PASSWORD || secrets.ANDROID_KEYSTORE_PASSWORD || secrets.KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ALPHAMATE_KEY_ALIAS || secrets.ANDROID_KEY_ALIAS || secrets.KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ALPHAMATE_KEY_PASSWORD || secrets.ANDROID_KEY_PASSWORD || secrets.KEY_PASSWORD }}
         shell: bash
         run: |
           set -euo pipefail
 
           if [[ -z "${ANDROID_KEYSTORE_BASE64:-}" ]]; then
-            echo "::error::Missing ANDROID_KEYSTORE_BASE64 (or KEYSTORE_BASE64) repository secret."
+            echo "::error::Missing ALPHAMATE_UPLOAD_KEYSTORE_BASE64 (or ANDROID_KEYSTORE_BASE64 / KEYSTORE_BASE64) repository secret."
             exit 1
           fi
           if [[ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]]; then
-            echo "::error::Missing ANDROID_KEYSTORE_PASSWORD (or KEYSTORE_PASSWORD) repository secret."
+            echo "::error::Missing ALPHAMATE_STORE_PASSWORD (or ANDROID_KEYSTORE_PASSWORD / KEYSTORE_PASSWORD) repository secret."
             exit 1
           fi
 
