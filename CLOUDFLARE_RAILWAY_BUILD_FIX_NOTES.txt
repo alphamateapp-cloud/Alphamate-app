@@ -1,0 +1,8 @@
+Alpha Mate build environment fix
+
+- Removed the stale root package-lock.json because it did not match package.json and caused Cloudflare's npm clean-install / npm ci to fail.
+- Added .nvmrc and .node-version specifying Node.js 24.12.0, matching the package.json engines requirement.
+- Kept functions/package-lock.json intact; it belongs to the separate Firebase Functions workspace.
+- Kept application source, Firebase configuration, Android project, and feature code unchanged.
+
+Build environment should install root dependencies with npm install (not npm ci) because the stale root lockfile has been removed. Ensure Cloudflare Pages uses Node.js 24.12.0 or newer Node 24.
