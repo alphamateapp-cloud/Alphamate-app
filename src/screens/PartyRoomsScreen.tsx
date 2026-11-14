@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import { PartyRoom, PartySeat, User, Gift } from '../types';
 import { p2pStreamingEngine, PartyParticipantPresence } from '../services/webrtcService';
 import { auth, db, updatePartyRoomFields, togglePartySeatLockInFirestore } from '../services/firebase';
@@ -174,6 +175,8 @@ export const PartyRoomsScreen: React.FC = () => {
     activeGiftBanner,
     startDirectMessage,
     sendNotificationToUser,
+    refreshScope,
+    partyRefreshTick,
   } = useApp();
 
   // Party Level: 1 = Basic (4 guest seats), 2 = Advanced (8 guest seats), 3 = Premium (15 guest seats)
@@ -211,6 +214,9 @@ export const PartyRoomsScreen: React.FC = () => {
   const joinNotificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSyncedViewerCountRef = useRef<number>(-1);
   const lastSelfSpeakingSyncedRef = useRef<boolean>(false);
+  const partyRoomRootRef = useRef<HTMLDivElement>(null);
+  const lastHandledPartyRefreshTickRef = useRef<number>(partyRefreshTick);
+  const lastVoiceRoomIdRef = useRef<string | null>(null);
 
   // Music Player State
   const [isMusicPlaying, setIsMusicPlaying] = useState(true);
@@ -967,18 +973,22 @@ export const PartyRoomsScreen: React.FC = () => {
       startupAutoRetryCountRef.current = 0;
     }
 
+    const isNewRoom = lastVoiceRoomIdRef.current !== roomId;
+    lastVoiceRoomIdRef.current = roomId;
     const isUserHost = activePartyRoom.host?.id === effectiveUserId;
     const myInitialSeat = activePartyRoom.seats?.find((s: any) => s.user?.id === effectiveUserId);
     const isSeatedNow = Boolean(myInitialSeat);
     const initialCanSpeak = isUserHost || isSeatedNow;
     const initialMuted = isUserHost
-      ? false
+      ? (isNewRoom ? false : isHostMicMuted)
       : myInitialSeat
         ? Boolean(myInitialSeat.isMuted || myInitialSeat.isHostMuted)
         : false;
 
     let cancelled = false;
-    setIsHostMicMuted(false);
+    if (isNewRoom) {
+      setIsHostMicMuted(false);
+    }
     voiceHasConnectedRef.current = false;
     voiceParticipantsLoadedRef.current = false;
     initialParticipantsSeededRef.current = false;
@@ -1307,6 +1317,18 @@ export const PartyRoomsScreen: React.FC = () => {
     };
   }, [activePartyRoom?.id, partyAudioAutoplayBlocked, unlockAllRemoteAudioPlayback]);
 
+  // Scoped recovery when user pulls down or taps Refresh inside the active Party Room
+  useEffect(() => {
+    if (partyRefreshTick <= 0 || partyRefreshTick === lastHandledPartyRefreshTickRef.current) return;
+    lastHandledPartyRefreshTickRef.current = partyRefreshTick;
+    if (!activePartyRoom?.id) return;
+
+    setPartyVoiceError(null);
+    setPartyVoiceRetryToken((prev) => prev + 1);
+    unlockAllRemoteAudioPlayback().catch(() => {});
+    showToast('Party Room & audio refreshed');
+  }, [partyRefreshTick, activePartyRoom?.id, unlockAllRemoteAudioPlayback]);
+
   // Build deduplicated active audience list strictly from real live voiceParticipants + self
   const realViewersList: User[] = useMemo(() => {
     if (!activePartyRoom) return [];
@@ -1440,7 +1462,7 @@ export const PartyRoomsScreen: React.FC = () => {
       (error) => showToast(`Room chat connection error: ${error.message}`),
     );
     return unsubscribe;
-  }, [activePartyRoom?.id]);
+  }, [activePartyRoom?.id, partyRefreshTick]);
 
   // Shared real-time room heart count and incoming double-tap events.
   useEffect(() => {
@@ -1451,7 +1473,7 @@ export const PartyRoomsScreen: React.FC = () => {
       if (event.senderId !== auth.currentUser?.uid) { spawnHeart(); spawnHeart(); }
     }, (e) => console.warn('[Party heart events]', e));
     return () => { offCount(); offEvents(); };
-  }, [activePartyRoom?.id]);
+  }, [activePartyRoom?.id, partyRefreshTick]);
 
   // Auto-scroll chat feed
   useEffect(() => {
@@ -1682,6 +1704,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
     return (
       <div
+        ref={partyRoomRootRef}
         onDoubleClick={(e) => {
           spawnHeart(e.clientX, e.clientY);
           spawnHeart(e.clientX + 10, e.clientY - 20);
@@ -1693,6 +1716,11 @@ export const PartyRoomsScreen: React.FC = () => {
         onTouchStart={handleScreenTouchOrClick}
         className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
       >
+        <PullToRefresh
+          scrollContainerRef={partyRoomRootRef}
+          label="Refreshing Party Room..."
+          onRefresh={() => refreshScope('party_room')}
+        />
         {/* Mounted DOM Audio Outputs for Two-Way Cloudflare SFU Party Voice (strict self-echo filter) */}
         <div className="fixed left-0 bottom-0 w-2 h-2 opacity-0 pointer-events-none overflow-hidden">
           {remotePartyStreams
@@ -1920,6 +1948,14 @@ export const PartyRoomsScreen: React.FC = () => {
               <Palette className="w-3.5 h-3.5 text-[#EC4899]" />
             </button>}
 
+            {/* Refresh Party Room & Voice */}
+            <RefreshScopeButton
+              scope="party_room"
+              compact
+              className="w-8 h-8 bg-[#180C2E]"
+              title="Refresh Party Room & Voice"
+            />
+
             {/* Share Broadcast Button */}
             <button
               onClick={() => setShowShareModal(true)}
@@ -1984,7 +2020,7 @@ export const PartyRoomsScreen: React.FC = () => {
               <button
                 onClick={() => {
                   setPartyVoiceError(null);
-                  setPartyVoiceRetryToken((prev) => prev + 1);
+                  void refreshScope('party_room');
                 }}
                 className="text-amber-300 hover:text-white font-bold cursor-pointer"
               >

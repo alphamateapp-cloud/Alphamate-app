@@ -1,5 +1,6 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import { User } from '../types';
 import { searchAllRealUsers } from '../services/userDirectoryService';
 import { UserBadgeStrip } from '../components/badges/UserBadgeIcon';
@@ -26,7 +27,10 @@ export const SearchScreen: React.FC = () => {
     openPublicUserProfile,
     startDirectMessage,
     navigateBack,
+    refreshScope,
+    userSyncRefreshEpoch,
   } = useApp();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [query, setQuery] = useState('');
   const [directoryTab, setDirectoryTab] = useState<'all' | 'followers' | 'following'>('all');
@@ -60,7 +64,7 @@ export const SearchScreen: React.FC = () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, realUsers, currentUser.id]);
+  }, [query, realUsers, currentUser.id, userSyncRefreshEpoch]);
 
   const displayedUsers = useMemo(() => {
     const base =
@@ -94,10 +98,18 @@ export const SearchScreen: React.FC = () => {
   };
 
   return (
-    <div className="relative w-full h-full min-h-screen pb-24 bg-[#09070F] text-white overflow-y-auto">
+    <div
+      ref={scrollContainerRef}
+      className="relative w-full h-full min-h-screen pb-24 bg-[#09070F] text-white overflow-y-auto"
+    >
+      <PullToRefresh
+        scrollContainerRef={scrollContainerRef}
+        label="Refreshing directory..."
+        onRefresh={() => refreshScope('search')}
+      />
       {/* Top Search Header */}
       <div className="sticky top-0 z-30 w-full bg-[#09070F]/95 backdrop-blur-md border-b border-[#A855F7]/20 px-4 py-3 space-y-3">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
           <button
             type="button"
             onClick={navigateBack}
@@ -128,6 +140,8 @@ export const SearchScreen: React.FC = () => {
               </button>
             )}
           </div>
+
+          <RefreshScopeButton scope="search" compact className="w-9 h-9 shrink-0" title="Refresh user directory" />
         </div>
 
         {/* Directory Filter Bar */}

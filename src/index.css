@@ -10,6 +10,11 @@
   --color-brand-card: #140F24;
 }
 
+html,
+body {
+  overscroll-behavior-y: contain;
+}
+
 body {
   font-family: var(--font-sans);
   background-color: #09070F;

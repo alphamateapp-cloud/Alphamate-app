@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import { VIRTUAL_GIFTS } from '../data/mockData';
 import { Gift } from '../types';
 import {
@@ -87,6 +88,8 @@ export const LiveStreamScreen: React.FC = () => {
     setCurrentScreen,
     startDirectMessage,
     sendNotificationToUser,
+    refreshScope,
+    liveRefreshTick,
   } = useApp();
 
   // Role perspective: Host or Viewer (only actual stream owner can be host)
@@ -365,6 +368,8 @@ export const LiveStreamScreen: React.FC = () => {
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const subscribedSfuKeyRef = useRef<string | null>(null);
+  const liveRootRef = useRef<HTMLDivElement>(null);
+  const lastHandledRefreshTickRef = useRef<number>(liveRefreshTick);
   const lastTapRef = useRef<number>(0);
   const lastHeartSentAtRef = useRef<number>(0);
 
@@ -512,7 +517,7 @@ export const LiveStreamScreen: React.FC = () => {
       realtimeSocket.leaveRoom('live', streamId);
       leaveLiveStreamViewer(streamId, uid).catch(() => {});
     };
-  }, [activeStream?.id, currentUser.id, isHost]);
+  }, [activeStream?.id, currentUser.id, isHost, liveRefreshTick]);
 
   const realViewersList: User[] = useMemo(() => {
     if (!activeStream) return [];
@@ -570,7 +575,7 @@ export const LiveStreamScreen: React.FC = () => {
       }
     }, (e) => console.warn('[Live heart events]', e));
     return () => { offCount(); offEvents(); };
-  }, [activeStream?.id]);
+  }, [activeStream?.id, liveRefreshTick]);
 
   // =========================================================================
   // STRICT CLOUDFLARE REALTIME SFU PIPELINE: HOST PUBLISHING VS VIEWER SUBSCRIPTION
@@ -876,6 +881,22 @@ export const LiveStreamScreen: React.FC = () => {
     showToast('Host Audio Playing 🔊');
   };
 
+  // Trigger scoped SFU & media recovery when user refreshes the active Live Broadcast
+  useEffect(() => {
+    if (liveRefreshTick <= 0 || liveRefreshTick === lastHandledRefreshTickRef.current) return;
+    lastHandledRefreshTickRef.current = liveRefreshTick;
+    if (!activeStream?.id) return;
+
+    setStreamError(null);
+    setStreamStatus('connecting');
+    subscribedSfuKeyRef.current = null;
+    setRetryToken((n) => n + 1);
+    if (activeRole === 'viewer' && !isRemoteAudioMuted) {
+      remoteAudioRef.current?.play().then(() => setAutoplayBlocked(false)).catch(() => {});
+    }
+    showToast('Broadcast & network refreshed');
+  }, [liveRefreshTick, activeStream?.id, activeRole, isRemoteAudioMuted]);
+
   // Auto-scroll comments feed
   useEffect(() => {
     commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -961,7 +982,7 @@ export const LiveStreamScreen: React.FC = () => {
     return () => {
       unsubscribe();
     };
-  }, [activeStream?.id]);
+  }, [activeStream?.id, liveRefreshTick]);
 
   const handleSendComment = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1121,6 +1142,7 @@ export const LiveStreamScreen: React.FC = () => {
 
   return (
     <div
+      ref={liveRootRef}
       onDoubleClick={(e) => {
         if (activeRole === 'viewer' && remoteVideoRef.current) remoteVideoRef.current.play().catch(() => {});
         if (activeRole === 'viewer' && remoteAudioRef.current && !isRemoteAudioMuted) {
@@ -1136,6 +1158,11 @@ export const LiveStreamScreen: React.FC = () => {
       onTouchStart={handleScreenTouchOrClick}
       className="relative w-full h-full h-[100dvh] max-h-[100dvh] bg-black text-white overflow-hidden flex flex-col justify-between select-none"
     >
+      <PullToRefresh
+        scrollContainerRef={liveRootRef}
+        label="Refreshing broadcast..."
+        onRefresh={() => refreshScope('live_stream')}
+      />
       {/* Dedicated remote audio output. The video element stays muted to avoid duplicate playback. */}
       {activeRole === 'viewer' && (
         <audio
@@ -1281,7 +1308,7 @@ export const LiveStreamScreen: React.FC = () => {
                 onClick={() => {
                   setStreamStatus('connecting');
                   setStreamError(null);
-                  setRetryToken((n) => n + 1);
+                  void refreshScope('live_stream');
                 }}
                 className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold cursor-pointer"
               >
@@ -1431,6 +1458,14 @@ export const LiveStreamScreen: React.FC = () => {
               <span className="hidden xs:inline">{activeRole === 'host' ? 'Host' : 'Viewer'}</span>
             </button>
           )}
+
+          {/* Scoped Broadcast Refresh Button (never closes broadcast) */}
+          <RefreshScopeButton
+            scope="live_stream"
+            compact
+            className="w-7 h-7"
+            title="Refresh Broadcast & Network"
+          />
 
           {/* Close Live Button */}
           <button

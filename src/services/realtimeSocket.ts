@@ -133,6 +133,29 @@ class RealtimeSocketService {
     this.isConnecting = false;
   }
 
+  public async forceReconnect(): Promise<void> {
+    if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return;
+    if (!auth.currentUser) return;
+    this.manuallyDisconnected = false;
+    this.reconnectAttempts = 0;
+    this.clearTimers();
+    if (this.ws) {
+      try {
+        this.ws.onopen = null;
+        this.ws.onmessage = null;
+        this.ws.onerror = null;
+        this.ws.onclose = null;
+        this.ws.close();
+      } catch {
+        // ignore
+      }
+      this.ws = null;
+    }
+    this.isAuthed = false;
+    this.isConnecting = false;
+    await this.connectInternal().catch(() => {});
+  }
+
   private clearTimers(): void {
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh } from '../components/common/PullToRefresh';
 import {
   ArrowLeft,
   Bell,
@@ -44,7 +45,9 @@ export const NotificationsScreen: React.FC = () => {
     openLiveStream,
     partyRooms,
     openPartyRoom,
+    refreshScope,
   } = useApp();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [activeFilter, setActiveFilter] = useState<FeedFilter>('all');
   const [showInlineCategories, setShowInlineCategories] = useState<boolean>(
@@ -202,7 +205,15 @@ export const NotificationsScreen: React.FC = () => {
   ).length;
 
   return (
-    <div className="relative w-full h-full min-h-screen pb-24 bg-[#09070F] text-white overflow-y-auto">
+    <div
+      ref={scrollContainerRef}
+      className="relative w-full h-full min-h-screen pb-24 bg-[#09070F] text-white overflow-y-auto"
+    >
+      <PullToRefresh
+        scrollContainerRef={scrollContainerRef}
+        label="Refreshing notifications..."
+        onRefresh={() => refreshScope('notifications')}
+      />
       {/* Header */}
       <div className="sticky top-0 z-30 w-full bg-[#09070F]/90 backdrop-blur-md border-b border-[#A855F7]/15 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">

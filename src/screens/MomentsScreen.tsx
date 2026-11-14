@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh } from '../components/common/PullToRefresh';
 import { VideoPost, Gift, FriendStory } from '../types';
 import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
@@ -62,6 +63,7 @@ export const MomentsScreen: React.FC = () => {
     liveStreams,
     openLiveStream,
     sendNotificationToUser,
+    refreshScope,
   } = useApp();
 
   const [showCreateStoryModal, setShowCreateStoryModal] = useState<boolean>(false);
@@ -405,6 +407,11 @@ export const MomentsScreen: React.FC = () => {
         ref={containerRef}
         className="w-full h-full overflow-y-scroll snap-y snap-mandatory scrollbar-none"
       >
+        <PullToRefresh
+          scrollContainerRef={containerRef}
+          label="Refreshing Moments..."
+          onRefresh={() => refreshScope('moments')}
+        />
         {filteredVideos.length === 0 ? (
           <div className="w-full h-full flex flex-col items-center justify-center p-6 text-center text-zinc-400 bg-[#09070F]">
             <span className="text-4xl mb-3">

@@ -16,6 +16,7 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  enableNetwork,
   doc,
   getDoc,
   getDocFromServer,
@@ -1706,3 +1707,58 @@ export function subscribeToGiftTransactions(
     unsubReceived();
   };
 }
+
+// =========================================================================
+// SCOPED NETWORK RECOVERY & SERVER SNAPSHOT HELPERS
+// =========================================================================
+export async function recoverFirestoreNetwork(): Promise<{ online: boolean; error?: string }> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return { online: false, error: 'You appear to be offline. Please check your internet connection.' };
+  }
+  try {
+    await enableNetwork(db).catch(() => {});
+    await withFirestoreTimeout(getDocFromServer(doc(db, 'test', 'connection')), 5500, 'Network connection check');
+    return { online: true };
+  } catch (err: any) {
+    const msg = String(err?.message || err || '').toLowerCase();
+    // If Firestore responded with permission-denied, the network connection to Firestore is genuinely alive!
+    if (msg.includes('permission') || msg.includes('missing or insufficient')) {
+      return { online: true };
+    }
+    if (msg.includes('offline') || msg.includes('timed out') || msg.includes('network') || msg.includes('unavailable')) {
+      return { online: false, error: 'Network unavailable. Please check your connection and pull again.' };
+    }
+    return { online: true };
+  }
+}
+
+export async function fetchLiveStreamFromServer(streamId: string): Promise<any | null> {
+  if (!streamId) return null;
+  try {
+    const snap = await withFirestoreTimeout(
+      getDocFromServer(doc(db, 'liveStreams', streamId)),
+      6000,
+      'Refresh live broadcast'
+    );
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...snap.data() };
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchPartyRoomFromServer(roomId: string): Promise<any | null> {
+  if (!roomId) return null;
+  try {
+    const snap = await withFirestoreTimeout(
+      getDocFromServer(doc(db, 'partyRooms', roomId)),
+      6000,
+      'Refresh party room'
+    );
+    if (!snap.exists()) return null;
+    return { id: snap.id, ...snap.data() };
+  } catch {
+    return null;
+  }
+}
+

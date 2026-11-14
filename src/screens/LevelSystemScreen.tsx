@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh } from '../components/common/PullToRefresh';
 import { VIP_TIER_CONFIGS, VipAvatarFrame, VipTierConfig } from '../components/brand/VipAvatarFrame';
 import {
   ALL_LEVELS_1_TO_100,
@@ -33,7 +34,8 @@ import {
 import { LevelBadgeIcon } from '../components/brand/LevelBadgeIcon';
 
 export const LevelSystemScreen: React.FC = () => {
-  const { currentUser, navigateBack, setCurrentScreen, updateUserProfile } = useApp();
+  const { currentUser, navigateBack, setCurrentScreen, updateUserProfile, refreshScope } = useApp();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [selectedTab, setSelectedTab] = useState<'levels' | 'vips' | 'tiers' | 'leaderboard'>('levels');
   const [tierFilter, setTierFilter] = useState<
@@ -100,7 +102,15 @@ export const LevelSystemScreen: React.FC = () => {
   ];
 
   return (
-    <div className="relative w-full h-full min-h-screen pb-32 bg-[#09070F] text-white overflow-y-auto">
+    <div
+      ref={scrollContainerRef}
+      className="relative w-full h-full min-h-screen pb-32 bg-[#09070F] text-white overflow-y-auto"
+    >
+      <PullToRefresh
+        scrollContainerRef={scrollContainerRef}
+        label="Refreshing levels..."
+        onRefresh={() => refreshScope('levels')}
+      />
       {/* Toast Alert */}
       {toastMessage && (
         <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-5 py-2.5 rounded-full bg-[#180E2C]/95 border border-[#A855F7]/40 text-white text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-bounce pointer-events-none">

@@ -1,5 +1,6 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { PullToRefresh } from './components/common/PullToRefresh';
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
 import { StatusBar, Style } from '@capacitor/status-bar';
@@ -64,7 +65,9 @@ const AppContent: React.FC = () => {
     firebaseUser,
     firebaseAuthLoading,
     isEmailVerified,
+    refreshScope,
   } = useApp();
+  const mainTabScrollRef = useRef<HTMLDivElement>(null);
 
   const isRestrictedLifecycleAccount = Boolean(
     firebaseUser &&
@@ -230,9 +233,21 @@ const AppContent: React.FC = () => {
   }
 
   // Main navigation tab views with fixed bottom navigation
+  const usesDedicatedPullToRefresh =
+    currentScreen === 'moments' || currentScreen === 'upload';
+
   return (
     <div className="relative w-full h-full max-h-[100dvh] bg-[#09070F] flex flex-col overflow-hidden">
-      <div className="flex-1 w-full overflow-y-auto overflow-x-hidden min-h-0 overscroll-contain">
+      <div
+        ref={mainTabScrollRef}
+        className="flex-1 w-full overflow-y-auto overflow-x-hidden min-h-0 overscroll-contain"
+      >
+        {!usesDedicatedPullToRefresh && (
+          <PullToRefresh
+            scrollContainerRef={mainTabScrollRef}
+            onRefresh={() => refreshScope()}
+          />
+        )}
         {currentScreen === 'home' && <HomeScreen />}
         {currentScreen === 'party' && <PartyRoomsScreen />}
         {currentScreen === 'moments' && <MomentsScreen />}

@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import {
   ArrowLeft,
   Coins,
@@ -40,7 +41,9 @@ export const WalletScreen: React.FC = () => {
     currentUser,
     giftTransactions,
     simulateDemoHostGift,
+    refreshScope,
   } = useApp();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [activeTab, setActiveTab] = useState<'recharge' | 'withdraw' | 'exchange' | 'history'>('recharge');
   const [historyFilter, setHistoryFilter] = useState<'all' | 'recharge' | 'withdrawal' | 'reward' | 'gift_received'>('all');
@@ -242,7 +245,15 @@ export const WalletScreen: React.FC = () => {
   });
 
   return (
-    <div className="relative w-full h-full min-h-screen pb-32 bg-[#09070F] text-white overflow-y-auto select-none">
+    <div
+      ref={scrollContainerRef}
+      className="relative w-full h-full min-h-screen pb-32 bg-[#09070F] text-white overflow-y-auto select-none"
+    >
+      <PullToRefresh
+        scrollContainerRef={scrollContainerRef}
+        label="Refreshing wallet..."
+        onRefresh={() => refreshScope('wallet')}
+      />
       {/* Toast Feedback */}
       {toastMessage && (
         <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-[#1E0F36]/95 border border-[#A855F7]/40 text-white text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-bounce">
@@ -267,6 +278,7 @@ export const WalletScreen: React.FC = () => {
         </div>
 
         <div className="flex items-center gap-1.5">
+          <RefreshScopeButton scope="wallet" compact title="Refresh wallet balances" />
           <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-[10px] text-emerald-300 font-bold">
             <ShieldCheck className="w-3.5 h-3.5" />
             <span>256-Bit SSL</span>

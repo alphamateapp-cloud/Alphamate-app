@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import {
   ChevronLeft,
   Coins,
@@ -36,6 +36,7 @@ import {
   X,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh } from '../components/common/PullToRefresh';
 import { SendCoinsModal } from '../components/agency/SendCoinsModal';
 import { AgencyOrderDetailsModal } from '../components/agency/AgencyOrderDetailsModal';
 import { AgencyPinSetupModal } from '../components/agency/AgencyPinSetupModal';
@@ -62,7 +63,9 @@ export const AgencyManagementScreen: React.FC = () => {
     rejectHostJoinRequest,
     removeHostFromAgency,
     updateHostAgencyProfile,
+    refreshScope,
   } = useApp();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Branch Selection: 'coin_seller' vs 'host_agency'
   const [activeBranch, setActiveBranch] = useState<'coin_seller' | 'host_agency'>('coin_seller');
@@ -389,7 +392,15 @@ export const AgencyManagementScreen: React.FC = () => {
       </div>
 
       {/* Scrollable Container */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 px-4 py-4 space-y-4 scrollbar-none">
+      <div
+        ref={scrollContainerRef}
+        className="flex-1 overflow-y-auto overflow-x-hidden min-h-0 px-4 py-4 space-y-4 scrollbar-none"
+      >
+        <PullToRefresh
+          scrollContainerRef={scrollContainerRef}
+          label="Refreshing agency data..."
+          onRefresh={() => refreshScope('agency_management')}
+        />
         {activeBranch === 'host_agency' ? (
           /* =========================================================================
              BRANCH 2: HOST AGENCY (TALENT ROSTER, WEEKLY TARGETS, COMMISSION & REQUESTS)

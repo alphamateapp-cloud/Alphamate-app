@@ -15,6 +15,7 @@ import {
   ArrowUpRight,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { PullToRefresh, RefreshScopeButton } from '../common/PullToRefresh';
 import {
   LeaderboardMetric,
   LeaderboardMonthView,
@@ -327,6 +328,7 @@ export const GlobalWeeklyLeaderboardModal: React.FC = () => {
     previousMonthLocalOverrides,
     loadPreviousMonthLeaderboard,
     userHistoricalStats,
+    refreshScope,
   } = useApp();
 
   const [scope, setScope] = useState<LeaderboardScope>(leaderboardInitialScope);
@@ -456,14 +458,17 @@ export const GlobalWeeklyLeaderboardModal: React.FC = () => {
               </div>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setShowLeaderboardModal(false)}
-              aria-label="Close leaderboard"
-              className="w-11 h-11 rounded-2xl bg-white/5 hover:bg-white/15 border border-white/10 flex items-center justify-center text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <RefreshScopeButton scope="leaderboard" compact className="w-11 h-11 rounded-2xl" title="Refresh rankings" />
+              <button
+                type="button"
+                onClick={() => setShowLeaderboardModal(false)}
+                aria-label="Close leaderboard"
+                className="w-11 h-11 rounded-2xl bg-white/5 hover:bg-white/15 border border-white/10 flex items-center justify-center text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
 
           {/* Primary Scope Toggle: Global (Monthly) vs Weekly + 1-Month Archive Toggle */}
@@ -593,6 +598,11 @@ export const GlobalWeeklyLeaderboardModal: React.FC = () => {
           ref={listContainerRef}
           className="flex-1 overflow-y-auto overscroll-contain px-4 py-3 space-y-3"
         >
+          <PullToRefresh
+            scrollContainerRef={listContainerRef}
+            label="Refreshing rankings..."
+            onRefresh={() => refreshScope('leaderboard')}
+          />
           {loadingPrevMonth ? (
             <div className="py-12 text-center text-xs text-zinc-400">
               Loading {formatMonthLabel(activeMonthKey)} rankings...

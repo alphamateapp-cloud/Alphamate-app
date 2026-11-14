@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh } from '../components/common/PullToRefresh';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
 import {
   ArrowLeft,
@@ -34,7 +35,9 @@ export const SettingsScreen: React.FC = () => {
     setActiveTab,
     setShowPushSettingsModal,
     notificationPreferences,
+    refreshScope,
   } = useApp();
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   const [streamQuality, setStreamQuality] = useState<'1080p' | '720p'>('1080p');
   const [selectedLanguage, setSelectedLanguage] = useState('English');
@@ -62,7 +65,15 @@ export const SettingsScreen: React.FC = () => {
   };
 
   return (
-    <div className="relative w-full h-full min-h-screen pb-24 bg-[#09070F] text-white overflow-y-auto">
+    <div
+      ref={scrollContainerRef}
+      className="relative w-full h-full min-h-screen pb-24 bg-[#09070F] text-white overflow-y-auto"
+    >
+      <PullToRefresh
+        scrollContainerRef={scrollContainerRef}
+        label="Refreshing settings..."
+        onRefresh={() => refreshScope('settings')}
+      />
       {/* Top Header */}
       <div className="sticky top-0 z-30 w-full bg-[#09070F]/85 backdrop-blur-md border-b border-[#A855F7]/15 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">

@@ -69,6 +69,9 @@ import {
   fetchBroadcastRecipientIds,
   executeSixtyFortyGiftTransaction,
   subscribeToGiftTransactions,
+  recoverFirestoreNetwork,
+  fetchLiveStreamFromServer,
+  fetchPartyRoomFromServer,
   SendNotificationParams,
   FirebaseUser,
 } from '../services/firebase';
@@ -110,6 +113,25 @@ import {
   setUserFollowStateFirestore,
 } from '../services/userDirectoryService';
 import { getOrCreateDirectChat } from '../services/chatService';
+
+export type RefreshScope =
+  | 'home'
+  | 'party'
+  | 'party_room'
+  | 'live_stream'
+  | 'moments'
+  | 'chat'
+  | 'search'
+  | 'profile'
+  | 'notifications'
+  | 'wallet'
+  | 'store'
+  | 'levels'
+  | 'settings'
+  | 'agency_management'
+  | 'leaderboard'
+  | 'pk_battle'
+  | 'upload';
 
 interface AppContextType {
   // Navigation & Screen state
@@ -339,6 +361,13 @@ interface AppContextType {
   searchQuery: string;
   setSearchQuery: (query: string) => void;
 
+  // Scoped Refresh & Network Recovery
+  refreshScope: (scope?: RefreshScope) => Promise<{ ok: boolean; message: string }>;
+  chatRefreshEpoch: number;
+  liveRefreshTick: number;
+  partyRefreshTick: number;
+  userSyncRefreshEpoch: number;
+
   // Device & Admin View
   deviceMode: 'mobile' | 'responsive' | 'admin';
   setDeviceMode: (mode: 'mobile' | 'responsive' | 'admin') => void;
@@ -438,6 +467,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     return [];
   });
+
+  // Per-scope refresh epochs (trigger targeted re-subscriptions without leaving active rooms/screens)
+  const [discoveryRefreshEpoch, setDiscoveryRefreshEpoch] = useState(0);
+  const [reelsRefreshEpoch, setReelsRefreshEpoch] = useState(0);
+  const [userSyncRefreshEpoch, setUserSyncRefreshEpoch] = useState(0);
+  const [chatRefreshEpoch, setChatRefreshEpoch] = useState(0);
+  const [leaderboardRefreshEpoch, setLeaderboardRefreshEpoch] = useState(0);
+  const [liveRefreshTick, setLiveRefreshTick] = useState(0);
+  const [partyRefreshTick, setPartyRefreshTick] = useState(0);
   const [realUsers, setRealUsers] = useState<User[]>([]);
   const [followingUserIds, setFollowingUserIds] = useState<string[]>([]);
   const [followerUserIds, setFollowerUserIds] = useState<string[]>([]);
@@ -801,7 +839,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       mergeAndPublishStreams();
     });
 
-    // Real-time Firestore Reels & Cloudflare R2 Feed Subscription
+    return () => {
+      unsubscribeWs();
+      unsubscribeRooms();
+      unsubscribeLiveStreams();
+    };
+  }, [firebaseUser?.uid, discoveryRefreshEpoch]);
+
+  // Real-time Firestore Reels & Cloudflare R2 Feed Subscription (independently refreshable for Moments)
+  useEffect(() => {
     const unsubscribeReels = subscribeToActiveReels((remoteReels: Reel[]) => {
       if (remoteReels && remoteReels.length > 0) {
         setVideos((prevLocal) => {
@@ -849,12 +895,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
 
     return () => {
-      unsubscribeWs();
-      unsubscribeRooms();
-      unsubscribeLiveStreams();
       unsubscribeReels();
     };
-  }, [firebaseUser?.uid]);
+  }, [firebaseUser?.uid, reelsRefreshEpoch]);
 
   // =========================================================================
   // GLOBAL & WEEKLY LEADERBOARD (MONTHLY REFRESH + 1-MONTH RETENTION)
@@ -916,7 +959,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       unsub();
     };
-  }, [firebaseUser?.uid, isEmailVerified, leaderboardMonthKey, leaderboardPreviousMonthKey]);
+  }, [firebaseUser?.uid, isEmailVerified, leaderboardMonthKey, leaderboardPreviousMonthKey, leaderboardRefreshEpoch]);
 
   // Active time-spent heartbeat (counts active minutes & handles automatic monthly/weekly resets)
   useEffect(() => {
@@ -1655,7 +1698,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubUsers();
       unsubFollows();
     };
-  }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified]);
+  }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified, userSyncRefreshEpoch]);
 
   const updateNotificationPreferences = async (prefs: NotificationPreferences) => {
     const uid =
@@ -4223,6 +4266,131 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const unreadNotificationsCount = notifications.filter((n) => !n.isRead).length;
 
+  // Automatic silent network recovery when device comes back online
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleOnline = () => {
+      recoverFirestoreNetwork().catch(() => {});
+      if (auth.currentUser) {
+        realtimeSocket.ensureConnected();
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, []);
+
+  // Context-aware scoped refresh: recovers stalled network/listeners for ONLY the active view/room
+  // without reloading the app, leaving an active Live Broadcast or Party Room, or dropping seats.
+  const refreshScope = async (
+    requestedScope?: RefreshScope
+  ): Promise<{ ok: boolean; message: string }> => {
+    const inferredScope: RefreshScope =
+      requestedScope ||
+      (activeStream && currentScreen === 'live_stream'
+        ? 'live_stream'
+        : activePartyRoom
+        ? 'party_room'
+        : (currentScreen as RefreshScope) || 'home');
+
+    const net = await recoverFirestoreNetwork();
+    if (!net.online) {
+      return {
+        ok: false,
+        message: net.error || 'No internet connection. Check your network and retry.',
+      };
+    }
+
+    if (auth.currentUser) {
+      await realtimeSocket.forceReconnect().catch(() => {});
+    }
+
+    const refreshUserProfileFromServer = async () => {
+      const uid = auth.currentUser?.uid || firebaseUser?.uid;
+      if (!uid) return;
+      try {
+        const remote = await getUserProfileFromFirestore(uid);
+        if (!remote) return;
+        if (typeof remote.coins === 'number') setCoins(remote.coins);
+        if (typeof remote.diamonds === 'number') setDiamonds(remote.diamonds);
+        if (typeof remote.heldDiamonds === 'number') setHeldDiamonds(remote.heldDiamonds);
+        setCurrentUser((prev) => ({
+          ...prev,
+          ...remote,
+          id: uid,
+        }));
+      } catch {
+        // ignore transient errors; listener epoch still rebinds
+      }
+    };
+
+    switch (inferredScope) {
+      case 'live_stream': {
+        if (activeStream?.id) {
+          const freshStream = await fetchLiveStreamFromServer(activeStream.id);
+          if (freshStream && freshStream.isActive !== false) {
+            setActiveStream((prev) => (prev && prev.id === freshStream.id ? { ...prev, ...freshStream } : prev));
+          }
+        }
+        setLiveRefreshTick((n) => n + 1);
+        setDiscoveryRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'Live broadcast refreshed' };
+      }
+      case 'party_room': {
+        if (activePartyRoom?.id) {
+          const freshRoom = await fetchPartyRoomFromServer(activePartyRoom.id);
+          if (freshRoom && freshRoom.isActive !== false) {
+            setActivePartyRoom((prev) => (prev && prev.id === freshRoom.id ? { ...prev, ...freshRoom } : prev));
+          }
+        }
+        setPartyRefreshTick((n) => n + 1);
+        setDiscoveryRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'Party room refreshed' };
+      }
+      case 'party': {
+        setDiscoveryRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'Party rooms updated' };
+      }
+      case 'moments': {
+        setReelsRefreshEpoch((n) => n + 1);
+        setUserSyncRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'Moments feed refreshed' };
+      }
+      case 'chat': {
+        setChatRefreshEpoch((n) => n + 1);
+        setUserSyncRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'Chats synced' };
+      }
+      case 'search': {
+        setUserSyncRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'User directory refreshed' };
+      }
+      case 'leaderboard': {
+        setLeaderboardRefreshEpoch((n) => n + 1);
+        await loadPreviousMonthLeaderboard().catch(() => {});
+        return { ok: true, message: 'Leaderboard updated' };
+      }
+      case 'profile':
+      case 'wallet':
+      case 'notifications':
+      case 'store':
+      case 'levels':
+      case 'settings':
+      case 'agency_management': {
+        await refreshUserProfileFromServer();
+        setUserSyncRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'Account & network refreshed' };
+      }
+      case 'home':
+      default: {
+        await refreshUserProfileFromServer();
+        setDiscoveryRefreshEpoch((n) => n + 1);
+        setReelsRefreshEpoch((n) => n + 1);
+        setUserSyncRefreshEpoch((n) => n + 1);
+        return { ok: true, message: 'Home feed refreshed' };
+      }
+    }
+  };
+
   return (
     <AppContext.Provider
       value={{
@@ -4355,6 +4523,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         closePublicUserProfile,
         searchQuery,
         setSearchQuery,
+        refreshScope,
+        chatRefreshEpoch,
+        liveRefreshTick,
+        partyRefreshTick,
+        userSyncRefreshEpoch,
         deviceMode,
         setDeviceMode,
         customLogoUrl,

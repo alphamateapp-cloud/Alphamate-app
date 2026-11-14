@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
+import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import {
   acceptChatRequest,
   rejectOrBlockChatRequest,
@@ -73,6 +74,9 @@ export const ChatScreen: React.FC = () => {
     toggleFollowUser,
     openPublicUserProfile,
     sendNotificationToUser,
+    refreshScope,
+    chatRefreshEpoch,
+    userSyncRefreshEpoch,
   } = useApp();
 
   const [toastMsg, setToastMsg] = useState<string | null>(null);
@@ -108,6 +112,7 @@ export const ChatScreen: React.FC = () => {
   const cameraRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLElement>(null);
 
   const directoryUsers = useMemo(
     () => (realUsers.length > 0 ? realUsers : registeredUsers).filter((u) => u.id !== currentUser.id),
@@ -181,7 +186,7 @@ export const ChatScreen: React.FC = () => {
       window.removeEventListener('pagehide', handleOffline);
       setChatPresence(false).catch(() => {});
     };
-  }, [currentUser.id]);
+  }, [currentUser.id, chatRefreshEpoch]);
 
   // Real-time Firestore messages listener for active conversation
   useEffect(() => {
@@ -232,7 +237,7 @@ export const ChatScreen: React.FC = () => {
         )
       );
     });
-  }, [activeConversation?.id, firebaseChats.length, currentUser.id]);
+  }, [activeConversation?.id, firebaseChats.length, currentUser.id, chatRefreshEpoch]);
 
   // Scroll to bottom when active messages update (real-time or local)
   const activeMessagesCount = activeConversation
@@ -312,7 +317,7 @@ export const ChatScreen: React.FC = () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, showSearch, currentUser.id, directoryUsers]);
+  }, [query, showSearch, currentUser.id, directoryUsers, userSyncRefreshEpoch]);
 
   // Open or create a real-time Firestore chat with any registered user
   const openUser = async (user: User) => {
@@ -631,6 +636,7 @@ export const ChatScreen: React.FC = () => {
             >
               <Video size={20} />
             </button>
+            <RefreshScopeButton scope="chat" compact className="w-9 h-9" title="Refresh chat messages" />
             <button
               onClick={() => setShowAttach((v) => !v)}
               className="rounded-full p-2 text-zinc-300 cursor-pointer"
@@ -658,7 +664,15 @@ export const ChatScreen: React.FC = () => {
           </div>
         )}
 
-        <main className="flex-1 space-y-3 overflow-y-auto bg-[radial-gradient(ellipse_at_top,_#291044_0%,_#10091c_42%,_#090510_100%)] px-3 py-4">
+        <main
+          ref={messagesScrollRef}
+          className="flex-1 space-y-3 overflow-y-auto bg-[radial-gradient(ellipse_at_top,_#291044_0%,_#10091c_42%,_#090510_100%)] px-3 py-4"
+        >
+          <PullToRefresh
+            scrollContainerRef={messagesScrollRef}
+            label="Refreshing messages..."
+            onRefresh={() => refreshScope('chat')}
+          />
           <div className="mx-auto w-fit rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[10px] text-zinc-400">
             Today · Alpha Mate Real-Time Chat
           </div>
@@ -884,31 +898,37 @@ export const ChatScreen: React.FC = () => {
   return (
     <div className="min-h-full bg-[#090510] pb-28 text-white">
       <header className="sticky top-0 z-10 border-b border-purple-500/15 bg-[#10091d]/95 px-4 pb-3 pt-[max(16px,env(safe-area-inset-top))] backdrop-blur-xl">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-black tracking-tight">Chats</h1>
-            <p className="mt-0.5 text-[11px] text-zinc-500">Real-time conversations &amp; user search</p>
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <h1 className="text-2xl font-black tracking-tight">Chats</h1>
+              <p className="mt-0.5 text-[11px] text-zinc-500">Real-time conversations &amp; user search</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <RefreshScopeButton
+                scope="chat"
+                compact
+                className="h-11 w-11 border-purple-400/20 bg-purple-500/10 text-purple-200"
+                title="Refresh chats"
+              />
+              <button
+                onClick={() => {
+                  setShowSearch((prev) => !prev);
+                  setQuery('');
+                }}
+                className="rounded-full border border-purple-400/20 bg-purple-500/10 p-3 text-purple-200 cursor-pointer"
+                title="Search users and chats"
+              >
+                <Search size={19} />
+              </button>
+              <button
+                onClick={() => setShowNew(true)}
+                className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white shadow-lg shadow-purple-900/30 cursor-pointer"
+                title="New conversation"
+              >
+                <Plus size={19} />
+              </button>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                setShowSearch((prev) => !prev);
-                setQuery('');
-              }}
-              className="rounded-full border border-purple-400/20 bg-purple-500/10 p-3 text-purple-200 cursor-pointer"
-              title="Search users and chats"
-            >
-              <Search size={19} />
-            </button>
-            <button
-              onClick={() => setShowNew(true)}
-              className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white shadow-lg shadow-purple-900/30 cursor-pointer"
-              title="New conversation"
-            >
-              <Plus size={19} />
-            </button>
-          </div>
-        </div>
 
         {showSearch && (
           <div className="mb-3 flex items-center gap-2 rounded-2xl border border-purple-400/30 bg-[#21152f] px-3">
