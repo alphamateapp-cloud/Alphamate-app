@@ -166,3 +166,4 @@ Only public certificate fingerprints are printed. The keystore file, passwords,
 private key material, and repository secrets are never printed or uploaded as artifacts.
 After adding fingerprints, download the refreshed `google-services.json`, replace
 `android/app/google-services.json`, and build again.
+\n\nThe SHA fingerprint step uses the existing ALPHAMATE_STORE_PASSWORD and ALPHAMATE_KEY_ALIAS repository secrets explicitly. It reads only the public certificate details with keytool and prints SHA-1/SHA-256 to the Actions log and run summary. It does not print passwords or private key material.\n

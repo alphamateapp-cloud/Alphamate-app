@@ -132,14 +132,19 @@ jobs:
 
       - name: Print Release Signing Certificate SHA Fingerprints
         shell: bash
+        env:
+          STORE_PASSWORD: ${{ secrets.ALPHAMATE_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ALPHAMATE_KEY_ALIAS }}
         run: |
           set -euo pipefail
-          CERT_INFO=$(keytool -list -v \\
-            -keystore android/app/release-key.jks \\
-            -storepass "$ANDROID_KEYSTORE_PASSWORD" \\
-            -alias "$ANDROID_KEY_ALIAS" 2>/dev/null)
-          SHA1=$(printf '%s\\n' "$CERT_INFO" | awk -F': ' '/SHA1:|SHA-1:/ {print $2; exit}')
-          SHA256=$(printf '%s\\n' "$CERT_INFO" | awk -F': ' '/SHA256:|SHA-256:/ {print $2; exit}')
+          KEYSTORE_PATH="android/app/release-key.jks"
+          if [[ ! -f "$KEYSTORE_PATH" ]]; then
+            echo "::error::Release keystore file not found at $KEYSTORE_PATH"
+            exit 1
+          fi
+          CERT_INFO="$(keytool -list -v -keystore "$KEYSTORE_PATH" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS")"
+          SHA1="$(printf '%s\n' "$CERT_INFO" | awk -F': ' '/SHA1:|SHA-1:/ {print $2; exit}')"
+          SHA256="$(printf '%s\n' "$CERT_INFO" | awk -F': ' '/SHA256:|SHA-256:/ {print $2; exit}')"
           if [[ -z "$SHA1" || -z "$SHA256" ]]; then
             echo "::error::Could not extract SHA-1 and SHA-256 from the release signing certificate."
             exit 1
@@ -147,8 +152,8 @@ jobs:
           {
             echo "## Alpha Mate Android release certificate"
             echo
-            echo "- **SHA-1:** \\`$SHA1\\`"
-            echo "- **SHA-256:** \\`$SHA256\\`"
+            echo "- SHA-1: $SHA1"
+            echo "- SHA-256: $SHA256"
           } >> "$GITHUB_STEP_SUMMARY"
           echo "Release signing certificate SHA-1: $SHA1"
           echo "Release signing certificate SHA-256: $SHA256"
