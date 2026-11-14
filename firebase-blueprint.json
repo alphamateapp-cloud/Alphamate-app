@@ -335,12 +335,34 @@
         "updatedAt",
         "updatedAtMs"
       ]
+    },
+    "UserFollowEdge": {
+      "title": "UserFollowEdge",
+      "description": "Real-time bidirectional follow/follow-back social graph edge keyed by followerId_targetId",
+      "type": "object",
+      "properties": {
+        "followerId": { "type": "string", "maxLength": 128 },
+        "targetId": { "type": "string", "maxLength": 128 },
+        "followerName": { "type": "string", "maxLength": 128 },
+        "followerUsername": { "type": "string", "maxLength": 64 },
+        "followerAvatar": { "type": "string", "maxLength": 1024 },
+        "targetName": { "type": "string", "maxLength": 128 },
+        "targetUsername": { "type": "string", "maxLength": 64 },
+        "targetAvatar": { "type": "string", "maxLength": 1024 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" }
+      },
+      "required": ["followerId", "targetId", "createdAt", "createdAtMs"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
       "description": "User profile documents keyed by Firebase auth UID"
+    },
+    "/userFollows/{edgeId}": {
+      "schema": "UserFollowEdge",
+      "description": "Real-time user follow and follow-back relationship documents"
     },
     "/users/{userId}/badgeStats/{docId}": {
       "schema": "UserBadgeStats",

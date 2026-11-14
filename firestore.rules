@@ -222,6 +222,31 @@ service cloud.firestore {
       }
     }
 
+    function isValidFollowEdge(data, edgeId) {
+      return data.keys().hasOnly([
+        'followerId', 'targetId', 'followerName', 'followerUsername', 'followerAvatar',
+        'targetName', 'targetUsername', 'targetAvatar', 'createdAt', 'createdAtMs'
+      ])
+      && isNonEmptyString(data.followerId, 1, 128)
+      && isNonEmptyString(data.targetId, 1, 128)
+      && data.followerId == request.auth.uid
+      && data.targetId != request.auth.uid
+      && edgeId == (data.followerId + '_' + data.targetId)
+      && data.createdAtMs is number;
+    }
+
+    // Real-time bidirectional Follow / Follow Back edges
+    match /userFollows/{edgeId} {
+      allow get, list: if isSignedIn();
+      allow create: if isSignedIn()
+        && isValidId(edgeId)
+        && isValidFollowEdge(request.resource.data, edgeId);
+      allow update: if false;
+      allow delete: if isSignedIn()
+        && isValidId(edgeId)
+        && resource.data.followerId == request.auth.uid;
+    }
+
     // Immutable 60/40 Gifting Ledger (60% Host Diamonds, 40% App Revenue Share)
     match /giftTransactions/{txId} {
       allow get: if isValidId(txId)

@@ -755,17 +755,11 @@ export function buildMergedLeaderboardList(options: {
     isCurrentMonth,
   } = options;
 
-  const baseRoster = generateMonthlyBaseRoster(monthKey, currentWeekKey, MIN_LEADERBOARD_USERS);
   const byUid = new Map<string, LeaderboardEntry>();
 
-  // 1. Seed deterministic 108-user monthly community baseline
-  baseRoster.forEach((item) => {
-    byUid.set(item.uid, item);
-  });
-
-  // 2. Overlay local persisted updates for this month
+  // 1. Seed persisted local overrides for this month (real active user / received gifts)
   Object.values(localOverrides || {}).forEach((loc) => {
-    if (!loc?.uid) return;
+    if (!loc?.uid || loc.uid.startsWith('lb_member_')) return;
     const prev = byUid.get(loc.uid);
     if (!prev) {
       byUid.set(loc.uid, loc);

@@ -66,7 +66,7 @@ jobs:
           ./gradlew --stop || true
           ./gradlew --no-daemon assembleDebug --stacktrace
 
-      - name: Decode Android Signing Keystore
+      - name: Prepare Android Signing Keystore
         env:
           SECRETS_JSON: ${{ toJSON(secrets) }}
           VARS_JSON: ${{ toJSON(vars) }}
@@ -144,58 +144,59 @@ jobs:
               ", key_password=" + (keyPwMatch ? keyPwMatch.key : "missing")
             );
 
-            if (b64Match && ksPwMatch) {
-              const cleaned = b64Match.val.replace(/[\s"\x27]/g, "").replace(/-/g, "+").replace(/_/g, "/");
-              const buf = Buffer.from(cleaned, "base64");
-              if (!buf.length) {
-                console.error("::error::Decoded android/app/release-key.jks is empty. Verify your base64 keystore secret (" + b64Match.key + ").");
+            const envFile = process.env.GITHUB_ENV;
+            const summaryFile = process.env.GITHUB_STEP_SUMMARY;
+            const writeEnv = (lines) => fs.appendFileSync(envFile, lines.join("\n") + "\n");
+
+            const hasOfficialSecrets = Boolean(b64Match && ksPwMatch) ||
+              (fs.existsSync("android/release-key.jks") && Boolean(ksPwMatch)) ||
+              (fs.existsSync("android/app/release-key.jks") && Boolean(ksPwMatch));
+
+            if (hasOfficialSecrets) {
+              if (b64Match && ksPwMatch) {
+                const cleaned = b64Match.val.replace(/[\s"\x27]/g, "").replace(/-/g, "+").replace(/_/g, "/");
+                const buf = Buffer.from(cleaned, "base64");
+                if (!buf.length) {
+                  console.error("::error::Decoded android/app/release-key.jks is empty. Verify your base64 keystore secret (" + b64Match.key + ").");
+                  process.exit(1);
+                }
+                fs.writeFileSync("android/app/release-key.jks", buf);
+              } else if (fs.existsSync("android/release-key.jks")) {
+                fs.copyFileSync("android/release-key.jks", "android/app/release-key.jks");
+              }
+
+              const ksPassword = ksPwMatch.val;
+              const kAlias = aliasMatch ? aliasMatch.val.trim() : "";
+              const keyPassword = (keyPwMatch ? keyPwMatch.val : "") || ksPassword;
+
+              console.log("::add-mask::" + ksPassword);
+              console.log("::add-mask::" + keyPassword);
+
+              let detectedAlias = "";
+              try {
+                const listOut = execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword], { encoding: "utf8" });
+                const line = listOut.split(/\r?\n/).find(l => l.includes("PrivateKeyEntry"));
+                if (line) detectedAlias = line.split(",")[0].trim();
+              } catch {}
+
+              let resolvedAlias = detectedAlias || kAlias || "alphamate";
+              if (kAlias) {
+                try {
+                  execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword, "-alias", kAlias], { stdio: "ignore" });
+                  resolvedAlias = kAlias;
+                } catch {}
+              }
+
+              try {
+                execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword, "-alias", resolvedAlias], { stdio: "inherit" });
+              } catch {
+                console.error("::error::Failed to open android/app/release-key.jks with alias " + resolvedAlias + ". Check keystore password and alias.");
                 process.exit(1);
               }
-              fs.writeFileSync("android/app/release-key.jks", buf);
-            } else if (fs.existsSync("android/release-key.jks") && ksPwMatch) {
-              fs.copyFileSync("android/release-key.jks", "android/app/release-key.jks");
-            } else if (fs.existsSync("android/app/release-key.jks") && ksPwMatch) {
-              console.log("Using existing android/app/release-key.jks.");
-            } else {
-              console.error("::error::Release signing secrets are not available to this GitHub Actions job (keystore_b64=" + Boolean(b64Match) + ", store_password=" + Boolean(ksPwMatch) + ", visible_repo_secrets=" + visibleSecretNames.length + "). Note: Debug APK was built above, but Play Store Release APK/AAB requires ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD in GitHub Settings -> Secrets and variables -> Actions -> Repository secrets (not Environment secrets).");
-              process.exit(1);
-            }
 
-            const ksPassword = ksPwMatch.val;
-            const kAlias = aliasMatch ? aliasMatch.val.trim() : "";
-            const keyPassword = (keyPwMatch ? keyPwMatch.val : "") || ksPassword;
-
-            console.log("::add-mask::" + ksPassword);
-            console.log("::add-mask::" + keyPassword);
-
-            let detectedAlias = "";
-            try {
-              const listOut = execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword], { encoding: "utf8" });
-              const line = listOut.split(/\r?\n/).find(l => l.includes("PrivateKeyEntry"));
-              if (line) detectedAlias = line.split(",")[0].trim();
-            } catch {}
-
-            let resolvedAlias = detectedAlias || kAlias || "alphamate";
-            if (kAlias) {
-              try {
-                execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword, "-alias", kAlias], { stdio: "ignore" });
-                resolvedAlias = kAlias;
-              } catch {}
-            }
-
-            try {
-              execFileSync("keytool", ["-list", "-keystore", "android/app/release-key.jks", "-storepass", ksPassword, "-alias", resolvedAlias], { stdio: "inherit" });
-            } catch {
-              console.error("::error::Failed to open android/app/release-key.jks with alias " + resolvedAlias + ". Check keystore password and alias.");
-              process.exit(1);
-            }
-
-            const envFile = process.env.GITHUB_ENV;
-            const ksMarker = "__AM_KS_" + Math.random().toString(36).slice(2) + "__";
-            const kpMarker = "__AM_KP_" + Math.random().toString(36).slice(2) + "__";
-            fs.appendFileSync(
-              envFile,
-              [
+              const ksMarker = "__AM_KS_" + Math.random().toString(36).slice(2) + "__";
+              const kpMarker = "__AM_KP_" + Math.random().toString(36).slice(2) + "__";
+              writeEnv([
                 "ANDROID_KEYSTORE_PATH=release-key.jks",
                 "ANDROID_KEYSTORE_PASSWORD<<" + ksMarker,
                 ksPassword,
@@ -205,10 +206,53 @@ jobs:
                 keyPassword,
                 kpMarker,
                 "SIGNED_RELEASE=true",
-                ""
-              ].join("\n")
-            );
-            console.log("Release signing configured cleanly with alias: " + resolvedAlias);
+                "PREVIEW_SIGNED=false"
+              ]);
+              console.log("Official Play Store release signing configured cleanly with alias: " + resolvedAlias);
+            } else {
+              console.warn("::warning::No Play Store keystore secrets (ANDROID_KEYSTORE_BASE64 & ANDROID_KEYSTORE_PASSWORD) found in GitHub Repository Secrets. Generating a temporary preview keystore for Release APK testing and skipping Play Store AAB.");
+              const previewPass = "AlphaMatePreviewKey2026!";
+              const previewAlias = "alphamate-preview";
+              if (fs.existsSync("android/app/release-key.jks")) {
+                fs.unlinkSync("android/app/release-key.jks");
+              }
+              execFileSync("keytool", [
+                "-genkeypair", "-v",
+                "-keystore", "android/app/release-key.jks",
+                "-storetype", "PKCS12",
+                "-keyalg", "RSA",
+                "-keysize", "2048",
+                "-validity", "365",
+                "-alias", previewAlias,
+                "-storepass", previewPass,
+                "-keypass", previewPass,
+                "-dname", "CN=Alpha Mate Live Party, OU=Mobile, O=Alpha Mate, L=Dubai, ST=Dubai, C=AE"
+              ], { stdio: "inherit" });
+
+              writeEnv([
+                "ANDROID_KEYSTORE_PATH=release-key.jks",
+                "ANDROID_KEYSTORE_PASSWORD=" + previewPass,
+                "ANDROID_KEY_ALIAS=" + previewAlias,
+                "ANDROID_KEY_PASSWORD=" + previewPass,
+                "SIGNED_RELEASE=false",
+                "PREVIEW_SIGNED=true"
+              ]);
+
+              if (summaryFile) {
+                fs.appendFileSync(
+                  summaryFile,
+                  [
+                    "### Android Build Summary (Preview Signing Mode)",
+                    "- **Debug APK (`alphamate-debug-apk`)**: Built & uploaded.",
+                    "- **Release APK (`alphamate-release-apk`)**: Built with a temporary preview signing certificate so you can install & test the APK immediately.",
+                    "- **Play Store AAB**: Skipped until permanent signing secrets are added.",
+                    "",
+                    "To generate a Google Play Store `.aab`, add `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` under **GitHub Repository -> Settings -> Secrets and variables -> Actions -> Repository secrets**.",
+                    ""
+                  ].join("\n")
+                );
+              }
+            }
           '
 
       - name: Build Release APK
@@ -217,6 +261,7 @@ jobs:
           ./gradlew --no-daemon assembleRelease --stacktrace
 
       - name: Build Android App Bundle (AAB)
+        if: env.SIGNED_RELEASE == 'true'
         run: |
           cd android
           ./gradlew --no-daemon bundleRelease --stacktrace
@@ -227,7 +272,7 @@ jobs:
           ls -la android/app/build/outputs/apk/debug/ || true
           ls -la android/app/build/outputs/apk/release/ || true
           ls -la android/app/build/outputs/bundle/release/ || true
-          if [ "${SIGNED_RELEASE}" = "true" ]; then
+          if [ "${SIGNED_RELEASE}" = "true" ] || [ "${PREVIEW_SIGNED}" = "true" ]; then
             if [ -f android/app/build/outputs/apk/release/app-release-unsigned.apk ]; then
               echo "::error::Unsigned release APK was generated instead of a signed release APK."
               exit 1
@@ -236,16 +281,18 @@ jobs:
               echo "::error::Expected signed android/app/build/outputs/apk/release/app-release.apk was not generated."
               exit 1
             fi
-            if [ ! -f android/app/build/outputs/bundle/release/app-release.aab ]; then
-              echo "::error::Expected signed android/app/build/outputs/bundle/release/app-release.aab was not generated."
-              exit 1
-            fi
             APKSIGNER_BIN=$(ls -d ${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)
             if [ -z "$APKSIGNER_BIN" ]; then
               echo "::error::apksigner was not found; cannot verify release APK signature."
               exit 1
             fi
             "$APKSIGNER_BIN" verify --verbose --print-certs android/app/build/outputs/apk/release/app-release.apk
+          fi
+          if [ "${SIGNED_RELEASE}" = "true" ]; then
+            if [ ! -f android/app/build/outputs/bundle/release/app-release.aab ]; then
+              echo "::error::Expected signed android/app/build/outputs/bundle/release/app-release.aab was not generated."
+              exit 1
+            fi
             AAB_VERIFY=$(jarsigner -verify -verbose -certs android/app/build/outputs/bundle/release/app-release.aab 2>&1)
             echo "$AAB_VERIFY"
             if ! echo "$AAB_VERIFY" | grep -q "jar verified."; then
@@ -278,7 +325,7 @@ jobs:
 
       - name: Upload Release AAB Artifact
         uses: actions/upload-artifact@v4
-        if: always()
+        if: env.SIGNED_RELEASE == 'true'
         with:
           name: alphamate-release-aab
           path: android/app/build/outputs/bundle/release/*.aab

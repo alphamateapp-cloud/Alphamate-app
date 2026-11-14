@@ -34,6 +34,9 @@ import {
   Edit3,
   Trash2,
   AlertTriangle,
+  Camera,
+  Image as ImageIcon,
+  Video,
 } from 'lucide-react';
 import { auth } from '../services/firebase';
 import { incrementReelViews, addReelComment, subscribeToReelComments } from '../services/reelsService';
@@ -45,6 +48,10 @@ export const MomentsScreen: React.FC = () => {
     deleteVideoPost,
     currentUser,
     setCurrentScreen,
+    openUploadScreen,
+    openPublicUserProfile,
+    followingUserIds,
+    toggleFollowUser,
     sendLiveGift,
     coins,
     friendStories,
@@ -58,21 +65,16 @@ export const MomentsScreen: React.FC = () => {
   } = useApp();
 
   const [showCreateStoryModal, setShowCreateStoryModal] = useState<boolean>(false);
+  const [showCreateMenuModal, setShowCreateMenuModal] = useState<boolean>(false);
   const [viewingStoryFriend, setViewingStoryFriend] = useState<FriendStory | null>(null);
   const [isViewingMyStory, setIsViewingMyStory] = useState<boolean>(false);
 
   // Active top navigation tab: FOR YOU | FOLLOWING | TRENDING | SAVED
   const [activeTab, setActiveTab] = useState<'FOR YOU' | 'FOLLOWING' | 'TRENDING' | 'SAVED'>('FOR YOU');
   const [isMuted, setIsMuted] = useState(true);
-  const [followingMap, setFollowingMap] = useState<Record<string, boolean>>({
-    host_01: true,
-  });
 
   // Saved Videos/Posts state (persisted in session)
-  const [savedVideoIds, setSavedVideoIds] = useState<Record<string, boolean>>({
-    vid_01: true,
-    vid_03: true,
-  });
+  const [savedVideoIds, setSavedVideoIds] = useState<Record<string, boolean>>({});
 
   // Video playback states
   const [isPlayingMap, setIsPlayingMap] = useState<Record<string, boolean>>({});
@@ -84,20 +86,9 @@ export const MomentsScreen: React.FC = () => {
 
   // Comments Sheet state
   const [showCommentsVideoId, setShowCommentsVideoId] = useState<string | null>(null);
-  const [commentsMap, setCommentsMap] = useState<Record<string, Array<{ id: string; user: string; text: string; time: string }>>>({
-    vid_01: [
-      { id: 'c1', user: 'Luna Star 🌙', text: 'Love this choreo! 🔥', time: '1h ago' },
-      { id: 'c2', user: 'DJ Kairo', text: 'Bass drop went crazy in this cut', time: '2h ago' },
-      { id: 'c3', user: 'Zack Alpha', text: 'Where did you get that neon outfit?!', time: '3h ago' },
-    ],
-    vid_02: [
-      { id: 'c4', user: 'Elena Dance', text: 'Voice of an angel 💜', time: '4h ago' },
-      { id: 'c5', user: 'Alex Rider', text: 'Listening on repeat!', time: '5h ago' },
-    ],
-    vid_03: [
-      { id: 'c6', user: 'Sammy ⚡', text: 'Drop of the year for real! 🚀', time: '30m ago' },
-    ],
-  });
+  const [commentsMap, setCommentsMap] = useState<
+    Record<string, Array<{ id: string; user: string; text: string; time: string }>>
+  >({});
   const [inputComment, setInputComment] = useState('');
 
   // Gift Modal state
@@ -129,7 +120,7 @@ export const MomentsScreen: React.FC = () => {
       return (vid.likes && vid.likes > 20000) || vid.feedCategory === 'Trending';
     }
     if (activeTab === 'FOLLOWING') {
-      return followingMap[vid.user.id] || vid.feedCategory === 'Following';
+      return followingUserIds.includes(vid.user.id) || vid.feedCategory === 'Following';
     }
     // FOR YOU - shows all
     return true;
@@ -152,21 +143,10 @@ export const MomentsScreen: React.FC = () => {
     return () => unsubscribe();
   }, [showCommentsVideoId]);
 
-  // Follow / Unfollow creator
-  const handleToggleFollow = (userId: string) => {
-    const isNextFollow = !followingMap[userId];
-    setFollowingMap((prev) => ({ ...prev, [userId]: isNextFollow }));
-    showToast(isNextFollow ? 'Followed creator! ⭐' : 'Unfollowed creator');
-    if (isNextFollow && userId && userId !== currentUser.id) {
-      sendNotificationToUser({
-        recipientId: userId,
-        type: 'follow',
-        category: 'friendRequests',
-        title: `⭐ ${currentUser.displayName} followed you!`,
-        message: `${currentUser.displayName} started following your Moments.`,
-        screen: 'moments',
-      }).catch(() => {});
-    }
+  // Follow / Unfollow creator in real-time Firestore
+  const handleToggleFollow = async (targetUser: VideoPost['user']) => {
+    const nextFollow = await toggleFollowUser(targetUser);
+    showToast(nextFollow ? 'Followed creator! ⭐' : 'Unfollowed creator');
   };
 
   // Save / Bookmark Video toggle
@@ -369,8 +349,8 @@ export const MomentsScreen: React.FC = () => {
           })}
         </div>
 
-        {/* Right: Sound toggle & Upload Button */}
-        <div className="flex items-center gap-2">
+        {/* Right: Sound toggle ONLY */}
+        <div className="flex items-center">
           <button
             onClick={() => {
               setIsMuted(!isMuted);
@@ -385,38 +365,19 @@ export const MomentsScreen: React.FC = () => {
               <Volume2 className="w-4 h-4 text-emerald-400" />
             )}
           </button>
-
-          {/* Add Story Button */}
-          <button
-            onClick={() => setShowCreateStoryModal(true)}
-            className="px-2.5 py-1.5 rounded-full bg-gradient-to-r from-[#EC4899] to-[#06B6D4] text-white font-extrabold text-xs shadow-md shadow-[#EC4899]/30 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1 cursor-pointer"
-            title="Add 24h Story 📸"
-          >
-            <Sparkles className="w-3.5 h-3.5 text-white" />
-            <span className="text-[11px]">+ Story</span>
-          </button>
-
-          {/* Create Post Button */}
-          <button
-            onClick={() => setCurrentScreen('upload')}
-            className="px-2.5 py-1.5 rounded-full bg-[#1F1238] border border-[#EC4899]/50 text-white font-bold text-xs hover:bg-[#2B184F] active:scale-95 transition-all flex items-center gap-1 cursor-pointer shadow-md"
-            title="Write a Post ✍️"
-          >
-            <Edit3 className="w-3.5 h-3.5 text-[#EC4899]" />
-            <span className="text-[11px]">Post</span>
-          </button>
-
-          {/* Upload Video Button */}
-          <button
-            onClick={() => setCurrentScreen('upload')}
-            className="px-2.5 py-1.5 rounded-full bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white font-bold text-xs shadow-md shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1 cursor-pointer"
-            title="Upload Video or Photo"
-          >
-            <Plus className="w-3.5 h-3.5 stroke-[3]" />
-            <span className="text-[11px] hidden sm:inline">Upload</span>
-          </button>
         </div>
       </div>
+
+      {/* Small Corner '+' Button -> Opens 4 Creation Options */}
+      <button
+        type="button"
+        onClick={() => setShowCreateMenuModal(true)}
+        aria-label="Create Story, Post, Photo or Video"
+        title="Create Story, Post, Photo or Video"
+        className="absolute bottom-4 left-3.5 z-30 w-10 h-10 rounded-full bg-gradient-to-tr from-[#7928CA] to-[#EC4899] border border-white/30 shadow-lg shadow-[#EC4899]/35 flex items-center justify-center text-white hover:scale-105 active:scale-95 transition-transform cursor-pointer"
+      >
+        <Plus className="w-5 h-5 stroke-[2.75]" />
+      </button>
 
       {/* Desktop Up/Down Navigation Chevrons */}
       <div className="hidden md:flex flex-col gap-2 absolute left-4 top-1/2 -translate-y-1/2 z-30">
@@ -477,7 +438,7 @@ export const MomentsScreen: React.FC = () => {
           </div>
         ) : (
           filteredVideos.map((video) => {
-            const isFollowing = followingMap[video.user.id] || false;
+            const isFollowing = followingUserIds.includes(video.user.id);
             const isSaved = !!savedVideoIds[video.id];
             const isPlaying = isPlayingMap[video.id] !== false;
             const commentsList = commentsMap[video.id] || [];
@@ -609,28 +570,34 @@ export const MomentsScreen: React.FC = () => {
                 <div className="absolute right-2.5 sm:right-3 bottom-20 sm:bottom-24 z-30 flex flex-col items-center gap-2 sm:gap-3">
                   {/* Creator Avatar & Follow Button */}
                   <div className="relative mb-0.5">
-                    <div className="w-11 h-11 rounded-full p-[2px] bg-gradient-to-tr from-[#7928CA] to-[#EC4899] shadow-lg shadow-[#7928CA]/40">
+                    <button
+                      onClick={() => openPublicUserProfile(video.user)}
+                      className="w-11 h-11 rounded-full p-[2px] bg-gradient-to-tr from-[#7928CA] to-[#EC4899] shadow-lg shadow-[#7928CA]/40 cursor-pointer block hover:scale-105 transition-transform"
+                      title={`View ${video.user.displayName}'s profile`}
+                    >
                       <img
                         src={video.user.avatar}
                         alt={video.user.displayName}
                         className="w-full h-full rounded-full object-cover bg-zinc-900"
                       />
-                    </div>
-                    <button
-                      onClick={() => handleToggleFollow(video.user.id)}
-                      className={`absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-90 cursor-pointer ${
-                        isFollowing
-                          ? 'bg-zinc-800 text-zinc-300 border border-white/20'
-                          : 'bg-[#EC4899] text-white hover:scale-110 shadow-[#EC4899]/50'
-                      }`}
-                      title={isFollowing ? 'Following' : 'Follow'}
-                    >
-                      {isFollowing ? (
-                        <Check className="w-3 h-3 stroke-[3]" />
-                      ) : (
-                        <Plus className="w-3.5 h-3.5 stroke-[3]" />
-                      )}
                     </button>
+                    {video.user.id !== currentUser.id && (
+                      <button
+                        onClick={() => handleToggleFollow(video.user)}
+                        className={`absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-5 h-5 rounded-full flex items-center justify-center shadow-lg transition-transform active:scale-90 cursor-pointer ${
+                          isFollowing
+                            ? 'bg-zinc-800 text-zinc-300 border border-white/20'
+                            : 'bg-[#EC4899] text-white hover:scale-110 shadow-[#EC4899]/50'
+                        }`}
+                        title={isFollowing ? 'Following' : 'Follow'}
+                      >
+                        {isFollowing ? (
+                          <Check className="w-3 h-3 stroke-[3]" />
+                        ) : (
+                          <Plus className="w-3.5 h-3.5 stroke-[3]" />
+                        )}
+                      </button>
+                    )}
                   </div>
 
                   {/* 1. Like Button */}
@@ -747,9 +714,12 @@ export const MomentsScreen: React.FC = () => {
                 <div className="absolute left-3 sm:left-4 right-16 sm:right-18 bottom-20 sm:bottom-24 z-20 flex flex-col gap-1.5 text-left pointer-events-auto">
                   {/* Creator Info */}
                   <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm font-black text-white drop-shadow flex items-center gap-1">
+                    <button
+                      onClick={() => openPublicUserProfile(video.user)}
+                      className="text-sm font-black text-white drop-shadow flex items-center gap-1 hover:text-[#F472B6] transition-colors cursor-pointer"
+                    >
                       @{video.user.username}
-                    </span>
+                    </button>
                     {video.user.isVerified && (
                       <ShieldCheck className="w-4 h-4 text-[#A855F7] fill-[#A855F7]/30" />
                     )}
@@ -1193,6 +1163,100 @@ export const MomentsScreen: React.FC = () => {
             showToast('Story posted successfully! 🌟 (Active for 24h)');
           }}
         />
+      )}
+
+      {/* Corner '+' Creation Sheet (All 4 Options: Story, Post, Photo, Video) */}
+      {showCreateMenuModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in duration-150"
+          onClick={() => setShowCreateMenuModal(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md rounded-t-3xl sm:rounded-3xl bg-[#140C26] border border-[#A855F7]/35 p-5 pb-[max(24px,env(safe-area-inset-bottom))] shadow-2xl space-y-3"
+          >
+            <div className="flex items-center justify-between pb-2 border-b border-white/10">
+              <div>
+                <h3 className="text-sm font-black text-white">Create Moment</h3>
+                <p className="text-[11px] text-zinc-400">Choose what you want to share</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCreateMenuModal(false)}
+                aria-label="Close create options"
+                className="w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-zinc-300 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5">
+              {/* 1. Add Story */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateMenuModal(false);
+                  setShowCreateStoryModal(true);
+                }}
+                className="p-3.5 rounded-2xl bg-gradient-to-br from-[#EC4899]/20 to-[#06B6D4]/20 border border-[#EC4899]/40 hover:border-[#EC4899] text-left space-y-1.5 cursor-pointer active:scale-95 transition-all"
+              >
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#EC4899] to-[#06B6D4] flex items-center justify-center text-white shadow-md">
+                  <Sparkles className="w-4 h-4" />
+                </div>
+                <div className="text-xs font-black text-white">Add Story</div>
+                <div className="text-[10px] text-zinc-400">Share a 24-hour status story</div>
+              </button>
+
+              {/* 2. Write Post */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateMenuModal(false);
+                  openUploadScreen('post');
+                }}
+                className="p-3.5 rounded-2xl bg-gradient-to-br from-[#7928CA]/20 to-[#A855F7]/20 border border-[#A855F7]/40 hover:border-[#A855F7] text-left space-y-1.5 cursor-pointer active:scale-95 transition-all"
+              >
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-[#7928CA] to-[#A855F7] flex items-center justify-center text-white shadow-md">
+                  <Edit3 className="w-4 h-4" />
+                </div>
+                <div className="text-xs font-black text-white">Write Post</div>
+                <div className="text-[10px] text-zinc-400">Text card, music &amp; backdrop</div>
+              </button>
+
+              {/* 3. Photo Moment */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateMenuModal(false);
+                  openUploadScreen('photo');
+                }}
+                className="p-3.5 rounded-2xl bg-gradient-to-br from-amber-500/15 to-orange-500/15 border border-amber-400/35 hover:border-amber-400 text-left space-y-1.5 cursor-pointer active:scale-95 transition-all"
+              >
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-amber-500 to-orange-500 flex items-center justify-center text-white shadow-md">
+                  <Camera className="w-4 h-4" />
+                </div>
+                <div className="text-xs font-black text-white">Snap / Photo</div>
+                <div className="text-[10px] text-zinc-400">Capture or share a photo</div>
+              </button>
+
+              {/* 4. Upload / Record Video */}
+              <button
+                type="button"
+                onClick={() => {
+                  setShowCreateMenuModal(false);
+                  openUploadScreen('gallery');
+                }}
+                className="p-3.5 rounded-2xl bg-gradient-to-br from-emerald-500/15 to-cyan-500/15 border border-emerald-400/35 hover:border-emerald-400 text-left space-y-1.5 cursor-pointer active:scale-95 transition-all"
+              >
+                <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-500 to-cyan-500 flex items-center justify-center text-white shadow-md">
+                  <Video className="w-4 h-4" />
+                </div>
+                <div className="text-xs font-black text-white">Upload Video</div>
+                <div className="text-[10px] text-zinc-400">Upload reel or record clip</div>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

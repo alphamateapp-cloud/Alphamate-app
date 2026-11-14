@@ -57,10 +57,18 @@ const CANVAS_BG_PRESETS = [
 ];
 
 export const VideoUploadScreen: React.FC = () => {
-  const { addVideoPost, currentUser, setActiveTab, setCurrentScreen } = useApp();
+  const { addVideoPost, currentUser, setActiveTab, setCurrentScreen, uploadInitialMode } = useApp();
 
   // Mode: 'record' (Record Video) | 'photo' (Snap Photo) | 'gallery' (Upload from device) | 'post' (Write Post ✍️)
-  const [activeMode, setActiveMode] = useState<'record' | 'photo' | 'gallery' | 'post'>('post');
+  const [activeMode, setActiveMode] = useState<'record' | 'photo' | 'gallery' | 'post'>(
+    uploadInitialMode || 'post'
+  );
+
+  useEffect(() => {
+    if (uploadInitialMode) {
+      setActiveMode(uploadInitialMode);
+    }
+  }, [uploadInitialMode]);
 
   // Camera stream & recording state
   const cameraPreviewRef = useRef<HTMLVideoElement>(null);

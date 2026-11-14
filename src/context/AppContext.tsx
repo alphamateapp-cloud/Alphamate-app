@@ -104,6 +104,12 @@ import {
   subscribeToUserBadgeStats,
   syncUserBadgeStatsToFirestore,
 } from '../services/badgeService';
+import {
+  subscribeToRealUsers,
+  subscribeToMyFollowEdges,
+  setUserFollowStateFirestore,
+} from '../services/userDirectoryService';
+import { getOrCreateDirectChat } from '../services/chatService';
 
 interface AppContextType {
   // Navigation & Screen state
@@ -231,11 +237,13 @@ interface AppContextType {
   conversations: Conversation[];
   activeConversation: Conversation | null;
   openConversation: (conv: Conversation) => void;
-  startDirectMessage: (user: User) => void;
+  startDirectMessage: (user: User) => Promise<void>;
   sendMessage: (convId: string, text: string, imageUrl?: string) => void;
 
   // Video feed & Upload
   videos: VideoPost[];
+  uploadInitialMode: 'record' | 'photo' | 'gallery' | 'post';
+  openUploadScreen: (mode?: 'record' | 'photo' | 'gallery' | 'post') => void;
   addVideoPost: (video: Omit<VideoPost, 'id' | 'likes' | 'commentsCount' | 'sharesCount' | 'timestamp'>) => void;
   toggleLikeVideo: (videoId: string) => void;
   deleteVideoPost: (postId: string, videoKey?: string) => Promise<void>;
@@ -320,7 +328,14 @@ interface AppContextType {
   openBadgesModal: () => void;
   toggleEquipUserBadge: (badgeId: UserBadgeId) => { success: boolean; message: string };
 
-  // Global Search
+  // Real-Time User Directory, Follow Graph & Global Search
+  realUsers: User[];
+  followingUserIds: string[];
+  followerUserIds: string[];
+  toggleFollowUser: (targetUser: User) => Promise<boolean>;
+  viewingPublicUser: User | null;
+  openPublicUserProfile: (user: User) => void;
+  closePublicUserProfile: () => void;
   searchQuery: string;
   setSearchQuery: (query: string) => void;
 
@@ -409,129 +424,25 @@ interface AppContextType {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const INITIAL_REGISTERED_USERS: User[] = [
-    {
-      ...CURRENT_USER,
-      email: 'alphamateapp@gmail.com',
-      dob: '2000-01-15',
-      password: 'password123',
-      authProvider: 'google',
-    },
-    {
-      id: 'user_alex_demo',
-      uniqueId: 'AM_992104',
-      username: 'alex',
-      displayName: 'Alex Rider',
-      email: 'alex@alphamate.com',
-      dob: '1998-05-20',
-      password: 'password123',
-      authProvider: 'email',
-      avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
-      bio: 'VIP Royal Host 👑 | LIVE • PARTY • SOCIAL',
-      followersCount: 12000,
-      followingCount: 340,
-      likesCount: 154000,
-      level: 28,
-      xp: 14200,
-      nextLevelXp: 20000,
-      vipTier: 3,
-      coins: 5000,
-      diamonds: 2000,
-      isVerified: true,
-    },
-    {
-      id: 'user_sophia_demo',
-      uniqueId: 'AM_664129',
-      username: 'sophia',
-      displayName: 'Sophia Taylor',
-      email: 'sophia@alphamate.com',
-      avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
-      bio: 'Music & Vibes | Alpha Diamond VIP ✨',
-      followersCount: 8400,
-      followingCount: 190,
-      likesCount: 92000,
-      level: 22,
-      xp: 11200,
-      nextLevelXp: 15000,
-      vipTier: 2,
-      coins: 14200,
-      diamonds: 1500,
-      isVerified: true,
-    },
-    {
-      id: 'user_liam_demo',
-      uniqueId: 'AM_552109',
-      username: 'liam',
-      displayName: 'Liam Carter',
-      email: 'liam@alphamate.com',
-      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
-      bio: 'Gaming streamer & Top Gifter 🎮',
-      followersCount: 14500,
-      followingCount: 420,
-      likesCount: 180000,
-      level: 35,
-      xp: 24500,
-      nextLevelXp: 30000,
-      vipTier: 4,
-      coins: 38000,
-      diamonds: 8900,
-      isVerified: true,
-    },
-    {
-      id: 'user_elena_demo',
-      uniqueId: 'AM_441908',
-      username: 'elena',
-      displayName: 'Elena Rostova',
-      email: 'elena@alphamate.com',
-      avatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
-      bio: 'Singer & Party Host 🎤 Welcome to my room!',
-      followersCount: 22000,
-      followingCount: 510,
-      likesCount: 310000,
-      level: 42,
-      xp: 41000,
-      nextLevelXp: 50000,
-      vipTier: 5,
-      coins: 65000,
-      diamonds: 12000,
-      isVerified: true,
-    },
-    {
-      id: 'user_zara_demo',
-      uniqueId: 'AM_331820',
-      username: 'zara',
-      displayName: 'Zara Khan',
-      email: 'zara@alphamate.com',
-      avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=400&q=80',
-      bio: 'Alpha Mate Rising Star 🌟 Love from Lahore',
-      followersCount: 6500,
-      followingCount: 180,
-      likesCount: 45000,
-      level: 18,
-      xp: 7800,
-      nextLevelXp: 10000,
-      vipTier: 1,
-      coins: 9500,
-      diamonds: 850,
-      isVerified: true,
-    },
-  ];
-
   const [registeredUsers, setRegisteredUsers] = useState<User[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_registered_users');
       if (saved) {
         const parsed = JSON.parse(saved);
-        // Ensure new sample community users are included
-        const existingIds = new Set(parsed.map((u: User) => u.id));
-        const missing = INITIAL_REGISTERED_USERS.filter((u) => !existingIds.has(u.id));
-        return [...parsed, ...missing];
+        if (Array.isArray(parsed)) {
+          return parsed.filter((u: User) => u?.id && !String(u.id).endsWith('_demo'));
+        }
       }
     } catch {
       // ignore
     }
-    return INITIAL_REGISTERED_USERS;
+    return [];
   });
+  const [realUsers, setRealUsers] = useState<User[]>([]);
+  const [followingUserIds, setFollowingUserIds] = useState<string[]>([]);
+  const [followerUserIds, setFollowerUserIds] = useState<string[]>([]);
+  const [viewingPublicUser, setViewingPublicUser] = useState<User | null>(null);
+  const [uploadInitialMode, setUploadInitialMode] = useState<'record' | 'photo' | 'gallery' | 'post'>('post');
 
   const isAccountRestrictedStatus = (status?: string | null): boolean =>
     status === 'deactivated' || status === 'pending_deletion' || status === 'permanently_deleted';
@@ -1103,22 +1014,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [myStories, setMyStories] = useState<StoryItem[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_my_stories');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((s: StoryItem) => s?.id !== 'story_me_default');
+        }
+      }
     } catch {
       // ignore
     }
-    return [
-      {
-        id: 'story_me_default',
-        mediaUrl: 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?auto=format&fit=crop&w=800&q=80',
-        caption: 'Alpha Mate Live vibe! Streaming chill music tonight 🎶💜',
-        createdAt: '40m ago',
-        likes: 64,
-        isLiked: false,
-        viewsCount: 240,
-        musicTitle: 'Cyber Wave - Neon Sunset',
-      },
-    ];
+    return [];
   });
 
   // Economy
@@ -1733,10 +1638,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     });
 
+    const unsubUsers = subscribeToRealUsers((usersList) => {
+      setRealUsers(usersList);
+      setRegisteredUsers(usersList);
+    });
+
+    const unsubFollows = subscribeToMyFollowEdges(uid, (edges) => {
+      setFollowingUserIds(edges.followingIds);
+      setFollowerUserIds(edges.followerIds);
+    });
+
     return () => {
       unsubProfile();
       unsubNotifs();
       unsubGifts();
+      unsubUsers();
+      unsubFollows();
     };
   }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified]);
 
@@ -1878,103 +1795,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return INITIAL_AGENCY_PROFILE;
   });
 
-  const INITIAL_AGENCY_ORDERS: AgencyOrder[] = [
-    {
-      id: 'order_101',
-      orderNo: 'ORD-9842',
-      buyerId: 'user_sophia_demo',
-      buyerUniqueId: 'AM_664129',
-      buyerName: 'Sophia Taylor',
-      buyerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
-      coins: 50000,
-      bonusCoins: 8000,
-      price: 'Rs. 11,900',
-      paymentMethod: 'JazzCash',
-      receiptUrl: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=600&q=80',
-      status: 'pending',
-      createdAt: '12 mins ago',
-      note: 'Payment done via JazzCash from 0300-XXXXXXX. Please deliver coins.',
-    },
-    {
-      id: 'order_102',
-      orderNo: 'ORD-9843',
-      buyerId: 'user_liam_demo',
-      buyerUniqueId: 'AM_552109',
-      buyerName: 'Liam Carter',
-      buyerAvatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
-      coins: 100000,
-      bonusCoins: 18000,
-      price: 'Rs. 22,500',
-      paymentMethod: 'EasyPaisa',
-      receiptUrl: 'https://images.unsplash.com/photo-1554224154-26032ffc0d07?auto=format&fit=crop&w=600&q=80',
-      status: 'pending',
-      createdAt: '35 mins ago',
-      note: 'EasyPaisa TID: 994820124. Need coins for PK battle support.',
-    },
-    {
-      id: 'order_100',
-      orderNo: 'ORD-9830',
-      buyerId: 'user_elena_demo',
-      buyerUniqueId: 'AM_441908',
-      buyerName: 'Elena Rostova',
-      buyerAvatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
-      coins: 20000,
-      bonusCoins: 3000,
-      price: 'Rs. 4,800',
-      paymentMethod: 'Bank Transfer',
-      receiptUrl: 'https://images.unsplash.com/photo-1554224155-6726b3ff858f?auto=format&fit=crop&w=600&q=80',
-      status: 'delivered',
-      createdAt: '2 hours ago',
-      deliveredAt: '1 hour ago',
-      note: 'Verified and delivered.',
-    },
-  ];
-
   const [agencyOrders, setAgencyOrders] = useState<AgencyOrder[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_agency_orders');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((o: AgencyOrder) => !String(o?.buyerId || '').endsWith('_demo'));
+        }
+      }
     } catch {
       // ignore
     }
-    return INITIAL_AGENCY_ORDERS;
+    return [];
   });
-
-  const INITIAL_AGENCY_TRANSACTIONS: AgencyTransaction[] = [
-    {
-      id: 'atx_201',
-      type: 'order_delivery',
-      recipientId: 'user_elena_demo',
-      recipientUniqueId: 'AM_441908',
-      recipientName: 'Elena Rostova',
-      recipientAvatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
-      coins: 20000,
-      remainingBalance: 2500000,
-      timestamp: 'Today, 01:15 PM',
-      referenceId: 'ORD-9830',
-    },
-    {
-      id: 'atx_200',
-      type: 'direct_send',
-      recipientId: 'user_alex_demo',
-      recipientUniqueId: 'AM_992104',
-      recipientName: 'Alex Rider',
-      recipientAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80',
-      coins: 10000,
-      remainingBalance: 2520000,
-      timestamp: 'Yesterday, 09:30 PM',
-      referenceId: 'TX-DIRECT-8812',
-    },
-  ];
 
   const [agencyTransactions, setAgencyTransactions] = useState<AgencyTransaction[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_agency_transactions');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((t: AgencyTransaction) => !String(t?.recipientId || '').endsWith('_demo'));
+        }
+      }
     } catch {
       // ignore
     }
-    return INITIAL_AGENCY_TRANSACTIONS;
+    return [];
   });
 
   const saveAgencyProfile = (profile: CoinSellerAgencyProfile) => {
@@ -2347,136 +2195,49 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return ALL_HOST_AGENCIES[0];
   });
 
-  const INITIAL_AGENCY_HOSTS: HostMember[] = [
-    {
-      id: 'host_member_sophia',
-      userId: 'user_sophia_demo',
-      uniqueId: 'AM_664129',
-      displayName: 'Sophia Taylor',
-      username: 'sophia',
-      avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&w=400&q=80',
-      level: 22,
-      agencyId: 'agency_royal_talent',
-      agencyName: 'Alpha Royal Talent Agency',
-      agencyTag: 'ROYAL',
-      weeklyTargetDiamonds: 500000,
-      currentProgressDiamonds: 385000,
-      targetStatus: 'pending',
-      weeklyHoursStreamed: 18.5,
-      weeklyTargetHours: 20,
-      weeklyEarnings: 320000,
-      commissionRate: 15,
-      isLive: true,
-      joinedDate: 'Joined 2 weeks ago',
-    },
-    {
-      id: 'host_member_liam',
-      userId: 'user_liam_demo',
-      uniqueId: 'AM_552109',
-      displayName: 'Liam Carter',
-      username: 'liam',
-      avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=400&q=80',
-      level: 35,
-      agencyId: 'agency_royal_talent',
-      agencyName: 'Alpha Royal Talent Agency',
-      agencyTag: 'ROYAL',
-      weeklyTargetDiamonds: 1000000,
-      currentProgressDiamonds: 1120000,
-      targetStatus: 'achieved',
-      weeklyHoursStreamed: 24.0,
-      weeklyTargetHours: 20,
-      weeklyEarnings: 950000,
-      commissionRate: 15,
-      isLive: false,
-      joinedDate: 'Joined 1 month ago',
-    },
-    {
-      id: 'host_member_elena',
-      userId: 'user_elena_demo',
-      uniqueId: 'AM_441908',
-      displayName: 'Elena Rostova',
-      username: 'elena',
-      avatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=400&q=80',
-      level: 42,
-      agencyId: 'agency_royal_talent',
-      agencyName: 'Alpha Royal Talent Agency',
-      agencyTag: 'ROYAL',
-      weeklyTargetDiamonds: 250000,
-      currentProgressDiamonds: 210000,
-      targetStatus: 'pending',
-      weeklyHoursStreamed: 12.0,
-      weeklyTargetHours: 15,
-      weeklyEarnings: 180000,
-      commissionRate: 15,
-      isLive: false,
-      joinedDate: 'Joined 3 weeks ago',
-    },
-  ];
-
   const [agencyHosts, setAgencyHosts] = useState<HostMember[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_agency_hosts');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((h: HostMember) => !String(h?.userId || '').endsWith('_demo'));
+        }
+      }
     } catch {
       // ignore
     }
-    return INITIAL_AGENCY_HOSTS;
+    return [];
   });
-
-  const INITIAL_HOST_REQUESTS: HostJoinRequest[] = [
-    {
-      id: 'hreq_zara',
-      userId: 'user_zara_demo',
-      uniqueId: 'AM_331820',
-      displayName: 'Zara Khan',
-      username: 'zara',
-      avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&w=400&q=80',
-      level: 18,
-      agencyId: 'agency_royal_talent',
-      whatsapp: '+92 321 4455667',
-      experience: 'Acoustic singing & live party chat host for 1+ year. Eager to achieve weekly 500k targets.',
-      expectedHours: 18,
-      appliedDate: 'Today, 10:20 AM',
-      status: 'pending',
-    },
-  ];
 
   const [hostJoinRequests, setHostJoinRequests] = useState<HostJoinRequest[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_host_join_requests');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((r: HostJoinRequest) => !String(r?.userId || '').endsWith('_demo'));
+        }
+      }
     } catch {
       // ignore
     }
-    return INITIAL_HOST_REQUESTS;
+    return [];
   });
-
-  const INITIAL_AGENCY_APPLICATIONS: AgencyApplication[] = [
-    {
-      id: 'app_agency_01',
-      type: 'host_agency',
-      applicantUserId: 'user_alex_demo',
-      applicantName: 'Alex Rider',
-      applicantUniqueId: 'AM_992104',
-      agencyName: 'Alex Rising Stars',
-      agencyTag: 'RIDER',
-      whatsapp: '+92 301 9922110',
-      phoneNumber: '+92 301 9922110',
-      idCardNumber: '35201-XXXXXXX-1',
-      experience: 'Experienced VIP streamer with 10+ recruited talent hosts.',
-      status: 'pending',
-      submittedAt: 'Yesterday, 04:30 PM',
-    },
-  ];
 
   const [agencyApplications, setAgencyApplications] = useState<AgencyApplication[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_agency_applications');
-      if (saved) return JSON.parse(saved);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((a: AgencyApplication) => !String(a?.applicantUserId || '').endsWith('_demo'));
+        }
+      }
     } catch {
       // ignore
     }
-    return INITIAL_AGENCY_APPLICATIONS;
+    return [];
   });
 
   const saveAgencyHosts = (hosts: HostMember[]) => {
@@ -3935,34 +3696,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentScreen('chat_conversation');
   };
 
-  const startDirectMessage = (targetUser: User) => {
-    let existingConv = conversations.find(
-      (c) => c.user.id === targetUser.id || c.user.displayName === targetUser.displayName
+  const openPublicUserProfile = (user: User) => {
+    setViewingPublicUser(user);
+  };
+
+  const closePublicUserProfile = () => {
+    setViewingPublicUser(null);
+  };
+
+  const openUploadScreen = (mode: 'record' | 'photo' | 'gallery' | 'post' = 'post') => {
+    setUploadInitialMode(mode);
+    setCurrentScreen('upload');
+  };
+
+  const toggleFollowUser = async (targetUser: User): Promise<boolean> => {
+    const myUid = auth.currentUser?.uid || currentUser.id;
+    if (!targetUser?.id || targetUser.id === myUid) return false;
+    const currentlyFollowing = followingUserIds.includes(targetUser.id);
+    const shouldFollow = !currentlyFollowing;
+    const isFollowBack = shouldFollow && followerUserIds.includes(targetUser.id);
+
+    // Optimistic state update
+    setFollowingUserIds((prev) =>
+      shouldFollow ? Array.from(new Set([...prev, targetUser.id])) : prev.filter((id) => id !== targetUser.id)
     );
-    if (!existingConv) {
-      existingConv = {
-        id: `conv_${targetUser.id || Date.now()}`,
-        user: targetUser,
-        lastMessage: 'Chat started',
-        lastTimestamp: 'Just now',
-        unreadCount: 0,
-        isGroup: false,
-        messages: [
-          {
-            id: `msg_welcome_${Date.now()}`,
-            senderId: targetUser.id,
-            senderName: targetUser.displayName,
-            senderAvatar: targetUser.avatar,
-            text: `Hey there! Thanks for connecting with me on Alpha Mate 💜`,
-            timestamp: 'Just now',
-            isRead: true,
-            isMe: false,
-          },
-        ],
-      };
-      setConversations((prev) => [existingConv!, ...prev]);
+
+    if (auth.currentUser?.uid) {
+      return setUserFollowStateFirestore({
+        me: currentUser,
+        target: targetUser,
+        shouldFollow,
+        isFollowBack,
+      });
     }
-    setActiveConversation(existingConv);
+    return shouldFollow;
+  };
+
+  const startDirectMessage = async (targetUser: User) => {
+    const myUid = auth.currentUser?.uid;
+    let chatId = `conv_${targetUser.id || Date.now()}`;
+
+    if (myUid && targetUser.id && targetUser.id !== myUid) {
+      try {
+        chatId = await getOrCreateDirectChat(
+          {
+            id: myUid,
+            displayName: currentUser.displayName,
+            username: currentUser.username,
+            uniqueId: currentUser.uniqueId,
+            avatar: currentUser.avatar,
+          },
+          {
+            id: targetUser.id,
+            displayName: targetUser.displayName,
+            username: targetUser.username,
+            uniqueId: targetUser.uniqueId,
+            avatar: targetUser.avatar,
+          }
+        );
+      } catch (err) {
+        console.warn('Direct chat initialization fallback:', err);
+      }
+    }
+
+    const existingConv = conversations.find(
+      (c) => c.id === chatId || (!c.isGroup && c.user?.id === targetUser.id)
+    );
+    const convToOpen: Conversation = existingConv || {
+      id: chatId,
+      user: targetUser,
+      lastMessage: 'Connected on Alpha Mate',
+      lastTimestamp: 'Just now',
+      unreadCount: 0,
+      isGroup: false,
+      messages: [],
+    };
+    setActiveConversation(convToOpen);
     setCurrentScreen('chat_conversation');
   };
 
@@ -4481,6 +4290,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         startDirectMessage,
         sendMessage,
         videos,
+        uploadInitialMode,
+        openUploadScreen,
         addVideoPost,
         toggleLikeVideo,
         deleteVideoPost,
@@ -4535,6 +4346,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setShowBadgesModal,
         openBadgesModal,
         toggleEquipUserBadge,
+        realUsers,
+        followingUserIds,
+        followerUserIds,
+        toggleFollowUser,
+        viewingPublicUser,
+        openPublicUserProfile,
+        closePublicUserProfile,
         searchQuery,
         setSearchQuery,
         deviceMode,

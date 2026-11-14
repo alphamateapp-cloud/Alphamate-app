@@ -23,6 +23,8 @@ import {
   Crown,
   Trophy,
   TrendingUp,
+  Search,
+  X,
 } from 'lucide-react';
 
 export const HomeScreen: React.FC = () => {
@@ -42,10 +44,12 @@ export const HomeScreen: React.FC = () => {
     reactToStory,
     markStorySeen,
     openLeaderboard,
+    followingUserIds,
   } = useApp();
 
   const [activeCategory, setActiveCategory] = useState<'Live' | 'Following' | 'For You'>('Live');
   const [selectedTag, setSelectedTag] = useState<string>('All');
+  const [broadcastQuery, setBroadcastQuery] = useState<string>('');
   const [showGoLiveModal, setShowGoLiveModal] = useState<boolean>(false);
   const [showPKModal, setShowPKModal] = useState<boolean>(false);
   const [customRoomTitle, setCustomRoomTitle] = useState<string>('Party with Alex! 💜 Drop in');
@@ -75,13 +79,22 @@ export const HomeScreen: React.FC = () => {
 
   // Dynamic ranking algorithm:
   // Balances Gifting (1.5x) and Live Viewers (50x)
-  // When a host receives higher gifting, they rank higher; if another host overtakes in viewers, they take Top 1.
   const rankedStreams = useMemo(() => {
+    const bq = broadcastQuery.trim().toLowerCase();
     let list = liveStreams.filter((stream: LiveStream) => {
-      if (activeCategory === 'Following' && stream.host.id !== 'host_01') return false;
+      if (activeCategory === 'Following' && !followingUserIds.includes(stream.host.id)) return false;
       if (selectedTag !== 'All') {
         if (selectedTag === 'PK Battle' && !stream.isPK) return false;
         if (selectedTag !== 'PK Battle' && stream.category !== selectedTag) return false;
+      }
+      if (bq) {
+        const matches =
+          stream.title.toLowerCase().includes(bq) ||
+          stream.host.displayName.toLowerCase().includes(bq) ||
+          (stream.host.username || '').toLowerCase().includes(bq) ||
+          (stream.host.uniqueId || '').toLowerCase().includes(bq) ||
+          stream.category.toLowerCase().includes(bq);
+        if (!matches) return false;
       }
       return true;
     });
@@ -96,7 +109,7 @@ export const HomeScreen: React.FC = () => {
       const scoreB = (b.totalGiftCoins || 0) * 1.5 + (b.viewerCount || 0) * 50;
       return scoreB - scoreA;
     });
-  }, [liveStreams, activeCategory, selectedTag]);
+  }, [liveStreams, activeCategory, selectedTag, broadcastQuery, followingUserIds]);
 
   // Top 1 or 2 Top Broadcasters
   const topStreams = useMemo(() => rankedStreams.slice(0, 2), [rankedStreams]);
@@ -510,8 +523,30 @@ export const HomeScreen: React.FC = () => {
               All Broadcasts
             </span>
             <span className="text-[10px] text-[#C084FC] font-semibold">
-              {allOtherStreams.length} streaming
+              {rankedStreams.length} streaming
             </span>
+          </div>
+
+          {/* Dedicated Live Broadcast Search Bar */}
+          <div className="relative mb-3">
+            <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={broadcastQuery}
+              onChange={(e) => setBroadcastQuery(e.target.value)}
+              placeholder="Search live broadcasts by host, title or category..."
+              className="w-full h-9 pl-9 pr-8 rounded-xl bg-[#150E2A] border border-[#A855F7]/20 focus:border-[#EC4899] text-xs text-white placeholder-zinc-500 focus:outline-none"
+            />
+            {broadcastQuery && (
+              <button
+                type="button"
+                onClick={() => setBroadcastQuery('')}
+                aria-label="Clear broadcast search"
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-zinc-300 cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
           </div>
 
           {rankedStreams.length === 0 ? (

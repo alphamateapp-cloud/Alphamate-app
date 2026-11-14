@@ -407,8 +407,9 @@ export const GlobalWeeklyLeaderboardModal: React.FC = () => {
   if (!showLeaderboardModal) return null;
 
   const isSearching = searchTerm.trim().length > 0;
-  const podium = !isSearching ? filteredEntries.slice(0, 3) : [];
-  const listRows = !isSearching ? filteredEntries.slice(3) : filteredEntries;
+  const showPodium = !isSearching && filteredEntries.length >= 3;
+  const podium = showPodium ? filteredEntries.slice(0, 3) : [];
+  const listRows = showPodium ? filteredEntries.slice(3) : filteredEntries;
 
   const resetInfo =
     scope === 'weekly' && isCurrentMonth

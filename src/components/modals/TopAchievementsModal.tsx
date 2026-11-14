@@ -238,9 +238,11 @@ export const TopAchievementsModal: React.FC<TopAchievementsModalProps> = ({
             </div>
             <div className="text-right shrink-0">
               <span className="text-[9px] uppercase tracking-wider text-emerald-400 font-bold block">
-                Rank: S-Tier
+                Lv.{currentUser.level} {currentUser.vipTier > 0 ? `• VIP ${currentUser.vipTier}` : ''}
               </span>
-              <span className="text-xs font-black text-white font-mono">142 Wins</span>
+              <span className="text-xs font-black text-white font-mono">
+                {Object.keys(userHistoricalStats.earnedBadges || {}).length} Badges
+              </span>
             </div>
           </div>
 
@@ -283,45 +285,58 @@ export const TopAchievementsModal: React.FC<TopAchievementsModalProps> = ({
           {/* TAB 1: Combat & Honors Overview */}
           {activeTab === 'overview' && (
             <div className="space-y-3.5">
-              {/* Warrior Battle Record Hero */}
+              {/* Real Historical Record Hero */}
               <div className="p-4 rounded-2xl bg-gradient-to-r from-[#200A38] via-[#17082A] to-[#10041F] border border-amber-400/30">
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-black uppercase text-amber-300 tracking-wider flex items-center gap-1.5">
                     <Swords className="w-4 h-4" />
-                    <span>Arena Combat Record</span>
+                    <span>Activity & Honor Record</span>
                   </span>
                   <span className="text-[10px] font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
-                    Grand Victor Status
+                    {userHistoricalStats.bestLeaderboardRank ? `Best Rank #${userHistoricalStats.bestLeaderboardRank}` : 'Active Challenger'}
                   </span>
                 </div>
 
                 <div className="grid grid-cols-3 gap-2 text-center">
                   <div className="p-2.5 rounded-xl bg-black/40 border border-white/5">
-                    <div className="text-lg font-black text-white font-mono">142</div>
-                    <div className="text-[9.5px] text-zinc-400 uppercase font-bold mt-0.5">Battles Won</div>
+                    <div className="text-lg font-black text-white font-mono">
+                      {userHistoricalStats.totalGiftsSentCount.toLocaleString()}
+                    </div>
+                    <div className="text-[9.5px] text-zinc-400 uppercase font-bold mt-0.5">Gifts Sent</div>
                   </div>
                   <div className="p-2.5 rounded-xl bg-black/40 border border-white/5">
-                    <div className="text-lg font-black text-amber-400 font-mono">12 Streak</div>
-                    <div className="text-[9.5px] text-zinc-400 uppercase font-bold mt-0.5">Win Streak 🔥</div>
+                    <div className="text-lg font-black text-amber-400 font-mono">
+                      {userHistoricalStats.maxDailyStreak} Days
+                    </div>
+                    <div className="text-[9.5px] text-zinc-400 uppercase font-bold mt-0.5">Best Streak 🔥</div>
                   </div>
                   <div className="p-2.5 rounded-xl bg-black/40 border border-white/5">
-                    <div className="text-lg font-black text-emerald-400 font-mono">98.4%</div>
-                    <div className="text-[9.5px] text-zinc-400 uppercase font-bold mt-0.5">Win Rate</div>
+                    <div className="text-lg font-black text-emerald-400 font-mono">
+                      {userHistoricalStats.totalActiveMinutes.toLocaleString()}m
+                    </div>
+                    <div className="text-[9.5px] text-zinc-400 uppercase font-bold mt-0.5">Active Time</div>
                   </div>
                 </div>
               </div>
 
-              {/* Warrior Rank Progression */}
+              {/* Rank Progression */}
               <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 space-y-2">
                 <div className="flex items-center justify-between text-xs">
-                  <span className="font-bold text-zinc-300">Victor Glory Tier</span>
-                  <span className="font-mono font-bold text-amber-300">Level 8 / 10 (Supreme Master)</span>
+                  <span className="font-bold text-zinc-300">Level XP Progression</span>
+                  <span className="font-mono font-bold text-amber-300">
+                    Lv.{currentUser.level} ({currentUser.xp.toLocaleString()} / {currentUser.nextLevelXp.toLocaleString()} XP)
+                  </span>
                 </div>
                 <div className="w-full h-2 rounded-full bg-black/60 overflow-hidden border border-white/10">
-                  <div className="h-full bg-gradient-to-r from-amber-400 via-rose-500 to-purple-600 rounded-full w-[82%]" />
+                  <div
+                    className="h-full bg-gradient-to-r from-amber-400 via-rose-500 to-purple-600 rounded-full transition-all"
+                    style={{
+                      width: `${Math.min(100, Math.max(4, Math.round((currentUser.xp / Math.max(1, currentUser.nextLevelXp)) * 100)))}%`,
+                    }}
+                  />
                 </div>
                 <p className="text-[10px] text-zinc-400">
-                  Earn 1,200 more battle points to unlock the exclusive "Overlord Sovereign" animated entry vehicle.
+                  Earned {userHistoricalStats.totalDiamondsEarned.toLocaleString()} 💎 Diamonds &amp; {userHistoricalStats.postsCreatedCount} Moments published.
                 </p>
               </div>
 
