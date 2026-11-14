@@ -21,10 +21,73 @@
         "vipTier": { "type": "number" },
         "coins": { "type": "number" },
         "diamonds": { "type": "number" },
+        "accountStatus": { "type": "string", "enum": ["active", "deactivated", "pending_deletion", "permanently_deleted"] },
+        "deactivatedAt": { "type": "string", "format": "date-time" },
+        "deletionRequestedAt": { "type": "string", "format": "date-time" },
+        "scheduledPermanentDeletionAt": { "type": "string", "format": "date-time" },
+        "pushNotificationToken": { "type": "string", "maxLength": 512 },
+        "pushPlatform": { "type": "string", "enum": ["android", "ios", "web"] },
+        "pushLastActiveAt": { "type": "string", "format": "date-time" },
+        "notificationPreferences": { "type": "object" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "displayName", "level", "vipTier", "coins", "diamonds"]
+    },
+    "Notification": {
+      "title": "Notification",
+      "description": "Real-time per-user notification item backed by Firestore and FCM push triggers",
+      "type": "object",
+      "properties": {
+        "recipientId": { "type": "string", "maxLength": 128 },
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 128 },
+        "senderAvatar": { "type": "string", "maxLength": 1024 },
+        "type": {
+          "type": "string",
+          "enum": ["live_on", "party_invite", "friend_request", "follow", "gift", "comment", "message", "like", "pk_invite", "wallet", "agency", "system"]
+        },
+        "category": { "type": "string", "maxLength": 64 },
+        "title": { "type": "string", "maxLength": 160 },
+        "message": { "type": "string", "maxLength": 600 },
+        "screen": { "type": "string", "maxLength": 64 },
+        "tab": { "type": "string", "maxLength": 64 },
+        "roomId": { "type": "string", "maxLength": 128 },
+        "streamId": { "type": "string", "maxLength": 128 },
+        "reelId": { "type": "string", "maxLength": 128 },
+        "chatId": { "type": "string", "maxLength": 128 },
+        "isRead": { "type": "boolean" },
+        "readAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" }
+      },
+      "required": ["recipientId", "senderId", "type", "title", "message", "isRead", "createdAt", "createdAtMs"]
+    },
+    "GiftTransaction": {
+      "title": "GiftTransaction",
+      "description": "Immutable 60/40 gifting ledger: 60% host Diamonds + 40% App Revenue Share",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string", "maxLength": 128 },
+        "senderName": { "type": "string", "maxLength": 128 },
+        "recipientId": { "type": "string", "maxLength": 128 },
+        "recipientName": { "type": "string", "maxLength": 128 },
+        "giftId": { "type": "string", "maxLength": 64 },
+        "giftName": { "type": "string", "maxLength": 80 },
+        "giftIcon": { "type": "string", "maxLength": 32 },
+        "quantity": { "type": "number" },
+        "totalCoins": { "type": "number" },
+        "hostDiamonds": { "type": "number" },
+        "appShareCoins": { "type": "number" },
+        "context": { "type": "string", "enum": ["live", "party", "moments", "pk", "demo"] },
+        "roomId": { "type": "string", "maxLength": 128 },
+        "streamId": { "type": "string", "maxLength": 128 },
+        "reelId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["completed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" }
+      },
+      "required": ["senderId", "recipientId", "giftId", "giftName", "quantity", "totalCoins", "hostDiamonds", "appShareCoins", "context", "status", "createdAt", "createdAtMs"]
     },
     "PartyRoom": {
       "title": "PartyRoom",
@@ -158,12 +221,47 @@
         "lastSeenAtMs": { "type": "number" }
       },
       "required": ["userId", "sfuSessionId"]
+    },
+    "AccountDeletionRequest": {
+      "title": "AccountDeletionRequest",
+      "description": "Account temporary deactivation and OTP-verified 15-day permanent deletion queue records",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "uniqueId": { "type": "string", "maxLength": 64 },
+        "username": { "type": "string", "maxLength": 64 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 128 },
+        "avatar": { "type": "string", "maxLength": 1024 },
+        "type": { "type": "string", "enum": ["deactivation", "permanent_delete"] },
+        "status": { "type": "string", "enum": ["deactivated", "pending_official_deletion", "recovered", "permanently_deleted"] },
+        "otpVerified": { "type": "boolean" },
+        "otpVerifiedAt": { "type": "string", "format": "date-time" },
+        "requestedAt": { "type": "string", "format": "date-time" },
+        "scheduledPermanentDeletionAt": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string", "maxLength": 500 },
+        "recoveredAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "type", "status", "requestedAt", "updatedAt"]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
       "description": "User profile documents keyed by Firebase auth UID"
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": "Notification",
+      "description": "Real-time user notifications inbox scoped per recipient UID"
+    },
+    "/giftTransactions/{txId}": {
+      "schema": "GiftTransaction",
+      "description": "60/40 gifting transactions (60% host Diamonds, 40% App share)"
+    },
+    "/accountDeletionRequests/{requestId}": {
+      "schema": "AccountDeletionRequest",
+      "description": "Official account deactivation and 15-day pending permanent deletion records keyed by Firebase auth UID"
     },
     "/reels/{reelId}": {
       "schema": "Reel",

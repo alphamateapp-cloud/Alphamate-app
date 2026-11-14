@@ -26,9 +26,12 @@ import { AdminDashboard } from './screens/AdminDashboard';
 import { AgencyManagementScreen } from './screens/AgencyManagementScreen';
 import { PrivacyPolicyScreen } from './screens/PrivacyPolicyScreen';
 import { TermsConditionsScreen } from './screens/TermsConditionsScreen';
+import { DeleteAccountScreen } from './screens/DeleteAccountScreen';
+import { AccountRecoveryScreen } from './screens/AccountRecoveryScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
+import { PushNotificationSettingsModal } from './components/modals/PushNotificationSettingsModal';
 
 const PUBLIC_AUTH_SCREENS = new Set([
   'splash',
@@ -37,6 +40,8 @@ const PUBLIC_AUTH_SCREENS = new Set([
   'signin',
   'privacy_policy',
   'terms_conditions',
+  'delete_account',
+  'account_recovery',
 ]);
 
 const AppContent: React.FC = () => {
@@ -58,16 +63,33 @@ const AppContent: React.FC = () => {
     isEmailVerified,
   } = useApp();
 
-  const isSessionReadyAndAuthed = Boolean(isAuthenticated && firebaseUser && isEmailVerified);
+  const isRestrictedLifecycleAccount = Boolean(
+    firebaseUser &&
+      isEmailVerified &&
+      (currentUser?.accountStatus === 'deactivated' ||
+        currentUser?.accountStatus === 'pending_deletion' ||
+        currentUser?.accountStatus === 'permanently_deleted')
+  );
+  const isSessionReadyAndAuthed = Boolean(isAuthenticated && firebaseUser && isEmailVerified && !isRestrictedLifecycleAccount);
 
-  // Route guard: never allow unauthenticated users into protected main screens
+  // Route guard: never allow unauthenticated or restricted accounts into protected main screens
   useEffect(() => {
     if (deviceMode === 'admin') return;
     if (firebaseAuthLoading) return;
+    if (
+      isRestrictedLifecycleAccount &&
+      currentScreen !== 'account_recovery' &&
+      currentScreen !== 'delete_account' &&
+      currentScreen !== 'privacy_policy' &&
+      currentScreen !== 'terms_conditions'
+    ) {
+      setCurrentScreen('account_recovery');
+      return;
+    }
     if (!isSessionReadyAndAuthed && !PUBLIC_AUTH_SCREENS.has(currentScreen)) {
       setCurrentScreen('welcome');
     }
-  }, [deviceMode, firebaseAuthLoading, isSessionReadyAndAuthed, currentScreen, setCurrentScreen]);
+  }, [deviceMode, firebaseAuthLoading, isRestrictedLifecycleAccount, isSessionReadyAndAuthed, currentScreen, setCurrentScreen]);
 
   // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
   useEffect(() => {
@@ -155,10 +177,16 @@ const AppContent: React.FC = () => {
   if (currentScreen === 'terms_conditions') {
     return <TermsConditionsScreen />;
   }
+  if (currentScreen === 'delete_account') {
+    return <DeleteAccountScreen />;
+  }
 
   // Prevent flashing protected screens while auth is unresolved or unauthenticated
   if (firebaseAuthLoading) {
     return <SplashScreen />;
+  }
+  if (isRestrictedLifecycleAccount || currentScreen === 'account_recovery') {
+    return firebaseUser ? <AccountRecoveryScreen /> : <WelcomeScreen />;
   }
   if (!isSessionReadyAndAuthed) {
     return <WelcomeScreen />;
@@ -222,8 +250,19 @@ export default function App() {
     <AppProvider>
       <DeviceFrame>
         <PushNotificationBanner />
+        <GlobalPushSettingsHost />
         <AppContent />
       </DeviceFrame>
     </AppProvider>
   );
 }
+
+const GlobalPushSettingsHost: React.FC = () => {
+  const { showPushSettingsModal, setShowPushSettingsModal } = useApp();
+  return (
+    <PushNotificationSettingsModal
+      isOpen={showPushSettingsModal}
+      onClose={() => setShowPushSettingsModal(false)}
+    />
+  );
+};

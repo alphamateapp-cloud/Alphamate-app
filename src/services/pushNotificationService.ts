@@ -7,16 +7,26 @@ import {
   PermissionStatus,
 } from '@capacitor/push-notifications';
 import { doc, setDoc } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, handleFirestoreError, OperationType } from './firebase';
+import {
+  NotificationCategoryKey,
+  NotificationEventType,
+  NotificationPreferences,
+} from '../types';
 
 export interface PushNotificationPayload {
   title: string;
   body: string;
   id?: string;
   data?: {
-    type?: 'gift' | 'pk_invite' | 'party_invite' | 'agency' | 'wallet' | 'message';
+    type?: NotificationEventType;
+    category?: NotificationCategoryKey;
     screen?: string;
+    tab?: string;
     roomId?: string;
+    streamId?: string;
+    reelId?: string;
+    chatId?: string;
     senderId?: string;
     [key: string]: any;
   };
@@ -30,9 +40,127 @@ export interface PushStatus {
   error: string | null;
 }
 
+export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  enabled: true,
+  categories: {
+    liveOn: true,
+    partyInvites: true,
+    friendRequests: true,
+    gifts: true,
+    comments: true,
+    messages: true,
+    likes: true,
+    pkBattles: true,
+    walletAndSystem: true,
+  },
+};
+
+export const NOTIFICATION_CATEGORY_META: Array<{
+  key: NotificationCategoryKey;
+  label: string;
+  description: string;
+  channelId: string;
+  accent: string;
+}> = [
+  {
+    key: 'liveOn',
+    label: 'Live Broadcast Alerts',
+    description: 'Notify when followed hosts or friends go Live',
+    channelId: 'alpha_live_alerts',
+    accent: 'text-[#EC4899] bg-[#EC4899]/20',
+  },
+  {
+    key: 'partyInvites',
+    label: 'Party Rooms & Invites',
+    description: 'New voice party rooms, seat invites & room openings',
+    channelId: 'alpha_live_alerts',
+    accent: 'text-[#A855F7] bg-[#A855F7]/20',
+  },
+  {
+    key: 'friendRequests',
+    label: 'Friend Requests & Followers',
+    description: 'New friend/chat requests, acceptances & followers',
+    channelId: 'alpha_social_alerts',
+    accent: 'text-emerald-400 bg-emerald-500/20',
+  },
+  {
+    key: 'gifts',
+    label: 'Gifts Received (60% Diamonds)',
+    description: 'Instant alerts for gifts received & Diamond credits',
+    channelId: 'alpha_rewards_alerts',
+    accent: 'text-amber-400 bg-amber-500/20',
+  },
+  {
+    key: 'messages',
+    label: 'Direct & Group Messages',
+    description: 'Private DM replies, voice notes & group messages',
+    channelId: 'alpha_social_alerts',
+    accent: 'text-cyan-400 bg-cyan-500/20',
+  },
+  {
+    key: 'comments',
+    label: 'Video & Moment Comments',
+    description: 'When someone comments on your Moments or Reels',
+    channelId: 'alpha_social_alerts',
+    accent: 'text-violet-300 bg-violet-500/20',
+  },
+  {
+    key: 'likes',
+    label: 'Video & Moment Likes',
+    description: 'When someone likes your uploaded videos or posts',
+    channelId: 'alpha_social_alerts',
+    accent: 'text-rose-400 bg-rose-500/20',
+  },
+  {
+    key: 'pkBattles',
+    label: 'PK Battle Challenges',
+    description: 'Direct PK battle challenges & match starts',
+    channelId: 'alpha_live_alerts',
+    accent: 'text-fuchsia-400 bg-fuchsia-500/20',
+  },
+  {
+    key: 'walletAndSystem',
+    label: 'Wallet, Agency & Official Alerts',
+    description: 'Coin top-ups, withdrawals, agency deliveries & system notices',
+    channelId: 'alpha_agency_chat',
+    accent: 'text-sky-400 bg-sky-500/20',
+  },
+];
+
+export function getCategoryForNotificationType(type?: string): NotificationCategoryKey {
+  switch (type) {
+    case 'live_on':
+    case 'live_invite':
+      return 'liveOn';
+    case 'party_invite':
+      return 'partyInvites';
+    case 'friend_request':
+    case 'follow':
+      return 'friendRequests';
+    case 'gift':
+      return 'gifts';
+    case 'comment':
+      return 'comments';
+    case 'message':
+      return 'messages';
+    case 'like':
+      return 'likes';
+    case 'pk_invite':
+      return 'pkBattles';
+    case 'wallet':
+    case 'agency':
+    case 'system':
+    default:
+      return 'walletAndSystem';
+  }
+}
+
+const PREFS_STORAGE_KEY = 'alphamate_notification_prefs';
+
 class PushNotificationService {
   private token: string | null = null;
   private isInitialized = false;
+  private preferences: NotificationPreferences = DEFAULT_NOTIFICATION_PREFERENCES;
   private onNotificationReceivedHandlers: Array<(notification: PushNotificationSchema) => void> = [];
   private onNotificationActionPerformedHandlers: Array<(action: ActionPerformed) => void> = [];
   private onTokenHandlers: Array<(token: string) => void> = [];
@@ -43,25 +171,87 @@ class PushNotificationService {
     } catch {
       // ignore
     }
+    this.preferences = this.getPreferences();
   }
 
-  /**
-   * Check if native platform
-   */
   public isNative(): boolean {
     return Capacitor.isNativePlatform();
   }
 
-  /**
-   * Get current cached token
-   */
   public getToken(): string | null {
     return this.token;
   }
 
-  /**
-   * Check current push notification permission status
-   */
+  public getPreferences(): NotificationPreferences {
+    try {
+      const raw = localStorage.getItem(PREFS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as Partial<NotificationPreferences>;
+        return {
+          enabled: parsed.enabled !== undefined ? Boolean(parsed.enabled) : true,
+          categories: {
+            ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+            ...(parsed.categories || {}),
+          },
+          updatedAt: parsed.updatedAt,
+        };
+      }
+    } catch {
+      // ignore
+    }
+    return {
+      enabled: DEFAULT_NOTIFICATION_PREFERENCES.enabled,
+      categories: { ...DEFAULT_NOTIFICATION_PREFERENCES.categories },
+    };
+  }
+
+  public setLocalPreferences(prefs: NotificationPreferences): NotificationPreferences {
+    const normalized: NotificationPreferences = {
+      enabled: Boolean(prefs.enabled),
+      categories: {
+        ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+        ...(prefs.categories || {}),
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    this.preferences = normalized;
+    try {
+      localStorage.setItem(PREFS_STORAGE_KEY, JSON.stringify(normalized));
+    } catch {
+      // ignore
+    }
+    return normalized;
+  }
+
+  public async saveAndSyncPreferences(
+    userId: string | null | undefined,
+    prefs: NotificationPreferences
+  ): Promise<NotificationPreferences> {
+    const normalized = this.setLocalPreferences(prefs);
+    if (!userId) return normalized;
+    const path = `users/${userId}`;
+    try {
+      await setDoc(
+        doc(db, 'users', userId),
+        {
+          notificationPreferences: normalized,
+          updatedAt: normalized.updatedAt,
+        },
+        { merge: true }
+      );
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, path);
+    }
+    return normalized;
+  }
+
+  public isCategoryAllowed(type?: string): boolean {
+    const prefs = this.preferences || this.getPreferences();
+    if (!prefs.enabled) return false;
+    const categoryKey = getCategoryForNotificationType(type);
+    return prefs.categories[categoryKey] !== false;
+  }
+
   public async checkPermissions(): Promise<PushStatus> {
     const native = Capacitor.isNativePlatform();
 
@@ -72,7 +262,7 @@ class PushNotificationService {
           isSupported: true,
           isNative: false,
           permission: perm === 'default' ? 'prompt' : perm,
-          token: this.token || 'web-simulated-token-' + Math.random().toString(36).substring(7),
+          token: this.token,
           error: null,
         };
       }
@@ -105,9 +295,6 @@ class PushNotificationService {
     }
   }
 
-  /**
-   * Initialize Push Notification listeners and Android notification channels
-   */
   public async initialize(options?: {
     onReceived?: (notification: PushNotificationSchema) => void;
     onActionPerformed?: (action: ActionPerformed) => void;
@@ -128,18 +315,14 @@ class PushNotificationService {
     }
 
     if (!Capacitor.isNativePlatform()) {
-      console.log('[PushService] Web environment detected. Simulation & Web Notifications enabled.');
       this.isInitialized = true;
       return;
     }
 
     try {
-      // Create high-priority notification channels on Android 8.0+
       await this.setupAndroidChannels();
 
-      // Listen for registration token
       await PushNotifications.addListener('registration', (token: Token) => {
-        console.log('[PushService] Registration Token Received:', token.value);
         this.token = token.value;
         try {
           localStorage.setItem('alphamate_push_token', token.value);
@@ -155,16 +338,15 @@ class PushNotificationService {
         });
       });
 
-      // Listen for registration errors
       await PushNotifications.addListener('registrationError', (error: any) => {
         console.warn('[PushService] Registration Error:', error);
       });
 
-      // Listen for foreground notifications
       await PushNotifications.addListener(
         'pushNotificationReceived',
         (notification: PushNotificationSchema) => {
-          console.log('[PushService] Push Notification Received in Foreground:', notification);
+          const notifType = (notification.data as any)?.type;
+          if (!this.isCategoryAllowed(notifType)) return;
           this.onNotificationReceivedHandlers.forEach((h) => {
             try {
               h(notification);
@@ -175,11 +357,9 @@ class PushNotificationService {
         }
       );
 
-      // Listen for user tap on notification (action performed)
       await PushNotifications.addListener(
         'pushNotificationActionPerformed',
         (action: ActionPerformed) => {
-          console.log('[PushService] Push Notification Action Performed:', action);
           this.onNotificationActionPerformedHandlers.forEach((h) => {
             try {
               h(action);
@@ -191,26 +371,24 @@ class PushNotificationService {
       );
 
       this.isInitialized = true;
-      console.log('[PushService] Native Push Notifications initialized successfully.');
     } catch (err) {
       console.warn('[PushService] Error initializing native push notifications:', err);
     }
   }
 
-  /**
-   * Request push notification permissions and register device
-   */
   public async requestPermissions(): Promise<PushStatus> {
     if (!Capacitor.isNativePlatform()) {
       if (typeof window !== 'undefined' && 'Notification' in window) {
         try {
           const res = await Notification.requestPermission();
           const perm = res === 'default' ? 'prompt' : res;
-          const dummyToken = 'web_push_' + Math.random().toString(36).substring(2, 12);
+          const webToken = 'web_push_' + Math.random().toString(36).substring(2, 12);
           if (res === 'granted') {
-            this.token = dummyToken;
-            localStorage.setItem('alphamate_push_token', dummyToken);
-            this.onTokenHandlers.forEach((h) => h(dummyToken));
+            this.token = webToken;
+            try {
+              localStorage.setItem('alphamate_push_token', webToken);
+            } catch {}
+            this.onTokenHandlers.forEach((h) => h(webToken));
           }
           return {
             isSupported: true,
@@ -245,7 +423,6 @@ class PushNotificationService {
       }
 
       if (permStatus.receive === 'granted') {
-        // Register with Google FCM / Apple APNS
         await PushNotifications.register();
       }
 
@@ -268,43 +445,47 @@ class PushNotificationService {
     }
   }
 
-  /**
-   * Create dedicated Android notification channels
-   */
   private async setupAndroidChannels(): Promise<void> {
     if (!Capacitor.isNativePlatform()) return;
 
     try {
-      // Channel 1: Live & PK Battle Alerts
       await PushNotifications.createChannel({
         id: 'alpha_live_alerts',
-        name: 'Live Streams & PK Battles',
-        description: 'Instant alerts when favorite hosts go live or challenge you to PK',
-        importance: 5, // High
-        visibility: 1, // Public
-        sound: 'res_custom_notification',
+        name: 'Live Streams, Party Rooms & PK',
+        description: 'Instant alerts when followed hosts go live, open party rooms, or challenge PK',
+        importance: 5,
+        visibility: 1,
         vibration: true,
         lights: true,
         lightColor: '#EC4899',
       });
 
-      // Channel 2: Gifts & Wallet
       await PushNotifications.createChannel({
         id: 'alpha_rewards_alerts',
-        name: 'Gifts & Wallet Transactions',
-        description: 'Coin deposits, diamond earnings, and gift received notices',
-        importance: 4, // Default/High
+        name: 'Gifts & Diamond Wallet',
+        description: 'Gifts received (60% Diamond share) and wallet updates',
+        importance: 4,
         visibility: 1,
         vibration: true,
         lights: true,
         lightColor: '#F59E0B',
       });
 
-      // Channel 3: Agency & Direct Messages
+      await PushNotifications.createChannel({
+        id: 'alpha_social_alerts',
+        name: 'Friends, Messages, Likes & Comments',
+        description: 'Friend requests, followers, DM/group messages, video likes and comments',
+        importance: 4,
+        visibility: 1,
+        vibration: true,
+        lights: true,
+        lightColor: '#10B981',
+      });
+
       await PushNotifications.createChannel({
         id: 'alpha_agency_chat',
-        name: 'Agency & Direct Chat',
-        description: 'Coin seller orders, host applications, and agency announcements',
+        name: 'Agency & Official Notices',
+        description: 'Coin seller orders, host applications, and official announcements',
         importance: 4,
         visibility: 1,
         vibration: true,
@@ -316,11 +497,9 @@ class PushNotificationService {
     }
   }
 
-  /**
-   * Sync push device token to user's Firestore document
-   */
   public async syncTokenToUserDoc(userId: string): Promise<boolean> {
     if (!userId || !this.token) return false;
+    const path = `users/${userId}`;
     try {
       await setDoc(
         doc(db, 'users', userId),
@@ -328,24 +507,26 @@ class PushNotificationService {
           pushNotificationToken: this.token,
           pushPlatform: Capacitor.isNativePlatform() ? 'android' : 'web',
           pushLastActiveAt: new Date().toISOString(),
+          notificationPreferences: this.getPreferences(),
         },
         { merge: true }
       );
-      console.log(`[PushService] Synced push token to Firestore for user: ${userId}`);
       return true;
-    } catch (err) {
-      console.warn('[PushService] Could not sync push token to Firestore:', err);
+    } catch (error) {
+      console.warn('[PushService] Could not sync push token to Firestore:', error);
       return false;
     }
   }
 
   /**
-   * Trigger a simulated or local push notification for testing user engagement
+   * Dispatch a foreground alert banner + browser Notification (if enabled by user preferences).
    */
-  public triggerTestNotification(payload: PushNotificationPayload): void {
-    console.log('[PushService] Triggering test alert:', payload);
+  public notifyForeground(payload: PushNotificationPayload, force = false): boolean {
+    const type = payload.data?.type;
+    if (!force && !this.isCategoryAllowed(type)) {
+      return false;
+    }
 
-    // If on web and permission granted, use Web Notification API
     if (!Capacitor.isNativePlatform() && typeof window !== 'undefined' && 'Notification' in window) {
       if (Notification.permission === 'granted') {
         try {
@@ -360,9 +541,8 @@ class PushNotificationService {
       }
     }
 
-    // Also dispatch to internal listeners so in-app alert banner & notifications list respond
     const syntheticNotification: PushNotificationSchema = {
-      id: payload.id || 'test_' + Date.now(),
+      id: payload.id || 'notif_' + Date.now(),
       title: payload.title,
       body: payload.body,
       data: payload.data || {},
@@ -375,6 +555,11 @@ class PushNotificationService {
         console.error(e);
       }
     });
+    return true;
+  }
+
+  public triggerTestNotification(payload: PushNotificationPayload): boolean {
+    return this.notifyForeground(payload, false);
   }
 }
 

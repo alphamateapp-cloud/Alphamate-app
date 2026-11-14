@@ -1,5 +1,19 @@
-import React, { useState, useEffect } from 'react';
-import { Bell, X, ExternalLink, Gift, Swords, Radio, ShieldCheck, DollarSign } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  Bell,
+  X,
+  ExternalLink,
+  Gift,
+  Swords,
+  Radio,
+  ShieldCheck,
+  DollarSign,
+  UserPlus,
+  MessageCircle,
+  MessageSquare,
+  Heart,
+  Users,
+} from 'lucide-react';
 import { pushService } from '../../services/pushNotificationService';
 import { useApp } from '../../context/AppContext';
 
@@ -12,12 +26,72 @@ export interface ActivePushBanner {
 
 export const PushNotificationBanner: React.FC = () => {
   const [activeBanner, setActiveBanner] = useState<ActivePushBanner | null>(null);
-  const { setCurrentScreen, setActiveTab } = useApp();
+  const {
+    setCurrentScreen,
+    setActiveTab,
+    liveStreams,
+    openLiveStream,
+    partyRooms,
+    openPartyRoom,
+  } = useApp();
+
+  const handleBannerClick = useCallback(
+    (banner: ActivePushBanner) => {
+      const data = banner.data || {};
+      if (data.streamId) {
+        const matchedStream = liveStreams.find((s) => s.id === data.streamId);
+        if (matchedStream) {
+          openLiveStream(matchedStream);
+          setActiveBanner(null);
+          return;
+        }
+      }
+      if (data.roomId) {
+        const matchedRoom = partyRooms.find((r) => r.id === data.roomId);
+        if (matchedRoom) {
+          openPartyRoom(matchedRoom);
+          setActiveBanner(null);
+          return;
+        }
+      }
+
+      const screen = data.screen;
+      const tab = data.tab;
+      const type = data.type;
+
+      if (screen && screen !== 'live_stream' && screen !== 'party_room') {
+        setCurrentScreen(screen as any);
+      } else if (tab) {
+        setActiveTab(tab as any);
+      } else if (type === 'gift' || type === 'wallet') {
+        setCurrentScreen('wallet');
+      } else if (type === 'pk_invite' || type === 'party_invite') {
+        setActiveTab('party');
+        setCurrentScreen('party');
+      } else if (type === 'live_on') {
+        setActiveTab('home');
+        setCurrentScreen('home');
+      } else if (type === 'message' || type === 'friend_request' || type === 'follow') {
+        setActiveTab('chat');
+        setCurrentScreen('chat');
+      } else if (type === 'comment' || type === 'like') {
+        setCurrentScreen('moments');
+      } else if (type === 'agency') {
+        setCurrentScreen('agency_management');
+      } else {
+        setCurrentScreen('notifications');
+      }
+
+      setActiveBanner(null);
+    },
+    [liveStreams, openLiveStream, partyRooms, openPartyRoom, setCurrentScreen, setActiveTab]
+  );
 
   useEffect(() => {
-    // Listen to push notifications arriving in foreground
     pushService.initialize({
       onReceived: (notification) => {
+        const type = (notification.data as any)?.type;
+        if (!pushService.isCategoryAllowed(type)) return;
         setActiveBanner({
           id: notification.id || String(Date.now()),
           title: notification.title || 'Alpha Mate Alert',
@@ -34,7 +108,7 @@ export const PushNotificationBanner: React.FC = () => {
         });
       },
     });
-  }, []);
+  }, [handleBannerClick]);
 
   // Auto-dismiss banner after 6 seconds
   useEffect(() => {
@@ -47,36 +121,26 @@ export const PushNotificationBanner: React.FC = () => {
 
   if (!activeBanner) return null;
 
-  const handleBannerClick = (banner: ActivePushBanner) => {
-    const screen = banner.data?.screen;
-    const tab = banner.data?.tab;
-
-    if (screen) {
-      setCurrentScreen(screen as any);
-    } else if (tab) {
-      setActiveTab(tab as any);
-    } else if (banner.data?.type === 'gift' || banner.data?.type === 'wallet') {
-      setCurrentScreen('wallet');
-    } else if (banner.data?.type === 'pk_invite' || banner.data?.type === 'party_invite') {
-      setActiveTab('party');
-    } else if (banner.data?.type === 'agency') {
-      setCurrentScreen('agency_management');
-    } else {
-      setCurrentScreen('notifications');
-    }
-
-    setActiveBanner(null);
-  };
-
   const getIcon = () => {
     const type = activeBanner.data?.type;
     switch (type) {
+      case 'live_on':
+        return <Radio className="w-5 h-5 text-[#EC4899] animate-pulse" />;
+      case 'party_invite':
+        return <Users className="w-5 h-5 text-[#A855F7]" />;
+      case 'friend_request':
+      case 'follow':
+        return <UserPlus className="w-5 h-5 text-emerald-400" />;
       case 'gift':
         return <Gift className="w-5 h-5 text-amber-400" />;
+      case 'message':
+        return <MessageCircle className="w-5 h-5 text-cyan-400" />;
+      case 'comment':
+        return <MessageSquare className="w-5 h-5 text-violet-300" />;
+      case 'like':
+        return <Heart className="w-5 h-5 text-rose-400" />;
       case 'pk_invite':
         return <Swords className="w-5 h-5 text-[#EC4899]" />;
-      case 'party_invite':
-        return <Radio className="w-5 h-5 text-[#A855F7]" />;
       case 'agency':
         return <ShieldCheck className="w-5 h-5 text-emerald-400" />;
       case 'wallet':

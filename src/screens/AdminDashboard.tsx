@@ -1,6 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
+import {
+  subscribeToAccountDeletionRequests,
+  adminProcessAccountDeletionRequest,
+} from '../services/firebase';
+import { AccountDeletionRequest } from '../types';
 import {
   Activity,
   Users,
@@ -19,6 +24,9 @@ import {
   Building2,
   CheckCircle2,
   XCircle,
+  Clock,
+  RotateCcw,
+  Trash2,
 } from 'lucide-react';
 
 export const AdminDashboard: React.FC = () => {
@@ -29,19 +37,64 @@ export const AdminDashboard: React.FC = () => {
     openLiveStream,
     agencyApplications,
     reviewAgencyApplication,
+    firebaseUser,
+    giftTransactions,
   } = useApp();
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedStreamId, setSelectedStreamId] = useState<string>(liveStreams[0]?.id || '');
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [deletionRequests, setDeletionRequests] = useState<AccountDeletionRequest[]>([]);
+  const [processingRequestUid, setProcessingRequestUid] = useState<string | null>(null);
+
+  const isOfficialAdminUser = firebaseUser?.email?.toLowerCase() === 'alphamateapp@gmail.com';
+
+  useEffect(() => {
+    if (!isOfficialAdminUser) return;
+    let unsubscribe: (() => void) | undefined;
+    try {
+      unsubscribe = subscribeToAccountDeletionRequests((items) => {
+        setDeletionRequests(items as AccountDeletionRequest[]);
+      });
+    } catch (err) {
+      console.warn('Account deletion queue listener error:', err);
+    }
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [isOfficialAdminUser]);
 
   const activeMonitorStream = liveStreams.find((s) => s.id === selectedStreamId) || liveStreams[0];
 
   const totalViewers = liveStreams.reduce((acc, s) => acc + s.viewerCount, 0);
+  const totalGiftCoins = giftTransactions.reduce((acc, g) => acc + (g.totalCoins || 0), 0);
+  const totalHostDiamonds = giftTransactions.reduce((acc, g) => acc + (g.hostDiamonds || 0), 0);
+  const totalAppShareCoins = giftTransactions.reduce((acc, g) => acc + (g.appShareCoins || 0), 0);
 
   const handleAction = (type: string, hostName: string) => {
     setActionNotice(`Admin action applied: [${type}] issued to ${hostName}. Notification sent to moderation log.`);
     setTimeout(() => setActionNotice(null), 3500);
+  };
+
+  const handleDeletionQueueAction = async (
+    reqItem: AccountDeletionRequest,
+    action: 'restore' | 'finalize'
+  ) => {
+    try {
+      setProcessingRequestUid(reqItem.uid);
+      await adminProcessAccountDeletionRequest(reqItem, action);
+      setActionNotice(
+        action === 'restore'
+          ? `Account restored to active status for ${reqItem.displayName} (${reqItem.email}).`
+          : `Permanent deletion marked finalized for ${reqItem.displayName} (${reqItem.email}).`
+      );
+      setTimeout(() => setActionNotice(null), 4000);
+    } catch (err: any) {
+      setActionNotice(err?.message || 'Unable to process account deletion request.');
+      setTimeout(() => setActionNotice(null), 4000);
+    } finally {
+      setProcessingRequestUid(null);
+    }
   };
 
   return (
@@ -105,12 +158,14 @@ export const AdminDashboard: React.FC = () => {
 
           <div className="p-5 rounded-3xl bg-[#120A24] border border-[#A855F7]/20 shadow-lg">
             <div className="flex items-center justify-between text-zinc-400 text-xs font-bold uppercase mb-2">
-              <span>Gift Revenue Velocity</span>
+              <span>60/40 Gift Revenue</span>
               <DollarSign className="w-4 h-4 text-amber-400" />
             </div>
-            <div className="text-2xl font-black text-amber-300 font-mono">$18,420.50 USD</div>
-            <div className="text-[11px] text-zinc-400 mt-1">
-              <span>384,000 Coins Circulating</span>
+            <div className="text-2xl font-black text-amber-300 font-mono">
+              {totalGiftCoins.toLocaleString()} Coins
+            </div>
+            <div className="text-[11px] text-zinc-300 mt-1 font-mono">
+              <span>Host 60%: {totalHostDiamonds.toLocaleString()} 💎 • App 40%: {totalAppShareCoins.toLocaleString()}</span>
             </div>
           </div>
 
@@ -384,6 +439,210 @@ export const AdminDashboard: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+
+        {/* 60/40 Coin-to-Diamond Gift Economy Ledger */}
+        <div className="rounded-3xl bg-[#120A24] border border-amber-400/25 p-5 shadow-xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2.5">
+              <DollarSign className="w-5 h-5 text-amber-400" />
+              <div>
+                <h3 className="text-sm font-black text-white">
+                  60/40 Gift Revenue Split Ledger (Host Diamonds vs App Share)
+                </h3>
+                <p className="text-[11px] text-zinc-400">
+                  Real-time audit of all live, party, moments, PK &amp; demo gifts
+                </p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-amber-400/15 text-amber-300 text-xs font-bold border border-amber-400/30 font-mono">
+              App 40% Share: {totalAppShareCoins.toLocaleString()} Coins
+            </span>
+          </div>
+
+          {giftTransactions.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-[#0B0616] border border-white/10 text-xs text-zinc-400">
+              No gift transactions recorded yet. Send any gift in Live, Party, Moments or Wallet Demo to see the 60/40 split here.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-white/10 text-zinc-400 uppercase text-[10px] tracking-wider">
+                    <th className="pb-2">Gift &amp; Context</th>
+                    <th className="pb-2">Sender</th>
+                    <th className="pb-2">Recipient Host</th>
+                    <th className="pb-2">Total Coins</th>
+                    <th className="pb-2">60% Host 💎</th>
+                    <th className="pb-2 text-right">40% App Share</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5 font-mono">
+                  {giftTransactions.slice(0, 25).map((tx) => (
+                    <tr key={tx.id} className="hover:bg-white/[0.02]">
+                      <td className="py-2.5 font-sans">
+                        <span className="font-bold text-white">
+                          {tx.giftIcon} {tx.giftName} {tx.quantity > 1 ? `x${tx.quantity}` : ''}
+                        </span>
+                        <span className="ml-2 px-1.5 py-0.5 rounded bg-purple-500/20 text-[#C084FC] text-[9px] uppercase font-bold">
+                          {tx.context}
+                        </span>
+                      </td>
+                      <td className="py-2.5 text-zinc-300 font-sans">{tx.senderName}</td>
+                      <td className="py-2.5 text-zinc-200 font-sans">{tx.recipientName}</td>
+                      <td className="py-2.5 text-white">{tx.totalCoins.toLocaleString()}</td>
+                      <td className="py-2.5 text-pink-300 font-bold">+{tx.hostDiamonds.toLocaleString()} 💎</td>
+                      <td className="py-2.5 text-right text-amber-300 font-bold">
+                        {tx.appShareCoins.toLocaleString()} Coins
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Official Account Deletion & Deactivation Queue (15-Day Pending Review) */}
+        <div className="rounded-3xl bg-[#120A24] border border-rose-500/25 p-5 shadow-xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2.5">
+              <Clock className="w-5 h-5 text-rose-400" />
+              <div>
+                <h3 className="text-sm font-black text-white">
+                  Official Account Deletion &amp; Deactivation Queue (15-Day Review)
+                </h3>
+                <p className="text-[11px] text-zinc-400">
+                  OTP-verified permanent deletions remain pending for 15 days; temporary deactivations never expire
+                </p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-rose-500/15 text-rose-300 text-xs font-bold border border-rose-500/30">
+              {deletionRequests.filter((r) => r.status === 'pending_official_deletion').length} Pending 15-Day Delete
+            </span>
+          </div>
+
+          {!isOfficialAdminUser ? (
+            <div className="p-4 rounded-2xl bg-[#0B0616] border border-white/10 text-xs text-zinc-400">
+              Sign in with the official administrator account (<span className="text-zinc-200 font-mono">alphamateapp@gmail.com</span>) to view and manage live account deletion requests.
+            </div>
+          ) : deletionRequests.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-[#0B0616] border border-white/10 text-xs text-zinc-400">
+              No account deactivation or permanent deletion requests recorded yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-white/10 text-zinc-400 uppercase text-[10px] tracking-wider">
+                    <th className="pb-2">User</th>
+                    <th className="pb-2">Request Type</th>
+                    <th className="pb-2">OTP Verified</th>
+                    <th className="pb-2">15-Day Scheduled Date</th>
+                    <th className="pb-2">Reason</th>
+                    <th className="pb-2">Status</th>
+                    <th className="pb-2 text-right">Official Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {deletionRequests.map((reqItem) => {
+                    const scheduledMs = reqItem.scheduledPermanentDeletionAt
+                      ? Date.parse(reqItem.scheduledPermanentDeletionAt)
+                      : NaN;
+                    const daysRemaining = Number.isFinite(scheduledMs)
+                      ? Math.max(0, Math.ceil((scheduledMs - Date.now()) / (24 * 60 * 60 * 1000)))
+                      : null;
+                    return (
+                      <tr key={reqItem.uid} className="hover:bg-white/[0.02]">
+                        <td className="py-3">
+                          <div className="font-bold text-white">{reqItem.displayName}</div>
+                          <div className="text-[10px] text-zinc-400">{reqItem.email}</div>
+                          <div className="text-[10px] text-zinc-500 font-mono">ID: {reqItem.uniqueId || reqItem.uid}</div>
+                        </td>
+                        <td className="py-3">
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                              reqItem.type === 'permanent_delete'
+                                ? 'bg-rose-500/20 text-rose-300'
+                                : 'bg-purple-500/20 text-purple-300'
+                            }`}
+                          >
+                            {reqItem.type === 'permanent_delete' ? 'Permanent Delete' : 'Temp Deactivation'}
+                          </span>
+                        </td>
+                        <td className="py-3">
+                          {reqItem.otpVerified ? (
+                            <span className="text-emerald-400 font-semibold">Yes (Email OTP)</span>
+                          ) : (
+                            <span className="text-zinc-500">N/A</span>
+                          )}
+                        </td>
+                        <td className="py-3 font-mono text-[11px] text-zinc-300">
+                          {reqItem.type === 'deactivation' ? (
+                            <span className="text-emerald-300">Never (Unlimited Recovery)</span>
+                          ) : reqItem.scheduledPermanentDeletionAt ? (
+                            <div>
+                              <div>{new Date(reqItem.scheduledPermanentDeletionAt).toLocaleDateString()}</div>
+                              <div className="text-[10px] text-amber-300">{daysRemaining} day(s) remaining</div>
+                            </div>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                        <td className="py-3 max-w-[180px] truncate text-zinc-400">
+                          {reqItem.reason || 'No reason provided'}
+                        </td>
+                        <td className="py-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[9.5px] font-bold uppercase ${
+                              reqItem.status === 'pending_official_deletion'
+                                ? 'bg-amber-500/20 text-amber-300'
+                                : reqItem.status === 'deactivated'
+                                ? 'bg-purple-500/20 text-purple-300'
+                                : reqItem.status === 'recovered'
+                                ? 'bg-emerald-500/20 text-emerald-300'
+                                : 'bg-rose-500/20 text-rose-300'
+                            }`}
+                          >
+                            {reqItem.status.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                        <td className="py-3 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {(reqItem.status === 'deactivated' || reqItem.status === 'pending_official_deletion') && (
+                              <button
+                                type="button"
+                                disabled={processingRequestUid === reqItem.uid}
+                                onClick={() => handleDeletionQueueAction(reqItem, 'restore')}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[10.5px] font-bold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              >
+                                <RotateCcw className="w-3 h-3" />
+                                <span>Restore</span>
+                              </button>
+                            )}
+                            {reqItem.status === 'pending_official_deletion' && (
+                              <button
+                                type="button"
+                                disabled={processingRequestUid === reqItem.uid}
+                                onClick={() => handleDeletionQueueAction(reqItem, 'finalize')}
+                                className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10.5px] font-bold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>Finalize</span>
+                              </button>
+                            )}
+                            {(reqItem.status === 'recovered' || reqItem.status === 'permanently_deleted') && (
+                              <span className="text-[10px] text-zinc-500 font-mono">Closed</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </div>
     </div>

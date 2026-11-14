@@ -23,7 +23,9 @@ export type ScreenType =
   | 'admin_dashboard'
   | 'agency_management'
   | 'privacy_policy'
-  | 'terms_conditions';
+  | 'terms_conditions'
+  | 'delete_account'
+  | 'account_recovery';
 
 export type MainTabType = 'home' | 'party' | 'moments' | 'store' | 'chat' | 'me';
 
@@ -69,6 +71,37 @@ export interface User {
   heldDiamonds?: number;
   activeFrame?: string;
   activeHonorTitle?: string;
+  accountStatus?: 'active' | 'deactivated' | 'pending_deletion' | 'permanently_deleted';
+  deactivatedAt?: string | null;
+  deletionRequestedAt?: string | null;
+  scheduledPermanentDeletionAt?: string | null;
+  deletionOtpVerifiedAt?: string | null;
+  deletionReason?: string | null;
+  reactivatedAt?: string | null;
+  pushNotificationToken?: string;
+  pushPlatform?: 'android' | 'ios' | 'web';
+  notificationPreferences?: NotificationPreferences;
+}
+
+export interface AccountDeletionRequest {
+  id: string;
+  uid: string;
+  uniqueId?: string;
+  username?: string;
+  displayName: string;
+  email: string;
+  avatar?: string;
+  type: 'deactivation' | 'permanent_delete';
+  status: 'deactivated' | 'pending_official_deletion' | 'recovered' | 'permanently_deleted';
+  otpVerified: boolean;
+  otpVerifiedAt?: string | null;
+  requestedAt: string;
+  scheduledPermanentDeletionAt?: string | null;
+  reason?: string;
+  recoveredAt?: string | null;
+  permanentlyDeletedAt?: string | null;
+  processedBy?: string | null;
+  updatedAt: string;
 }
 
 export interface SfuPublishedTrack {
@@ -245,15 +278,81 @@ export interface WalletTransaction {
   };
 }
 
+export type NotificationCategoryKey =
+  | 'liveOn'
+  | 'partyInvites'
+  | 'friendRequests'
+  | 'gifts'
+  | 'comments'
+  | 'messages'
+  | 'likes'
+  | 'pkBattles'
+  | 'walletAndSystem';
+
+export interface NotificationPreferences {
+  enabled: boolean;
+  categories: Record<NotificationCategoryKey, boolean>;
+  updatedAt?: string;
+}
+
+export type NotificationEventType =
+  | 'live_on'
+  | 'live_invite'
+  | 'party_invite'
+  | 'friend_request'
+  | 'follow'
+  | 'gift'
+  | 'comment'
+  | 'message'
+  | 'like'
+  | 'pk_invite'
+  | 'wallet'
+  | 'agency'
+  | 'system';
+
 export interface NotificationItem {
   id: string;
-  type: 'follow' | 'message' | 'party_invite' | 'live_invite' | 'gift' | 'pk_invite' | 'system';
+  type: NotificationEventType;
+  category?: NotificationCategoryKey;
   title: string;
   message: string;
   user?: User;
+  senderId?: string;
+  senderName?: string;
+  senderAvatar?: string;
+  recipientId?: string;
+  screen?: string;
+  tab?: string;
+  roomId?: string;
+  streamId?: string;
+  reelId?: string;
+  chatId?: string;
   timestamp: string;
+  createdAtMs?: number;
   isRead: boolean;
   actionUrl?: string;
+}
+
+export interface GiftTransactionRecord {
+  id: string;
+  senderId: string;
+  senderName: string;
+  recipientId: string;
+  recipientName: string;
+  giftId: string;
+  giftName: string;
+  giftIcon: string;
+  quantity: number;
+  totalCoins: number;
+  hostDiamonds: number; // 60% host share
+  appShareCoins: number; // 40% app revenue share
+  context: 'live' | 'party' | 'moments' | 'pk' | 'demo';
+  roomId?: string;
+  streamId?: string;
+  reelId?: string;
+  status: 'completed';
+  createdAt: string;
+  createdAtMs: number;
 }
 
 export interface StoryItem {

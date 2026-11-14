@@ -363,23 +363,38 @@ export const PrivacyPolicyScreen: React.FC = () => {
       content: (
         <>
           <p>
-            You may request permanent deletion of your Alpha Mate account at any time by emailing{' '}
+            You may manage account deactivation or permanent deletion directly inside the app under{' '}
+            <strong>Settings &rarr; Delete or Deactivate Account</strong>, or through our official web deletion page at{' '}
+            <button
+              type="button"
+              onClick={() => setCurrentScreen('delete_account')}
+              className="text-[#D8B4FE] underline font-semibold cursor-pointer"
+            >
+              https://alphamate.app/delete-account
+            </button>
+            , or by contacting{' '}
             <a href="mailto:support@alphamate.app" className="text-[#D8B4FE] underline font-semibold">
               support@alphamate.app
-            </a>{' '}
-            from your registered email address (or by completing email ownership verification with our support team).
+            </a>
+            .
           </p>
-          <p>
-            Upon verifying your deletion request, your account enters a <strong>15-day deletion grace period</strong>{' '}
-            before permanent removal. Active account access is disabled, and once the 15-day window concludes without
-            recovery, our team permanently removes your account authentication credentials, profile data, and associated
-            hosted user content where applicable.
-          </p>
+          <ul className="list-disc pl-5 space-y-1.5 text-zinc-300">
+            <li>
+              <strong>Temporary Deactivation (No Time Limit):</strong> If you choose temporary deactivation, your account
+              access is paused and you are signed out, while your profile, Coins, Diamonds, VIP tier, and history remain
+              safely preserved and are never permanently deleted.
+            </li>
+            <li>
+              <strong>Permanent Deletion (Email OTP + 15-Day Official Queue):</strong> Permanent deletion requires
+              verifying a 6-digit one-time password (OTP) sent to your registered email address. Once verified, your
+              request enters our official <strong>15-day pending deletion queue</strong>, and upon completion after 15
+              days without recovery, your Firebase Authentication credentials, profile data, and presence records are
+              permanently removed.
+            </li>
+          </ul>
           <p className="text-xs text-zinc-400">
-            Note: Automated self-service deletion inside the app UI and automated purging of infrastructure backups are
-            not currently automated via a background server job. Infrastructure-level backups, server logs, or records
-            required for fraud prevention or legal compliance remain subject to the underlying cloud provider&apos;s
-            standard retention cycles and applicable law.
+            Infrastructure-level backups, server logs, or records required for fraud prevention or legal compliance
+            remain subject to the underlying cloud provider&apos;s standard retention cycles and applicable law.
           </p>
         </>
       ),
@@ -391,17 +406,19 @@ export const PrivacyPolicyScreen: React.FC = () => {
       content: (
         <>
           <p>
-            If you change your mind after submitting an account deletion request, you have <strong>15 days</strong> from
-            the request date to recover your account.
+            <strong>Temporarily Deactivated Accounts:</strong> There is <strong>no time limit</strong> to recover a
+            temporarily deactivated account. Simply sign back in with your Google or Email credentials at any time to
+            reactivate your account immediately with all balances intact.
           </p>
           <p>
-            To recover your account within this 15-day window, contact{' '}
+            <strong>Pending Permanent Deletion Accounts (15-Day Window):</strong> If you verified permanent deletion via
+            OTP, you have <strong>15 days</strong> from the request date to recover your account by signing back into
+            Alpha Mate (or contacting{' '}
             <a href="mailto:support@alphamate.app" className="text-[#D8B4FE] underline font-semibold">
               support@alphamate.app
-            </a>{' '}
-            and complete <strong>email ownership verification</strong> using your registered email address. After the
-            15-day period expires and permanent deletion is completed, your account, Coins, Diamonds, VIP status, and
-            content cannot be restored.
+            </a>
+            ) and selecting <strong>Cancel Deletion &amp; Recover Account</strong>. After the 15-day period expires and
+            permanent deletion is executed, your account, Coins, Diamonds, VIP status, and content cannot be restored.
           </p>
         </>
       ),

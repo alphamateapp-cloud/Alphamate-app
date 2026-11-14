@@ -31,6 +31,9 @@ import {
   addDoc,
   deleteDoc,
   serverTimestamp,
+  writeBatch,
+  getDocs,
+  increment,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
@@ -887,5 +890,808 @@ export function subscribeToLiveStreamViewers(
   );
 }
 
+// =========================================================================
+// ACCOUNT DEACTIVATION, 15-DAY PERMANENT DELETION & RECOVERY HELPERS
+// =========================================================================
 
+export const FIFTEEN_DAYS_MS = 15 * 24 * 60 * 60 * 1000;
 
+function sanitizeDeletionReason(reason?: string): string {
+  return String(reason || '').trim().slice(0, 500);
+}
+
+/**
+ * Temporarily deactivate user account (never deleted, unlimited recovery window).
+ */
+export async function submitAccountDeactivationFirestore(
+  user: {
+    id: string;
+    uniqueId?: string;
+    username?: string;
+    displayName?: string;
+    email?: string;
+    avatar?: string;
+  },
+  reason?: string
+): Promise<{ deactivatedAt: string }> {
+  const uid = auth.currentUser?.uid || user.id;
+  if (!uid) throw new Error('Authenticated user required to deactivate account.');
+
+  const nowIso = new Date().toISOString();
+  const cleanReason = sanitizeDeletionReason(reason);
+  const userPath = `users/${uid}`;
+  const reqPath = `accountDeletionRequests/${uid}`;
+
+  try {
+    await setDoc(
+      doc(db, 'users', uid),
+      stripUndefinedFields({
+        accountStatus: 'deactivated',
+        deactivatedAt: nowIso,
+        deletionRequestedAt: null,
+        scheduledPermanentDeletionAt: null,
+        deletionOtpVerifiedAt: null,
+        deletionReason: cleanReason,
+        updatedAt: nowIso,
+      }),
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, userPath);
+  }
+
+  try {
+    const reqDoc = stripUndefinedFields({
+      uid,
+      uniqueId: String(user.uniqueId || uid).slice(0, 64),
+      username: String(user.username || 'user').slice(0, 64),
+      displayName: String(user.displayName || 'Alpha Mate User').slice(0, 128),
+      email: String(auth.currentUser?.email || user.email || '').toLowerCase().slice(0, 128),
+      avatar: sanitizeAvatarString(user.avatar),
+      type: 'deactivation',
+      status: 'deactivated',
+      otpVerified: false,
+      requestedAt: nowIso,
+      reason: cleanReason,
+      updatedAt: nowIso,
+    });
+    await setDoc(doc(db, 'accountDeletionRequests', uid), reqDoc);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, reqPath);
+  }
+
+  return { deactivatedAt: nowIso };
+}
+
+/**
+ * Submit OTP-verified Permanent Account Deletion request into Official 15-Day Pending Queue.
+ */
+export async function submitPermanentDeletionRequestFirestore(
+  user: {
+    id: string;
+    uniqueId?: string;
+    username?: string;
+    displayName?: string;
+    email?: string;
+    avatar?: string;
+  },
+  otpVerifiedAt: string,
+  reason?: string
+): Promise<{ requestedAt: string; scheduledPermanentDeletionAt: string }> {
+  const uid = auth.currentUser?.uid || user.id;
+  if (!uid) throw new Error('Authenticated user required to request permanent account deletion.');
+  if (!otpVerifiedAt) throw new Error('Email OTP verification is required before requesting permanent deletion.');
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const scheduledIso = new Date(nowMs + FIFTEEN_DAYS_MS).toISOString();
+  const cleanReason = sanitizeDeletionReason(reason);
+  const userPath = `users/${uid}`;
+  const reqPath = `accountDeletionRequests/${uid}`;
+
+  try {
+    await setDoc(
+      doc(db, 'users', uid),
+      stripUndefinedFields({
+        accountStatus: 'pending_deletion',
+        deletionRequestedAt: nowIso,
+        scheduledPermanentDeletionAt: scheduledIso,
+        deletionOtpVerifiedAt: otpVerifiedAt,
+        deletionReason: cleanReason,
+        updatedAt: nowIso,
+      }),
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, userPath);
+  }
+
+  try {
+    const reqDoc = stripUndefinedFields({
+      uid,
+      uniqueId: String(user.uniqueId || uid).slice(0, 64),
+      username: String(user.username || 'user').slice(0, 64),
+      displayName: String(user.displayName || 'Alpha Mate User').slice(0, 128),
+      email: String(auth.currentUser?.email || user.email || '').toLowerCase().slice(0, 128),
+      avatar: sanitizeAvatarString(user.avatar),
+      type: 'permanent_delete',
+      status: 'pending_official_deletion',
+      otpVerified: true,
+      otpVerifiedAt,
+      requestedAt: nowIso,
+      scheduledPermanentDeletionAt: scheduledIso,
+      reason: cleanReason,
+      updatedAt: nowIso,
+    });
+    await setDoc(doc(db, 'accountDeletionRequests', uid), reqDoc);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, reqPath);
+  }
+
+  return {
+    requestedAt: nowIso,
+    scheduledPermanentDeletionAt: scheduledIso,
+  };
+}
+
+/**
+ * Fetch a user's current deactivation/deletion request document.
+ */
+export async function getAccountDeletionRequestFirestore(uid: string) {
+  if (!uid) return null;
+  const path = `accountDeletionRequests/${uid}`;
+  try {
+    const snap = await getDoc(doc(db, 'accountDeletionRequests', uid));
+    return snap.exists() ? snap.data() : null;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
+}
+
+/**
+ * Recover a deactivated account (any time) or a pending permanent deletion account (within 15 days).
+ */
+export async function recoverAccountLifecycleFirestore(user: {
+  id: string;
+  uniqueId?: string | null;
+  username?: string | null;
+  displayName?: string | null;
+  email?: string | null;
+  avatar?: string | null;
+  accountStatus?: string | null;
+  deletionRequestedAt?: string | null;
+  scheduledPermanentDeletionAt?: string | null;
+}): Promise<{ reactivatedAt: string }> {
+  const uid = auth.currentUser?.uid || user.id;
+  if (!uid) throw new Error('Authenticated user required to recover account.');
+
+  const existingReq = await getAccountDeletionRequestFirestore(uid).catch(() => null);
+  const scheduledIso = existingReq?.scheduledPermanentDeletionAt || user.scheduledPermanentDeletionAt;
+  const effectiveStatus = existingReq?.status || user.accountStatus;
+
+  if (effectiveStatus === 'permanently_deleted') {
+    throw new Error('This account has already been permanently deleted and can no longer be recovered.');
+  }
+
+  if (
+    (effectiveStatus === 'pending_official_deletion' || user.accountStatus === 'pending_deletion') &&
+    scheduledIso
+  ) {
+    const deadlineMs = Date.parse(scheduledIso);
+    if (Number.isFinite(deadlineMs) && Date.now() >= deadlineMs) {
+      throw new Error(
+        'The 15-day recovery window has expired. This account is queued for final permanent removal and cannot be recovered.'
+      );
+    }
+  }
+
+  const nowIso = new Date().toISOString();
+  const userPath = `users/${uid}`;
+  const reqPath = `accountDeletionRequests/${uid}`;
+
+  try {
+    await setDoc(
+      doc(db, 'users', uid),
+      stripUndefinedFields({
+        accountStatus: 'active',
+        reactivatedAt: nowIso,
+        deactivatedAt: null,
+        deletionRequestedAt: null,
+        scheduledPermanentDeletionAt: null,
+        deletionOtpVerifiedAt: null,
+        updatedAt: nowIso,
+      }),
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, userPath);
+  }
+
+  try {
+    const reqDoc = stripUndefinedFields({
+      uid,
+      uniqueId: String(existingReq?.uniqueId || user.uniqueId || uid).slice(0, 64),
+      username: String(existingReq?.username || user.username || 'user').slice(0, 64),
+      displayName: String(existingReq?.displayName || user.displayName || 'Alpha Mate User').slice(0, 128),
+      email: String(existingReq?.email || auth.currentUser?.email || user.email || '').toLowerCase().slice(0, 128),
+      avatar: sanitizeAvatarString(existingReq?.avatar || user.avatar),
+      type: existingReq?.type === 'permanent_delete' ? 'permanent_delete' : 'deactivation',
+      status: 'recovered',
+      otpVerified: Boolean(existingReq?.otpVerified),
+      ...(existingReq?.otpVerifiedAt ? { otpVerifiedAt: existingReq.otpVerifiedAt } : {}),
+      requestedAt: existingReq?.requestedAt || user.deletionRequestedAt || nowIso,
+      recoveredAt: nowIso,
+      processedBy: 'user_self_recovery',
+      updatedAt: nowIso,
+    });
+    await setDoc(doc(db, 'accountDeletionRequests', uid), reqDoc);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, reqPath);
+  }
+
+  return { reactivatedAt: nowIso };
+}
+
+/**
+ * Real-time subscription for Official Admin Dashboard deletion queue.
+ */
+export function subscribeToAccountDeletionRequests(onUpdate: (items: any[]) => void) {
+  const path = 'accountDeletionRequests';
+  const q = query(collection(db, 'accountDeletionRequests'), orderBy('updatedAt', 'desc'), limit(200));
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const items = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+      onUpdate(items);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+/**
+ * Official Admin action: restore a user account or mark an expired request as permanently deleted.
+ */
+export async function adminProcessAccountDeletionRequest(
+  reqItem: {
+    uid: string;
+    uniqueId?: string | null;
+    username?: string | null;
+    displayName: string;
+    email: string;
+    avatar?: string | null;
+    type: 'deactivation' | 'permanent_delete';
+    otpVerified?: boolean | null;
+    otpVerifiedAt?: string | null;
+    requestedAt: string;
+    scheduledPermanentDeletionAt?: string | null;
+  },
+  action: 'restore' | 'finalize'
+): Promise<void> {
+  const uid = reqItem.uid;
+  const nowIso = new Date().toISOString();
+  const adminEmail = auth.currentUser?.email || 'official_admin';
+
+  if (action === 'restore') {
+    await setDoc(
+      doc(db, 'users', uid),
+      stripUndefinedFields({
+        accountStatus: 'active',
+        reactivatedAt: nowIso,
+        deactivatedAt: null,
+        deletionRequestedAt: null,
+        scheduledPermanentDeletionAt: null,
+        deletionOtpVerifiedAt: null,
+        updatedAt: nowIso,
+      }),
+      { merge: true }
+    );
+    await setDoc(
+      doc(db, 'accountDeletionRequests', uid),
+      stripUndefinedFields({
+        uid,
+        uniqueId: reqItem.uniqueId || uid,
+        username: reqItem.username || 'user',
+        displayName: String(reqItem.displayName || 'Alpha Mate User').slice(0, 128),
+        email: String(reqItem.email || '').toLowerCase().slice(0, 128),
+        avatar: sanitizeAvatarString(reqItem.avatar || undefined),
+        type: reqItem.type,
+        status: 'recovered',
+        otpVerified: Boolean(reqItem.otpVerified),
+        ...(reqItem.otpVerifiedAt ? { otpVerifiedAt: reqItem.otpVerifiedAt } : {}),
+        requestedAt: reqItem.requestedAt || nowIso,
+        recoveredAt: nowIso,
+        processedBy: adminEmail,
+        updatedAt: nowIso,
+      })
+    );
+    return;
+  }
+
+  await setDoc(
+    doc(db, 'users', uid),
+    stripUndefinedFields({
+      accountStatus: 'permanently_deleted',
+      updatedAt: nowIso,
+    }),
+    { merge: true }
+  );
+  await setDoc(
+    doc(db, 'accountDeletionRequests', uid),
+    stripUndefinedFields({
+      uid,
+      uniqueId: reqItem.uniqueId || uid,
+      username: reqItem.username || 'user',
+      displayName: String(reqItem.displayName || 'Alpha Mate User').slice(0, 128),
+      email: String(reqItem.email || '').toLowerCase().slice(0, 128),
+      avatar: sanitizeAvatarString(reqItem.avatar || undefined),
+      type: 'permanent_delete',
+      status: 'permanently_deleted',
+      otpVerified: Boolean(reqItem.otpVerified),
+      ...(reqItem.otpVerifiedAt ? { otpVerifiedAt: reqItem.otpVerifiedAt } : {}),
+      requestedAt: reqItem.requestedAt || nowIso,
+      ...(reqItem.scheduledPermanentDeletionAt
+        ? { scheduledPermanentDeletionAt: reqItem.scheduledPermanentDeletionAt }
+        : {}),
+      permanentlyDeletedAt: nowIso,
+      processedBy: adminEmail,
+      updatedAt: nowIso,
+    })
+  );
+}
+
+// =========================================================================
+// REAL-TIME USER NOTIFICATIONS & PREFERENCES
+// =========================================================================
+
+const FIRESTORE_VALID_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function formatNotificationTimestamp(ms?: number): string {
+  if (!ms || !Number.isFinite(ms)) return 'Just now';
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return 'Just now';
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return new Date(ms).toLocaleDateString();
+}
+
+export async function updateUserNotificationPreferencesFirestore(
+  userId: string,
+  preferences: { enabled: boolean; categories: Record<string, boolean>; updatedAt?: string }
+): Promise<void> {
+  if (!userId || !FIRESTORE_VALID_ID_RE.test(userId)) return;
+  const path = `users/${userId}`;
+  try {
+    await setDoc(
+      doc(db, 'users', userId),
+      {
+        notificationPreferences: {
+          enabled: Boolean(preferences.enabled),
+          categories: { ...preferences.categories },
+          updatedAt: preferences.updatedAt || new Date().toISOString(),
+        },
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+  }
+}
+
+export interface SendNotificationParams {
+  recipientId: string;
+  type:
+    | 'live_on'
+    | 'live_invite'
+    | 'party_invite'
+    | 'friend_request'
+    | 'follow'
+    | 'gift'
+    | 'comment'
+    | 'message'
+    | 'like'
+    | 'pk_invite'
+    | 'wallet'
+    | 'agency'
+    | 'system';
+  category?: string;
+  title: string;
+  message: string;
+  senderName?: string;
+  senderAvatar?: string;
+  screen?: string;
+  tab?: string;
+  roomId?: string;
+  streamId?: string;
+  reelId?: string;
+  chatId?: string;
+}
+
+export async function sendFirestoreNotification(
+  params: SendNotificationParams
+): Promise<string | null> {
+  const senderUid = auth.currentUser?.uid;
+  const recipientId = String(params.recipientId || '').trim();
+  if (!senderUid || !recipientId || !FIRESTORE_VALID_ID_RE.test(recipientId)) {
+    return null;
+  }
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const notifId = `n_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
+  const path = `users/${recipientId}/notifications/${notifId}`;
+
+  const payload = stripUndefinedFields({
+    recipientId,
+    senderId: senderUid,
+    senderName: String(params.senderName || auth.currentUser?.displayName || 'Alpha Mate User').slice(0, 128),
+    senderAvatar: sanitizeAvatarString(params.senderAvatar || auth.currentUser?.photoURL || undefined),
+    type: params.type,
+    category: params.category || undefined,
+    title: String(params.title || 'Alpha Mate').slice(0, 160),
+    message: String(params.message || '').slice(0, 600),
+    screen: params.screen ? String(params.screen).slice(0, 64) : undefined,
+    tab: params.tab ? String(params.tab).slice(0, 64) : undefined,
+    roomId: params.roomId ? String(params.roomId).slice(0, 128) : undefined,
+    streamId: params.streamId ? String(params.streamId).slice(0, 128) : undefined,
+    reelId: params.reelId ? String(params.reelId).slice(0, 128) : undefined,
+    chatId: params.chatId ? String(params.chatId).slice(0, 128) : undefined,
+    isRead: false,
+    createdAt: nowIso,
+    createdAtMs: nowMs,
+  });
+
+  try {
+    await setDoc(doc(db, 'users', recipientId, 'notifications', notifId), payload);
+    return notifId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export function subscribeToUserNotifications(
+  userId: string,
+  onUpdate: (items: any[]) => void
+) {
+  const path = `users/${userId}/notifications`;
+  const q = query(
+    collection(db, 'users', userId, 'notifications'),
+    orderBy('createdAtMs', 'desc'),
+    limit(100)
+  );
+  return onSnapshot(
+    q,
+    (snapshot) => {
+      const list = snapshot.docs.map((docSnap) => {
+        const d = docSnap.data() as Record<string, any>;
+        return {
+          id: docSnap.id,
+          type: d.type || 'system',
+          category: d.category,
+          title: d.title || 'Alpha Mate',
+          message: d.message || '',
+          senderId: d.senderId,
+          senderName: d.senderName,
+          senderAvatar: d.senderAvatar,
+          recipientId: d.recipientId,
+          screen: d.screen,
+          tab: d.tab,
+          roomId: d.roomId,
+          streamId: d.streamId,
+          reelId: d.reelId,
+          chatId: d.chatId,
+          isRead: Boolean(d.isRead),
+          createdAtMs: Number(d.createdAtMs) || Date.now(),
+          timestamp: formatNotificationTimestamp(Number(d.createdAtMs)),
+          user: d.senderId
+            ? {
+                id: d.senderId,
+                displayName: d.senderName || 'Alpha Mate User',
+                avatar: d.senderAvatar || '',
+              }
+            : undefined,
+        };
+      });
+      onUpdate(list);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+export async function markFirestoreNotificationRead(
+  userId: string,
+  notificationId: string
+): Promise<void> {
+  if (!userId || !notificationId) return;
+  const path = `users/${userId}/notifications/${notificationId}`;
+  try {
+    await updateDoc(doc(db, 'users', userId, 'notifications', notificationId), {
+      isRead: true,
+      readAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function markAllFirestoreNotificationsRead(
+  userId: string,
+  notificationIds: string[]
+): Promise<void> {
+  if (!userId || notificationIds.length === 0) return;
+  const readAt = new Date().toISOString();
+  const batch = writeBatch(db);
+  notificationIds.slice(0, 100).forEach((id) => {
+    if (FIRESTORE_VALID_ID_RE.test(id)) {
+      batch.update(doc(db, 'users', userId, 'notifications', id), {
+        isRead: true,
+        readAt,
+      });
+    }
+  });
+  try {
+    await batch.commit();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `users/${userId}/notifications`);
+  }
+}
+
+export async function fetchBroadcastRecipientIds(
+  excludeUid: string,
+  maxUsers: number = 30
+): Promise<string[]> {
+  if (!auth.currentUser?.uid) return [];
+  try {
+    const snap = await getDocs(query(collection(db, 'users'), limit(maxUsers + 5)));
+    return snap.docs
+      .map((d) => d.id)
+      .filter((id) => id !== excludeUid && FIRESTORE_VALID_ID_RE.test(id))
+      .slice(0, maxUsers);
+  } catch (err) {
+    console.warn('Could not query broadcast notification recipients:', err);
+    return [];
+  }
+}
+
+// =========================================================================
+// 60/40 GIFTING ECONOMY (60% HOST DIAMONDS + 40% APP REVENUE SHARE)
+// =========================================================================
+
+export interface SixtyFortyGiftInput {
+  senderId: string;
+  senderName: string;
+  senderAvatar?: string;
+  recipientId: string;
+  recipientName: string;
+  giftId: string;
+  giftName: string;
+  giftIcon: string;
+  unitCoins: number;
+  quantity: number;
+  context: 'live' | 'party' | 'moments' | 'pk' | 'demo';
+  roomId?: string;
+  streamId?: string;
+  reelId?: string;
+}
+
+export interface SixtyFortyGiftResult {
+  txId: string;
+  totalCoins: number;
+  hostDiamonds: number;
+  appShareCoins: number;
+  creditedHostFirestore: boolean;
+  senderNextCoins?: number;
+  senderNextDiamonds?: number;
+}
+
+export async function executeSixtyFortyGiftTransaction(
+  input: SixtyFortyGiftInput
+): Promise<SixtyFortyGiftResult> {
+  const qty = Math.max(1, Math.floor(Number(input.quantity) || 1));
+  const unitCoins = Math.max(1, Math.floor(Number(input.unitCoins) || 1));
+  const totalCoins = unitCoins * qty;
+  const hostDiamonds = Math.round(totalCoins * 0.6);
+  const appShareCoins = totalCoins - hostDiamonds;
+
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const txId = `gift_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
+
+  const authUid = auth.currentUser?.uid;
+  if (!authUid) {
+    return {
+      txId,
+      totalCoins,
+      hostDiamonds,
+      appShareCoins,
+      creditedHostFirestore: false,
+    };
+  }
+
+  const recipientId = String(input.recipientId || authUid).trim();
+  const isSelfRecipient = recipientId === authUid;
+  const canQueryRecipientDoc = FIRESTORE_VALID_ID_RE.test(recipientId);
+
+  let creditedHostFirestore = false;
+  let senderNextCoins: number | undefined;
+  let senderNextDiamonds: number | undefined;
+
+  try {
+    await runTransaction(db, async (transaction) => {
+      const senderRef = doc(db, 'users', authUid);
+      const senderSnap = await transaction.get(senderRef);
+
+      let recipientSnap: any = null;
+      const recipientRef = canQueryRecipientDoc && !isSelfRecipient ? doc(db, 'users', recipientId) : null;
+      if (recipientRef) {
+        recipientSnap = await transaction.get(recipientRef);
+      }
+
+      if (senderSnap.exists()) {
+        const senderData = senderSnap.data() as Record<string, any>;
+        const currentCoins = Number(senderData.coins ?? 0);
+        const currentDiamonds = Number(senderData.diamonds ?? 0);
+        senderNextCoins = Math.max(0, currentCoins - totalCoins);
+
+        if (isSelfRecipient) {
+          senderNextDiamonds = currentDiamonds + hostDiamonds;
+          transaction.update(senderRef, {
+            coins: senderNextCoins,
+            diamonds: senderNextDiamonds,
+            updatedAt: nowIso,
+          });
+          creditedHostFirestore = true;
+        } else {
+          transaction.update(senderRef, {
+            coins: senderNextCoins,
+            updatedAt: nowIso,
+          });
+        }
+      }
+
+      if (recipientRef && recipientSnap && recipientSnap.exists()) {
+        const rData = recipientSnap.data() as Record<string, any>;
+        const currentRecipientDiamonds = Number(rData.diamonds ?? 0);
+        transaction.update(recipientRef, {
+          diamonds: currentRecipientDiamonds + hostDiamonds,
+          updatedAt: nowIso,
+        });
+        creditedHostFirestore = true;
+      }
+
+      const ledgerPayload = stripUndefinedFields({
+        senderId: authUid,
+        senderName: String(input.senderName || 'Alpha Mate User').slice(0, 128),
+        recipientId: canQueryRecipientDoc ? recipientId : authUid,
+        recipientName: String(input.recipientName || 'Host').slice(0, 128),
+        giftId: String(input.giftId || 'gift').slice(0, 64),
+        giftName: String(input.giftName || 'Gift').slice(0, 80),
+        giftIcon: String(input.giftIcon || '🎁').slice(0, 32),
+        quantity: qty,
+        totalCoins,
+        hostDiamonds,
+        appShareCoins,
+        context: input.context,
+        roomId: input.roomId ? String(input.roomId).slice(0, 128) : undefined,
+        streamId: input.streamId ? String(input.streamId).slice(0, 128) : undefined,
+        reelId: input.reelId ? String(input.reelId).slice(0, 128) : undefined,
+        status: 'completed',
+        createdAt: nowIso,
+        createdAtMs: nowMs,
+      });
+
+      transaction.set(doc(db, 'giftTransactions', txId), ledgerPayload);
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `giftTransactions/${txId}`);
+  }
+
+  if (input.context === 'live' && input.streamId) {
+    updateDoc(doc(db, 'liveStreams', input.streamId), {
+      totalGiftCoins: increment(totalCoins),
+      updatedAt: nowIso,
+    }).catch(() => {});
+  } else if (input.context === 'party' && input.roomId) {
+    updateDoc(doc(db, 'partyRooms', input.roomId), {
+      totalGiftCoins: increment(totalCoins),
+      updatedAt: nowIso,
+    }).catch(() => {});
+  }
+
+  if (canQueryRecipientDoc) {
+    sendFirestoreNotification({
+      recipientId,
+      type: 'gift',
+      category: 'gifts',
+      title: `${input.giftIcon} Gift Received (+${hostDiamonds.toLocaleString()} 💎)`,
+      message: `${input.senderName} sent ${qty > 1 ? `${qty}x ` : ''}${input.giftName} (${totalCoins.toLocaleString()} Coins). Your 60% host share (+${hostDiamonds.toLocaleString()} Diamonds) is in your wallet!`,
+      senderName: input.senderName,
+      senderAvatar: input.senderAvatar,
+      screen: 'wallet',
+      roomId: input.roomId,
+      streamId: input.streamId,
+      reelId: input.reelId,
+    }).catch((err) => console.warn('Gift notification dispatch warning:', err));
+  }
+
+  return {
+    txId,
+    totalCoins,
+    hostDiamonds,
+    appShareCoins,
+    creditedHostFirestore,
+    senderNextCoins,
+    senderNextDiamonds,
+  };
+}
+
+export function subscribeToGiftTransactions(
+  options: { userId?: string; isAdmin?: boolean },
+  onUpdate: (items: any[]) => void
+) {
+  const path = 'giftTransactions';
+  if (options.isAdmin) {
+    const q = query(
+      collection(db, 'giftTransactions'),
+      orderBy('createdAtMs', 'desc'),
+      limit(200)
+    );
+    return onSnapshot(
+      q,
+      (snap) => onUpdate(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => handleFirestoreError(err, OperationType.LIST, path)
+    );
+  }
+  const uid = options.userId;
+  if (!uid) return () => {};
+
+  let sentDocs: any[] = [];
+  let receivedDocs: any[] = [];
+  const mergeAndEmit = () => {
+    const byId = new Map<string, any>();
+    [...sentDocs, ...receivedDocs].forEach((item) => byId.set(item.id, item));
+    const merged = Array.from(byId.values()).sort(
+      (a, b) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0)
+    );
+    onUpdate(merged);
+  };
+
+  const qSent = query(
+    collection(db, 'giftTransactions'),
+    where('senderId', '==', uid),
+    limit(100)
+  );
+  const qReceived = query(
+    collection(db, 'giftTransactions'),
+    where('recipientId', '==', uid),
+    limit(100)
+  );
+
+  const unsubSent = onSnapshot(
+    qSent,
+    (snap) => {
+      sentDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      mergeAndEmit();
+    },
+    (err) => handleFirestoreError(err, OperationType.LIST, path)
+  );
+  const unsubReceived = onSnapshot(
+    qReceived,
+    (snap) => {
+      receivedDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      mergeAndEmit();
+    },
+    (err) => handleFirestoreError(err, OperationType.LIST, path)
+  );
+
+  return () => {
+    unsubSent();
+    unsubReceived();
+  };
+}

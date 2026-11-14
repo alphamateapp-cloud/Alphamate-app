@@ -86,6 +86,7 @@ export const LiveStreamScreen: React.FC = () => {
     currentUser,
     setCurrentScreen,
     startDirectMessage,
+    sendNotificationToUser,
   } = useApp();
 
   // Role perspective: Host or Viewer (only actual stream owner can be host)
@@ -313,6 +314,17 @@ export const LiveStreamScreen: React.FC = () => {
       }
       return next;
     });
+    if (isNowFollowing && targetUser.id && targetUser.id !== currentUser.id) {
+      sendNotificationToUser({
+        recipientId: targetUser.id,
+        type: 'follow',
+        category: 'friendRequests',
+        title: `⭐ ${currentUser.displayName} followed you!`,
+        message: `${currentUser.displayName} started following you during a live stream.`,
+        screen: 'chat',
+        streamId: activeStream?.id,
+      }).catch(() => {});
+    }
     showToast(isNowFollowing ? `Following ${targetUser.displayName}! 💜` : `Unfollowed ${targetUser.displayName}`);
   };
 
@@ -1008,8 +1020,11 @@ export const LiveStreamScreen: React.FC = () => {
       ? giftRecipientUser.displayName
       : (activeStream?.host.displayName || 'Host');
 
-    // Deduct coins & record via AppContext
-    sendLiveGift(selectedGift, recipientId);
+    // Deduct coins & record 60% Host Diamonds / 40% App Share via AppContext
+    sendLiveGift(selectedGift, recipientId, qty, recipientName, {
+      context: 'live',
+      streamId: activeStream?.id,
+    });
 
     // Calculate Combo Streaks (reset if > 4.2 seconds between sends)
     const now = Date.now();
@@ -1341,7 +1356,19 @@ export const LiveStreamScreen: React.FC = () => {
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                setIsFollowing(!isFollowing);
+                const nextFollow = !isFollowing;
+                setIsFollowing(nextFollow);
+                if (nextFollow && activeStream?.host?.id && activeStream.host.id !== currentUser.id) {
+                  sendNotificationToUser({
+                    recipientId: activeStream.host.id,
+                    type: 'follow',
+                    category: 'friendRequests',
+                    title: `⭐ ${currentUser.displayName} followed you!`,
+                    message: `${currentUser.displayName} joined your Live Stream and followed you.`,
+                    screen: 'chat',
+                    streamId: activeStream.id,
+                  }).catch(() => {});
+                }
               }}
               className={`ml-0.5 px-2 py-0.5 rounded-full text-[9px] font-bold transition-all cursor-pointer shrink-0 ${
                 isFollowing

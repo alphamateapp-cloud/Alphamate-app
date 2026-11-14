@@ -38,6 +38,8 @@ export const WalletScreen: React.FC = () => {
     setCurrentScreen,
     agencyProfile,
     currentUser,
+    giftTransactions,
+    simulateDemoHostGift,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'recharge' | 'withdraw' | 'exchange' | 'history'>('recharge');
@@ -401,6 +403,65 @@ export const WalletScreen: React.FC = () => {
             </div>
           </div>
           <ChevronRight className="w-4 h-4 text-zinc-400 group-hover:text-white shrink-0" />
+        </div>
+
+        {/* 60/40 Creator Economy & Demo Gift Verification Card */}
+        <div className="p-3.5 rounded-2xl bg-[#140929] border border-pink-500/25 space-y-2.5">
+          <div className="flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-xs font-black text-white flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-pink-400" />
+                <span>60/40 Gift Split Economy</span>
+              </h3>
+              <p className="text-[10px] text-zinc-400">
+                Every gift credits <span className="text-pink-300 font-bold">60% Host Diamonds 💎</span> &amp;{' '}
+                <span className="text-amber-300 font-bold">40% App Share</span>
+              </p>
+            </div>
+            <span className="px-2 py-0.5 rounded-full bg-pink-500/15 border border-pink-500/30 text-[9.5px] font-mono font-black text-pink-300">
+              60% / 40%
+            </span>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div className="p-2 rounded-xl bg-black/35 border border-white/5">
+              <div className="text-[9px] text-zinc-400 uppercase">Total Gifts</div>
+              <div className="text-xs font-mono font-black text-white">
+                {giftTransactions.reduce((acc, g) => acc + (g.totalCoins || 0), 0).toLocaleString()} 💰
+              </div>
+            </div>
+            <div className="p-2 rounded-xl bg-black/35 border border-pink-500/20">
+              <div className="text-[9px] text-pink-300 uppercase">Host 60%</div>
+              <div className="text-xs font-mono font-black text-pink-300">
+                +{giftTransactions.reduce((acc, g) => acc + (g.hostDiamonds || 0), 0).toLocaleString()} 💎
+              </div>
+            </div>
+            <div className="p-2 rounded-xl bg-black/35 border border-amber-400/20">
+              <div className="text-[9px] text-amber-300 uppercase">App 40%</div>
+              <div className="text-xs font-mono font-black text-amber-300">
+                {giftTransactions.reduce((acc, g) => acc + (g.appShareCoins || 0), 0).toLocaleString()} 💰
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/5">
+            <span className="text-[10px] text-zinc-300 font-medium">Test Demo Host Gift:</span>
+            <div className="flex items-center gap-1.5">
+              {[100, 500, 1000].map((amt) => (
+                <button
+                  key={amt}
+                  type="button"
+                  onClick={() => {
+                    const res = simulateDemoHostGift(amt, `Demo ${amt} Gift`);
+                    showToast(res.message);
+                  }}
+                  className="px-2 py-1 rounded-lg bg-gradient-to-r from-[#7928CA] to-[#EC4899] hover:brightness-110 text-white text-[10px] font-black cursor-pointer active:scale-95 transition-all"
+                >
+                  {amt} → +{Math.round(amt * 0.6)} 💎
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1087,6 +1148,40 @@ export const WalletScreen: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {giftTransactions.length > 0 && (
+            <div className="pt-3 space-y-2">
+              <div className="flex items-center justify-between px-1">
+                <span className="text-[11px] font-black uppercase tracking-wider text-pink-300">
+                  60/40 Gift Ledger ({giftTransactions.length})
+                </span>
+                <span className="text-[10px] text-zinc-400">60% Host 💎 • 40% App Coins</span>
+              </div>
+              {giftTransactions.slice(0, 15).map((g) => (
+                <div
+                  key={g.id}
+                  className="p-3 rounded-2xl bg-[#140D26] border border-pink-500/20 flex items-center justify-between gap-2"
+                >
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white truncate">
+                      {g.giftIcon} {g.giftName} {g.quantity > 1 ? `x${g.quantity}` : ''} → {g.recipientName}
+                    </div>
+                    <div className="text-[10px] text-zinc-400 font-mono mt-0.5">
+                      Total: {g.totalCoins.toLocaleString()} Coins • {g.context.toUpperCase()}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0 font-mono">
+                    <div className="text-[11px] font-black text-pink-300">
+                      +{g.hostDiamonds.toLocaleString()} 💎 (60%)
+                    </div>
+                    <div className="text-[10px] text-amber-300">
+                      {g.appShareCoins.toLocaleString()} App (40%)
+                    </div>
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

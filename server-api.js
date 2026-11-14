@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
+import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -516,7 +518,14 @@ export function createApiApp() {
   const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'alphamateapp@gmail.com')
     .split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
   const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || '';
-  const ADMIN_READABLE_COLLECTIONS = new Set(['users', 'partyRooms', 'liveStreams', 'reels', 'presence']);
+  const ADMIN_READABLE_COLLECTIONS = new Set([
+    'users',
+    'partyRooms',
+    'liveStreams',
+    'reels',
+    'presence',
+    'accountDeletionRequests',
+  ]);
   let adminAccessTokenCache = null;
   let adminAccessTokenExpiresAt = 0;
 
@@ -1187,6 +1196,335 @@ export function createApiApp() {
   app.get('/api/realtime/rooms', requireFirebaseAuth, (_req, res) => {
     const snap = app.locals.realtimeRegistry?.getSnapshot?.() || { liveStreams: [], partyRooms: [] };
     return res.json({ success: true, ...snap });
+  });
+
+  // 11. Account Permanent Deletion Email OTP (Send & Cryptographic Verify)
+  const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
+  const SMTP_USER = (process.env.SMTP_USER || '').trim();
+  const SMTP_PASS = (process.env.SMTP_PASS || '').trim();
+  const SMTP_HOST = (process.env.SMTP_HOST || (SMTP_USER ? 'smtp.gmail.com' : '')).trim();
+  const SMTP_PORT = Number(process.env.SMTP_PORT || 465);
+  const SMTP_SECURE =
+    process.env.SMTP_SECURE !== undefined
+      ? String(process.env.SMTP_SECURE).toLowerCase() === 'true'
+      : SMTP_PORT === 465;
+  const SMTP_FROM = (
+    process.env.SMTP_FROM ||
+    (SMTP_USER ? `Alpha Mate <${SMTP_USER}>` : 'Alpha Mate <no-reply@alphamate.app>')
+  ).trim();
+  const OTP_HMAC_SECRET = (
+    process.env.OTP_HMAC_SECRET ||
+    crypto
+      .createHash('sha256')
+      .update(
+        `${FIREBASE_PROJECT_ID}:${FIREBASE_DATABASE_ID}:${REALTIME_SFU_BEARER_TOKEN || FIREBASE_SERVICE_ACCOUNT_JSON || 'alphamate-otp-secret'}`
+      )
+      .digest('hex')
+  ).trim();
+
+  const OTP_TTL_MS = 10 * 60 * 1000;
+  const OTP_COOLDOWN_MS = 30 * 1000;
+  const OTP_MAX_ATTEMPTS = 5;
+  const otpCooldownMap = new Map(); // uid -> lastSentMs
+  const otpAttemptMap = new Map(); // nonce -> { count, exp }
+
+  function maskEmailAddress(email) {
+    const [local, domain] = String(email || '').split('@');
+    if (!local || !domain) return email || '';
+    const visible = local.slice(0, Math.min(2, local.length));
+    return `${visible}${'*'.repeat(Math.max(2, local.length - visible.length))}@${domain}`;
+  }
+
+  function signOtpPayload(payload) {
+    const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+    const sig = crypto.createHmac('sha256', OTP_HMAC_SECRET).update(encoded).digest('base64url');
+    return `${encoded}.${sig}`;
+  }
+
+  function verifySignedOtpPayload(token) {
+    if (typeof token !== 'string' || !token.includes('.')) return null;
+    const [encoded, sig] = token.split('.');
+    if (!encoded || !sig) return null;
+    const expectedSig = crypto.createHmac('sha256', OTP_HMAC_SECRET).update(encoded).digest('base64url');
+    const a = Buffer.from(sig, 'utf8');
+    const b = Buffer.from(expectedSig, 'utf8');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    try {
+      return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    } catch {
+      return null;
+    }
+  }
+
+  function hashOtpCode(uid, nonce, otp) {
+    return crypto
+      .createHmac('sha256', OTP_HMAC_SECRET)
+      .update(`${uid}:${nonce}:${String(otp).trim()}`)
+      .digest('hex');
+  }
+
+  function pruneOtpMaps() {
+    const now = Date.now();
+    for (const [key, ts] of otpCooldownMap.entries()) {
+      if (now - ts > OTP_TTL_MS) otpCooldownMap.delete(key);
+    }
+    for (const [nonce, rec] of otpAttemptMap.entries()) {
+      if (now > rec.exp) otpAttemptMap.delete(nonce);
+    }
+  }
+
+  async function sendDeletionOtpEmail({ toEmail, otpCode }) {
+    const subject = `Alpha Mate Account Deletion Verification Code: ${otpCode}`;
+    const text = [
+      'Alpha Mate Security Verification',
+      '',
+      `Your 6-digit verification code to request permanent deletion of your Alpha Mate account is: ${otpCode}`,
+      '',
+      'This code expires in 10 minutes. Never share this code with anyone.',
+      'Once verified, your account will enter a 15-day official pending deletion window during which you may sign back in to recover your account.',
+      '',
+      'If you did not request this, ignore this email and secure your account at support@alphamate.app.',
+    ].join('\n');
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#09070F; color:#F4F4F5; padding:28px; border-radius:16px; max-width:520px; margin:0 auto; border:1px solid #2E1A47;">
+        <h2 style="margin:0 0 8px; color:#FFFFFF; font-size:20px;">Alpha Mate Account Deletion OTP</h2>
+        <p style="margin:0 0 18px; color:#A1A1AA; font-size:14px; line-height:1.5;">
+          Use the 6-digit verification code below to confirm your permanent account deletion request. This code expires in <strong>10 minutes</strong>.
+        </p>
+        <div style="background:#160D2B; border:1px solid #A855F7; border-radius:12px; padding:18px; text-align:center; margin-bottom:18px;">
+          <span style="font-family:monospace; font-size:32px; font-weight:800; letter-spacing:8px; color:#F9A8D4;">${otpCode}</span>
+        </div>
+        <p style="margin:0 0 10px; color:#D4D4D8; font-size:13px; line-height:1.5;">
+          After verifying this code, your account will remain in a <strong>15-day official pending deletion queue</strong> before permanent removal. You can recover your account at any time within those 15 days by signing back in.
+        </p>
+        <p style="margin:0; color:#71717A; font-size:12px;">
+          If you did not initiate this request, you can safely ignore this message or contact support@alphamate.app.
+        </p>
+      </div>
+    `;
+
+    if (RESEND_API_KEY) {
+      const resendRes = await fetchWithTimeout(
+        'https://api.resend.com/emails',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${RESEND_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: SMTP_FROM,
+            to: [toEmail],
+            subject,
+            text,
+            html,
+          }),
+        },
+        10000
+      );
+      if (!resendRes.ok) {
+        const errText = await resendRes.text().catch(() => '');
+        throw new Error(`Resend email delivery failed (${resendRes.status}): ${errText.slice(0, 180)}`);
+      }
+      return { provider: 'resend' };
+    }
+
+    if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+      const transporter = nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_SECURE,
+        auth: {
+          user: SMTP_USER,
+          pass: SMTP_PASS,
+        },
+      });
+      await transporter.sendMail({
+        from: SMTP_FROM,
+        to: toEmail,
+        subject,
+        text,
+        html,
+      });
+      return { provider: 'smtp' };
+    }
+
+    const err = new Error(
+      'Email OTP delivery is not configured on the backend server. Set RESEND_API_KEY or SMTP_USER & SMTP_PASS.'
+    );
+    err.statusCode = 503;
+    err.code = 'EMAIL_OTP_NOT_CONFIGURED';
+    throw err;
+  }
+
+  app.post('/api/account/deletion-otp/send', requireFirebaseAuth, async (req, res) => {
+    try {
+      pruneOtpMaps();
+      const uid = req.firebaseUser.uid;
+      const registeredEmail = (req.firebaseUser.email || '').trim().toLowerCase();
+      if (!registeredEmail) {
+        return res.status(400).json({
+          success: false,
+          error: 'No registered email address was found on your Firebase account.',
+        });
+      }
+
+      const requestedEmail = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      if (requestedEmail && requestedEmail !== registeredEmail) {
+        return res.status(403).json({
+          success: false,
+          error: 'OTP can only be sent to your signed-in account email address.',
+        });
+      }
+
+      const hasDeliveryProvider = Boolean(RESEND_API_KEY || (SMTP_HOST && SMTP_USER && SMTP_PASS));
+      if (!hasDeliveryProvider) {
+        return res.status(503).json({
+          success: false,
+          code: 'EMAIL_OTP_NOT_CONFIGURED',
+          error:
+            'Email OTP delivery is not configured on the backend server. Configure RESEND_API_KEY or SMTP_USER & SMTP_PASS on Railway.',
+        });
+      }
+
+      const now = Date.now();
+      const lastSent = otpCooldownMap.get(uid) || 0;
+      const remainingMs = OTP_COOLDOWN_MS - (now - lastSent);
+      if (remainingMs > 0) {
+        const waitSeconds = Math.ceil(remainingMs / 1000);
+        return res.status(429).json({
+          success: false,
+          code: 'OTP_COOLDOWN',
+          retryAfterSeconds: waitSeconds,
+          error: `Please wait ${waitSeconds}s before requesting a new verification code.`,
+        });
+      }
+
+      const otpCode = String(crypto.randomInt(100000, 1000000));
+      const nonce = crypto.randomBytes(16).toString('hex');
+      const expiresAt = now + OTP_TTL_MS;
+      const otpHash = hashOtpCode(uid, nonce, otpCode);
+      const challengeToken = signOtpPayload({
+        purpose: 'account_permanent_deletion',
+        uid,
+        email: registeredEmail,
+        nonce,
+        otpHash,
+        exp: expiresAt,
+      });
+
+      const delivery = await sendDeletionOtpEmail({ toEmail: registeredEmail, otpCode });
+      otpCooldownMap.set(uid, now);
+      otpAttemptMap.set(nonce, { count: 0, exp: expiresAt });
+
+      return res.json({
+        success: true,
+        emailMasked: maskEmailAddress(registeredEmail),
+        challengeToken,
+        expiresAt,
+        expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        cooldownSeconds: Math.floor(OTP_COOLDOWN_MS / 1000),
+        provider: delivery.provider,
+      });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      console.error('[Account OTP] Send failed:', error.message);
+      return res.status(status).json({
+        success: false,
+        code: error.code || undefined,
+        error: error.message || 'Failed to send verification OTP email.',
+      });
+    }
+  });
+
+  app.post('/api/account/deletion-otp/verify', requireFirebaseAuth, async (req, res) => {
+    try {
+      pruneOtpMaps();
+      const uid = req.firebaseUser.uid;
+      const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken.trim() : '';
+      const otpInput = typeof req.body?.otp === 'string' ? req.body.otp.replace(/\s+/g, '') : String(req.body?.otp || '').trim();
+
+      if (!challengeToken || !/^\d{6}$/.test(otpInput)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please enter the 6-digit OTP sent to your email.',
+        });
+      }
+
+      const payload = verifySignedOtpPayload(challengeToken);
+      if (!payload || payload.purpose !== 'account_permanent_deletion') {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid or tampered OTP session. Please request a new code.',
+        });
+      }
+
+      if (payload.uid !== uid) {
+        return res.status(403).json({
+          success: false,
+          error: 'This OTP challenge does not belong to the signed-in account.',
+        });
+      }
+
+      if (!payload.exp || Date.now() > Number(payload.exp)) {
+        return res.status(400).json({
+          success: false,
+          code: 'OTP_EXPIRED',
+          error: 'Verification OTP has expired. Please request a new code.',
+        });
+      }
+
+      const attempts = otpAttemptMap.get(payload.nonce) || { count: 0, exp: Number(payload.exp) };
+      if (attempts.count >= OTP_MAX_ATTEMPTS) {
+        return res.status(429).json({
+          success: false,
+          code: 'OTP_MAX_ATTEMPTS',
+          error: 'Too many incorrect OTP attempts. Please request a fresh verification code.',
+        });
+      }
+
+      const computedHash = hashOtpCode(uid, payload.nonce, otpInput);
+      const a = Buffer.from(computedHash, 'hex');
+      const b = Buffer.from(String(payload.otpHash || ''), 'hex');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        attempts.count += 1;
+        otpAttemptMap.set(payload.nonce, attempts);
+        const remainingAttempts = Math.max(0, OTP_MAX_ATTEMPTS - attempts.count);
+        return res.status(400).json({
+          success: false,
+          code: 'OTP_INVALID',
+          remainingAttempts,
+          error:
+            remainingAttempts > 0
+              ? `Incorrect OTP code. ${remainingAttempts} attempt${remainingAttempts === 1 ? '' : 's'} remaining.`
+              : 'Too many incorrect OTP attempts. Please request a fresh verification code.',
+        });
+      }
+
+      otpAttemptMap.delete(payload.nonce);
+      const verifiedAtIso = new Date().toISOString();
+      const deletionVerificationToken = signOtpPayload({
+        purpose: 'account_deletion_verified',
+        uid,
+        email: payload.email,
+        verifiedAt: verifiedAtIso,
+        exp: Date.now() + OTP_TTL_MS,
+      });
+
+      return res.json({
+        success: true,
+        uid,
+        email: payload.email,
+        otpVerifiedAt: verifiedAtIso,
+        deletionVerificationToken,
+      });
+    } catch (error) {
+      console.error('[Account OTP] Verify failed:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to verify OTP code.',
+      });
+    }
   });
 
   // Ensure unmatched /api/* endpoints return JSON 404 instead of falling through to SPA HTML

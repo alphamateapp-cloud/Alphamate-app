@@ -19,6 +19,77 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
+    function isOfficialAdmin() {
+      return isSignedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'alphamateapp@gmail.com';
+    }
+
+    function isValidAccountDeletionRequest(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'type', 'status', 'requestedAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'uniqueId', 'username', 'displayName', 'email', 'avatar',
+          'type', 'status', 'otpVerified', 'otpVerifiedAt', 'requestedAt',
+          'scheduledPermanentDeletionAt', 'reason', 'recoveredAt', 'permanentlyDeletedAt',
+          'processedBy', 'updatedAt'
+        ])
+        && data.uid is string && data.uid.size() > 0 && data.uid.size() <= 128
+        && data.email is string && data.email.size() <= 128
+        && data.displayName is string && data.displayName.size() <= 128
+        && data.type in ['deactivation', 'permanent_delete']
+        && data.status in ['deactivated', 'pending_official_deletion', 'recovered', 'permanently_deleted']
+        && data.requestedAt is string && data.requestedAt.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() <= 64
+        && (!('otpVerified' in data) || data.otpVerified is bool)
+        && (!('reason' in data) || (data.reason is string && data.reason.size() <= 500));
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['recipientId', 'senderId', 'type', 'title', 'message', 'isRead', 'createdAt', 'createdAtMs'])
+        && data.keys().hasOnly([
+          'recipientId', 'senderId', 'senderName', 'senderAvatar', 'type', 'category',
+          'title', 'message', 'screen', 'tab', 'roomId', 'streamId', 'reelId', 'chatId',
+          'isRead', 'readAt', 'createdAt', 'createdAtMs'
+        ])
+        && data.recipientId is string && data.recipientId.size() > 0 && data.recipientId.size() <= 128
+        && data.senderId is string && data.senderId.size() > 0 && data.senderId.size() <= 128
+        && data.type in [
+          'live_on', 'live_invite', 'party_invite', 'friend_request', 'follow', 'gift',
+          'comment', 'message', 'like', 'pk_invite', 'wallet', 'agency', 'system'
+        ]
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 160
+        && data.message is string && data.message.size() > 0 && data.message.size() <= 600
+        && data.isRead is bool
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.createdAtMs is number;
+    }
+
+    function isValidGiftTransaction(data) {
+      return data.keys().hasAll([
+          'senderId', 'recipientId', 'giftId', 'giftName', 'quantity',
+          'totalCoins', 'hostDiamonds', 'appShareCoins', 'context', 'status',
+          'createdAt', 'createdAtMs'
+        ])
+        && data.keys().hasOnly([
+          'senderId', 'senderName', 'recipientId', 'recipientName', 'giftId', 'giftName', 'giftIcon',
+          'quantity', 'totalCoins', 'hostDiamonds', 'appShareCoins', 'context',
+          'roomId', 'streamId', 'reelId', 'status', 'createdAt', 'createdAtMs'
+        ])
+        && data.senderId == request.auth.uid
+        && data.recipientId is string && data.recipientId.size() > 0 && data.recipientId.size() <= 128
+        && data.giftId is string && data.giftId.size() > 0 && data.giftId.size() <= 64
+        && data.giftName is string && data.giftName.size() > 0 && data.giftName.size() <= 80
+        && data.quantity is number && data.quantity >= 1 && data.quantity <= 9999
+        && data.totalCoins is number && data.totalCoins > 0 && data.totalCoins <= 50000000
+        && data.hostDiamonds is number && data.hostDiamonds >= 0
+        && data.appShareCoins is number && data.appShareCoins >= 0
+        && (data.hostDiamonds + data.appShareCoins) == data.totalCoins
+        && data.context in ['live', 'party', 'moments', 'pk', 'demo']
+        && data.status == 'completed'
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.createdAtMs is number;
+    }
+
     // Connection testing
     match /test/{docId} {
       allow read: if true;
@@ -30,7 +101,67 @@ service cloud.firestore {
       allow get: if isSignedIn();
       allow list: if isSignedIn();
       allow create: if isOwner(userId) && isValidId(userId);
-      allow update: if isOwner(userId);
+      allow update: if isOwner(userId)
+        || isOfficialAdmin()
+        || (
+          isSignedIn()
+          && isValidId(userId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['diamonds', 'updatedAt'])
+          && request.resource.data.diamonds is number
+          && (!('diamonds' in resource.data) || resource.data.diamonds is number)
+          && request.resource.data.diamonds > (('diamonds' in resource.data) ? resource.data.diamonds : 0)
+          && request.resource.data.diamonds <= (('diamonds' in resource.data) ? resource.data.diamonds : 0) + 5000000
+          && request.resource.data.updatedAt is string
+          && request.resource.data.updatedAt.size() <= 64
+        );
+      allow delete: if false;
+
+      // Per-user real-time notifications inbox
+      match /notifications/{notificationId} {
+        allow get: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
+        allow list: if isOwner(userId);
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(notificationId)
+          && request.resource.data.senderId == request.auth.uid
+          && request.resource.data.recipientId == userId
+          && isValidNotification(request.resource.data);
+        allow update: if isValidId(userId)
+          && isValidId(notificationId)
+          && isOwner(userId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt'])
+          && request.resource.data.isRead is bool;
+        allow delete: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
+      }
+    }
+
+    // Immutable 60/40 Gifting Ledger (60% Host Diamonds, 40% App Revenue Share)
+    match /giftTransactions/{txId} {
+      allow get: if isValidId(txId)
+        && isSignedIn()
+        && (isOfficialAdmin() || resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow list: if isSignedIn()
+        && (isOfficialAdmin() || resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow create: if isValidId(txId)
+        && isSignedIn()
+        && isValidGiftTransaction(request.resource.data);
+      allow update, delete: if false;
+    }
+
+    // Account Deactivation & 15-Day Official Permanent Deletion Queue
+    match /accountDeletionRequests/{requestId} {
+      allow get: if isValidId(requestId) && (isOwner(requestId) || isOfficialAdmin());
+      allow list: if isSignedIn() && (isOfficialAdmin() || resource.data.uid == request.auth.uid);
+      allow create: if isValidId(requestId)
+        && isOwner(requestId)
+        && request.resource.data.uid == request.auth.uid
+        && isValidAccountDeletionRequest(request.resource.data);
+      allow update: if isValidId(requestId)
+        && isValidAccountDeletionRequest(request.resource.data)
+        && (
+          (isOwner(requestId) && request.resource.data.uid == resource.data.uid)
+          || isOfficialAdmin()
+        );
       allow delete: if false;
     }
 

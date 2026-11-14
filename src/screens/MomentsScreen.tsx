@@ -36,7 +36,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { auth } from '../services/firebase';
-import { incrementReelViews } from '../services/reelsService';
+import { incrementReelViews, addReelComment, subscribeToReelComments } from '../services/reelsService';
 
 export const MomentsScreen: React.FC = () => {
   const {
@@ -54,6 +54,7 @@ export const MomentsScreen: React.FC = () => {
     reactToStory,
     liveStreams,
     openLiveStream,
+    sendNotificationToUser,
   } = useApp();
 
   const [showCreateStoryModal, setShowCreateStoryModal] = useState<boolean>(false);
@@ -134,13 +135,38 @@ export const MomentsScreen: React.FC = () => {
     return true;
   });
 
+  // Real-time Firestore comments listener when drawer is open
+  useEffect(() => {
+    if (!showCommentsVideoId || showCommentsVideoId.startsWith('vid_')) return;
+    const unsubscribe = subscribeToReelComments(showCommentsVideoId, (remoteComments) => {
+      setCommentsMap((prev) => ({
+        ...prev,
+        [showCommentsVideoId]: remoteComments.map((c) => ({
+          id: c.id,
+          user: c.user,
+          text: c.text,
+          time: c.time,
+        })),
+      }));
+    });
+    return () => unsubscribe();
+  }, [showCommentsVideoId]);
+
   // Follow / Unfollow creator
   const handleToggleFollow = (userId: string) => {
-    setFollowingMap((prev) => {
-      const next = !prev[userId];
-      showToast(next ? 'Followed creator! ⭐' : 'Unfollowed creator');
-      return { ...prev, [userId]: next };
-    });
+    const isNextFollow = !followingMap[userId];
+    setFollowingMap((prev) => ({ ...prev, [userId]: isNextFollow }));
+    showToast(isNextFollow ? 'Followed creator! ⭐' : 'Unfollowed creator');
+    if (isNextFollow && userId && userId !== currentUser.id) {
+      sendNotificationToUser({
+        recipientId: userId,
+        type: 'follow',
+        category: 'friendRequests',
+        title: `⭐ ${currentUser.displayName} followed you!`,
+        message: `${currentUser.displayName} started following your Moments.`,
+        screen: 'moments',
+      }).catch(() => {});
+    }
   };
 
   // Save / Bookmark Video toggle
@@ -202,17 +228,50 @@ export const MomentsScreen: React.FC = () => {
     e.preventDefault();
     if (!inputComment.trim() || !showCommentsVideoId) return;
 
+    const commentText = inputComment.trim();
+    const targetVideo = videos.find((v) => v.id === showCommentsVideoId);
     const newComment = {
       id: `comm_${Date.now()}`,
       user: currentUser.displayName,
-      text: inputComment.trim(),
+      text: commentText,
       time: 'Just now',
     };
 
-    setCommentsMap((prev) => ({
-      ...prev,
-      [showCommentsVideoId]: [newComment, ...(prev[showCommentsVideoId] || [])],
-    }));
+    if (showCommentsVideoId.startsWith('vid_')) {
+      setCommentsMap((prev) => ({
+        ...prev,
+        [showCommentsVideoId]: [newComment, ...(prev[showCommentsVideoId] || [])],
+      }));
+    } else if (auth.currentUser) {
+      addReelComment(showCommentsVideoId, commentText, {
+        id: currentUser.id,
+        displayName: currentUser.displayName,
+        avatar: currentUser.avatar,
+      }).catch(() => {
+        setCommentsMap((prev) => ({
+          ...prev,
+          [showCommentsVideoId]: [newComment, ...(prev[showCommentsVideoId] || [])],
+        }));
+      });
+    } else {
+      setCommentsMap((prev) => ({
+        ...prev,
+        [showCommentsVideoId]: [newComment, ...(prev[showCommentsVideoId] || [])],
+      }));
+    }
+
+    if (targetVideo?.user?.id && targetVideo.user.id !== currentUser.id) {
+      sendNotificationToUser({
+        recipientId: targetVideo.user.id,
+        type: 'comment',
+        category: 'comments',
+        title: `💭 ${currentUser.displayName} commented on your Moment`,
+        message: `"${commentText.slice(0, 120)}"`,
+        screen: 'moments',
+        reelId: targetVideo.id,
+      }).catch(() => {});
+    }
+
     setInputComment('');
     showToast('Comment posted! 💬');
   };
@@ -1071,7 +1130,14 @@ export const MomentsScreen: React.FC = () => {
                 <button
                   key={g.id}
                   onClick={() => {
-                    sendLiveGift(g, giftTargetPost.user.id);
+                    if (coins < g.coins) {
+                      showToast(`Insufficient coins! You need ${g.coins.toLocaleString()} Coins.`);
+                      return;
+                    }
+                    sendLiveGift(g, giftTargetPost.user.id, 1, giftTargetPost.user.displayName, {
+                      context: 'moments',
+                      reelId: giftTargetPost.id,
+                    });
                     setGiftTargetPost(null);
                     showToast(
                       `Sent ${g.name} ${g.icon} to @${giftTargetPost.user.username}! 🎁✨`

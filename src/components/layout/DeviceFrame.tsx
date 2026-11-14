@@ -9,8 +9,8 @@ interface DeviceFrameProps {
 export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
   const { deviceMode, setDeviceMode, currentScreen } = useApp();
 
-  // Public legal pages (/privacy and /terms) render cleanly as full responsive web/mobile pages
-  if (currentScreen === 'privacy_policy' || currentScreen === 'terms_conditions') {
+  // Public legal & account deletion pages (/privacy, /terms, /delete-account) render cleanly as full responsive web/mobile pages
+  if (currentScreen === 'privacy_policy' || currentScreen === 'terms_conditions' || currentScreen === 'delete_account') {
     return <div className="w-full h-[100dvh] min-h-[100dvh] bg-[#09070F] overflow-hidden flex flex-col">{children}</div>;
   }
 

@@ -20,9 +20,9 @@ import {
   Smartphone,
   FileText,
   ShieldCheck,
+  Trash2,
 } from 'lucide-react';
 import { AndroidSetupModal } from '../components/modals/AndroidSetupModal';
-import { PushNotificationSettingsModal } from '../components/modals/PushNotificationSettingsModal';
 
 export const SettingsScreen: React.FC = () => {
   const {
@@ -32,14 +32,14 @@ export const SettingsScreen: React.FC = () => {
     setCustomLogoUrl,
     setCurrentScreen,
     setActiveTab,
+    setShowPushSettingsModal,
+    notificationPreferences,
   } = useApp();
 
-  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [streamQuality, setStreamQuality] = useState<'1080p' | '720p'>('1080p');
   const [selectedLanguage, setSelectedLanguage] = useState('English');
   const [showLogoModal, setShowLogoModal] = useState(false);
   const [showAndroidModal, setShowAndroidModal] = useState(false);
-  const [showPushModal, setShowPushModal] = useState(false);
   const [logoInputUrl, setLogoInputUrl] = useState('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -166,7 +166,7 @@ export const SettingsScreen: React.FC = () => {
           </span>
           <div className="rounded-2xl bg-[#140D26] border border-white/5 divide-y divide-white/5 overflow-hidden">
             <div
-              onClick={() => setShowPushModal(true)}
+              onClick={() => setShowPushSettingsModal(true)}
               className="p-3.5 flex items-center justify-between hover:bg-white/[0.02] cursor-pointer"
             >
               <div className="flex items-center gap-3">
@@ -176,11 +176,15 @@ export const SettingsScreen: React.FC = () => {
                 <div>
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs font-bold text-white">Push Notifications Hub</span>
-                    <span className="text-[9px] px-1.5 py-0.2 rounded bg-purple-500/20 text-[#C084FC] font-bold uppercase">
-                      FCM Live
+                    <span className={`text-[9px] px-1.5 py-0.2 rounded font-bold uppercase ${
+                      notificationPreferences.enabled
+                        ? 'bg-emerald-500/20 text-emerald-300'
+                        : 'bg-zinc-700 text-zinc-300'
+                    }`}>
+                      {notificationPreferences.enabled ? 'ON' : 'OFF'}
                     </span>
                   </div>
-                  <p className="text-[10px] text-zinc-400">Real-time alerts, PK challenges & device token</p>
+                  <p className="text-[10px] text-zinc-400">Live, Party, Friends, Gifts, Messages & Likes</p>
                 </div>
               </div>
               <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
@@ -293,6 +297,26 @@ export const SettingsScreen: React.FC = () => {
           </div>
         </div>
 
+        {/* Account Deactivation & Deletion (Placed right above Log Out) */}
+        <button
+          type="button"
+          onClick={() => setCurrentScreen('delete_account')}
+          className="w-full p-3.5 rounded-2xl bg-[#140D26] hover:bg-[#1C1235] border border-amber-500/25 flex items-center justify-between transition-colors cursor-pointer text-left"
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-300 flex items-center justify-center shrink-0">
+              <Trash2 className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-bold text-white">Delete or Deactivate Account</div>
+              <div className="text-[10px] text-zinc-400 truncate">
+                Temporary deactivation (no limit) or OTP 15-day deletion
+              </div>
+            </div>
+          </div>
+          <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
+        </button>
+
         {/* Log Out Button */}
         <button
           onClick={logout}
@@ -346,12 +370,6 @@ export const SettingsScreen: React.FC = () => {
       <AndroidSetupModal
         isOpen={showAndroidModal}
         onClose={() => setShowAndroidModal(false)}
-      />
-
-      {/* Push Notification Settings Modal */}
-      <PushNotificationSettingsModal
-        isOpen={showPushModal}
-        onClose={() => setShowPushModal(false)}
       />
 
       {/* Non-blocking in-app toast notification */}

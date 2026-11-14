@@ -13,8 +13,19 @@ import {
   Smartphone,
   Globe,
   AlertTriangle,
+  Users,
+  UserPlus,
+  MessageCircle,
+  MessageSquare,
+  Heart,
+  Cloud,
 } from 'lucide-react';
-import { pushService, PushStatus } from '../../services/pushNotificationService';
+import {
+  pushService,
+  PushStatus,
+  NOTIFICATION_CATEGORY_META,
+} from '../../services/pushNotificationService';
+import { NotificationCategoryKey, NotificationEventType } from '../../types';
 import { useApp } from '../../context/AppContext';
 
 interface PushNotificationSettingsModalProps {
@@ -26,7 +37,14 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
   isOpen,
   onClose,
 }) => {
-  const { currentUser } = useApp();
+  const {
+    currentUser,
+    notificationPreferences,
+    updateNotificationPreferences,
+    toggleMasterNotifications,
+    sendNotificationToUser,
+  } = useApp();
+
   const [status, setStatus] = useState<PushStatus>({
     isSupported: true,
     isNative: false,
@@ -38,15 +56,6 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
   const [copied, setCopied] = useState(false);
   const [feedbackMsg, setFeedbackMsg] = useState<string | null>(null);
 
-  // Category Preferences
-  const [channels, setChannels] = useState({
-    liveAlerts: true,
-    pkBattles: true,
-    giftsRewards: true,
-    agencyOrders: true,
-    messages: true,
-  });
-
   const checkStatus = async () => {
     const s = await pushService.checkPermissions();
     setStatus(s);
@@ -55,12 +64,6 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
   useEffect(() => {
     if (isOpen) {
       checkStatus();
-      try {
-        const savedChannels = localStorage.getItem('alphamate_push_channels');
-        if (savedChannels) {
-          setChannels(JSON.parse(savedChannels));
-        }
-      } catch {}
     }
   }, [isOpen]);
 
@@ -73,12 +76,13 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
       const res = await pushService.requestPermissions();
       setStatus(res);
       if (res.permission === 'granted') {
-        setFeedbackMsg('Push notifications enabled! Device registered for real-time alerts.');
+        await toggleMasterNotifications(true);
+        setFeedbackMsg('Push notifications enabled and synced with Cloud Firestore!');
         if (currentUser?.id) {
           await pushService.syncTokenToUserDoc(currentUser.id);
         }
       } else {
-        setFeedbackMsg('Permission not granted. Please check system notification settings.');
+        setFeedbackMsg('Permission not granted. Please allow notifications in browser/Android settings.');
       }
     } catch (err: any) {
       setFeedbackMsg(err?.message || 'Error enabling notifications');
@@ -87,12 +91,48 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
     }
   };
 
-  const toggleChannel = (key: keyof typeof channels) => {
-    const updated = { ...channels, [key]: !channels[key] };
-    setChannels(updated);
+  const handleMasterToggle = async () => {
+    setIsLoading(true);
+    setFeedbackMsg(null);
     try {
-      localStorage.setItem('alphamate_push_channels', JSON.stringify(updated));
-    } catch {}
+      const nextEnabled = !notificationPreferences.enabled;
+      await toggleMasterNotifications(nextEnabled);
+      await checkStatus();
+      setFeedbackMsg(
+        nextEnabled
+          ? 'All push notifications turned ON. Customize your alert categories below.'
+          : 'All push notifications paused. Re-enable anytime.'
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleToggleCategory = async (key: NotificationCategoryKey) => {
+    const nextPrefs = {
+      ...notificationPreferences,
+      enabled: true,
+      categories: {
+        ...notificationPreferences.categories,
+        [key]: !notificationPreferences.categories[key],
+      },
+      updatedAt: new Date().toISOString(),
+    };
+    await updateNotificationPreferences(nextPrefs);
+  };
+
+  const handleToggleAllCategories = async (value: boolean) => {
+    const updatedCategories = { ...notificationPreferences.categories };
+    (Object.keys(updatedCategories) as NotificationCategoryKey[]).forEach((k) => {
+      updatedCategories[k] = value;
+    });
+    await updateNotificationPreferences({
+      ...notificationPreferences,
+      enabled: value ? true : notificationPreferences.enabled,
+      categories: updatedCategories,
+      updatedAt: new Date().toISOString(),
+    });
+    setFeedbackMsg(value ? 'All 9 notification categories enabled!' : 'Optional categories muted.');
   };
 
   const handleCopyToken = () => {
@@ -102,38 +142,58 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const triggerTestAlert = (type: 'pk' | 'gift' | 'agency') => {
+  const triggerTestAlert = (
+    type: NotificationEventType,
+    title: string,
+    body: string,
+    screen?: string,
+    tab?: string
+  ) => {
     setFeedbackMsg(null);
-    if (type === 'pk') {
-      pushService.triggerTestNotification({
-        title: '⚔️ PK Battle Challenge!',
-        body: 'Malik Sardar challenged you to an intense 5-minute PK battle in Party Room #7!',
-        data: {
-          type: 'pk_invite',
-          tab: 'party',
-        },
-      });
-      setFeedbackMsg('Test PK Battle alert triggered!');
-    } else if (type === 'gift') {
-      pushService.triggerTestNotification({
-        title: '💎 Golden Dragon Received!',
-        body: 'Elena Rostova sent you a 50,000 Coin Golden Dragon gift! Check your Diamond wallet.',
-        data: {
-          type: 'gift',
-          screen: 'wallet',
-        },
-      });
-      setFeedbackMsg('Test Gift notification triggered!');
-    } else if (type === 'agency') {
-      pushService.triggerTestNotification({
-        title: '🛡️ Agency Coins Delivered!',
-        body: 'Official Coin Seller Alpha Royal Talent delivered 200,000 Coins to your balance.',
-        data: {
-          type: 'agency',
-          screen: 'agency_management',
-        },
-      });
-      setFeedbackMsg('Test Agency alert triggered!');
+    if (!pushService.isCategoryAllowed(type)) {
+      setFeedbackMsg('This category is currently turned OFF. Turn it ON above to receive this alert.');
+      return;
+    }
+
+    if (currentUser?.id) {
+      sendNotificationToUser({
+        recipientId: currentUser.id,
+        type,
+        title,
+        message: body,
+        screen,
+        tab,
+      }).catch(() => {});
+    }
+    pushService.triggerTestNotification({
+      title,
+      body,
+      data: { type, screen, tab },
+    });
+    setFeedbackMsg(`Triggered "${title}" alert!`);
+  };
+
+  const getCategoryIcon = (key: NotificationCategoryKey) => {
+    switch (key) {
+      case 'liveOn':
+        return <Radio className="w-4 h-4" />;
+      case 'partyInvites':
+        return <Users className="w-4 h-4" />;
+      case 'friendRequests':
+        return <UserPlus className="w-4 h-4" />;
+      case 'gifts':
+        return <Gift className="w-4 h-4" />;
+      case 'messages':
+        return <MessageCircle className="w-4 h-4" />;
+      case 'comments':
+        return <MessageSquare className="w-4 h-4" />;
+      case 'likes':
+        return <Heart className="w-4 h-4" />;
+      case 'pkBattles':
+        return <Swords className="w-4 h-4" />;
+      case 'walletAndSystem':
+      default:
+        return <ShieldCheck className="w-4 h-4" />;
     }
   };
 
@@ -144,24 +204,25 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
         <div className="relative px-5 py-4 bg-gradient-to-r from-[#1E103A] to-[#120A24] border-b border-white/5 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-[#A855F7] to-[#EC4899] flex items-center justify-center text-white shadow-lg shadow-purple-950/40">
-              <Bell className="w-5 h-5 animate-bounce" />
+              <Bell className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2">
-                <h3 className="text-base font-bold text-white">Push Notifications Hub</h3>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30">
-                  @capacitor/push-notifications
+                <h3 className="text-base font-bold text-white">Notification Controls</h3>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold border border-emerald-500/30 flex items-center gap-1">
+                  <Cloud className="w-3 h-3" />
+                  FCM + Firestore
                 </span>
               </div>
               <p className="text-[11px] text-zinc-400">
-                Real-time engagement, instant alerts & FCM token management
+                Choose exactly which real-time alerts you want ON or OFF
               </p>
             </div>
           </div>
 
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white flex items-center justify-center transition-colors"
+            className="w-8 h-8 rounded-full bg-white/5 hover:bg-white/10 text-zinc-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
           >
             <X className="w-4 h-4" />
           </button>
@@ -169,59 +230,86 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
 
         {/* Content */}
         <div className="p-5 overflow-y-auto space-y-4">
-          {/* Status Banner */}
-          <div className="p-4 rounded-2xl bg-[#150F26] border border-white/10 flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div
-                className={`w-9 h-9 rounded-xl flex items-center justify-center ${
-                  status.permission === 'granted'
-                    ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-                    : 'bg-amber-500/20 text-amber-400 border border-amber-500/30'
-                }`}
-              >
-                {status.permission === 'granted' ? (
-                  <CheckCircle className="w-5 h-5" />
-                ) : (
-                  <AlertTriangle className="w-5 h-5" />
-                )}
-              </div>
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-bold text-white">Permission Status</span>
-                  <span
-                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${
-                      status.permission === 'granted'
-                        ? 'bg-emerald-500/20 text-emerald-300'
-                        : 'bg-amber-500/20 text-amber-300'
-                    }`}
-                  >
-                    {status.permission === 'granted' ? 'Active & Granted' : status.permission}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
-                  {status.isNative ? (
-                    <span className="flex items-center gap-1 text-[#C084FC]">
-                      <Smartphone className="w-3 h-3" />
-                      Capacitor Native (Android FCM)
-                    </span>
+          {/* Master Switch & Permission Status */}
+          <div className="p-4 rounded-2xl bg-[#150F26] border border-white/10 space-y-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div
+                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                    notificationPreferences.enabled && status.permission === 'granted'
+                      ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                      : notificationPreferences.enabled
+                      ? 'bg-purple-500/20 text-[#C084FC] border border-purple-500/30'
+                      : 'bg-zinc-800 text-zinc-400 border border-white/10'
+                  }`}
+                >
+                  {notificationPreferences.enabled ? (
+                    <CheckCircle className="w-5 h-5" />
                   ) : (
-                    <span className="flex items-center gap-1 text-sky-400">
-                      <Globe className="w-3 h-3" />
-                      Web Push & Foreground Simulation
-                    </span>
+                    <AlertTriangle className="w-5 h-5" />
                   )}
                 </div>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-bold text-white">Master Push Notifications</span>
+                    <span
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
+                        notificationPreferences.enabled
+                          ? 'bg-emerald-500/20 text-emerald-300'
+                          : 'bg-zinc-700 text-zinc-300'
+                      }`}
+                    >
+                      {notificationPreferences.enabled ? 'Enabled' : 'Paused'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5 text-[11px] text-zinc-400">
+                    {status.isNative ? (
+                      <span className="flex items-center gap-1 text-[#C084FC]">
+                        <Smartphone className="w-3 h-3" />
+                        Android FCM ({status.permission})
+                      </span>
+                    ) : (
+                      <span className="flex items-center gap-1 text-sky-400">
+                        <Globe className="w-3 h-3" />
+                        Web Push + In-App ({status.permission})
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
+
+              <button
+                type="button"
+                onClick={handleMasterToggle}
+                disabled={isLoading}
+                className={`w-12 h-6 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                  notificationPreferences.enabled
+                    ? 'bg-gradient-to-r from-[#A855F7] to-[#EC4899]'
+                    : 'bg-zinc-700'
+                }`}
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    notificationPreferences.enabled ? 'translate-x-6' : 'translate-x-0'
+                  }`}
+                />
+              </button>
             </div>
 
             {status.permission !== 'granted' && (
-              <button
-                onClick={handleRequestPermissions}
-                disabled={isLoading}
-                className="px-3.5 py-2 rounded-xl bg-gradient-to-r from-[#A855F7] to-[#EC4899] text-white text-xs font-bold hover:brightness-110 active:scale-95 transition-all shadow-md shadow-purple-950/40 cursor-pointer disabled:opacity-50"
-              >
-                {isLoading ? 'Enabling...' : 'Enable Alerts'}
-              </button>
+              <div className="pt-2 border-t border-white/5 flex items-center justify-between gap-2">
+                <span className="text-[11px] text-amber-300">
+                  Enable system permission for lock-screen & background delivery.
+                </span>
+                <button
+                  type="button"
+                  onClick={handleRequestPermissions}
+                  disabled={isLoading}
+                  className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#A855F7] to-[#EC4899] text-white text-[11px] font-bold hover:brightness-110 cursor-pointer disabled:opacity-50 shrink-0"
+                >
+                  {isLoading ? 'Enabling...' : 'Grant Permission'}
+                </button>
+              </div>
             )}
           </div>
 
@@ -232,14 +320,89 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
             </div>
           )}
 
+          {/* Granular 9-Category Selector (Expanded whenever Master is ON) */}
+          {notificationPreferences.enabled ? (
+            <div className="p-4 rounded-2xl bg-[#140D26] border border-[#A855F7]/25 space-y-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-white block">
+                    Choose Notification Categories (9)
+                  </span>
+                  <span className="text-[10px] text-zinc-400">
+                    Select which alerts stay active on your account
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleToggleAllCategories(true)}
+                    className="px-2 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 text-[10px] font-bold cursor-pointer"
+                  >
+                    All ON
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleToggleAllCategories(false)}
+                    className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-300 text-[10px] font-bold cursor-pointer"
+                  >
+                    Mute All
+                  </button>
+                </div>
+              </div>
+
+              <div className="divide-y divide-white/5">
+                {NOTIFICATION_CATEGORY_META.map((cat) => {
+                  const isOn = notificationPreferences.categories[cat.key] !== false;
+                  return (
+                    <div key={cat.key} className="py-2.5 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className={`w-8 h-8 rounded-xl flex items-center justify-center shrink-0 ${cat.accent}`}>
+                          {getCategoryIcon(cat.key)}
+                        </div>
+                        <div className="min-w-0">
+                          <h5 className="text-xs font-semibold text-white truncate">{cat.label}</h5>
+                          <p className="text-[10px] text-zinc-400 leading-snug">{cat.description}</p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => handleToggleCategory(cat.key)}
+                        aria-label={`Toggle ${cat.label}`}
+                        className={`w-10 h-5 rounded-full transition-colors p-0.5 cursor-pointer shrink-0 ${
+                          isOn ? 'bg-gradient-to-r from-[#A855F7] to-[#EC4899]' : 'bg-zinc-700'
+                        }`}
+                      >
+                        <div
+                          className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                            isOn ? 'translate-x-5' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="p-4 rounded-2xl bg-[#140D26]/60 border border-white/5 text-center space-y-2">
+              <p className="text-xs text-zinc-300 font-semibold">
+                Notifications are currently paused
+              </p>
+              <p className="text-[11px] text-zinc-400">
+                Turn ON Master Push Notifications above to select Live, Party, Friend Requests, Gifts, Messages, Comments & Likes alerts.
+              </p>
+            </div>
+          )}
+
           {/* FCM / Device Push Token */}
           <div className="p-4 rounded-2xl bg-[#140D26] border border-white/5 space-y-2">
             <div className="flex items-center justify-between">
               <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400">
-                Device Push Registration Token
+                Device FCM Push Registration Token
               </span>
               {status.token && (
                 <button
+                  type="button"
                   onClick={handleCopyToken}
                   className="flex items-center gap-1 text-[11px] text-[#C084FC] hover:text-white transition-colors cursor-pointer"
                 >
@@ -261,165 +424,117 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
             <div className="p-2.5 rounded-xl bg-[#090614] border border-white/5 font-mono text-[10px] text-zinc-300 break-all select-all">
               {status.token || (
                 <span className="text-zinc-500 italic">
-                  No token registered yet. Tap "Enable Alerts" above to register this device.
+                  No token registered yet. Enable notifications above to register this device.
                 </span>
               )}
             </div>
           </div>
 
-          {/* Alert Channels & Preferences */}
-          <div className="p-4 rounded-2xl bg-[#140D26] border border-white/5 space-y-3">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-zinc-400 block">
-              Engagement Channels & Priority
-            </span>
-
-            <div className="divide-y divide-white/5">
-              {/* Channel 1: PK Battle */}
-              <div className="py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-[#EC4899]/20 text-[#EC4899] flex items-center justify-center">
-                    <Swords className="w-3.5 h-3.5" />
-                  </div>
-                  <div>
-                    <h5 className="text-xs font-medium text-white">PK Battle Challenges</h5>
-                    <p className="text-[10px] text-zinc-400">Direct invitations & battle start notices</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggleChannel('pkBattles')}
-                  className={`w-9 h-5 rounded-full transition-colors p-0.5 cursor-pointer ${
-                    channels.pkBattles ? 'bg-[#EC4899]' : 'bg-zinc-700'
-                  }`}
-                >
-                  <div
-                    className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                      channels.pkBattles ? 'translate-x-4' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {/* Channel 2: Live Streams */}
-              <div className="py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-[#A855F7]/20 text-[#A855F7] flex items-center justify-center">
-                    <Radio className="w-3.5 h-3.5" />
-                  </div>
-                  <div>
-                    <h5 className="text-xs font-medium text-white">Followed Host Live Alerts</h5>
-                    <p className="text-[10px] text-zinc-400">Broadcast starts and VIP party rooms</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggleChannel('liveAlerts')}
-                  className={`w-9 h-5 rounded-full transition-colors p-0.5 cursor-pointer ${
-                    channels.liveAlerts ? 'bg-[#A855F7]' : 'bg-zinc-700'
-                  }`}
-                >
-                  <div
-                    className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                      channels.liveAlerts ? 'translate-x-4' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {/* Channel 3: Gifts & Rewards */}
-              <div className="py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center">
-                    <Gift className="w-3.5 h-3.5" />
-                  </div>
-                  <div>
-                    <h5 className="text-xs font-medium text-white">Gift Receipts & Diamond Payouts</h5>
-                    <p className="text-[10px] text-zinc-400">Real-time alerts when receiving gifts or withdrawals</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggleChannel('giftsRewards')}
-                  className={`w-9 h-5 rounded-full transition-colors p-0.5 cursor-pointer ${
-                    channels.giftsRewards ? 'bg-amber-500' : 'bg-zinc-700'
-                  }`}
-                >
-                  <div
-                    className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                      channels.giftsRewards ? 'translate-x-4' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-              </div>
-
-              {/* Channel 4: Agency */}
-              <div className="py-2.5 flex items-center justify-between">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                  </div>
-                  <div>
-                    <h5 className="text-xs font-medium text-white">Agency Orders & Host Applications</h5>
-                    <p className="text-[10px] text-zinc-400">Coin seller requests, deliveries & contract targets</p>
-                  </div>
-                </div>
-                <button
-                  onClick={() => toggleChannel('agencyOrders')}
-                  className={`w-9 h-5 rounded-full transition-colors p-0.5 cursor-pointer ${
-                    channels.agencyOrders ? 'bg-emerald-500' : 'bg-zinc-700'
-                  }`}
-                >
-                  <div
-                    className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                      channels.agencyOrders ? 'translate-x-4' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Test Real-Time Engagement Alerts */}
+          {/* Instant Test Triggers */}
           <div className="p-4 rounded-2xl bg-gradient-to-br from-[#1C1236] to-[#120A24] border border-[#A855F7]/30 space-y-3">
             <div className="flex items-center gap-2">
               <Send className="w-4 h-4 text-[#C084FC]" />
               <span className="text-xs font-bold text-white">
-                Test Real-Time Alert Triggers (Instant Demo)
+                Test Live Alerts (Respects Your Toggles)
               </span>
             </div>
-            <p className="text-[11px] text-zinc-300 leading-snug">
-              Tap any test button below to trigger simulated foreground push notifications and heads-up banner alerts:
-            </p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               <button
-                onClick={() => triggerTestAlert('pk')}
-                className="p-2.5 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-[#EC4899]/30 text-left transition-colors cursor-pointer group"
+                type="button"
+                onClick={() =>
+                  triggerTestAlert(
+                    'live_on',
+                    '🔴 Host Went Live!',
+                    'Elena Rostova just started a Live Broadcast — tap to join!',
+                    'home'
+                  )
+                }
+                className="p-2 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-[#EC4899]/30 text-left cursor-pointer"
               >
-                <div className="flex items-center gap-2 text-xs font-bold text-[#EC4899]">
-                  <Swords className="w-3.5 h-3.5" />
-                  <span>PK Challenge</span>
-                </div>
-                <span className="text-[10px] text-zinc-400 block mt-1">Simulate battle invite</span>
+                <span className="text-[11px] font-bold text-[#EC4899] block">Live On</span>
+                <span className="text-[9.5px] text-zinc-400">Host broadcast</span>
               </button>
 
               <button
-                onClick={() => triggerTestAlert('gift')}
-                className="p-2.5 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-amber-500/30 text-left transition-colors cursor-pointer group"
+                type="button"
+                onClick={() =>
+                  triggerTestAlert(
+                    'party_invite',
+                    '🎙️ Party Room Open!',
+                    'Royal Lounge Voice Party has open mic seats waiting for you.',
+                    undefined,
+                    'party'
+                  )
+                }
+                className="p-2 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-[#A855F7]/30 text-left cursor-pointer"
               >
-                <div className="flex items-center gap-2 text-xs font-bold text-amber-400">
-                  <Gift className="w-3.5 h-3.5" />
-                  <span>50k Coin Gift</span>
-                </div>
-                <span className="text-[10px] text-zinc-400 block mt-1">Simulate diamond reward</span>
+                <span className="text-[11px] font-bold text-[#C084FC] block">Party Room</span>
+                <span className="text-[9.5px] text-zinc-400">Seat / room invite</span>
               </button>
 
               <button
-                onClick={() => triggerTestAlert('agency')}
-                className="p-2.5 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-emerald-500/30 text-left transition-colors cursor-pointer group"
+                type="button"
+                onClick={() =>
+                  triggerTestAlert(
+                    'friend_request',
+                    '👋 New Friend Request',
+                    'Alex Rider sent you a friend/chat request!',
+                    'chat'
+                  )
+                }
+                className="p-2 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-emerald-500/30 text-left cursor-pointer"
               >
-                <div className="flex items-center gap-2 text-xs font-bold text-emerald-400">
-                  <ShieldCheck className="w-3.5 h-3.5" />
-                  <span>Agency Order</span>
-                </div>
-                <span className="text-[10px] text-zinc-400 block mt-1">Simulate coin delivery</span>
+                <span className="text-[11px] font-bold text-emerald-400 block">Friend Req</span>
+                <span className="text-[9.5px] text-zinc-400">Connect alert</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  triggerTestAlert(
+                    'gift',
+                    '💎 Gift Received (+600 💎)',
+                    'Fan sent a 1,000 Coin Gift! Your 60% Host Share (+600 Diamonds) was added.',
+                    'wallet'
+                  )
+                }
+                className="p-2 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-amber-500/30 text-left cursor-pointer"
+              >
+                <span className="text-[11px] font-bold text-amber-400 block">60% Gift 💎</span>
+                <span className="text-[9.5px] text-zinc-400">Diamond payout</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  triggerTestAlert(
+                    'message',
+                    '💬 New Message',
+                    'Sophia: "Join my party stage right now!"',
+                    'chat'
+                  )
+                }
+                className="p-2 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-cyan-500/30 text-left cursor-pointer"
+              >
+                <span className="text-[11px] font-bold text-cyan-400 block">Message</span>
+                <span className="text-[9.5px] text-zinc-400">DM / group chat</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() =>
+                  triggerTestAlert(
+                    'comment',
+                    '💭 Video Comment & Like',
+                    'Zara commented "Amazing video 🔥" and liked your Moment!',
+                    'moments'
+                  )
+                }
+                className="p-2 rounded-xl bg-[#251545] hover:bg-[#341C63] border border-rose-500/30 text-left cursor-pointer"
+              >
+                <span className="text-[11px] font-bold text-rose-400 block">Comment/Like</span>
+                <span className="text-[9.5px] text-zinc-400">Moment activity</span>
               </button>
             </div>
           </div>
@@ -428,9 +543,10 @@ export const PushNotificationSettingsModal: React.FC<PushNotificationSettingsMod
         {/* Footer */}
         <div className="px-5 py-3.5 bg-[#0A0614] border-t border-white/5 flex items-center justify-between">
           <span className="text-[10px] text-zinc-400">
-            Powered by Capacitor 8 & Firebase Cloud Messaging
+            Preferences synced to Firestore & FCM Cloud Functions
           </span>
           <button
+            type="button"
             onClick={onClose}
             className="px-4 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-semibold text-white transition-colors cursor-pointer"
           >

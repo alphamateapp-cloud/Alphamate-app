@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { Capacitor } from '@capacitor/core';
 import {
   ScreenType,
   MainTabType,
@@ -10,6 +11,8 @@ import {
   VideoPost,
   WalletTransaction,
   NotificationItem,
+  NotificationPreferences,
+  GiftTransactionRecord,
   StoryItem,
   FriendStory,
   AgencyOrder,
@@ -51,6 +54,18 @@ import {
   syncLiveStreamToFirestore,
   deleteLiveStreamFromFirestore,
   subscribeToLiveStreams,
+  submitAccountDeactivationFirestore,
+  submitPermanentDeletionRequestFirestore,
+  recoverAccountLifecycleFirestore,
+  updateUserNotificationPreferencesFirestore,
+  sendFirestoreNotification,
+  subscribeToUserNotifications,
+  markFirestoreNotificationRead,
+  markAllFirestoreNotificationsRead,
+  fetchBroadcastRecipientIds,
+  executeSixtyFortyGiftTransaction,
+  subscribeToGiftTransactions,
+  SendNotificationParams,
   FirebaseUser,
 } from '../services/firebase';
 import {
@@ -61,6 +76,7 @@ import {
 } from '../services/reelsService';
 import { p2pStreamingEngine } from '../services/webrtcService';
 import { realtimeSocket } from '../services/realtimeSocket';
+import { pushService, DEFAULT_NOTIFICATION_PREFERENCES } from '../services/pushNotificationService';
 
 interface AppContextType {
   // Navigation & Screen state
@@ -117,6 +133,32 @@ interface AppContextType {
   refreshFirebaseVerification: () => Promise<boolean>;
   resendEmailVerificationLink: () => Promise<void>;
   logoutFirebase: () => Promise<void>;
+  sendAccountDeletionOtp: () => Promise<{
+    success: boolean;
+    emailMasked?: string;
+    challengeToken?: string;
+    expiresAt?: number;
+    cooldownSeconds?: number;
+    code?: string;
+    error?: string;
+  }>;
+  verifyAccountDeletionOtp: (
+    challengeToken: string,
+    otp: string
+  ) => Promise<{
+    success: boolean;
+    otpVerifiedAt?: string;
+    deletionVerificationToken?: string;
+    code?: string;
+    remainingAttempts?: number;
+    error?: string;
+  }>;
+  deactivateCurrentAccount: (reason?: string) => Promise<{ success: boolean; deactivatedAt?: string; error?: string }>;
+  requestPermanentAccountDeletion: (
+    otpVerifiedAt: string,
+    reason?: string
+  ) => Promise<{ success: boolean; scheduledPermanentDeletionAt?: string; error?: string }>;
+  recoverCurrentAccount: () => Promise<{ success: boolean; error?: string }>;
 
   // Live Stream state
   liveStreams: LiveStream[];
@@ -124,9 +166,20 @@ interface AppContextType {
   openLiveStream: (stream: LiveStream) => void;
   publishLiveStream: (stream: LiveStream) => Promise<void>;
   closeLiveStream: () => void;
-  sendLiveGift: (gift: Gift, recipientHostId?: string) => void;
+  sendLiveGift: (
+    gift: Gift,
+    recipientHostId?: string,
+    quantity?: number,
+    recipientDisplayName?: string,
+    meta?: { context?: 'live' | 'party' | 'moments' | 'pk' | 'demo'; roomId?: string; streamId?: string; reelId?: string }
+  ) => void;
   activeGiftBanner: { gift: Gift; sender: string; recipient: string } | null;
   clearActiveGiftBanner: () => void;
+  giftTransactions: GiftTransactionRecord[];
+  simulateDemoHostGift: (
+    coinsAmount?: number,
+    giftName?: string
+  ) => { success: boolean; message: string; hostDiamonds: number; appShareCoins: number };
 
   // PK Battle state
   activePKBattle: LiveStream | null;
@@ -205,10 +258,17 @@ interface AppContextType {
   showDailyCheckInModal: boolean;
   setShowDailyCheckInModal: (show: boolean) => void;
 
-  // Notifications
+  // Notifications & Push Preferences
   notifications: NotificationItem[];
   markNotificationRead: (id: string) => void;
+  markAllNotificationsRead: () => void;
   unreadNotificationsCount: number;
+  notificationPreferences: NotificationPreferences;
+  updateNotificationPreferences: (prefs: NotificationPreferences) => Promise<void>;
+  toggleMasterNotifications: (enabled: boolean) => Promise<void>;
+  showPushSettingsModal: boolean;
+  setShowPushSettingsModal: (show: boolean) => void;
+  sendNotificationToUser: (params: SendNotificationParams) => Promise<void>;
 
   // Global Search
   searchQuery: string;
@@ -423,12 +483,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return INITIAL_REGISTERED_USERS;
   });
 
+  const isAccountRestrictedStatus = (status?: string | null): boolean =>
+    status === 'deactivated' || status === 'pending_deletion' || status === 'permanently_deleted';
+
   const getLegalScreenFromPath = (pathname?: string): ScreenType | null => {
     if (typeof window === 'undefined') return null;
     const normalized = (pathname ?? window.location.pathname).replace(/\/+$/, '').toLowerCase();
     if (normalized === '/privacy' || normalized === '/privacy-policy') return 'privacy_policy';
     if (normalized === '/terms' || normalized === '/terms-and-conditions' || normalized === '/terms-of-service') {
       return 'terms_conditions';
+    }
+    if (normalized === '/delete-account' || normalized === '/account-deletion') {
+      return 'delete_account';
     }
     return null;
   };
@@ -443,11 +509,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? '/privacy'
           : screen === 'terms_conditions'
           ? '/terms'
+          : screen === 'delete_account'
+          ? '/delete-account'
           : null;
       const currentPath = window.location.pathname.replace(/\/+$/, '').toLowerCase();
       if (targetPath && currentPath !== targetPath) {
         window.history.pushState({ screen }, '', targetPath);
-      } else if (!targetPath && (currentPath === '/privacy' || currentPath === '/privacy-policy' || currentPath === '/terms' || currentPath === '/terms-and-conditions' || currentPath === '/terms-of-service')) {
+      } else if (
+        !targetPath &&
+        (currentPath === '/privacy' ||
+          currentPath === '/privacy-policy' ||
+          currentPath === '/terms' ||
+          currentPath === '/terms-and-conditions' ||
+          currentPath === '/terms-of-service' ||
+          currentPath === '/delete-account' ||
+          currentPath === '/account-deletion')
+      ) {
         window.history.pushState({ screen }, '', '/');
       }
     } catch {
@@ -571,18 +648,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           if (!remoteProfile) {
             await syncUserProfileToFirestore(mergedUser).catch(() => {});
           }
-          saveUserSession(mergedUser, verified);
+          if (remoteProfile?.notificationPreferences) {
+            const hydratedPrefs = pushService.setLocalPreferences({
+              ...DEFAULT_NOTIFICATION_PREFERENCES,
+              ...remoteProfile.notificationPreferences,
+              categories: {
+                ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+                ...(remoteProfile.notificationPreferences.categories || {}),
+              },
+            });
+            setNotificationPreferences(hydratedPrefs);
+          }
+          const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
+          saveUserSession(mergedUser, verified && !restricted);
 
           // Restore an existing Firebase session directly into the app after
-          // refresh/reopen. Preserve direct visits to /privacy or /terms.
+          // refresh/reopen. Preserve direct visits to /privacy, /terms, or /delete-account.
           if (verified) {
             const activeLegal =
-              currentScreenRef.current === 'privacy_policy' || currentScreenRef.current === 'terms_conditions'
+              currentScreenRef.current === 'privacy_policy' ||
+              currentScreenRef.current === 'terms_conditions' ||
+              currentScreenRef.current === 'delete_account'
                 ? currentScreenRef.current
                 : getLegalScreenFromPath();
             if (activeLegal) {
-              setScreenHistory(['home', activeLegal]);
+              setScreenHistory([restricted ? 'welcome' : 'home', activeLegal]);
               setCurrentScreenState(activeLegal);
+            } else if (restricted) {
+              setScreenHistory(['welcome', 'account_recovery']);
+              setCurrentScreenState('account_recovery');
             } else {
               setScreenHistory(['home']);
               setCurrentScreenState('home');
@@ -594,7 +688,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           saveUserSession(fallbackUser, verified);
           if (verified) {
             const activeLegal =
-              currentScreenRef.current === 'privacy_policy' || currentScreenRef.current === 'terms_conditions'
+              currentScreenRef.current === 'privacy_policy' ||
+              currentScreenRef.current === 'terms_conditions' ||
+              currentScreenRef.current === 'delete_account'
                 ? currentScreenRef.current
                 : getLegalScreenFromPath();
             if (activeLegal) {
@@ -983,8 +1079,209 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  // Notifications
+  // Notifications & 60/40 Gift Ledger
   const [notifications, setNotifications] = useState<NotificationItem[]>(MOCK_NOTIFICATIONS);
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() =>
+    pushService.getPreferences()
+  );
+  const [showPushSettingsModal, setShowPushSettingsModal] = useState<boolean>(false);
+  const [giftTransactions, setGiftTransactions] = useState<GiftTransactionRecord[]>(() => {
+    try {
+      const saved = localStorage.getItem('alphamate_gift_transactions');
+      if (saved) return JSON.parse(saved);
+    } catch {
+      // ignore
+    }
+    return [];
+  });
+  const announcedLiveIdsRef = React.useRef<Set<string>>(new Set());
+  const seenNotificationIdsRef = React.useRef<Set<string>>(new Set());
+  const notificationBootedRef = React.useRef<boolean>(false);
+
+  // Real-time User Profile, Notifications & 60/40 Gift Ledger Subscriptions
+  useEffect(() => {
+    if (!firebaseUser?.uid || !isEmailVerified) {
+      seenNotificationIdsRef.current.clear();
+      notificationBootedRef.current = false;
+      return;
+    }
+
+    const uid = firebaseUser.uid;
+    const isAdmin = firebaseUser.email?.toLowerCase() === 'alphamateapp@gmail.com';
+    const sessionStartedAt = Date.now();
+
+    const unsubProfile = subscribeToUserProfile(uid, (remoteProfile) => {
+      if (!remoteProfile) return;
+      if (typeof remoteProfile.coins === 'number') {
+        setCoins(remoteProfile.coins);
+      }
+      if (typeof remoteProfile.diamonds === 'number') {
+        setDiamonds(remoteProfile.diamonds);
+      }
+      if (typeof remoteProfile.heldDiamonds === 'number') {
+        setHeldDiamonds(remoteProfile.heldDiamonds);
+      }
+      if (remoteProfile.notificationPreferences) {
+        const syncedPrefs = pushService.setLocalPreferences({
+          ...DEFAULT_NOTIFICATION_PREFERENCES,
+          ...remoteProfile.notificationPreferences,
+          categories: {
+            ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+            ...(remoteProfile.notificationPreferences.categories || {}),
+          },
+        });
+        setNotificationPreferences(syncedPrefs);
+      }
+      setCurrentUser((prev) => ({
+        ...prev,
+        coins: typeof remoteProfile.coins === 'number' ? remoteProfile.coins : prev.coins,
+        diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
+        heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
+        notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
+      }));
+    });
+
+    const unsubNotifs = subscribeToUserNotifications(uid, (remoteItems) => {
+      const typedItems = remoteItems as NotificationItem[];
+      setNotifications((prev) => {
+        const remoteIds = new Set(typedItems.map((i) => i.id));
+        const localOnly = prev.filter((p) => !remoteIds.has(p.id) && p.id.startsWith('local_notif_'));
+        return [...typedItems, ...localOnly];
+      });
+
+      if (!notificationBootedRef.current) {
+        typedItems.forEach((n) => seenNotificationIdsRef.current.add(n.id));
+        notificationBootedRef.current = true;
+        return;
+      }
+
+      typedItems.forEach((n) => {
+        if (!seenNotificationIdsRef.current.has(n.id)) {
+          seenNotificationIdsRef.current.add(n.id);
+          const createdMs = n.createdAtMs || 0;
+          if (!n.isRead && createdMs >= sessionStartedAt - 15000) {
+            pushService.notifyForeground({
+              id: n.id,
+              title: n.title,
+              body: n.message,
+              data: {
+                type: n.type,
+                category: n.category,
+                screen: n.screen,
+                tab: n.tab,
+                roomId: n.roomId,
+                streamId: n.streamId,
+                reelId: n.reelId,
+                chatId: n.chatId,
+                senderId: n.senderId,
+              },
+            });
+          }
+        }
+      });
+    });
+
+    const unsubGifts = subscribeToGiftTransactions({ userId: uid, isAdmin }, (remoteGifts) => {
+      const normalized = remoteGifts as GiftTransactionRecord[];
+      setGiftTransactions((prev) => {
+        const remoteIds = new Set(normalized.map((g) => g.id));
+        const localDemoOnly = prev.filter((g) => !remoteIds.has(g.id) && g.id.startsWith('local_gift_'));
+        const merged = [...normalized, ...localDemoOnly];
+        try {
+          localStorage.setItem('alphamate_gift_transactions', JSON.stringify(merged.slice(0, 100)));
+        } catch {}
+        return merged;
+      });
+    });
+
+    return () => {
+      unsubProfile();
+      unsubNotifs();
+      unsubGifts();
+    };
+  }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified]);
+
+  const updateNotificationPreferences = async (prefs: NotificationPreferences) => {
+    const uid =
+      firebaseUser?.uid ||
+      (currentUser?.id && !currentUser.id.startsWith('user_') ? currentUser.id : null);
+    const normalized = await pushService.saveAndSyncPreferences(uid, prefs);
+    setNotificationPreferences(normalized);
+    setCurrentUser((prev) => {
+      const updated = { ...prev, notificationPreferences: normalized };
+      saveUserSession(updated, isAuthenticated);
+      return updated;
+    });
+    if (firebaseUser?.uid) {
+      updateUserNotificationPreferencesFirestore(firebaseUser.uid, normalized).catch(() => {});
+    }
+  };
+
+  const toggleMasterNotifications = async (enabled: boolean) => {
+    if (enabled) {
+      await pushService.requestPermissions().catch(() => {});
+      if (firebaseUser?.uid) {
+        await pushService.syncTokenToUserDoc(firebaseUser.uid).catch(() => {});
+      }
+    }
+    await updateNotificationPreferences({
+      ...notificationPreferences,
+      enabled,
+      updatedAt: new Date().toISOString(),
+    });
+  };
+
+  const sendNotificationToUser = async (params: SendNotificationParams) => {
+    const targetId = String(params.recipientId || '').trim();
+    if (!targetId) return;
+
+    if (firebaseUser?.uid && /^[a-zA-Z0-9_-]{1,128}$/.test(targetId) && !targetId.startsWith('user_demo_')) {
+      sendFirestoreNotification({
+        ...params,
+        senderName: params.senderName || currentUser.displayName,
+        senderAvatar: params.senderAvatar || currentUser.avatar,
+      }).catch(() => {});
+    }
+
+    if (targetId === currentUser.id && !firebaseUser?.uid) {
+      const localId = `local_notif_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const item: NotificationItem = {
+        id: localId,
+        type: params.type,
+        category: params.category as any,
+        title: params.title,
+        message: params.message,
+        senderId: currentUser.id,
+        senderName: params.senderName || currentUser.displayName,
+        senderAvatar: params.senderAvatar || currentUser.avatar,
+        recipientId: targetId,
+        screen: params.screen,
+        tab: params.tab,
+        roomId: params.roomId,
+        streamId: params.streamId,
+        reelId: params.reelId,
+        chatId: params.chatId,
+        timestamp: 'Just now',
+        createdAtMs: Date.now(),
+        isRead: false,
+      };
+      setNotifications((prev) => [item, ...prev]);
+      pushService.notifyForeground({
+        id: localId,
+        title: params.title,
+        body: params.message,
+        data: {
+          type: params.type,
+          screen: params.screen,
+          tab: params.tab,
+          roomId: params.roomId,
+          streamId: params.streamId,
+          reelId: params.reelId,
+          chatId: params.chatId,
+        },
+      });
+    }
+  };
 
   // Search
   const [searchQuery, setSearchQuery] = useState<string>('');
@@ -2068,9 +2365,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
       if (
         currentScreenRef.current === 'privacy_policy' ||
-        currentScreenRef.current === 'terms_conditions'
+        currentScreenRef.current === 'terms_conditions' ||
+        currentScreenRef.current === 'delete_account'
       ) {
-        setCurrentScreenState(isAuthenticated && firebaseUser && isEmailVerified ? 'home' : 'welcome');
+        if (firebaseUser && isEmailVerified && isAccountRestrictedStatus(currentUser?.accountStatus)) {
+          setCurrentScreenState('account_recovery');
+        } else {
+          setCurrentScreenState(isAuthenticated && firebaseUser && isEmailVerified ? 'home' : 'welcome');
+        }
       }
     };
     window.addEventListener('popstate', handlePopState);
@@ -2258,10 +2560,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await syncUserProfileToFirestore(userObj);
       setFirebaseUser(fbUser);
       setIsEmailVerified(true);
-      saveUserSession(userObj, true);
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      saveUserSession(userObj, !restricted);
       if (!options?.skipRedirect) {
-        setScreenHistory(['home']);
-        setCurrentScreenState('home');
+        if (restricted) {
+          setScreenHistory(['welcome', 'account_recovery']);
+          setCurrentScreenState('account_recovery');
+        } else {
+          setScreenHistory(['home']);
+          setCurrentScreenState('home');
+        }
       }
       return { success: true, user: userObj };
     } catch (error: any) {
@@ -2297,10 +2605,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
       await syncUserProfileToFirestore(userObj).catch(() => {});
-      saveUserSession(userObj, true);
-      setScreenHistory(['home']);
-      setCurrentScreenState('home');
+      saveUserSession(userObj, !restricted);
+      if (restricted) {
+        setScreenHistory(['welcome', 'account_recovery']);
+        setCurrentScreenState('account_recovery');
+      } else {
+        setScreenHistory(['home']);
+        setCurrentScreenState('home');
+      }
       return { success: true, user: userObj };
     } catch (error: any) {
       console.error('Firebase Email Login error:', error);
@@ -2355,10 +2669,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const userObj: User = remoteProfile
         ? { ...buildNewUserFromFirebase(refreshed), ...remoteProfile, id: refreshed.uid, isVerified: true }
         : buildNewUserFromFirebase(refreshed, { isVerified: true });
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
       await syncUserProfileToFirestore(userObj).catch(() => {});
-      saveUserSession(userObj, true);
-      setScreenHistory(['home']);
-      setCurrentScreenState('home');
+      saveUserSession(userObj, !restricted);
+      if (restricted) {
+        setScreenHistory(['welcome', 'account_recovery']);
+        setCurrentScreenState('account_recovery');
+      } else {
+        setScreenHistory(['home']);
+        setCurrentScreenState('home');
+      }
     }
     return verified;
   };
@@ -2405,6 +2725,138 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const logoutFirebase = async () => {
     await performCleanLogout();
+  };
+
+  const callAccountOtpEndpoint = async (subPath: string, body: Record<string, unknown>) => {
+    const activeFbUser = auth.currentUser || firebaseUser;
+    if (!activeFbUser) {
+      return { success: false, status: 401, error: 'Please sign in first to verify your account.' };
+    }
+    const idToken = await activeFbUser.getIdToken(true);
+    const railwayBase = p2pStreamingEngine.getResolvedBackendApiBase();
+    const isLocalPreview =
+      typeof window !== 'undefined' &&
+      !Capacitor.isNativePlatform() &&
+      (window.location.hostname.endsWith('.run.app') ||
+        window.location.hostname === 'localhost' ||
+        window.location.hostname === '127.0.0.1');
+
+    const endpoints = isLocalPreview ? [subPath, `${railwayBase}${subPath}`] : [`${railwayBase}${subPath}`];
+    let lastError = 'Unable to reach OTP verification service.';
+
+    for (const url of endpoints) {
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${idToken}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify(body),
+        });
+        const contentType = res.headers.get('content-type') || '';
+        if (!contentType.includes('application/json')) {
+          lastError = `Unexpected non-JSON response (${res.status}) from ${url}.`;
+          continue;
+        }
+        const data = await res.json();
+        return { ...data, status: res.status };
+      } catch (err: any) {
+        lastError = err?.message || lastError;
+      }
+    }
+    return { success: false, status: 503, error: lastError };
+  };
+
+  const sendAccountDeletionOtp = async () => {
+    const email = (auth.currentUser?.email || firebaseUser?.email || currentUser?.email || '').trim().toLowerCase();
+    const res = await callAccountOtpEndpoint('/api/account/deletion-otp/send', { email });
+    return {
+      success: Boolean(res?.success),
+      emailMasked: res?.emailMasked,
+      challengeToken: res?.challengeToken,
+      expiresAt: res?.expiresAt,
+      cooldownSeconds: res?.cooldownSeconds,
+      code: res?.code,
+      error: res?.error,
+    };
+  };
+
+  const verifyAccountDeletionOtp = async (challengeToken: string, otp: string) => {
+    const res = await callAccountOtpEndpoint('/api/account/deletion-otp/verify', { challengeToken, otp });
+    return {
+      success: Boolean(res?.success),
+      otpVerifiedAt: res?.otpVerifiedAt,
+      deletionVerificationToken: res?.deletionVerificationToken,
+      code: res?.code,
+      remainingAttempts: res?.remainingAttempts,
+      error: res?.error,
+    };
+  };
+
+  const deactivateCurrentAccount = async (reason?: string) => {
+    try {
+      const targetUser = {
+        ...currentUser,
+        id: auth.currentUser?.uid || firebaseUser?.uid || currentUser.id,
+        email: auth.currentUser?.email || firebaseUser?.email || currentUser.email,
+      };
+      const { deactivatedAt } = await submitAccountDeactivationFirestore(targetUser, reason);
+      await performCleanLogout();
+      return { success: true, deactivatedAt };
+    } catch (error: any) {
+      console.error('Account deactivation error:', error);
+      return { success: false, error: error?.message || 'Failed to deactivate account.' };
+    }
+  };
+
+  const requestPermanentAccountDeletion = async (otpVerifiedAt: string, reason?: string) => {
+    try {
+      const targetUser = {
+        ...currentUser,
+        id: auth.currentUser?.uid || firebaseUser?.uid || currentUser.id,
+        email: auth.currentUser?.email || firebaseUser?.email || currentUser.email,
+      };
+      const { scheduledPermanentDeletionAt } = await submitPermanentDeletionRequestFirestore(
+        targetUser,
+        otpVerifiedAt,
+        reason
+      );
+      await performCleanLogout();
+      return { success: true, scheduledPermanentDeletionAt };
+    } catch (error: any) {
+      console.error('Permanent account deletion request error:', error);
+      return { success: false, error: error?.message || 'Failed to submit permanent deletion request.' };
+    }
+  };
+
+  const recoverCurrentAccount = async () => {
+    try {
+      const targetUser = {
+        ...currentUser,
+        id: auth.currentUser?.uid || firebaseUser?.uid || currentUser.id,
+        email: auth.currentUser?.email || firebaseUser?.email || currentUser.email,
+      };
+      const { reactivatedAt } = await recoverAccountLifecycleFirestore(targetUser);
+      const restoredUser: User = {
+        ...currentUser,
+        accountStatus: 'active',
+        reactivatedAt,
+        deactivatedAt: undefined,
+        deletionRequestedAt: undefined,
+        scheduledPermanentDeletionAt: undefined,
+        deletionOtpVerifiedAt: undefined,
+      };
+      saveUserSession(restoredUser, true);
+      setScreenHistory(['home']);
+      setCurrentScreenState('home');
+      syncBrowserUrlForScreen('home');
+      return { success: true };
+    } catch (error: any) {
+      console.error('Account recovery error:', error);
+      return { success: false, error: error?.message || 'Unable to recover account.' };
+    }
   };
 
   const updateUserProfile = (data: Partial<User>) => {
@@ -2471,6 +2923,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     });
     try {
       await syncLiveStreamToFirestore(publishedStream);
+      if (
+        firebaseUser?.uid &&
+        publishedStream.isActive !== false &&
+        publishedStream.sfuSessionId &&
+        !announcedLiveIdsRef.current.has(publishedStream.id)
+      ) {
+        announcedLiveIdsRef.current.add(publishedStream.id);
+        fetchBroadcastRecipientIds(firebaseUser.uid, 25)
+          .then((uids) => {
+            uids.forEach((recipientId) => {
+              sendFirestoreNotification({
+                recipientId,
+                type: 'live_on',
+                category: 'liveOn',
+                title: `🔴 ${publishedStream.host.displayName} is LIVE now!`,
+                message: publishedStream.title || 'Tap to join the live stream now!',
+                senderName: publishedStream.host.displayName,
+                senderAvatar: publishedStream.host.avatar,
+                screen: 'live_stream',
+                streamId: publishedStream.id,
+              }).catch(() => {});
+            });
+          })
+          .catch(() => {});
+      }
     } catch (err) {
       realtimeSocket.removeLiveStream(publishedStream.id);
       throw err;
@@ -2503,46 +2980,237 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentScreen('pk_battle');
   };
 
+  const executeGiftEconomy = (
+    gift: Gift,
+    recipientHostId?: string,
+    quantity = 1,
+    recipientDisplayName?: string,
+    meta?: { context?: 'live' | 'party' | 'moments' | 'pk' | 'demo'; roomId?: string; streamId?: string; reelId?: string }
+  ): { success: boolean; hostDiamonds: number; appShareCoins: number; totalCoins: number } => {
+    const qty = Math.max(1, Math.floor(quantity || 1));
+    const totalCoins = gift.coins * qty;
+    const hostDiamonds = Math.round(totalCoins * 0.6);
+    const appShareCoins = totalCoins - hostDiamonds;
+
+    if (coins < totalCoins) {
+      return { success: false, hostDiamonds, appShareCoins, totalCoins };
+    }
+
+    const context = meta?.context || 'live';
+    const effectiveRecipientId = recipientHostId || activeStream?.host.id || activePartyRoom?.host.id || currentUser.id;
+    const resolvedRecipientName =
+      recipientDisplayName ||
+      activeStream?.host.displayName ||
+      activePartyRoom?.host.displayName ||
+      'Host';
+    const isSelfHost =
+      effectiveRecipientId === currentUser.id ||
+      (Boolean(firebaseUser?.uid) && effectiveRecipientId === firebaseUser?.uid);
+
+    const nextCoins = Math.max(0, coins - totalCoins);
+    const nextDiamonds = isSelfHost ? diamonds + hostDiamonds : diamonds;
+    setCoins(nextCoins);
+    if (isSelfHost) {
+      setDiamonds(nextDiamonds);
+    }
+
+    const updatedUser: User = {
+      ...currentUser,
+      coins: nextCoins,
+      diamonds: nextDiamonds,
+    };
+    saveUserSession(updatedUser, isAuthenticated);
+
+    if (!isSelfHost) {
+      setRegisteredUsers((users) => {
+        const nextUsers = users.map((u) =>
+          u.id === effectiveRecipientId
+            ? { ...u, diamonds: (u.diamonds || 0) + hostDiamonds }
+            : u
+        );
+        try {
+          localStorage.setItem('alphamate_registered_users', JSON.stringify(nextUsers));
+        } catch {}
+        return nextUsers;
+      });
+    }
+
+    const sentTx: WalletTransaction = {
+      id: `tx_gift_${Date.now()}`,
+      type: 'gift_sent',
+      amount: totalCoins,
+      currency: 'coins',
+      title: `Sent ${qty > 1 ? `${qty}x ` : ''}${gift.name} (${gift.icon}) → ${resolvedRecipientName} [Host: +${hostDiamonds.toLocaleString()} 💎 (60%) | App: ${appShareCoins.toLocaleString()} Coins (40%)]`,
+      date: 'Just now',
+      status: 'completed',
+    };
+    const newTxs: WalletTransaction[] = [sentTx];
+    if (isSelfHost) {
+      newTxs.unshift({
+        id: `tx_earn_${Date.now() + 1}`,
+        type: 'gift_received',
+        amount: hostDiamonds,
+        currency: 'diamonds',
+        title: `60% Host Share: ${qty > 1 ? `${qty}x ` : ''}${gift.name} ${gift.icon} (${totalCoins.toLocaleString()} Coins)`,
+        date: 'Just now',
+        status: 'completed',
+      });
+    }
+    setTransactions((prev) => [...newTxs, ...prev]);
+
+    const localLedgerId = firebaseUser?.uid ? `pending_${Date.now()}` : `local_gift_${Date.now()}`;
+    const ledgerItem: GiftTransactionRecord = {
+      id: localLedgerId,
+      senderId: firebaseUser?.uid || currentUser.id,
+      senderName: currentUser.displayName,
+      recipientId: effectiveRecipientId,
+      recipientName: resolvedRecipientName,
+      giftId: gift.id,
+      giftName: gift.name,
+      giftIcon: gift.icon,
+      quantity: qty,
+      totalCoins,
+      hostDiamonds,
+      appShareCoins,
+      context,
+      roomId: meta?.roomId,
+      streamId: meta?.streamId,
+      reelId: meta?.reelId,
+      status: 'completed',
+      createdAt: new Date().toISOString(),
+      createdAtMs: Date.now(),
+    };
+    setGiftTransactions((prev) => {
+      const updated = [ledgerItem, ...prev.filter((x) => !x.id.startsWith('pending_'))];
+      try {
+        localStorage.setItem('alphamate_gift_transactions', JSON.stringify(updated.slice(0, 100)));
+      } catch {}
+      return updated;
+    });
+
+    if (firebaseUser?.uid) {
+      executeSixtyFortyGiftTransaction({
+        senderId: firebaseUser.uid,
+        senderName: currentUser.displayName,
+        senderAvatar: currentUser.avatar,
+        recipientId: effectiveRecipientId,
+        recipientName: resolvedRecipientName,
+        giftId: gift.id,
+        giftName: gift.name,
+        giftIcon: gift.icon,
+        unitCoins: gift.coins,
+        quantity: qty,
+        context,
+        roomId: meta?.roomId,
+        streamId: meta?.streamId,
+        reelId: meta?.reelId,
+      })
+        .then((res) => {
+          setGiftTransactions((prev) =>
+            prev.map((g) => (g.id === localLedgerId ? { ...g, id: res.txId } : g))
+          );
+        })
+        .catch((err) => console.warn('60/40 Firestore gift transaction warning:', err));
+    } else if (isSelfHost) {
+      const localNotifId = `local_notif_${Date.now()}`;
+      const giftNotif: NotificationItem = {
+        id: localNotifId,
+        type: 'gift',
+        category: 'gifts',
+        title: `${gift.icon} Gift Received (+${hostDiamonds.toLocaleString()} 💎)`,
+        message: `${currentUser.displayName} sent ${qty > 1 ? `${qty}x ` : ''}${gift.name} (${totalCoins.toLocaleString()} Coins). Your 60% host share (+${hostDiamonds.toLocaleString()} Diamonds) is in your wallet!`,
+        timestamp: 'Just now',
+        createdAtMs: Date.now(),
+        isRead: false,
+        screen: 'wallet',
+      };
+      setNotifications((prev) => [giftNotif, ...prev]);
+      pushService.notifyForeground({
+        id: localNotifId,
+        title: giftNotif.title,
+        body: giftNotif.message,
+        data: { type: 'gift', screen: 'wallet' },
+      });
+    }
+
+    return { success: true, hostDiamonds, appShareCoins, totalCoins };
+  };
+
   const supportPKHost = (side: 'left' | 'right', amount: number) => {
     if (coins < amount) return;
-    setCoins((prev) => prev - amount);
+    const pkGift: Gift = {
+      id: `pk_${amount}`,
+      name: 'PK Battle Support',
+      icon: VIRTUAL_GIFTS[1]?.icon || '🔥',
+      coins: amount,
+      animationType: 'sparkle',
+      description: 'PK battle gift with 60% host diamond split',
+    };
+    const hostRecipientId = side === 'left' ? (activePKBattle?.host.id || 'pk_left_host') : 'pk_right_host';
+    const hostRecipientName = side === 'left' ? (activePKBattle?.host.displayName || 'Host Left') : 'Host Right';
+    executeGiftEconomy(pkGift, hostRecipientId, 1, hostRecipientName, {
+      context: 'pk',
+      streamId: activePKBattle?.id,
+    });
     setPkScores((prev) => ({
       ...prev,
       [side]: prev[side] + amount,
     }));
-    // Flash banner
     setActiveGiftBanner({
-      gift: VIRTUAL_GIFTS[1],
+      gift: pkGift,
       sender: currentUser.displayName,
-      recipient: side === 'left' ? 'Host Left' : 'Host Right',
+      recipient: hostRecipientName,
     });
   };
 
-  const sendLiveGift = (gift: Gift, recipientHostId?: string) => {
-    if (coins < gift.coins) {
-      return;
-    }
+  const sendLiveGift = (
+    gift: Gift,
+    recipientHostId?: string,
+    quantity = 1,
+    recipientDisplayName?: string,
+    meta?: { context?: 'live' | 'party' | 'moments' | 'pk' | 'demo'; roomId?: string; streamId?: string; reelId?: string }
+  ) => {
+    const resolvedRecipientName =
+      recipientDisplayName ||
+      activeStream?.host.displayName ||
+      activePartyRoom?.host.displayName ||
+      'Host';
+    const res = executeGiftEconomy(gift, recipientHostId, quantity, resolvedRecipientName, meta);
+    if (!res.success) return;
 
-    setCoins((prev) => prev - gift.coins);
-
-    // Record transaction
-    const newTx: WalletTransaction = {
-      id: `tx_${Date.now()}`,
-      type: 'gift_sent',
-      amount: gift.coins,
-      currency: 'coins',
-      title: `Sent ${gift.name} (${gift.icon})`,
-      date: 'Just now',
-      status: 'completed',
-    };
-    setTransactions((prev) => [newTx, ...prev]);
-
-    // Show celebration banner
     setActiveGiftBanner({
       gift,
       sender: currentUser.displayName,
-      recipient: activeStream?.host.displayName || 'Host',
+      recipient: resolvedRecipientName,
     });
+  };
+
+  const simulateDemoHostGift = (coinsAmount = 1000, giftName = 'Demo Royal Gift') => {
+    const matchedGift: Gift = VIRTUAL_GIFTS.find((g) => g.coins === coinsAmount) || {
+      id: `demo_${coinsAmount}`,
+      name: giftName,
+      icon: '🎁',
+      coins: coinsAmount,
+      animationType: 'sparkle',
+      description: 'Demo gift with 60% host diamond split',
+    };
+    const res = executeGiftEconomy(matchedGift, currentUser.id, 1, currentUser.displayName, {
+      context: 'demo',
+    });
+    if (!res.success) {
+      return {
+        success: false,
+        message: `You need ${coinsAmount.toLocaleString()} Coins to run this demo 60/40 split test. Top up Coins above first.`,
+        hostDiamonds: res.hostDiamonds,
+        appShareCoins: res.appShareCoins,
+      };
+    }
+    return {
+      success: true,
+      message: `60/40 Split Applied: +${res.hostDiamonds.toLocaleString()} 💎 credited to Host Diamond Wallet (${res.appShareCoins.toLocaleString()} Coins App Share)!`,
+      hostDiamonds: res.hostDiamonds,
+      appShareCoins: res.appShareCoins,
+    };
   };
 
   const clearActiveGiftBanner = () => {
@@ -2590,6 +3258,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       realtimeSocket.announcePartyRoom(normalizedRoom);
       await syncPartyRoomToFirestore(normalizedRoom);
       setPartyRooms((prev) => [normalizedRoom, ...prev.filter((r) => r.id !== normalizedRoom.id)]);
+      fetchBroadcastRecipientIds(firebaseUid, 25)
+        .then((uids) => {
+          uids.forEach((recipientId) => {
+            sendFirestoreNotification({
+              recipientId,
+              type: 'party_invite',
+              category: 'partyInvites',
+              title: `🎙️ ${normalizedRoom.host.displayName} opened a Party Room!`,
+              message: `Join "${normalizedRoom.title || 'Voice Party Room'}" — open mic seats are ready!`,
+              senderName: normalizedRoom.host.displayName,
+              senderAvatar: normalizedRoom.host.avatar,
+              screen: 'party_room',
+              roomId: normalizedRoom.id,
+            }).catch(() => {});
+          });
+        })
+        .catch(() => {});
       openPartyRoom(normalizedRoom);
       return { success: true };
     } catch (err: any) {
@@ -2778,6 +3463,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const toggleLikeVideo = (videoId: string) => {
+    const targetVideo = videos.find((v) => v.id === videoId);
+    const willLike = targetVideo ? !targetVideo.isLiked : false;
+
     setVideos((prev) =>
       prev.map((v) => {
         if (v.id === videoId) {
@@ -2793,6 +3481,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return v;
       })
     );
+
+    if (willLike && targetVideo?.user?.id && targetVideo.user.id !== currentUser.id) {
+      sendNotificationToUser({
+        recipientId: targetVideo.user.id,
+        type: 'like',
+        category: 'likes',
+        title: `💖 ${currentUser.displayName} liked your Moment`,
+        message: `"${targetVideo.title || 'Your video'}" received a new like!`,
+        screen: 'moments',
+        reelId: targetVideo.id,
+      }).catch(() => {});
+    }
   };
 
   const deleteVideoPost = async (postId: string, videoKey?: string) => {
@@ -3134,6 +3834,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const markNotificationRead = (id: string) => {
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, isRead: true } : n)));
+    if (firebaseUser?.uid && !id.startsWith('notif_') && !id.startsWith('local_notif_')) {
+      markFirestoreNotificationRead(firebaseUser.uid, id).catch(() => {});
+    }
+  };
+
+  const markAllNotificationsRead = () => {
+    const unreadIds = notifications.filter((n) => !n.isRead).map((n) => n.id);
+    setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
+    if (firebaseUser?.uid) {
+      const fsIds = unreadIds.filter((id) => !id.startsWith('notif_') && !id.startsWith('local_notif_'));
+      if (fsIds.length > 0) {
+        markAllFirestoreNotificationsRead(firebaseUser.uid, fsIds).catch(() => {});
+      }
+    }
   };
 
   const unreadNotificationsCount = notifications.filter((n) => !n.isRead).length;
@@ -3169,6 +3883,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         refreshFirebaseVerification,
         resendEmailVerificationLink,
         logoutFirebase,
+        sendAccountDeletionOtp,
+        verifyAccountDeletionOtp,
+        deactivateCurrentAccount,
+        requestPermanentAccountDeletion,
+        recoverCurrentAccount,
         liveStreams,
         activeStream,
         openLiveStream,
@@ -3177,6 +3896,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendLiveGift,
         activeGiftBanner,
         clearActiveGiftBanner,
+        giftTransactions,
+        simulateDemoHostGift,
         activePKBattle,
         openPKBattle,
         pkScores,
@@ -3225,7 +3946,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setShowDailyCheckInModal,
         notifications,
         markNotificationRead,
+        markAllNotificationsRead,
         unreadNotificationsCount,
+        notificationPreferences,
+        updateNotificationPreferences,
+        toggleMasterNotifications,
+        showPushSettingsModal,
+        setShowPushSettingsModal,
+        sendNotificationToUser,
         searchQuery,
         setSearchQuery,
         deviceMode,

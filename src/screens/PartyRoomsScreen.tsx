@@ -173,6 +173,7 @@ export const PartyRoomsScreen: React.FC = () => {
     setCurrentScreen,
     activeGiftBanner,
     startDirectMessage,
+    sendNotificationToUser,
   } = useApp();
 
   // Party Level: 1 = Basic (4 guest seats), 2 = Advanced (8 guest seats), 3 = Premium (15 guest seats)
@@ -635,6 +636,17 @@ export const PartyRoomsScreen: React.FC = () => {
       }
       return next;
     });
+    if (isNowFollowing && targetUser.id && targetUser.id !== currentUser.id) {
+      sendNotificationToUser({
+        recipientId: targetUser.id,
+        type: 'follow',
+        category: 'friendRequests',
+        title: `⭐ ${currentUser.displayName} followed you!`,
+        message: `${currentUser.displayName} followed you in Party Room.`,
+        screen: 'party_room',
+        roomId: activePartyRoom?.id,
+      }).catch(() => {});
+    }
     showToast(isNowFollowing ? `Following ${targetUser.displayName}! 💜` : `Unfollowed ${targetUser.displayName}`);
   };
 
@@ -673,6 +685,17 @@ export const PartyRoomsScreen: React.FC = () => {
         : s
     );
     await updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
+    if (viewer.id && viewer.id !== currentUser.id) {
+      sendNotificationToUser({
+        recipientId: viewer.id,
+        type: 'party_invite',
+        category: 'partyInvites',
+        title: `🎙️ You were invited to Seat ${emptySeatIndex + 1}!`,
+        message: `${currentUser.displayName} invited you to speak in "${activePartyRoom.title || 'Party Room'}".`,
+        screen: 'party_room',
+        roomId: activePartyRoom.id,
+      }).catch(() => {});
+    }
     setShowViewersModal(false);
     showToast(`Invited ${viewer.displayName} to Seat ${emptySeatIndex + 1}! 🎙️`);
     setChatItems((prev) => [
@@ -1501,10 +1524,13 @@ export const PartyRoomsScreen: React.FC = () => {
 
   // Send Virtual Gift
   const handleSendSelectedGift = () => {
-    sendLiveGift(selectedGift);
-    spawnHeart();
-
     const recipient = giftRecipientUser ? giftRecipientUser.displayName : (activePartyRoom?.host.displayName || 'Host');
+    const recipientId = giftRecipientUser ? giftRecipientUser.id : (activePartyRoom?.host.id || currentUser.id);
+    sendLiveGift(selectedGift, recipientId, 1, recipient, {
+      context: 'party',
+      roomId: activePartyRoom?.id,
+    });
+    spawnHeart();
 
     const giftMsg: ChatItem = {
       id: `gift_${Date.now()}`,
@@ -2071,7 +2097,19 @@ export const PartyRoomsScreen: React.FC = () => {
             </button>
             <button
               onClick={() => {
-                setIsFollowingHost(!isFollowingHost);
+                const nextFollow = !isFollowingHost;
+                setIsFollowingHost(nextFollow);
+                if (nextFollow && activePartyRoom?.host?.id && activePartyRoom.host.id !== currentUser.id) {
+                  sendNotificationToUser({
+                    recipientId: activePartyRoom.host.id,
+                    type: 'follow',
+                    category: 'friendRequests',
+                    title: `⭐ ${currentUser.displayName} followed your Party Room!`,
+                    message: `${currentUser.displayName} started following you.`,
+                    screen: 'party_room',
+                    roomId: activePartyRoom.id,
+                  }).catch(() => {});
+                }
                 showToast(isFollowingHost ? 'Unfollowed Host' : 'Following Host! 💜');
               }}
               className={`px-2 py-0.5 rounded-full text-[8.5px] font-black transition-all cursor-pointer ${
@@ -2713,6 +2751,17 @@ export const PartyRoomsScreen: React.FC = () => {
             setRoomPKTimeLeft(300);
             setLeftRoomPKScore(0);
             setRightRoomPKScore(0);
+            if (opp.host?.id && opp.host.id !== currentUser.id) {
+              sendNotificationToUser({
+                recipientId: opp.host.id,
+                type: 'pk_invite',
+                category: 'pkBattles',
+                title: `⚔️ PK Challenge from ${activePartyRoom.host.displayName}!`,
+                message: `5-Minute Room PK Battle started against "${activePartyRoom.title}"!`,
+                screen: 'party_room',
+                roomId: opp.id,
+              }).catch(() => {});
+            }
             showToast(`⚔️ Room PK Battle Started vs ${opp.title}! (5 Mins)`);
             setChatItems((prev) => [
               ...prev,
