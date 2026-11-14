@@ -20,9 +20,12 @@ import {
 } from 'firebase/firestore';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
 
-export const WORKER_API_BASE = 'https://alpha-mate-reels-api.alphamateapp.workers.dev';
+const ENV_WORKER_URL = ((import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || '').trim().replace(/\/$/, '');
+const ENV_RAILWAY_URL = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim().replace(/\/$/, '');
+export const WORKER_API_BASE = ENV_WORKER_URL || 'https://alpha-mate-reels-api.alphamateapp.workers.dev';
 export const MAX_VIDEO_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
-export const R2_MEDIA_DOMAIN = 'https://media.alphamate.app';
+export const R2_MEDIA_DOMAIN =
+  ((import.meta as any).env?.VITE_R2_MEDIA_DOMAIN || '').trim().replace(/\/$/, '') || 'https://media.alphamate.app';
 
 export const SUPPORTED_VIDEO_FORMATS = [
   'video/mp4',
@@ -31,6 +34,71 @@ export const SUPPORTED_VIDEO_FORMATS = [
   'video/x-m4v',
   'video/x-matroska',
 ];
+
+function isNativeCapacitorRuntime(): boolean {
+  if (typeof window === 'undefined') return false;
+  const cap = (window as any).Capacitor;
+  if (cap?.isNativePlatform?.()) return true;
+  return window.location.protocol === 'capacitor:' || window.location.protocol === 'file:';
+}
+
+function getReelUploadEndpoints(): string[] {
+  const directWorkerUrl = `${WORKER_API_BASE}/upload`;
+  const railwayProxyUrl =
+    ENV_RAILWAY_URL && /^https?:\/\//i.test(ENV_RAILWAY_URL) ? `${ENV_RAILWAY_URL}/api/reels/upload` : null;
+
+  if (isNativeCapacitorRuntime()) {
+    return [directWorkerUrl, ...(railwayProxyUrl ? [railwayProxyUrl] : [])];
+  }
+
+  const host = typeof window !== 'undefined' ? window.location.hostname.toLowerCase() : '';
+  const isCustomDirectDomain = host === 'alphamate.app' || host === 'www.alphamate.app';
+  const sameOriginProxyUrl = '/api/reels/upload';
+
+  if (isCustomDirectDomain) {
+    return [directWorkerUrl, sameOriginProxyUrl];
+  }
+
+  // On AI Studio preview, localhost, or Capacitor web hosts, prefer the same-origin
+  // Express streaming proxy first so browser CORS preflight never blocks the upload.
+  return [sameOriginProxyUrl, directWorkerUrl, ...(railwayProxyUrl && railwayProxyUrl !== `${window?.location?.origin}/api/reels/upload` ? [railwayProxyUrl] : [])];
+}
+
+function getReelDeleteEndpoints(videoKey: string): string[] {
+  const encodedKey = encodeURIComponent(videoKey);
+  const directWorkerUrl = `${WORKER_API_BASE}/reels/${encodedKey}`;
+  const sameOriginProxyUrl = `/api/reels/${encodedKey}`;
+  const railwayProxyUrl =
+    ENV_RAILWAY_URL && /^https?:\/\//i.test(ENV_RAILWAY_URL) ? `${ENV_RAILWAY_URL}/api/reels/${encodedKey}` : null;
+
+  if (isNativeCapacitorRuntime()) {
+    return [directWorkerUrl, ...(railwayProxyUrl ? [railwayProxyUrl] : [])];
+  }
+
+  const host = typeof window !== 'undefined' ? window.location.hostname.toLowerCase() : '';
+  if (host === 'alphamate.app' || host === 'www.alphamate.app') {
+    return [directWorkerUrl, sameOriginProxyUrl];
+  }
+
+  return [sameOriginProxyUrl, directWorkerUrl];
+}
+
+function normalizeVideoMimeType(file: Blob | File, mimeType: string): string {
+  const baseMime = (mimeType || (file as File)?.type || '').split(';')[0].trim().toLowerCase();
+  if (SUPPORTED_VIDEO_FORMATS.includes(baseMime)) {
+    return mimeType && mimeType.toLowerCase().startsWith(baseMime) ? mimeType : baseMime;
+  }
+
+  const fileName = ((file as File)?.name || '').toLowerCase();
+  if (fileName.endsWith('.webm')) return 'video/webm';
+  if (fileName.endsWith('.mov')) return 'video/quicktime';
+  if (fileName.endsWith('.m4v')) return 'video/x-m4v';
+  if (fileName.endsWith('.mkv')) return 'video/x-matroska';
+  if (baseMime.startsWith('video/') || baseMime === '' || baseMime === 'application/octet-stream') {
+    return 'video/mp4';
+  }
+  return baseMime;
+}
 
 export interface Reel {
   id: string;
@@ -112,6 +180,10 @@ export function validateVideoFile(file: Blob | File, mimeType: string): { valid:
     return { valid: false, error: 'No video file provided.' };
   }
 
+  if (file.size === 0) {
+    return { valid: false, error: 'Selected video file is empty.' };
+  }
+
   if (file.size > MAX_VIDEO_SIZE_BYTES) {
     const sizeInMB = (file.size / (1024 * 1024)).toFixed(1);
     return {
@@ -120,7 +192,7 @@ export function validateVideoFile(file: Blob | File, mimeType: string): { valid:
     };
   }
 
-  const normalizedMime = mimeType.split(';')[0].trim().toLowerCase();
+  const normalizedMime = normalizeVideoMimeType(file, mimeType).split(';')[0].trim().toLowerCase();
   const isVideo = normalizedMime.startsWith('video/') || SUPPORTED_VIDEO_FORMATS.includes(normalizedMime);
 
   if (!isVideo) {
@@ -133,106 +205,391 @@ export function validateVideoFile(file: Blob | File, mimeType: string): { valid:
   return { valid: true };
 }
 
-/**
- * Upload raw video bytes to Cloudflare R2 via Cloudflare Worker
- * Uses XMLHttpRequest for genuine upload progress tracking
- */
-export async function uploadVideoToR2(
-  file: Blob | File,
-  mimeType: string,
-  onProgress?: (percent: number) => void
-): Promise<R2UploadResult> {
-  // 1. Client-Side Validation
-  const validation = validateVideoFile(file, mimeType);
-  if (!validation.valid) {
-    throw new Error(validation.error);
+class RetryableUploadEndpointError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RetryableUploadEndpointError';
   }
+}
 
-  // 2. Retrieve Fresh Firebase ID Token
-  const idToken = await getFreshIdToken();
+const CHUNK_UPLOAD_THRESHOLD_BYTES = 2 * 1024 * 1024; // Use chunked upload above 2 MB on proxy endpoints
+const UPLOAD_CHUNK_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB chunks (safely under proxy 32 MB limits)
 
-  // 3. Initiate Streamed Raw Upload via XHR
-  return new Promise<R2UploadResult>((resolve, reject) => {
+function sendSingleXhrRequest(
+  uploadUrl: string,
+  payload: Blob | File,
+  extraHeaders: Record<string, string>,
+  idToken: string,
+  timeoutMs: number,
+  onLoadedBytes?: (loaded: number, total: number) => void
+): Promise<{ status: number; responseText: string }> {
+  return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${WORKER_API_BASE}/upload`, true);
+    xhr.open('POST', uploadUrl, true);
+    xhr.timeout = timeoutMs;
 
     xhr.setRequestHeader('Authorization', `Bearer ${idToken}`);
-    xhr.setRequestHeader('Content-Type', mimeType);
+    for (const [k, v] of Object.entries(extraHeaders)) {
+      xhr.setRequestHeader(k, v);
+    }
 
-    // Track real upload progress
-    if (xhr.upload && onProgress) {
+    if (xhr.upload && onLoadedBytes) {
       xhr.upload.onprogress = (event) => {
         if (event.lengthComputable && event.total > 0) {
-          const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
-          onProgress(percent);
+          onLoadedBytes(event.loaded, event.total);
         }
       };
     }
 
     xhr.onload = () => {
-      let responseJson: any = null;
-      try {
-        responseJson = JSON.parse(xhr.responseText);
-      } catch {
-        // response might not be JSON
-      }
-
-      if (xhr.status >= 200 && xhr.status < 300) {
-        if (responseJson && responseJson.success && responseJson.videoKey) {
-          resolve(responseJson as R2UploadResult);
-        } else {
-          reject(new Error(responseJson?.error || 'Invalid upload response from Reels API'));
-        }
-      } else if (xhr.status === 401) {
-        reject(new Error('Firebase authentication failed or session expired. Please re-login.'));
-      } else if (xhr.status === 413) {
-        reject(new Error('Server-side check: Video exceeds the 100 MB file size limit.'));
-      } else if (xhr.status === 415) {
-        reject(new Error(`Reels API rejected format: ${responseJson?.error || 'Unsupported video format.'}`));
-      } else {
-        const errorMsg =
-          responseJson?.error ||
-          `Upload failed with HTTP status ${xhr.status} (${xhr.statusText || 'Worker Error'})`;
-        reject(new Error(errorMsg));
-      }
+      resolve({ status: xhr.status, responseText: xhr.responseText });
     };
 
     xhr.onerror = () => {
-      reject(new Error('Network error during video upload. Please check your internet connection and retry.'));
+      reject(
+        new RetryableUploadEndpointError(
+          'Network or CORS error while reaching video upload endpoint.'
+        )
+      );
     };
 
     xhr.ontimeout = () => {
       reject(new Error('Upload timed out. Video could not be uploaded within time limit.'));
     };
 
-    // Send the raw binary file/blob as body (no FormData wrapper or Base64)
-    xhr.send(file);
+    xhr.send(payload);
   });
 }
 
+function parseUploadResponse(status: number, responseText: string): R2UploadResult {
+  let responseJson: any = null;
+  try {
+    responseJson = JSON.parse(responseText);
+  } catch {
+    // response might not be JSON
+  }
+
+  if (status >= 200 && status < 300) {
+    if (responseJson && responseJson.success && responseJson.videoKey) {
+      return responseJson as R2UploadResult;
+    }
+    throw new Error(responseJson?.error || 'Invalid upload response from Reels API');
+  }
+
+  if (status === 404 || status === 405 || status === 502 || status === 503) {
+    throw new RetryableUploadEndpointError(
+      responseJson?.error || `Upload endpoint unavailable (${status})`
+    );
+  }
+  if (status === 401) {
+    throw new Error('Firebase authentication failed or session expired. Please re-login.');
+  }
+  if (status === 413) {
+    throw new Error('Server-side check: Video exceeds the 100 MB file size limit.');
+  }
+  if (status === 415) {
+    throw new Error(`Reels API rejected format: ${responseJson?.error || 'Unsupported video format.'}`);
+  }
+  if (status === 504) {
+    throw new Error('Server timed out while transferring video to Cloudflare R2. Please retry.');
+  }
+
+  throw new Error(responseJson?.error || `Upload failed with HTTP status ${status}`);
+}
+
+async function sendVideoViaXhr(
+  uploadUrl: string,
+  file: Blob | File,
+  contentType: string,
+  idToken: string,
+  onProgress?: (percent: number) => void
+): Promise<R2UploadResult> {
+  const { status, responseText } = await sendSingleXhrRequest(
+    uploadUrl,
+    file,
+    { 'Content-Type': contentType },
+    idToken,
+    300_000,
+    (loaded, total) => {
+      const percent = Math.min(99, Math.round((loaded / total) * 100));
+      onProgress?.(percent);
+    }
+  );
+  const result = parseUploadResponse(status, responseText);
+  onProgress?.(100);
+  return result;
+}
+
+async function uploadViaChunkedProxy(
+  proxyUploadUrl: string,
+  file: Blob | File,
+  contentType: string,
+  idToken: string,
+  onProgress?: (percent: number) => void
+): Promise<R2UploadResult> {
+  const basePrefix = proxyUploadUrl.replace(/\/upload$/, '');
+  const chunkUrl = `${basePrefix}/upload-chunk`;
+  const completeUrl = `${basePrefix}/upload-complete`;
+  const uploadId = `reel_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
+  const totalChunks = Math.ceil(file.size / UPLOAD_CHUNK_SIZE_BYTES);
+
+  let uploadedBaseBytes = 0;
+  for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
+    const start = chunkIndex * UPLOAD_CHUNK_SIZE_BYTES;
+    const end = Math.min(file.size, start + UPLOAD_CHUNK_SIZE_BYTES);
+    const chunkBlob = file.slice(start, end);
+
+    let attempt = 0;
+    while (true) {
+      attempt += 1;
+      try {
+        const { status, responseText } = await sendSingleXhrRequest(
+          chunkUrl,
+          chunkBlob,
+          {
+            'Content-Type': 'application/octet-stream',
+            'X-Upload-Id': uploadId,
+            'X-Chunk-Index': String(chunkIndex),
+          },
+          idToken,
+          120_000,
+          (loaded) => {
+            const overall = uploadedBaseBytes + loaded;
+            const pct = Math.min(88, Math.round((overall / file.size) * 88));
+            onProgress?.(pct);
+          }
+        );
+
+        if (status === 404 || status === 405) {
+          throw new RetryableUploadEndpointError('Chunked upload route not supported on this endpoint');
+        }
+        if (status === 401) {
+          throw new Error('Firebase authentication failed or session expired. Please re-login.');
+        }
+        if (status === 413) {
+          throw new Error('Server-side check: Video exceeds the 100 MB file size limit.');
+        }
+        if (status < 200 || status >= 300) {
+          const parsed = (() => {
+            try { return JSON.parse(responseText); } catch { return null; }
+          })();
+          throw new Error(parsed?.error || `Chunk ${chunkIndex + 1} failed (${status})`);
+        }
+        break;
+      } catch (err: any) {
+        if (err instanceof RetryableUploadEndpointError && attempt === 1) {
+          throw err;
+        }
+        const isTerminal =
+          err?.message?.includes('authentication failed') ||
+          err?.message?.includes('exceeds the 100 MB');
+        if (isTerminal || attempt >= 3) {
+          throw err;
+        }
+        await new Promise((r) => setTimeout(r, 700 * attempt));
+      }
+    }
+
+    uploadedBaseBytes += chunkBlob.size;
+    onProgress?.(Math.min(89, Math.round((uploadedBaseBytes / file.size) * 88)));
+  }
+
+  onProgress?.(90);
+  const completeUrlPayload = JSON.stringify({
+    uploadId,
+    totalChunks,
+    contentType,
+  });
+
+  let completeRes: Response | null = null;
+  let completeErr: any = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      completeRes = await fetch(completeUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: completeUrlPayload,
+      });
+      completeErr = null;
+      break;
+    } catch (err) {
+      completeErr = err;
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, 800 * attempt));
+      }
+    }
+  }
+
+  if (!completeRes) {
+    throw new RetryableUploadEndpointError(
+      completeErr?.message || 'Unable to trigger upload completion on server.'
+    );
+  }
+
+  const completeText = await completeRes.text();
+  let completeJson: any = null;
+  try {
+    completeJson = JSON.parse(completeText);
+  } catch {
+    completeJson = null;
+  }
+
+  // Synchronous 200/201 response (e.g., direct external server)
+  if (completeRes.status !== 202 && !completeJson?.asyncJob) {
+    const result = parseUploadResponse(completeRes.status, completeText);
+    onProgress?.(100);
+    return result;
+  }
+
+  // Async 202 job: poll /upload-status/:jobId every 1.2s so HTTP connections never idle-timeout
+  const jobId = String(completeJson?.jobId || uploadId);
+  const statusUrl = `${basePrefix}/upload-status/${encodeURIComponent(jobId)}`;
+  const pollDeadline = Date.now() + 330_000;
+  let consecutivePollFailures = 0;
+
+  while (Date.now() < pollDeadline) {
+    await new Promise((r) => setTimeout(r, 1200));
+
+    let statusRes: Response;
+    try {
+      statusRes = await fetch(statusUrl, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${idToken}` },
+      });
+      consecutivePollFailures = 0;
+    } catch (pollErr: any) {
+      consecutivePollFailures += 1;
+      if (consecutivePollFailures >= 8) {
+        throw new Error(pollErr?.message || 'Lost connection while finalizing video upload.');
+      }
+      continue;
+    }
+
+    const statusJson: any = await statusRes.json().catch(() => null);
+    if (!statusRes.ok && statusRes.status === 404) {
+      throw new Error('Upload session expired while transferring to Cloudflare R2. Please retry.');
+    }
+
+    if (statusJson?.status === 'uploading') {
+      const total = Number(statusJson.totalBytes) || file.size;
+      const sent = Number(statusJson.bytesTransferred) || 0;
+      const ratio = total > 0 ? Math.min(1, sent / total) : 0;
+      onProgress?.(Math.min(99, 90 + Math.round(ratio * 9)));
+      continue;
+    }
+
+    if (statusJson?.status === 'completed' && statusJson?.result?.videoKey) {
+      onProgress?.(100);
+      return statusJson.result as R2UploadResult;
+    }
+
+    if (statusJson?.status === 'failed') {
+      return parseUploadResponse(
+        Number(statusJson.statusCode) || 502,
+        JSON.stringify({ error: statusJson.error || 'Cloudflare R2 upload failed.' })
+      );
+    }
+  }
+
+  throw new Error('Video finalization timed out while transferring to Cloudflare R2. Please retry.');
+}
+
 /**
- * Delete a video object from Cloudflare R2 via Worker DELETE endpoint
+ * Upload raw video bytes to Cloudflare R2 (via same-origin proxy or Cloudflare Worker)
+ * Uses XMLHttpRequest for genuine upload progress tracking with chunked proxy & CORS-safe fallback.
+ */
+export async function uploadVideoToR2(
+  file: Blob | File,
+  mimeType: string,
+  onProgress?: (percent: number) => void
+): Promise<R2UploadResult> {
+  // 1. Client-Side Validation & MIME normalization
+  const validation = validateVideoFile(file, mimeType);
+  if (!validation.valid) {
+    throw new Error(validation.error);
+  }
+  const safeContentType = normalizeVideoMimeType(file, mimeType);
+
+  // 2. Retrieve Fresh Firebase ID Token
+  const idToken = await getFreshIdToken();
+
+  // 3. Try prioritized upload endpoints (chunked proxy for >2MB -> direct Worker -> Railway fallback)
+  const endpoints = getReelUploadEndpoints();
+  let lastError: Error | null = null;
+
+  for (const endpoint of endpoints) {
+    const isProxyEndpoint = endpoint.endsWith('/api/reels/upload');
+    try {
+      if (isProxyEndpoint && file.size > CHUNK_UPLOAD_THRESHOLD_BYTES) {
+        try {
+          return await uploadViaChunkedProxy(endpoint, file, safeContentType, idToken, onProgress);
+        } catch (chunkErr: any) {
+          if (chunkErr instanceof RetryableUploadEndpointError) {
+            // Endpoint doesn't support chunking; fall back to single-request XHR
+            return await sendVideoViaXhr(endpoint, file, safeContentType, idToken, onProgress);
+          }
+          throw chunkErr;
+        }
+      }
+      return await sendVideoViaXhr(endpoint, file, safeContentType, idToken, onProgress);
+    } catch (err: any) {
+      if (err instanceof RetryableUploadEndpointError) {
+        lastError = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error(
+    lastError?.message ||
+      'Unable to upload video to Cloudflare R2 right now. Please check your connection and retry.'
+  );
+}
+
+/**
+ * Delete a video object from Cloudflare R2 via Worker DELETE endpoint or proxy
  */
 export async function deleteVideoFromR2(videoKey: string): Promise<boolean> {
   if (!videoKey) return false;
 
   const idToken = await getFreshIdToken();
-  const encodedKey = encodeURIComponent(videoKey);
+  const endpoints = getReelDeleteEndpoints(videoKey);
+  let lastError: Error | null = null;
 
-  const response = await fetch(`${WORKER_API_BASE}/reels/${encodedKey}`, {
-    method: 'DELETE',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-    },
-  });
+  for (const endpoint of endpoints) {
+    try {
+      const response = await fetch(endpoint, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${idToken}`,
+        },
+      });
 
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    throw new Error(errorData?.error || `Failed to delete video from R2 (HTTP ${response.status})`);
+      if (response.status === 404 || response.status === 405 || response.status === 502) {
+        lastError = new Error(`Delete endpoint unavailable (${response.status})`);
+        continue;
+      }
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData?.error || `Failed to delete video from R2 (HTTP ${response.status})`);
+      }
+
+      const result = await response.json().catch(() => ({ success: true }));
+      return !!result.success;
+    } catch (err: any) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+    }
   }
 
-  const result = await response.json();
-  return !!result.success;
+  if (lastError) {
+    throw lastError;
+  }
+  return false;
 }
 
 /**
@@ -247,28 +604,46 @@ export async function saveReelMetadataToFirestore(
     throw new Error('User is not authenticated');
   }
 
+  const rawThumb = (input.thumbnailUrl || input.creator.avatar || currentUser.photoURL || '').trim();
+  const safeThumbnailUrl =
+    rawThumb && rawThumb.length <= 2048
+      ? rawThumb
+      : currentUser.photoURL && currentUser.photoURL.length <= 2048
+      ? currentUser.photoURL
+      : '';
+
+  const safeCreatorAvatar =
+    input.creator.avatar && input.creator.avatar.length <= 2048
+      ? input.creator.avatar
+      : currentUser.photoURL && currentUser.photoURL.length <= 2048
+      ? currentUser.photoURL
+      : '';
+
+  const normalizedVisibility =
+    input.visibility === 'private' || input.visibility === 'friends' ? input.visibility : 'public';
+
   const path = 'reels';
-  const reelDocData = {
+  const reelDocData: Record<string, any> = {
     uid: currentUser.uid,
-    videoKey: r2Result.videoKey,
-    videoUrl: r2Result.videoUrl,
-    title: input.title.trim() || 'Alpha Moment',
-    caption: input.caption.trim(),
-    tags: input.tags || [],
-    thumbnailUrl: input.thumbnailUrl || input.creator.avatar,
+    videoKey: String(r2Result.videoKey).slice(0, 256),
+    videoUrl: String(r2Result.videoUrl).slice(0, 1024),
+    title: (input.title.trim() || 'Alpha Moment').slice(0, 256),
+    caption: input.caption.trim().slice(0, 2000),
+    tags: (input.tags || []).slice(0, 15),
+    ...(safeThumbnailUrl ? { thumbnailUrl: safeThumbnailUrl } : {}),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
     likesCount: 0,
     commentsCount: 0,
     viewsCount: 0,
-    visibility: input.visibility || 'public',
+    visibility: normalizedVisibility,
     status: 'active',
     creator: {
       id: currentUser.uid,
       uniqueId: input.creator.uniqueId || currentUser.uid.slice(0, 8),
       displayName: input.creator.displayName || currentUser.displayName || 'Alpha Creator',
       username: input.creator.username || 'creator',
-      avatar: input.creator.avatar || currentUser.photoURL || '',
+      avatar: safeCreatorAvatar,
       level: Number(input.creator.level) || 1,
       vipTier: Number(input.creator.vipTier) || 0,
       isVerified: !!input.creator.isVerified,

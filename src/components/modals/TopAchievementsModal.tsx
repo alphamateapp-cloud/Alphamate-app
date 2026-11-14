@@ -12,7 +12,9 @@ import {
   X,
   Star,
   Zap,
+  ChevronRight,
 } from 'lucide-react';
+import { UserBadgeStrip } from '../badges/UserBadgeIcon';
 
 interface TopAchievementsModalProps {
   isOpen: boolean;
@@ -45,7 +47,7 @@ export const TopAchievementsModal: React.FC<TopAchievementsModalProps> = ({
   isOpen,
   onClose,
 }) => {
-  const { currentUser, equipFrame, equipHonorTitle } = useApp();
+  const { currentUser, equipFrame, equipHonorTitle, openBadgesModal, userHistoricalStats } = useApp();
   const [activeTab, setActiveTab] = useState<'overview' | 'frames' | 'tags'>('overview');
   const [feedback, setFeedback] = useState<string | null>(null);
 
@@ -370,6 +372,38 @@ export const TopAchievementsModal: React.FC<TopAchievementsModalProps> = ({
                       className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[10.5px] font-bold cursor-pointer"
                     >
                       Change Frame
+                    </button>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-[#1C0D30] border border-pink-400/40 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-lg bg-pink-500/20 border border-pink-400/30 flex items-center justify-center shrink-0">
+                        <Award className="w-4 h-4 text-pink-300" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-bold text-white flex items-center gap-1.5 flex-wrap">
+                          <span>Historical Profile Badges</span>
+                          <UserBadgeStrip
+                            badgeIds={userHistoricalStats.equippedBadgeIds}
+                            earnedBadges={userHistoricalStats.earnedBadges}
+                            size="xs"
+                          />
+                        </div>
+                        <p className="text-[10px] text-zinc-400 truncate">
+                          Top Contributor, Gift King, Party Attendee & more
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        openBadgesModal();
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-[10.5px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                    >
+                      <span>Badge Vault</span>
+                      <ChevronRight className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>

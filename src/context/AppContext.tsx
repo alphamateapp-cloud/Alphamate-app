@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import { Capacitor } from '@capacitor/core';
 import {
   ScreenType,
@@ -22,6 +22,10 @@ import {
   HostMember,
   HostJoinRequest,
   AgencyApplication,
+  LeaderboardEntry,
+  LeaderboardScope,
+  UserBadgeId,
+  UserHistoricalStats,
 } from '../types';
 import {
   CURRENT_USER,
@@ -77,6 +81,29 @@ import {
 import { p2pStreamingEngine } from '../services/webrtcService';
 import { realtimeSocket } from '../services/realtimeSocket';
 import { pushService, DEFAULT_NOTIFICATION_PREFERENCES } from '../services/pushNotificationService';
+import {
+  getCurrentMonthKey,
+  getPreviousMonthKey,
+  getCurrentWeekKey,
+  pruneExpiredLocalLeaderboardMonths,
+  loadLocalLeaderboardOverrides,
+  applyLocalLeaderboardGift,
+  applyLocalLeaderboardTime,
+  subscribeToMonthlyLeaderboard,
+  fetchMonthlyLeaderboardOnce,
+  syncUserTimeSpentToLeaderboard,
+  buildMergedLeaderboardList,
+} from '../services/leaderboardService';
+import {
+  BADGE_BY_ID,
+  EvaluatedUserBadge,
+  MAX_EQUIPPED_BADGES,
+  evaluateHistoricalBadges,
+  loadLocalUserBadgeStats,
+  saveLocalUserBadgeStats,
+  subscribeToUserBadgeStats,
+  syncUserBadgeStatsToFirestore,
+} from '../services/badgeService';
 
 interface AppContextType {
   // Navigation & Screen state
@@ -269,6 +296,29 @@ interface AppContextType {
   showPushSettingsModal: boolean;
   setShowPushSettingsModal: (show: boolean) => void;
   sendNotificationToUser: (params: SendNotificationParams) => Promise<void>;
+
+  // Global & Weekly Leaderboard (Monthly-refreshing, >=100 users, up to 1 month archive)
+  leaderboardMonthKey: string;
+  leaderboardPreviousMonthKey: string;
+  leaderboardWeekKey: string;
+  firestoreLeaderboardEntries: LeaderboardEntry[];
+  previousMonthLeaderboardEntries: LeaderboardEntry[];
+  localLeaderboardOverrides: Record<string, LeaderboardEntry>;
+  previousMonthLocalOverrides: Record<string, LeaderboardEntry>;
+  showLeaderboardModal: boolean;
+  setShowLeaderboardModal: (show: boolean) => void;
+  leaderboardInitialScope: LeaderboardScope;
+  setLeaderboardInitialScope: (scope: LeaderboardScope) => void;
+  openLeaderboard: (scope?: LeaderboardScope) => void;
+  loadPreviousMonthLeaderboard: () => Promise<void>;
+
+  // Historical User Badges
+  userHistoricalStats: UserHistoricalStats;
+  evaluatedBadges: EvaluatedUserBadge[];
+  showBadgesModal: boolean;
+  setShowBadgesModal: (show: boolean) => void;
+  openBadgesModal: () => void;
+  toggleEquipUserBadge: (badgeId: UserBadgeId) => { success: boolean; message: string };
 
   // Global Search
   searchQuery: string;
@@ -895,6 +945,139 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [firebaseUser?.uid]);
 
+  // =========================================================================
+  // GLOBAL & WEEKLY LEADERBOARD (MONTHLY REFRESH + 1-MONTH RETENTION)
+  // =========================================================================
+  const [leaderboardMonthKey, setLeaderboardMonthKey] = useState<string>(() => getCurrentMonthKey());
+  const [leaderboardPreviousMonthKey, setLeaderboardPreviousMonthKey] = useState<string>(() =>
+    getPreviousMonthKey()
+  );
+  const [leaderboardWeekKey, setLeaderboardWeekKey] = useState<string>(() => getCurrentWeekKey());
+  const [firestoreLeaderboardEntries, setFirestoreLeaderboardEntries] = useState<LeaderboardEntry[]>([]);
+  const [previousMonthLeaderboardEntries, setPreviousMonthLeaderboardEntries] = useState<
+    LeaderboardEntry[]
+  >([]);
+  const [localLeaderboardOverrides, setLocalLeaderboardOverrides] = useState<
+    Record<string, LeaderboardEntry>
+  >(() => loadLocalLeaderboardOverrides(getCurrentMonthKey()));
+  const [previousMonthLocalOverrides, setPreviousMonthLocalOverrides] = useState<
+    Record<string, LeaderboardEntry>
+  >(() => loadLocalLeaderboardOverrides(getPreviousMonthKey()));
+  const [showLeaderboardModal, setShowLeaderboardModal] = useState<boolean>(false);
+  const [leaderboardInitialScope, setLeaderboardInitialScope] = useState<LeaderboardScope>('global');
+
+  const pendingTimeSyncMinsRef = React.useRef<number>(0);
+  const currentUserRef = React.useRef<User>(currentUser);
+  React.useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  const openLeaderboard = (scope: LeaderboardScope = 'global') => {
+    setLeaderboardInitialScope(scope);
+    setShowLeaderboardModal(true);
+  };
+
+  const loadPreviousMonthLeaderboard = async () => {
+    const prevKey = getPreviousMonthKey();
+    setLeaderboardPreviousMonthKey(prevKey);
+    setPreviousMonthLocalOverrides(loadLocalLeaderboardOverrides(prevKey));
+    const entries = await fetchMonthlyLeaderboardOnce(prevKey, 200);
+    setPreviousMonthLeaderboardEntries(entries);
+  };
+
+  // Prune leaderboard records older than 1 previous month & subscribe to current month Firestore feed
+  useEffect(() => {
+    pruneExpiredLocalLeaderboardMonths(leaderboardMonthKey, leaderboardPreviousMonthKey);
+    setLocalLeaderboardOverrides(loadLocalLeaderboardOverrides(leaderboardMonthKey));
+
+    if (!firebaseUser?.uid || !isEmailVerified) {
+      setFirestoreLeaderboardEntries([]);
+      return;
+    }
+
+    const unsub = subscribeToMonthlyLeaderboard(
+      leaderboardMonthKey,
+      (entries) => {
+        setFirestoreLeaderboardEntries(entries);
+      },
+      200
+    );
+    return () => {
+      unsub();
+    };
+  }, [firebaseUser?.uid, isEmailVerified, leaderboardMonthKey, leaderboardPreviousMonthKey]);
+
+  // Active time-spent heartbeat (counts active minutes & handles automatic monthly/weekly resets)
+  useEffect(() => {
+    if (!isAuthenticated || !firebaseUser?.uid || !isEmailVerified) return;
+
+    const initialUser = currentUserRef.current;
+    const initLocal = applyLocalLeaderboardTime(
+      initialUser,
+      0,
+      leaderboardMonthKey,
+      leaderboardWeekKey
+    );
+    setLocalLeaderboardOverrides(initLocal);
+    syncUserTimeSpentToLeaderboard(initialUser, 0).catch(() => {});
+
+    const flushPendingTime = () => {
+      const pending = pendingTimeSyncMinsRef.current;
+      if (pending <= 0) return;
+      pendingTimeSyncMinsRef.current = 0;
+      syncUserTimeSpentToLeaderboard(currentUserRef.current, pending).catch(() => {});
+    };
+
+    const interval = setInterval(() => {
+      const latestMonth = getCurrentMonthKey();
+      const latestPrevMonth = getPreviousMonthKey();
+      const latestWeek = getCurrentWeekKey();
+
+      if (latestMonth !== leaderboardMonthKey) {
+        setLeaderboardMonthKey(latestMonth);
+        setLeaderboardPreviousMonthKey(latestPrevMonth);
+        pendingTimeSyncMinsRef.current = 0;
+      }
+      if (latestWeek !== leaderboardWeekKey) {
+        setLeaderboardWeekKey(latestWeek);
+      }
+
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+
+      const nextLocal = applyLocalLeaderboardTime(
+        currentUserRef.current,
+        1,
+        latestMonth,
+        latestWeek
+      );
+      setLocalLeaderboardOverrides(nextLocal);
+      pendingTimeSyncMinsRef.current += 1;
+
+      if (pendingTimeSyncMinsRef.current >= 2) {
+        flushPendingTime();
+      }
+    }, 60_000);
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        flushPendingTime();
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
+
+    return () => {
+      clearInterval(interval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
+      flushPendingTime();
+    };
+  }, [isAuthenticated, firebaseUser?.uid, isEmailVerified, leaderboardMonthKey, leaderboardWeekKey]);
+
   // Live Streams & PK
   const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
   const [activeStream, setActiveStream] = useState<LiveStream | null>(null);
@@ -1098,6 +1281,359 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const seenNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const notificationBootedRef = React.useRef<boolean>(false);
 
+  // =========================================================================
+  // HISTORICAL USER BADGE SYSTEM (Top Contributor, Gift King, Party Legend)
+  // =========================================================================
+  const [showBadgesModal, setShowBadgesModal] = useState<boolean>(false);
+  const openBadgesModal = () => setShowBadgesModal(true);
+  const activeBadgeUid = firebaseUser?.uid || currentUser.id || 'user_me';
+
+  const [rawBadgeStats, setRawBadgeStats] = useState<UserHistoricalStats>(() =>
+    loadLocalUserBadgeStats(activeBadgeUid)
+  );
+  const activePartySessionMinsRef = React.useRef<number>(0);
+  const lastSyncedBadgeSigRef = React.useRef<string>('');
+  const notifiedBadgeUnlocksRef = React.useRef<Set<string>>(new Set());
+  const activePartyRoomRef = React.useRef<PartyRoom | null>(activePartyRoom);
+  const activeStreamRef = React.useRef<LiveStream | null>(activeStream);
+
+  React.useEffect(() => {
+    activePartyRoomRef.current = activePartyRoom;
+    if (!activePartyRoom) {
+      activePartySessionMinsRef.current = 0;
+    }
+  }, [activePartyRoom]);
+
+  React.useEffect(() => {
+    activeStreamRef.current = activeStream;
+  }, [activeStream]);
+
+  // Reload local badge history and subscribe to Firestore badgeStats on account change
+  useEffect(() => {
+    notifiedBadgeUnlocksRef.current.clear();
+    lastSyncedBadgeSigRef.current = '';
+    setRawBadgeStats(loadLocalUserBadgeStats(activeBadgeUid));
+
+    if (!firebaseUser?.uid || !isEmailVerified) return;
+
+    const unsubBadges = subscribeToUserBadgeStats(firebaseUser.uid, (remote) => {
+      if (!remote) return;
+      setRawBadgeStats((prev) => {
+        const mergedEarned: UserHistoricalStats['earnedBadges'] = { ...prev.earnedBadges };
+        Object.entries(remote.earnedBadges || {}).forEach(([id, rec]) => {
+          const localRec = mergedEarned[id];
+          if (!localRec) {
+            mergedEarned[id] = rec;
+          } else {
+            const tierRank = { bronze: 1, silver: 2, gold: 3, mythic: 4 } as const;
+            mergedEarned[id] = {
+              ...localRec,
+              tier: tierRank[rec.tier] > tierRank[localRec.tier] ? rec.tier : localRec.tier,
+              metricValue: Math.max(localRec.metricValue || 0, rec.metricValue || 0),
+              unlockedAtMs: Math.min(localRec.unlockedAtMs || Date.now(), rec.unlockedAtMs || Date.now()),
+            };
+          }
+        });
+
+        const mergedEquipped =
+          remote.updatedAtMs >= prev.updatedAtMs && remote.equippedBadgeIds.length > 0
+            ? remote.equippedBadgeIds
+            : prev.equippedBadgeIds.length > 0
+            ? prev.equippedBadgeIds
+            : remote.equippedBadgeIds;
+
+        return {
+          uid: firebaseUser.uid,
+          totalGiftCoinsSent: Math.max(prev.totalGiftCoinsSent, remote.totalGiftCoinsSent),
+          totalGiftsSentCount: Math.max(prev.totalGiftsSentCount, remote.totalGiftsSentCount),
+          totalGiftCoinsReceived: Math.max(prev.totalGiftCoinsReceived, remote.totalGiftCoinsReceived),
+          totalDiamondsEarned: Math.max(prev.totalDiamondsEarned, remote.totalDiamondsEarned),
+          totalActiveMinutes: Math.max(prev.totalActiveMinutes, remote.totalActiveMinutes),
+          partyRoomMinutes: Math.max(prev.partyRoomMinutes, remote.partyRoomMinutes),
+          liveStreamMinutes: Math.max(prev.liveStreamMinutes, remote.liveStreamMinutes),
+          longestPartySessionMinutes: Math.max(
+            prev.longestPartySessionMinutes,
+            remote.longestPartySessionMinutes
+          ),
+          bestLeaderboardRank:
+            prev.bestLeaderboardRank && remote.bestLeaderboardRank
+              ? Math.min(prev.bestLeaderboardRank, remote.bestLeaderboardRank)
+              : prev.bestLeaderboardRank || remote.bestLeaderboardRank || null,
+          checkInDaysCount: Math.max(prev.checkInDaysCount, remote.checkInDaysCount),
+          maxDailyStreak: Math.max(prev.maxDailyStreak, remote.maxDailyStreak),
+          postsCreatedCount: Math.max(prev.postsCreatedCount, remote.postsCreatedCount),
+          equippedBadgeIds: mergedEquipped.slice(0, MAX_EQUIPPED_BADGES),
+          earnedBadges: mergedEarned,
+          updatedAt: remote.updatedAt || prev.updatedAt,
+          updatedAtMs: Math.max(prev.updatedAtMs || 0, remote.updatedAtMs || 0),
+        };
+      });
+    });
+
+    return () => {
+      unsubBadges();
+    };
+  }, [activeBadgeUid, firebaseUser?.uid, isEmailVerified]);
+
+  // 60-second active engagement, Party Room attendance & Live Stream attendance tracker
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        return;
+      }
+      const inParty = Boolean(activePartyRoomRef.current);
+      const inLive = Boolean(activeStreamRef.current);
+      if (inParty) {
+        activePartySessionMinsRef.current += 1;
+      }
+      setRawBadgeStats((prev) => ({
+        ...prev,
+        uid: activeBadgeUid,
+        totalActiveMinutes: prev.totalActiveMinutes + 1,
+        partyRoomMinutes: prev.partyRoomMinutes + (inParty ? 1 : 0),
+        liveStreamMinutes: prev.liveStreamMinutes + (inLive ? 1 : 0),
+        longestPartySessionMinutes: Math.max(
+          prev.longestPartySessionMinutes,
+          activePartySessionMinsRef.current
+        ),
+        updatedAt: new Date().toISOString(),
+        updatedAtMs: Date.now(),
+      }));
+    }, 60_000);
+
+    return () => clearInterval(interval);
+  }, [isAuthenticated, activeBadgeUid]);
+
+  // Resolve current & previous month leaderboard entries for badge evaluation
+  const badgeLeaderboardSnapshot = useMemo(() => {
+    const currentMerged = buildMergedLeaderboardList({
+      firestoreEntries: firestoreLeaderboardEntries,
+      localOverrides: localLeaderboardOverrides,
+      currentUser,
+      activeUid: activeBadgeUid,
+      monthKey: leaderboardMonthKey,
+      currentWeekKey: leaderboardWeekKey,
+      scope: 'global',
+      metric: 'overall',
+      isCurrentMonth: true,
+    });
+    const prevEntry =
+      previousMonthLeaderboardEntries.find(
+        (e) => e.uid === activeBadgeUid || e.uid === currentUser.id
+      ) ||
+      previousMonthLocalOverrides[activeBadgeUid] ||
+      previousMonthLocalOverrides[currentUser.id] ||
+      null;
+
+    return {
+      currentEntry: currentMerged.myEntry,
+      currentRank: currentMerged.myRank,
+      prevEntry,
+    };
+  }, [
+    firestoreLeaderboardEntries,
+    localLeaderboardOverrides,
+    previousMonthLeaderboardEntries,
+    previousMonthLocalOverrides,
+    currentUser,
+    activeBadgeUid,
+    leaderboardMonthKey,
+    leaderboardWeekKey,
+  ]);
+
+  const evaluatedBadgeResult = useMemo(
+    () =>
+      evaluateHistoricalBadges({
+        uid: activeBadgeUid,
+        storedStats: rawBadgeStats,
+        currentUser,
+        giftTransactions,
+        walletTransactions: transactions,
+        videos,
+        dailyCheckInState,
+        currentLeaderboardEntry: badgeLeaderboardSnapshot.currentEntry,
+        previousLeaderboardEntry: badgeLeaderboardSnapshot.prevEntry,
+        currentLeaderboardRank: badgeLeaderboardSnapshot.currentRank,
+      }),
+    [
+      activeBadgeUid,
+      rawBadgeStats,
+      currentUser,
+      giftTransactions,
+      transactions,
+      videos,
+      dailyCheckInState,
+      badgeLeaderboardSnapshot,
+    ]
+  );
+
+  // Persist badge evaluations, sync to Firestore/Profile (write-guarded), and notify on unlocks
+  useEffect(() => {
+    const nextStats = evaluatedBadgeResult.nextStats;
+    saveLocalUserBadgeStats(nextStats);
+
+    const earnedSignature = Object.entries(nextStats.earnedBadges)
+      .map(([k, v]) => `${k}:${v.tier}`)
+      .sort()
+      .join(',');
+    const sig = [
+      nextStats.uid,
+      nextStats.totalGiftCoinsSent,
+      nextStats.totalGiftsSentCount,
+      nextStats.totalGiftCoinsReceived,
+      nextStats.totalDiamondsEarned,
+      nextStats.totalActiveMinutes,
+      nextStats.partyRoomMinutes,
+      nextStats.liveStreamMinutes,
+      nextStats.longestPartySessionMinutes,
+      nextStats.bestLeaderboardRank || 0,
+      nextStats.checkInDaysCount,
+      nextStats.maxDailyStreak,
+      nextStats.postsCreatedCount,
+      nextStats.equippedBadgeIds.join(','),
+      earnedSignature,
+    ].join('|');
+
+    const prevEquippedJoined = (currentUserRef.current.equippedBadgeIds || []).join(',');
+    const nextEquippedJoined = nextStats.equippedBadgeIds.join(',');
+    if (isAuthenticated && prevEquippedJoined !== nextEquippedJoined) {
+      setCurrentUser((prev) => {
+        const updated = { ...prev, equippedBadgeIds: nextStats.equippedBadgeIds };
+        try {
+          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
+    }
+
+    if (
+      isAuthenticated &&
+      firebaseUser?.uid === nextStats.uid &&
+      isEmailVerified &&
+      sig !== lastSyncedBadgeSigRef.current
+    ) {
+      lastSyncedBadgeSigRef.current = sig;
+      syncUserBadgeStatsToFirestore(nextStats).catch(() => {});
+      if (prevEquippedJoined !== nextEquippedJoined) {
+        syncUserProfileToFirestore({
+          ...currentUserRef.current,
+          id: firebaseUser.uid,
+          equippedBadgeIds: nextStats.equippedBadgeIds,
+        }).catch(() => {});
+        syncUserTimeSpentToLeaderboard(
+          { ...currentUserRef.current, equippedBadgeIds: nextStats.equippedBadgeIds },
+          0
+        ).catch(() => {});
+      }
+    }
+
+    if (isAuthenticated && !firebaseAuthLoading && evaluatedBadgeResult.newlyUnlockedIds.length > 0) {
+      evaluatedBadgeResult.newlyUnlockedIds.forEach((badgeId) => {
+        const tier = nextStats.earnedBadges[badgeId]?.tier || 'bronze';
+        const key = `${nextStats.uid}:${badgeId}:${tier}`;
+        if (notifiedBadgeUnlocksRef.current.has(key)) return;
+        notifiedBadgeUnlocksRef.current.add(key);
+
+        const def = BADGE_BY_ID[badgeId];
+        if (!def) return;
+        const notifId = `local_notif_badge_${badgeId}_${Date.now()}`;
+        const badgeNotif: NotificationItem = {
+          id: notifId,
+          type: 'system',
+          category: 'walletAndSystem',
+          title: `🏅 Badge Unlocked: ${def.name}`,
+          message: `You earned the ${tier.toUpperCase()} tier "${def.name}" icon based on your Alpha Mate history!`,
+          timestamp: 'Just now',
+          createdAtMs: Date.now(),
+          isRead: false,
+          screen: 'profile',
+        };
+        setNotifications((prev) => [badgeNotif, ...prev]);
+        pushService.notifyForeground({
+          id: notifId,
+          title: badgeNotif.title,
+          body: badgeNotif.message,
+          data: { type: 'system', screen: 'profile' },
+        });
+      });
+    }
+  }, [
+    evaluatedBadgeResult,
+    isAuthenticated,
+    firebaseAuthLoading,
+    firebaseUser?.uid,
+    isEmailVerified,
+  ]);
+
+  const toggleEquipUserBadge = (
+    badgeId: UserBadgeId
+  ): { success: boolean; message: string } => {
+    const nextStats = evaluatedBadgeResult.nextStats;
+    const isEarned = Boolean(nextStats.earnedBadges[badgeId]);
+    if (!isEarned) {
+      return {
+        success: false,
+        message: 'Earn at least the Bronze tier of this badge before equipping it.',
+      };
+    }
+
+    const currentlyEquipped = nextStats.equippedBadgeIds || [];
+    const isEquipped = currentlyEquipped.includes(badgeId);
+    let updatedEquipped: UserBadgeId[];
+
+    if (isEquipped) {
+      updatedEquipped = currentlyEquipped.filter((id) => id !== badgeId);
+    } else {
+      if (currentlyEquipped.length >= MAX_EQUIPPED_BADGES) {
+        return {
+          success: false,
+          message: `You can display up to ${MAX_EQUIPPED_BADGES} badges on your profile. Unequip one first.`,
+        };
+      }
+      updatedEquipped = [...currentlyEquipped, badgeId];
+    }
+
+    const updatedStats: UserHistoricalStats = {
+      ...nextStats,
+      equippedBadgeIds: updatedEquipped,
+      updatedAt: new Date().toISOString(),
+      updatedAtMs: Date.now(),
+    };
+
+    setRawBadgeStats(updatedStats);
+    saveLocalUserBadgeStats(updatedStats);
+
+    setCurrentUser((prev) => {
+      const updated = { ...prev, equippedBadgeIds: updatedEquipped };
+      try {
+        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    if (firebaseUser?.uid && isEmailVerified) {
+      syncUserBadgeStatsToFirestore(updatedStats).catch(() => {});
+      syncUserProfileToFirestore({
+        ...currentUserRef.current,
+        id: firebaseUser.uid,
+        equippedBadgeIds: updatedEquipped,
+      }).catch(() => {});
+      syncUserTimeSpentToLeaderboard(
+        { ...currentUserRef.current, equippedBadgeIds: updatedEquipped },
+        0
+      ).catch(() => {});
+    }
+
+    const def = BADGE_BY_ID[badgeId];
+    return {
+      success: true,
+      message: isEquipped
+        ? `Removed "${def?.name || badgeId}" from your profile display.`
+        : `Equipped "${def?.name || badgeId}" icon on your profile!`,
+    };
+  };
+
   // Real-time User Profile, Notifications & 60/40 Gift Ledger Subscriptions
   useEffect(() => {
     if (!firebaseUser?.uid || !isEmailVerified) {
@@ -1138,6 +1674,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
         heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
         notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
+        equippedBadgeIds: Array.isArray(remoteProfile.equippedBadgeIds)
+          ? remoteProfile.equippedBadgeIds
+          : prev.equippedBadgeIds,
       }));
     });
 
@@ -3133,6 +3672,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
+    // Update local monthly/weekly leaderboard immediately on every gift sent
+    const updatedLbMap = applyLocalLeaderboardGift({
+      recipientId: effectiveRecipientId,
+      recipientName: resolvedRecipientName,
+      giftCoins: totalCoins,
+      hostDiamonds,
+      monthKey: leaderboardMonthKey,
+      weekKey: leaderboardWeekKey,
+    });
+    setLocalLeaderboardOverrides(updatedLbMap);
+
+    // Update historical badge counters immediately on gift transaction
+    setRawBadgeStats((prev) => ({
+      ...prev,
+      uid: activeBadgeUid,
+      totalGiftCoinsSent: prev.totalGiftCoinsSent + totalCoins,
+      totalGiftsSentCount: prev.totalGiftsSentCount + qty,
+      totalGiftCoinsReceived: prev.totalGiftCoinsReceived + (isSelfHost ? totalCoins : 0),
+      totalDiamondsEarned: prev.totalDiamondsEarned + (isSelfHost ? hostDiamonds : 0),
+      updatedAt: new Date().toISOString(),
+      updatedAtMs: Date.now(),
+    }));
+
     return { success: true, hostDiamonds, appShareCoins, totalCoins };
   };
 
@@ -3954,6 +4516,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         showPushSettingsModal,
         setShowPushSettingsModal,
         sendNotificationToUser,
+        leaderboardMonthKey,
+        leaderboardPreviousMonthKey,
+        leaderboardWeekKey,
+        firestoreLeaderboardEntries,
+        previousMonthLeaderboardEntries,
+        localLeaderboardOverrides,
+        previousMonthLocalOverrides,
+        showLeaderboardModal,
+        setShowLeaderboardModal,
+        leaderboardInitialScope,
+        setLeaderboardInitialScope,
+        openLeaderboard,
+        loadPreviousMonthLeaderboard,
+        userHistoricalStats: evaluatedBadgeResult.nextStats,
+        evaluatedBadges: evaluatedBadgeResult.evaluatedBadges,
+        showBadgesModal,
+        setShowBadgesModal,
+        openBadgesModal,
+        toggleEquipUserBadge,
         searchQuery,
         setSearchQuery,
         deviceMode,

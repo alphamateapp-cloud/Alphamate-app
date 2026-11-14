@@ -41,6 +41,7 @@ export const HomeScreen: React.FC = () => {
     toggleLikeStory,
     reactToStory,
     markStorySeen,
+    openLeaderboard,
   } = useApp();
 
   const [activeCategory, setActiveCategory] = useState<'Live' | 'Following' | 'For You'>('Live');
@@ -149,16 +150,16 @@ export const HomeScreen: React.FC = () => {
       {/* Top Bar */}
       <TopBar />
 
-      {/* Categories Bar: Live | Following | For You */}
-      <div className="px-4 pt-1 pb-1 flex items-center justify-between bg-transparent">
-        <div className="flex items-center gap-6">
+      {/* Categories Bar: Live | Following | For You + Global Leaderboard & PK Arena */}
+      <div className="px-4 pt-1 pb-1.5 flex flex-wrap items-center justify-between gap-2 bg-transparent">
+        <div className="flex items-center gap-3.5 sm:gap-5">
           {(['Live', 'Following', 'For You'] as const).map((cat) => {
             const isActive = activeCategory === cat;
             return (
               <button
                 key={cat}
                 onClick={() => setActiveCategory(cat)}
-                className={`relative pb-2 text-xs sm:text-sm font-bold tracking-wide transition-colors cursor-pointer ${
+                className={`relative pb-2 text-xs sm:text-sm font-bold tracking-wide transition-colors cursor-pointer whitespace-nowrap ${
                   isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
@@ -171,17 +172,30 @@ export const HomeScreen: React.FC = () => {
           })}
         </div>
 
-        {/* Quick PK Arena Shortcut Pill */}
-        <button
-          onClick={() => {
-            const pkStream = liveStreams.find((s) => s.isPK);
-            if (pkStream) openLiveStream(pkStream);
-          }}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-gradient-to-r from-[#EC4899]/20 to-[#7928CA]/20 border border-[#EC4899]/40 text-[#EC4899] text-[11px] font-bold hover:brightness-110 active:scale-95 transition-all cursor-pointer"
-        >
-          <Swords className="w-3.5 h-3.5" />
-          <span>PK Arena</span>
-        </button>
+        <div className="flex items-center gap-1.5 shrink-0 ml-auto">
+          {/* Global Leaderboard Shortcut */}
+          <button
+            type="button"
+            onClick={() => openLeaderboard('global')}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-gradient-to-r from-amber-500/20 to-[#7928CA]/25 border border-amber-400/45 text-amber-300 text-[10.5px] sm:text-[11px] font-bold hover:brightness-110 active:scale-95 transition-all cursor-pointer whitespace-nowrap"
+            title="View Global & Weekly Leaderboard"
+          >
+            <Trophy className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span>Global Leaderboard</span>
+          </button>
+
+          {/* Quick PK Arena Shortcut Pill */}
+          <button
+            onClick={() => {
+              const pkStream = liveStreams.find((s) => s.isPK);
+              if (pkStream) openLiveStream(pkStream);
+            }}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-gradient-to-r from-[#EC4899]/20 to-[#7928CA]/20 border border-[#EC4899]/40 text-[#EC4899] text-[10.5px] sm:text-[11px] font-bold hover:brightness-110 active:scale-95 transition-all cursor-pointer whitespace-nowrap"
+          >
+            <Swords className="w-3.5 h-3.5 shrink-0" />
+            <span>PK Arena</span>
+          </button>
+        </div>
       </div>
 
       {/* Daily Check-In Reward Banner */}

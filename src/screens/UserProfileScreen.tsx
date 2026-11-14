@@ -8,6 +8,8 @@ import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { copyToClipboard } from '../utils/clipboard';
 import { compressImage } from '../utils/imageCompressor';
 import { LevelBadgeTag } from '../components/brand/LevelBadgeTag';
+import { UserBadgeStrip } from '../components/badges/UserBadgeIcon';
+import { ProfileBadgeShowcase } from '../components/badges/UserBadgesModal';
 import {
   Crown,
   Copy,
@@ -102,6 +104,9 @@ export const UserProfileScreen: React.FC = () => {
     videos,
     updateUserProfile,
     agencyProfile,
+    openLeaderboard,
+    openBadgesModal,
+    userHistoricalStats,
   } = useApp();
 
   // Navigation & Modal states: Videos, Posts, Liked, Saved, Private
@@ -489,6 +494,12 @@ export const UserProfileScreen: React.FC = () => {
               <h1 className="text-xl font-black text-white tracking-tight flex items-center gap-1.5">
                 <span>{currentUser.displayName}</span>
               </h1>
+              <UserBadgeStrip
+                badgeIds={userHistoricalStats.equippedBadgeIds}
+                earnedBadges={userHistoricalStats.earnedBadges}
+                size="xs"
+                onClick={openBadgesModal}
+              />
               {currentUser.activeHonorTitle && (
                 <div
                   title="Equipped Honor Tag (Tap to view Top Achievements)"
@@ -623,6 +634,9 @@ export const UserProfileScreen: React.FC = () => {
                 <span className="text-white">{currentUser.familyCrew}</span>
               </div>
             )}
+
+            {/* Historical User Badges Showcase */}
+            <ProfileBadgeShowcase />
           </div>
 
           {/* =========================================================================
@@ -726,6 +740,20 @@ export const UserProfileScreen: React.FC = () => {
               </div>
             </div>
             <span className="text-xs font-bold text-zinc-300 group-hover:text-white">Wallet</span>
+          </button>
+
+          {/* Box 4: Global & Weekly Rankings */}
+          <button
+            type="button"
+            onClick={() => openLeaderboard('global')}
+            className="flex-1 flex flex-col items-center gap-2 group cursor-pointer active:scale-95 transition-transform"
+          >
+            <div className="w-14 h-14 rounded-2xl bg-gradient-to-tr from-[#7928CA] to-[#EC4899] p-0.5 shadow-lg shadow-purple-600/30 flex items-center justify-center group-hover:scale-105 transition-all">
+              <div className="w-full h-full rounded-[14px] bg-[#1D0F38] flex items-center justify-center text-pink-300 group-hover:text-white">
+                <BarChart3 className="w-6 h-6" />
+              </div>
+            </div>
+            <span className="text-xs font-bold text-zinc-300 group-hover:text-white">Rankings</span>
           </button>
         </div>
       </div>

@@ -3,6 +3,9 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import http from 'http';
+import https from 'https';
+import os from 'os';
 import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
 
@@ -68,7 +71,7 @@ export function createApiApp() {
     if (allowed) res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes('*') ? '*' : origin);
     res.header('Vary', 'Origin');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Content-Length, Accept, Authorization, X-Upload-Id, X-Chunk-Index');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
   });
@@ -1523,6 +1526,543 @@ export function createApiApp() {
       return res.status(500).json({
         success: false,
         error: error.message || 'Failed to verify OTP code.',
+      });
+    }
+  });
+
+  // =========================================================================
+  // CLOUDFLARE R2 REELS PROXY (/api/reels/upload & /api/reels/*)
+  // Proxies raw video streams server-side so browser/preview origins bypass
+  // third-party Worker CORS preflight blocks while keeping R2 credentials in Worker.
+  // =========================================================================
+  const R2_WORKER_API_BASE = (
+    process.env.CLOUDFLARE_WORKER_URL ||
+    process.env.VITE_CLOUDFLARE_WORKER_URL ||
+    'https://alpha-mate-reels-api.alphamateapp.workers.dev'
+  ).replace(/\/$/, '');
+  const MAX_REEL_UPLOAD_BYTES = 100 * 1024 * 1024; // 100 MB
+  const REELS_TMP_DIR = path.join(os.tmpdir(), 'alpha-reels-uploads');
+
+  function ensureReelsTmpDir() {
+    if (!fs.existsSync(REELS_TMP_DIR)) {
+      fs.mkdirSync(REELS_TMP_DIR, { recursive: true });
+    }
+  }
+
+  function cleanupStaleReelsTmp() {
+    try {
+      if (!fs.existsSync(REELS_TMP_DIR)) return;
+      const now = Date.now();
+      for (const entry of fs.readdirSync(REELS_TMP_DIR)) {
+        const fullPath = path.join(REELS_TMP_DIR, entry);
+        try {
+          const stat = fs.statSync(fullPath);
+          if (now - stat.mtimeMs > 30 * 60 * 1000) {
+            fs.rmSync(fullPath, { recursive: true, force: true });
+          }
+        } catch {
+          // ignore cleanup race
+        }
+      }
+    } catch {
+      // ignore cleanup errors
+    }
+  }
+
+  function writeRequestToTempFile(req, destPath, maxBytes) {
+    return new Promise((resolve, reject) => {
+      let totalBytes = 0;
+      let settled = false;
+      const out = fs.createWriteStream(destPath);
+
+      const fail = (err) => {
+        if (settled) return;
+        settled = true;
+        try { out.destroy(); } catch {}
+        fs.rm(destPath, { force: true }, () => {});
+        reject(err);
+      };
+
+      req.on('data', (chunk) => {
+        if (settled) return;
+        totalBytes += chunk.length;
+        if (totalBytes > maxBytes) {
+          const err = new Error('Video size exceeds maximum allowed limit of 100 MB.');
+          err.statusCode = 413;
+          req.destroy();
+          fail(err);
+          return;
+        }
+        if (!out.write(chunk)) {
+          req.pause();
+        }
+      });
+
+      out.on('drain', () => {
+        if (!settled) req.resume();
+      });
+
+      req.on('end', () => {
+        if (settled) return;
+        out.end(() => {
+          if (settled) return;
+          settled = true;
+          resolve(totalBytes);
+        });
+      });
+
+      req.on('aborted', () => {
+        const err = new Error('Upload stream was aborted by client.');
+        err.statusCode = 499;
+        fail(err);
+      });
+
+      req.on('error', (err) => fail(err));
+      out.on('error', (err) => fail(err));
+    });
+  }
+
+  const reelUploadJobs = new Map();
+
+  function pruneReelUploadJobs() {
+    const cutoff = Date.now() - 30 * 60 * 1000;
+    for (const [id, job] of reelUploadJobs.entries()) {
+      if ((job?.updatedAt || 0) < cutoff) {
+        reelUploadJobs.delete(id);
+      }
+    }
+  }
+
+  function stripHtmlErrorText(rawText, status) {
+    if (!rawText) return `Cloudflare R2 API returned HTTP ${status}`;
+    const trimmed = String(rawText).trim();
+    if (trimmed.startsWith('<!') || trimmed.toLowerCase().startsWith('<html')) {
+      return `Cloudflare R2 API returned HTTP ${status}`;
+    }
+    return trimmed.slice(0, 300);
+  }
+
+  function forwardFilesToR2Worker({ filePaths, totalBytes, authHeader, contentType, timeoutMs = 300_000, onBytesSent }) {
+    return new Promise((resolve, reject) => {
+      const targetUrl = new URL(`${R2_WORKER_API_BASE}/upload`);
+      const transport = targetUrl.protocol === 'http:' ? http : https;
+
+      let settled = false;
+      let bytesSent = 0;
+      const upstreamReq = transport.request(
+        targetUrl,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: authHeader,
+            'Content-Type': contentType,
+            'Content-Length': String(totalBytes),
+            Origin: 'https://alphamate.app',
+          },
+          timeout: timeoutMs,
+        },
+        (upstreamRes) => {
+          const chunks = [];
+          upstreamRes.on('data', (c) => chunks.push(c));
+          upstreamRes.on('end', () => {
+            if (settled) return;
+            settled = true;
+            const rawText = Buffer.concat(chunks).toString('utf8');
+            let payload = null;
+            try {
+              payload = rawText ? JSON.parse(rawText) : null;
+            } catch {
+              payload = null;
+            }
+            resolve({
+              status: upstreamRes.statusCode || 502,
+              ok: (upstreamRes.statusCode || 500) >= 200 && (upstreamRes.statusCode || 500) < 300,
+              payload,
+              rawText,
+            });
+          });
+        }
+      );
+
+      upstreamReq.on('timeout', () => {
+        if (settled) return;
+        settled = true;
+        const err = new Error('Timed out transferring video to Cloudflare R2.');
+        err.statusCode = 504;
+        upstreamReq.destroy(err);
+        reject(err);
+      });
+
+      upstreamReq.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        reject(err);
+      });
+
+      (async () => {
+        try {
+          for (const filePath of filePaths) {
+            if (settled) return;
+            const rs = fs.createReadStream(filePath, { highWaterMark: 256 * 1024 });
+            try {
+              for await (const chunk of rs) {
+                if (settled) {
+                  rs.destroy();
+                  return;
+                }
+                if (!upstreamReq.write(chunk)) {
+                  await new Promise((resDrain, rejDrain) => {
+                    const onDrain = () => { cleanup(); resDrain(); };
+                    const onErr = (e) => { cleanup(); rejDrain(e); };
+                    const onClose = () => { cleanup(); resDrain(); };
+                    const cleanup = () => {
+                      upstreamReq.off('drain', onDrain);
+                      upstreamReq.off('error', onErr);
+                      upstreamReq.off('close', onClose);
+                    };
+                    upstreamReq.once('drain', onDrain);
+                    upstreamReq.once('error', onErr);
+                    upstreamReq.once('close', onClose);
+                  });
+                }
+                bytesSent += chunk.length;
+                if (onBytesSent) onBytesSent(bytesSent);
+              }
+            } finally {
+              rs.destroy();
+            }
+          }
+          if (!settled) {
+            upstreamReq.end();
+          }
+        } catch (err) {
+          if (!settled) {
+            settled = true;
+            upstreamReq.destroy(err);
+            reject(err);
+          }
+        }
+      })();
+    });
+  }
+
+  app.post('/api/reels/upload', async (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Missing or malformed Authorization header. Expected Bearer token.',
+      });
+    }
+
+    const rawLength = req.headers['content-length'];
+    if (rawLength) {
+      const parsedLength = Number(rawLength);
+      if (Number.isFinite(parsedLength) && parsedLength > MAX_REEL_UPLOAD_BYTES) {
+        return res.status(413).json({
+          success: false,
+          error: 'Video size exceeds maximum allowed limit of 100 MB.',
+        });
+      }
+    }
+
+    const rawContentType = typeof req.headers['content-type'] === 'string' ? req.headers['content-type'] : 'video/mp4';
+    ensureReelsTmpDir();
+    cleanupStaleReelsTmp();
+    const tmpFilePath = path.join(REELS_TMP_DIR, `single_${Date.now()}_${crypto.randomBytes(6).toString('hex')}.bin`);
+
+    try {
+      const totalBytes = await writeRequestToTempFile(req, tmpFilePath, MAX_REEL_UPLOAD_BYTES);
+      if (totalBytes <= 0) {
+        return res.status(400).json({ success: false, error: 'Empty video file received.' });
+      }
+
+      const upstream = await forwardFilesToR2Worker({
+        filePaths: [tmpFilePath],
+        totalBytes,
+        authHeader,
+        contentType: rawContentType,
+        timeoutMs: 300_000,
+      });
+
+      if (upstream.payload && typeof upstream.payload === 'object') {
+        return res.status(upstream.status).json(upstream.payload);
+      }
+      return res.status(upstream.status).json({
+        success: upstream.ok,
+        error: upstream.ok ? undefined : stripHtmlErrorText(upstream.rawText, upstream.status),
+      });
+    } catch (error) {
+      const status = error?.statusCode || (error?.name === 'AbortError' ? 504 : 502);
+      console.error('[Reels Proxy] Single upload failed:', error?.message || error);
+      return res.status(status).json({
+        success: false,
+        error: error?.message || 'Unable to upload video to Cloudflare R2.',
+      });
+    } finally {
+      fs.rm(tmpFilePath, { force: true }, () => {});
+    }
+  });
+
+  app.post('/api/reels/upload-chunk', async (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Missing or malformed Authorization header. Expected Bearer token.',
+      });
+    }
+
+    const uploadId = String(req.headers['x-upload-id'] || '').trim();
+    const chunkIndex = Number(req.headers['x-chunk-index']);
+    if (!/^[a-zA-Z0-9_-]{8,64}$/.test(uploadId) || !Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex > 200) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid X-Upload-Id or X-Chunk-Index header.',
+      });
+    }
+
+    ensureReelsTmpDir();
+    cleanupStaleReelsTmp();
+    const sessionDir = path.join(REELS_TMP_DIR, `session_${uploadId}`);
+    if (!fs.existsSync(sessionDir)) {
+      fs.mkdirSync(sessionDir, { recursive: true });
+    }
+    const chunkPath = path.join(sessionDir, `chunk_${chunkIndex}.part`);
+
+    try {
+      const chunkBytes = await writeRequestToTempFile(req, chunkPath, 20 * 1024 * 1024);
+      let cumulativeBytes = 0;
+      for (const file of fs.readdirSync(sessionDir)) {
+        if (file.startsWith('chunk_') && file.endsWith('.part')) {
+          cumulativeBytes += fs.statSync(path.join(sessionDir, file)).size;
+        }
+      }
+      if (cumulativeBytes > MAX_REEL_UPLOAD_BYTES) {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+        return res.status(413).json({
+          success: false,
+          error: 'Total uploaded video size exceeds 100 MB limit.',
+        });
+      }
+      return res.json({
+        success: true,
+        uploadId,
+        chunkIndex,
+        chunkBytes,
+        cumulativeBytes,
+      });
+    } catch (error) {
+      const status = error?.statusCode || 500;
+      console.error('[Reels Proxy] Chunk upload failed:', error?.message || error);
+      return res.status(status).json({
+        success: false,
+        error: error?.message || 'Failed to store video upload chunk.',
+      });
+    }
+  });
+
+  app.post('/api/reels/upload-complete', async (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Missing or malformed Authorization header. Expected Bearer token.',
+      });
+    }
+
+    const uploadId = String(req.body?.uploadId || '').trim();
+    const totalChunks = Number(req.body?.totalChunks);
+    const contentType = typeof req.body?.contentType === 'string' && req.body.contentType.trim()
+      ? req.body.contentType.trim()
+      : 'video/mp4';
+
+    if (!/^[a-zA-Z0-9_-]{8,64}$/.test(uploadId) || !Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > 200) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid uploadId or totalChunks for reel completion.',
+      });
+    }
+
+    pruneReelUploadJobs();
+    const existingJob = reelUploadJobs.get(uploadId);
+    if (existingJob) {
+      return res.status(202).json({
+        success: true,
+        asyncJob: true,
+        jobId: uploadId,
+        status: existingJob.status,
+        totalBytes: existingJob.totalBytes,
+      });
+    }
+
+    const sessionDir = path.join(REELS_TMP_DIR, `session_${uploadId}`);
+    if (!fs.existsSync(sessionDir)) {
+      return res.status(404).json({
+        success: false,
+        error: 'Upload session expired or not found. Please retry uploading.',
+      });
+    }
+
+    const filePaths = [];
+    let totalBytes = 0;
+    for (let i = 0; i < totalChunks; i += 1) {
+      const chunkPath = path.join(sessionDir, `chunk_${i}.part`);
+      if (!fs.existsSync(chunkPath)) {
+        return res.status(400).json({
+          success: false,
+          error: `Missing video chunk ${i + 1} of ${totalChunks}. Please retry.`,
+        });
+      }
+      const stat = fs.statSync(chunkPath);
+      totalBytes += stat.size;
+      filePaths.push(chunkPath);
+    }
+
+    if (totalBytes <= 0 || totalBytes > MAX_REEL_UPLOAD_BYTES) {
+      fs.rm(sessionDir, { recursive: true, force: true }, () => {});
+      return res.status(totalBytes <= 0 ? 400 : 413).json({
+        success: false,
+        error: totalBytes <= 0 ? 'Uploaded video is empty.' : 'Video exceeds 100 MB limit.',
+      });
+    }
+
+    const job = {
+      status: 'uploading',
+      bytesTransferred: 0,
+      totalBytes,
+      statusCode: 202,
+      result: null,
+      error: null,
+      updatedAt: Date.now(),
+    };
+    reelUploadJobs.set(uploadId, job);
+
+    // Run R2 Worker upload asynchronously so browser HTTP requests never idle-disconnect.
+    (async () => {
+      try {
+        const upstream = await forwardFilesToR2Worker({
+          filePaths,
+          totalBytes,
+          authHeader,
+          contentType,
+          timeoutMs: 300_000,
+          onBytesSent: (sent) => {
+            job.bytesTransferred = sent;
+            job.updatedAt = Date.now();
+          },
+        });
+
+        job.statusCode = upstream.status;
+        job.updatedAt = Date.now();
+        if (upstream.ok && upstream.payload && upstream.payload.success && upstream.payload.videoKey) {
+          job.status = 'completed';
+          job.bytesTransferred = totalBytes;
+          job.result = upstream.payload;
+        } else {
+          job.status = 'failed';
+          job.error =
+            upstream.payload?.error ||
+            stripHtmlErrorText(upstream.rawText, upstream.status);
+          console.error('[Reels Proxy] R2 Worker rejected upload:', upstream.status, job.error);
+        }
+      } catch (error) {
+        job.status = 'failed';
+        job.statusCode = error?.statusCode || 502;
+        job.error = error?.message || 'Unable to finalize video upload to Cloudflare R2.';
+        job.updatedAt = Date.now();
+        console.error('[Reels Proxy] Chunked completion failed:', job.error);
+      } finally {
+        fs.rm(sessionDir, { recursive: true, force: true }, () => {});
+      }
+    })();
+
+    return res.status(202).json({
+      success: true,
+      asyncJob: true,
+      jobId: uploadId,
+      status: 'uploading',
+      totalBytes,
+    });
+  });
+
+  app.get('/api/reels/upload-status/:uploadId', (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Missing or malformed Authorization header. Expected Bearer token.',
+      });
+    }
+
+    const uploadId = String(req.params.uploadId || '').trim();
+    if (!/^[a-zA-Z0-9_-]{8,64}$/.test(uploadId)) {
+      return res.status(400).json({ success: false, error: 'Invalid uploadId.' });
+    }
+
+    const job = reelUploadJobs.get(uploadId);
+    if (!job) {
+      return res.status(404).json({
+        success: false,
+        error: 'Upload job not found or expired.',
+      });
+    }
+
+    return res.json({
+      success: job.status !== 'failed',
+      jobId: uploadId,
+      status: job.status,
+      bytesTransferred: job.bytesTransferred,
+      totalBytes: job.totalBytes,
+      statusCode: job.statusCode,
+      result: job.result,
+      error: job.error,
+    });
+  });
+
+  app.delete('/api/reels/*', async (req, res) => {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({
+        success: false,
+        error: 'Missing or malformed Authorization header. Expected Bearer token.',
+      });
+    }
+
+    const rawParam = typeof req.params?.[0] === 'string' ? req.params[0] : '';
+    let decodedKey = rawParam;
+    try {
+      decodedKey = decodeURIComponent(rawParam);
+    } catch {
+      decodedKey = rawParam;
+    }
+
+    if (!decodedKey) {
+      return res.status(400).json({ success: false, error: 'Missing reel videoKey.' });
+    }
+
+    try {
+      const upstreamRes = await fetchWithTimeout(
+        `${R2_WORKER_API_BASE}/reels/${encodeURIComponent(decodedKey)}`,
+        {
+          method: 'DELETE',
+          headers: {
+            Authorization: authHeader,
+            Origin: 'https://alphamate.app',
+            Accept: 'application/json',
+          },
+        },
+        15_000
+      );
+
+      const data = await upstreamRes.json().catch(() => ({}));
+      return res.status(upstreamRes.status).json(data);
+    } catch (error) {
+      const isTimeout = error?.code === 'UPSTREAM_TIMEOUT';
+      console.error('[Reels Proxy] Delete failed:', error?.message || error);
+      return res.status(isTimeout ? 504 : 502).json({
+        success: false,
+        error: error?.message || 'Unable to delete reel from Cloudflare R2.',
       });
     }
   });

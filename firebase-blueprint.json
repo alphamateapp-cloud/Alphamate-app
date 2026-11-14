@@ -29,6 +29,7 @@
         "pushPlatform": { "type": "string", "enum": ["android", "ios", "web"] },
         "pushLastActiveAt": { "type": "string", "format": "date-time" },
         "notificationPreferences": { "type": "object" },
+        "equippedBadgeIds": { "type": "array" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -244,12 +245,106 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "displayName", "type", "status", "requestedAt", "updatedAt"]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Monthly-resetting Global & Weekly leaderboard ranking record tracking received gifts and active time spent for 100+ users",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "uniqueId": { "type": "string", "maxLength": 64 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "username": { "type": "string", "maxLength": 64 },
+        "avatar": { "type": "string", "maxLength": 2048 },
+        "countryFlag": { "type": "string", "maxLength": 16 },
+        "level": { "type": "number" },
+        "vipTier": { "type": "number" },
+        "monthKey": { "type": "string", "maxLength": 16 },
+        "weekKey": { "type": "string", "maxLength": 16 },
+        "receivedGiftCoins": { "type": "number" },
+        "receivedDiamonds": { "type": "number" },
+        "giftsCount": { "type": "number" },
+        "timeSpentMinutes": { "type": "number" },
+        "score": { "type": "number" },
+        "weeklyGiftCoins": { "type": "number" },
+        "weeklyDiamonds": { "type": "number" },
+        "weeklyGiftsCount": { "type": "number" },
+        "weeklyTimeSpentMinutes": { "type": "number" },
+        "weeklyScore": { "type": "number" },
+        "equippedBadgeIds": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedAtMs": { "type": "number" }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "monthKey",
+        "weekKey",
+        "receivedGiftCoins",
+        "receivedDiamonds",
+        "giftsCount",
+        "timeSpentMinutes",
+        "score",
+        "weeklyGiftCoins",
+        "weeklyDiamonds",
+        "weeklyGiftsCount",
+        "weeklyTimeSpentMinutes",
+        "weeklyScore",
+        "updatedAt",
+        "updatedAtMs"
+      ]
+    },
+    "UserBadgeStats": {
+      "title": "UserBadgeStats",
+      "description": "Historical achievement metrics, unlocked User Badges, and equipped profile icons for a user",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "totalGiftCoinsSent": { "type": "number" },
+        "totalGiftsSentCount": { "type": "number" },
+        "totalGiftCoinsReceived": { "type": "number" },
+        "totalDiamondsEarned": { "type": "number" },
+        "totalActiveMinutes": { "type": "number" },
+        "partyRoomMinutes": { "type": "number" },
+        "liveStreamMinutes": { "type": "number" },
+        "longestPartySessionMinutes": { "type": "number" },
+        "bestLeaderboardRank": { "type": "number" },
+        "checkInDaysCount": { "type": "number" },
+        "maxDailyStreak": { "type": "number" },
+        "postsCreatedCount": { "type": "number" },
+        "equippedBadgeIds": { "type": "array" },
+        "earnedBadges": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedAtMs": { "type": "number" }
+      },
+      "required": [
+        "uid",
+        "totalGiftCoinsSent",
+        "totalGiftsSentCount",
+        "totalGiftCoinsReceived",
+        "totalDiamondsEarned",
+        "totalActiveMinutes",
+        "partyRoomMinutes",
+        "liveStreamMinutes",
+        "longestPartySessionMinutes",
+        "checkInDaysCount",
+        "maxDailyStreak",
+        "postsCreatedCount",
+        "equippedBadgeIds",
+        "earnedBadges",
+        "updatedAt",
+        "updatedAtMs"
+      ]
     }
   },
   "firestore": {
     "/users/{userId}": {
       "schema": "User",
       "description": "User profile documents keyed by Firebase auth UID"
+    },
+    "/users/{userId}/badgeStats/{docId}": {
+      "schema": "UserBadgeStats",
+      "description": "Historical achievement counters, earned User Badges, and equipped profile badge icons"
     },
     "/users/{userId}/notifications/{notificationId}": {
       "schema": "Notification",
@@ -262,6 +357,10 @@
     "/accountDeletionRequests/{requestId}": {
       "schema": "AccountDeletionRequest",
       "description": "Official account deactivation and 15-day pending permanent deletion records keyed by Firebase auth UID"
+    },
+    "/leaderboardMonths/{monthKey}/entries/{userId}": {
+      "schema": "LeaderboardEntry",
+      "description": "Monthly-partitioned Global & Weekly leaderboard records holding 100+ users per monthKey (YYYY-MM)"
     },
     "/reels/{reelId}": {
       "schema": "Reel",

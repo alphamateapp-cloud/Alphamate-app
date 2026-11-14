@@ -1618,6 +1618,17 @@ export async function executeSixtyFortyGiftTransaction(
       streamId: input.streamId,
       reelId: input.reelId,
     }).catch((err) => console.warn('Gift notification dispatch warning:', err));
+
+    import('./leaderboardService')
+      .then((m) =>
+        m.recordLeaderboardGiftReceived({
+          recipientId,
+          recipientName: input.recipientName,
+          giftCoins: totalCoins,
+          hostDiamonds,
+        })
+      )
+      .catch((err) => console.warn('Leaderboard gift update warning:', err));
   }
 
   return {

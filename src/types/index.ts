@@ -81,6 +81,7 @@ export interface User {
   pushNotificationToken?: string;
   pushPlatform?: 'android' | 'ios' | 'web';
   notificationPreferences?: NotificationPreferences;
+  equippedBadgeIds?: UserBadgeId[];
 }
 
 export interface AccountDeletionRequest {
@@ -496,3 +497,77 @@ export interface AgencyApplication {
   status: 'pending' | 'approved' | 'rejected';
   submittedAt: string;
 }
+
+export type LeaderboardScope = 'global' | 'weekly';
+export type LeaderboardMetric = 'overall' | 'gifts' | 'time';
+export type LeaderboardMonthView = 'current' | 'previous';
+
+export interface LeaderboardEntry {
+  uid: string;
+  uniqueId: string;
+  displayName: string;
+  username: string;
+  avatar: string;
+  countryFlag?: string;
+  level: number;
+  vipTier: number;
+  monthKey: string; // e.g. "2026-11"
+  weekKey: string; // e.g. "2026-W46"
+  receivedGiftCoins: number;
+  receivedDiamonds: number;
+  giftsCount: number;
+  timeSpentMinutes: number;
+  score: number;
+  weeklyGiftCoins: number;
+  weeklyDiamonds: number;
+  weeklyGiftsCount: number;
+  weeklyTimeSpentMinutes: number;
+  weeklyScore: number;
+  isLive?: boolean;
+  isRealUser?: boolean;
+  equippedBadgeIds?: UserBadgeId[];
+  updatedAt: string;
+  updatedAtMs: number;
+}
+
+export type UserBadgeId =
+  | 'top_contributor'
+  | 'gift_king'
+  | 'longest_party_attendee'
+  | 'diamond_patron'
+  | 'live_marathoner'
+  | 'streak_champion'
+  | 'social_creator'
+  | 'royal_vip';
+
+export type UserBadgeTier = 'bronze' | 'silver' | 'gold' | 'mythic';
+
+export interface EarnedBadgeRecord {
+  badgeId: UserBadgeId;
+  tier: UserBadgeTier;
+  unlockedAt: string;
+  unlockedAtMs: number;
+  metricValue: number;
+}
+
+export interface UserHistoricalStats {
+  uid: string;
+  totalGiftCoinsSent: number;
+  totalGiftsSentCount: number;
+  totalGiftCoinsReceived: number;
+  totalDiamondsEarned: number;
+  totalActiveMinutes: number;
+  partyRoomMinutes: number;
+  liveStreamMinutes: number;
+  longestPartySessionMinutes: number;
+  bestLeaderboardRank: number | null;
+  checkInDaysCount: number;
+  maxDailyStreak: number;
+  postsCreatedCount: number;
+  equippedBadgeIds: UserBadgeId[];
+  earnedBadges: Record<string, EarnedBadgeRecord>;
+  updatedAt: string;
+  updatedAtMs: number;
+}
+
+

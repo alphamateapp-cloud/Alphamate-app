@@ -398,3 +398,59 @@ export const sendPushOnNotificationCreated = onDocumentCreated(
   }
 );
 
+/**
+ * Scheduled Cloud Function running daily at 00:05 UTC to enforce the monthly
+ * leaderboard retention policy: keeps the active calendar month and up to 1 previous
+ * calendar month (max ~1-2 months), deleting expired monthly entry partitions.
+ */
+export const monthlyLeaderboardMaintenance = onSchedule(
+  {
+    schedule: '5 0 * * *',
+    timeZone: 'UTC',
+    timeoutSeconds: 180,
+    memory: '256MiB',
+  },
+  async () => {
+    const now = new Date();
+    const currentYear = now.getUTCFullYear();
+    const currentMonth = now.getUTCMonth(); // 0..11
+    const formatKey = (y: number, mZero: number) =>
+      `${y}-${String(mZero + 1).padStart(2, '0')}`;
+
+    const prevDate = new Date(Date.UTC(currentYear, currentMonth - 1, 1));
+    const allowedMonthKeys = new Set([
+      formatKey(currentYear, currentMonth),
+      formatKey(prevDate.getUTCFullYear(), prevDate.getUTCMonth()),
+    ]);
+
+    const monthsSnap = await db.collection('leaderboardMonths').listDocuments();
+    let purgedEntries = 0;
+
+    for (const monthDocRef of monthsSnap) {
+      if (allowedMonthKeys.has(monthDocRef.id)) continue;
+
+      const entriesSnap = await monthDocRef.collection('entries').limit(450).get();
+      if (!entriesSnap.empty) {
+        const batch = db.batch();
+        for (const entryDoc of entriesSnap.docs) {
+          batch.delete(entryDoc.ref);
+        }
+        await batch.commit();
+        purgedEntries += entriesSnap.size;
+      }
+
+      if (entriesSnap.size < 450) {
+        await monthDocRef.delete().catch(() => {});
+      }
+    }
+
+    if (purgedEntries > 0) {
+      logger.info('Purged expired monthly leaderboard partitions', {
+        keptMonths: Array.from(allowedMonthKeys),
+        purgedEntries,
+      });
+    }
+  }
+);
+
+

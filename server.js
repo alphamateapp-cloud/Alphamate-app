@@ -18,6 +18,8 @@ app.get('*', (_req, res) => {
 });
 
 const server = http.createServer(app);
+server.requestTimeout = 0;
+server.headersTimeout = 60_000;
 attachRealtimeWebSocketServer(server, {
   app,
   verifyFirebaseIdToken: app.locals.verifyFirebaseIdToken,

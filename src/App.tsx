@@ -32,6 +32,8 @@ import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
 import { PushNotificationSettingsModal } from './components/modals/PushNotificationSettingsModal';
+import { GlobalWeeklyLeaderboardModal } from './components/leaderboard/GlobalWeeklyLeaderboard';
+import { UserBadgesModal } from './components/badges/UserBadgesModal';
 
 const PUBLIC_AUTH_SCREENS = new Set([
   'splash',
@@ -251,6 +253,8 @@ export default function App() {
       <DeviceFrame>
         <PushNotificationBanner />
         <GlobalPushSettingsHost />
+        <GlobalWeeklyLeaderboardModal />
+        <UserBadgesModal />
         <AppContent />
       </DeviceFrame>
     </AppProvider>
