@@ -1,0 +1,22 @@
+Alpha Mate dependency/build repair
+==================================
+
+Changes:
+1. Removed the stale root package-lock.json. The uploaded lockfile was out of sync
+   with package.json: it lacked @types/ws and nodemailer and pinned ws 8.22.1
+   while package.json requires ^8.23.0.
+2. Updated devDependency esbuild from ^0.25.0 to ^0.28.0. Vite 8.3.6 declares
+   an optional peer requirement for esbuild ^0.27.0 or ^0.28.0.
+3. Preserved .npmrc legacy-peer-deps=true so npm can resolve peer dependencies.
+
+Important:
+- Do not restore the old root package-lock.json.
+- Cloudflare Pages: build command npm run build; output directory dist;
+  root directory repository root (/).
+- Railway: use Node 24.12.0 (already declared in .node-version/.nvmrc),
+  install command npm install, build command npm run build, and the existing
+  backend start command (normally npm start).
+- This archive was structurally checked, but a full npm install/build could not
+  be run here because package registry access timed out.
+- functions/package-lock.json is intentionally preserved; it belongs to the
+  separate Firebase Functions package.
