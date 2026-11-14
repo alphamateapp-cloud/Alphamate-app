@@ -153,3 +153,16 @@ Alpha Mate includes full native push notifications via `@capacitor/push-notifica
 
 In addition to native APK/AAB, Alpha Mate includes a full Web App Manifest (`public/manifest.json`) and Service Worker:
 - On Android Chrome, tap the in-app **"Install on This Android Device"** button in **Settings > Android APK & AAB Hub** or select **"Install App"** from the browser menu to install instantly without compiling.
+
+
+## Firebase Google Sign-In — Release SHA Fingerprints
+
+The GitHub Actions workflow prints the release keystore certificate's public SHA-1
+and SHA-256 fingerprints in the workflow log and the run's **Summary** after the
+keystore has been validated. Add both fingerprints to Firebase Console:
+**Project settings → General → Your apps → Alpha Mate Android → SHA certificate fingerprints**.
+
+Only public certificate fingerprints are printed. The keystore file, passwords,
+private key material, and repository secrets are never printed or uploaded as artifacts.
+After adding fingerprints, download the refreshed `google-services.json`, replace
+`android/app/google-services.json`, and build again.
