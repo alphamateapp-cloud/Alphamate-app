@@ -94,7 +94,10 @@ If your code is hosted on GitHub, an automated workflow is included in `.github/
   - `ANDROID_KEY_PASSWORD` (or `KEY_PASSWORD`, defaults to keystore password) — key password
   - `VITE_RAILWAY_API_URL` (Repository Secret or Variable) — your deployed Railway backend URL (`https://...up.railway.app`) for Live SFU & TURN
 - Go to **Actions** tab -> **Build Android APK and AAB** -> **Run workflow**.
-- When keystore secrets are present, `build-android.yml` builds and verifies **signed `app-release.apk`** (`alphamate-release-apk`) and **signed `app-release.aab`** (`alphamate-release-aab`).
+- The workflow requires the official Play Store upload keystore before producing release artifacts. It builds and verifies both **signed `app-release.apk`** (`alphamate-release-apk`) and **signed `app-release.aab`** (`alphamate-release-aab`).
+- If official signing secrets are missing or invalid, the workflow stops with a clear error instead of producing a temporary preview-signed APK that cannot be used for Play Store updates.
+- Required GitHub Actions Repository Secrets: `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`.
+- Optional: `ANDROID_KEY_ALIAS` (auto-detected if omitted) and `ANDROID_KEY_PASSWORD` (defaults to the store password).
 
 ---
 

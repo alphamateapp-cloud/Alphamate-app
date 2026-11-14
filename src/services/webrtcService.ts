@@ -175,7 +175,7 @@ export const CLOUDFLARE_TURN_URLS = [
 export const PARTY_PARTICIPANT_STALE_MS = 15_000;
 const PARTY_HEARTBEAT_INTERVAL_MS = 4000;
 const RECONNECT_GRACE_MS = 2500;
-const MAX_RECONNECT_ATTEMPTS = 3;
+const MAX_RECONNECT_ATTEMPTS = 8;
 const LIVE_HEARTBEAT_INTERVAL_MS = 5000;
 
 class RealtimeSfuStreamingEngine {
@@ -1377,20 +1377,32 @@ class RealtimeSfuStreamingEngine {
         if (!opts.isSessionActive()) return false;
 
         if (attempt < MAX_RECONNECT_ATTEMPTS) {
-          const nextDelay = Math.min(8000, RECONNECT_GRACE_MS * attempt);
+          // Mobile networks often recover in bursts. Use a longer capped backoff
+          // instead of exhausting the voice session after only three short retries.
+          const exponentialDelay = Math.min(30_000, 1500 * Math.pow(1.7, attempt - 1));
+          const jitter = Math.floor(Math.random() * 500);
           const retryTimer = setTimeout(() => {
             this.reconnectTimers.delete(sessionKey);
             if (opts.isSessionActive()) {
               this.runAutoReconnectWithBackoff(sessionKey, opts).catch(() => {});
             }
-          }, nextDelay);
+          }, exponentialDelay + jitter);
           this.reconnectTimers.set(sessionKey, retryTimer);
           return false;
         }
 
-        // Retries exhausted -> surface genuine failed state without faking success
-        this.reconnectAttempts.delete(sessionKey);
-        opts.onStateChange?.('failed');
+        // Keep the active room/session eligible for recovery during longer
+        // network outages. A later retry can recover without forcing the user
+        // to leave and rejoin the room.
+        this.reconnectAttempts.set(sessionKey, 0);
+        opts.onStateChange?.('disconnected');
+        const retryTimer = setTimeout(() => {
+          this.reconnectTimers.delete(sessionKey);
+          if (opts.isSessionActive()) {
+            this.runAutoReconnectWithBackoff(sessionKey, opts).catch(() => {});
+          }
+        }, 20_000);
+        this.reconnectTimers.set(sessionKey, retryTimer);
         return false;
       } finally {
         this.reconnectInFlight.delete(sessionKey);

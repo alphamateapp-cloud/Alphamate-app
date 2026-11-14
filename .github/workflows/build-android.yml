@@ -210,48 +210,8 @@ jobs:
               ]);
               console.log("Official Play Store release signing configured cleanly with alias: " + resolvedAlias);
             } else {
-              console.warn("::warning::No Play Store keystore secrets (ANDROID_KEYSTORE_BASE64 & ANDROID_KEYSTORE_PASSWORD) found in GitHub Repository Secrets. Generating a temporary preview keystore for Release APK testing and skipping Play Store AAB.");
-              const previewPass = "AlphaMatePreviewKey2026!";
-              const previewAlias = "alphamate-preview";
-              if (fs.existsSync("android/app/release-key.jks")) {
-                fs.unlinkSync("android/app/release-key.jks");
-              }
-              execFileSync("keytool", [
-                "-genkeypair", "-v",
-                "-keystore", "android/app/release-key.jks",
-                "-storetype", "PKCS12",
-                "-keyalg", "RSA",
-                "-keysize", "2048",
-                "-validity", "365",
-                "-alias", previewAlias,
-                "-storepass", previewPass,
-                "-keypass", previewPass,
-                "-dname", "CN=Alpha Mate Live Party, OU=Mobile, O=Alpha Mate, L=Dubai, ST=Dubai, C=AE"
-              ], { stdio: "inherit" });
-
-              writeEnv([
-                "ANDROID_KEYSTORE_PATH=release-key.jks",
-                "ANDROID_KEYSTORE_PASSWORD=" + previewPass,
-                "ANDROID_KEY_ALIAS=" + previewAlias,
-                "ANDROID_KEY_PASSWORD=" + previewPass,
-                "SIGNED_RELEASE=false",
-                "PREVIEW_SIGNED=true"
-              ]);
-
-              if (summaryFile) {
-                fs.appendFileSync(
-                  summaryFile,
-                  [
-                    "### Android Build Summary (Preview Signing Mode)",
-                    "- **Debug APK (`alphamate-debug-apk`)**: Built & uploaded.",
-                    "- **Release APK (`alphamate-release-apk`)**: Built with a temporary preview signing certificate so you can install & test the APK immediately.",
-                    "- **Play Store AAB**: Skipped until permanent signing secrets are added.",
-                    "",
-                    "To generate a Google Play Store `.aab`, add `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, and `ANDROID_KEY_PASSWORD` under **GitHub Repository -> Settings -> Secrets and variables -> Actions -> Repository secrets**.",
-                    ""
-                  ].join("\n")
-                );
-              }
+              console.error("::error::Official Android release signing is not configured. Add ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD to GitHub Actions Repository Secrets. Optional: ANDROID_KEY_ALIAS and ANDROID_KEY_PASSWORD (key password defaults to store password). A temporary preview key is not accepted for Play Store release artifacts.");
+              process.exit(1);
             }
           '
 
@@ -261,8 +221,11 @@ jobs:
           ./gradlew --no-daemon assembleRelease --stacktrace
 
       - name: Build Android App Bundle (AAB)
-        if: env.SIGNED_RELEASE == 'true'
         run: |
+          if [ "${SIGNED_RELEASE}" != "true" ]; then
+            echo "::error::AAB build blocked because official release signing was not verified."
+            exit 1
+          fi
           cd android
           ./gradlew --no-daemon bundleRelease --stacktrace
 
@@ -325,7 +288,7 @@ jobs:
 
       - name: Upload Release AAB Artifact
         uses: actions/upload-artifact@v4
-        if: env.SIGNED_RELEASE == 'true'
+        if: always()
         with:
           name: alphamate-release-aab
           path: android/app/build/outputs/bundle/release/*.aab
