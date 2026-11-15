@@ -1,0 +1,25 @@
+ALPHA MATE - ANDROID REALTIME RESILIENCE UPDATE
+
+Scope
+- The web and Android app continue to use the same React services, Firebase project,
+  API base URL, /ws WebSocket endpoint, room event protocol and Cloudflare SFU/WebRTC
+  implementation. No Android-only backend or alternate room protocol was introduced.
+- Updated src/services/realtimeSocket.ts to recover more reliably after Android WebView
+  background/resume, network restoration and stale-but-open WebSocket connections.
+- Added application-level JSON pong tracking and a heartbeat timeout. A dead connection
+  is closed so the existing exponential reconnect path can establish a fresh session.
+- Added an authentication handshake timeout so a socket that opens but never authenticates
+  cannot remain silently half-connected.
+- On foreground resume, a healthy authenticated socket requests a fresh discovery snapshot;
+  a missing/stale connection reconnects and rejoins the active room through the existing
+  room-join restoration logic.
+
+Important validation note
+- This source update is not a substitute for testing on physical Android devices and
+  comparing against the live web app. Real-time parity depends on backend availability,
+  network quality, WebRTC/ICE/TURN connectivity, Android microphone permissions and
+  audio-output/autoplay behavior. No claim is made that APK audio or every device is verified.
+- No changes were made to the existing WebRTC/SFU, microphone, speaker, audio player,
+  Firebase data model, web UI, or backend server behavior, to avoid regressing the working web app.
+- Build/test status: source ZIP integrity checked; Android Gradle build and device QA
+  were not run in this environment.
