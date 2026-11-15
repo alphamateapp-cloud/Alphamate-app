@@ -24,7 +24,7 @@ export const TermsConditionsScreen: React.FC = () => {
         <>
           <p>
             Welcome to <strong>Alpha Mate</strong> (<span className="text-[#D8B4FE]">https://alphamate.app</span>,
-            Android package <code className="text-purple-200">com.alphamate.live</code>). These Terms &amp; Conditions
+            Android package <code className="text-purple-200">com.alphamate.liveparty</code>). These Terms &amp; Conditions
             (&ldquo;Terms&rdquo;) govern your access to and use of the Alpha Mate mobile application, website, live
             streams, voice party rooms, Moments/Reels, chat features, and in-app virtual economy.
           </p>

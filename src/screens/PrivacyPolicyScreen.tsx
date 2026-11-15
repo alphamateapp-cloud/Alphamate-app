@@ -26,7 +26,7 @@ export const PrivacyPolicyScreen: React.FC = () => {
             Welcome to <strong>Alpha Mate</strong> (&ldquo;Alpha Mate,&rdquo; &ldquo;we,&rdquo; &ldquo;our,&rdquo; or
             &ldquo;us&rdquo;), accessible on the web at{' '}
             <span className="text-[#D8B4FE] font-medium">https://alphamate.app</span> and through the Alpha Mate
-            Android application (<code className="text-purple-200">com.alphamate.live</code>).
+            Android application (<code className="text-purple-200">com.alphamate.liveparty</code>).
           </p>
           <p>
             Alpha Mate is a live-streaming, multi-seat voice party room, short video (&ldquo;Moments&rdquo; / Reels),
@@ -482,7 +482,7 @@ export const PrivacyPolicyScreen: React.FC = () => {
               <span>Official Website: https://alphamate.app/privacy</span>
             </div>
             <div className="text-xs text-zinc-400 pt-1">
-              Application: Alpha Mate (Android Package: <code className="text-zinc-300">com.alphamate.live</code>)
+              Application: Alpha Mate (Android Package: <code className="text-zinc-300">com.alphamate.liveparty</code>)
             </div>
           </div>
         </div>
