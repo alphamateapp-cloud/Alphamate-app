@@ -22,6 +22,7 @@ import {
 } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
   doc,
   getDoc,
   getDocFromServer,
@@ -55,7 +56,25 @@ import { sanitizeAvatarString } from '../utils/imageCompressor';
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // CRITICAL: The app will break without passing firestoreDatabaseId
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// Android/iOS Capacitor WebViews can fail to establish Firestore WebChannel
+// streams on some mobile networks. Force long-polling only on native builds.
+function createFirestoreInstance() {
+  if (Capacitor.isNativePlatform()) {
+    try {
+      return initializeFirestore(
+        app,
+        { experimentalForceLongPolling: true, useFetchStreams: false },
+        firebaseConfig.firestoreDatabaseId
+      );
+    } catch (error) {
+      // Another module may already have initialized this database instance.
+      console.warn('Firestore already initialized; using existing instance.', error);
+      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    }
+  }
+  return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+}
+export const db = createFirestoreInstance();
 export const storage = getStorage(app);
 
 // Capacitor WebViews need durable JS-SDK auth persistence so the native Google
@@ -82,7 +101,7 @@ googleProvider.setCustomParameters({
 // =========================================================================
 // ERROR HANDLER CONFORMING TO FirestoreErrorInfo
 // =========================================================================
-async function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs: number = 9000, label: string = 'Firestore operation'): Promise<T> {
+async function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs: number = 25000, label: string = 'Firestore operation'): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -613,6 +632,7 @@ export async function syncPartyRoomToFirestore(room: any) {
       totalGiftCoins: Number(room.totalGiftCoins) || 0,
       isActive: room.isActive !== false,
       roomStatus: room.isActive !== false ? 'ready' : 'ended',
+      hostPresent: room.hostPresent !== false,
       coverImageUrl: typeof room.coverImageUrl === 'string' && room.coverImageUrl.startsWith('https://') ? room.coverImageUrl : '',
       backgroundTheme: room.backgroundTheme || 'from-[#1E103A] to-[#0A0614]',
       nowPlaying: room.nowPlaying || '',
@@ -654,7 +674,7 @@ export async function syncPartyRoomToFirestore(room: any) {
 
     await withFirestoreTimeout(
       setDoc(doc(db, 'partyRooms', room.id), stripUndefinedFields(sanitizedRoom), { merge: true }),
-      9000,
+      25000,
       'Party Room sync'
     );
   } catch (error) {
@@ -924,7 +944,7 @@ export async function syncLiveStreamToFirestore(stream: any) {
 
     await withFirestoreTimeout(
       setDoc(doc(db, 'liveStreams', stream.id), stripUndefinedFields(sanitizedStream), { merge: true }),
-      9000,
+      25000,
       'Live Stream sync'
     );
   } catch (error) {

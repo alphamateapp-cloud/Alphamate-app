@@ -18,6 +18,7 @@ import {
   subscribeToLiveStreamMessages,
   sendLiveStreamMessage,
   updateLiveStreamFields,
+  updateLiveStreamHeartbeat,
   deleteLiveStreamFromFirestore,
   joinLiveStreamViewer,
   leaveLiveStreamViewer,
@@ -103,6 +104,26 @@ export const LiveStreamScreen: React.FC = () => {
   useEffect(() => {
     setActiveRole(isHostByUser ? 'host' : 'viewer');
   }, [activeStream?.id, isHostByUser]);
+
+  // Keep the host's live discovery card fresh while the broadcast is active.
+  // Discovery hides streams with stale heartbeat timestamps.
+  useEffect(() => {
+    if (!activeStream?.id || !isHostByUser || !activeStream.sfuSessionId) return;
+    let cancelled = false;
+    const sendHeartbeat = () => {
+      if (!cancelled) {
+        updateLiveStreamHeartbeat(activeStream.id).catch((error) => {
+          console.warn('[LiveStream] Host heartbeat update failed:', error);
+        });
+      }
+    };
+    sendHeartbeat();
+    const heartbeatTimer = window.setInterval(sendHeartbeat, 20000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(heartbeatTimer);
+    };
+  }, [activeStream?.id, activeStream?.sfuSessionId, isHostByUser]);
 
   // Moderation & Audience state (Moderator limit: 10)
   const [moderatorIds, setModeratorIds] = useState<string[]>(

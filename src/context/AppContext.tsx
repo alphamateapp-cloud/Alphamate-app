@@ -55,6 +55,7 @@ import {
   subscribeToUserProfile,
   syncPartyRoomToFirestore,
   deletePartyRoomFromFirestore,
+  updatePartyRoomFields,
   subscribeToPartyRooms,
   updatePartyRoomSeat,
   syncLiveStreamToFirestore,
@@ -3456,14 +3457,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const publishLiveStream = async (publishedStream: LiveStream) => {
-    realtimeSocket.announceLiveStream(publishedStream);
-    setActiveStream((prev) => (prev && prev.id === publishedStream.id ? publishedStream : prev));
-    setLiveStreams((prev) => {
-      const withoutCurrent = prev.filter((s) => s.id !== publishedStream.id);
-      return [publishedStream, ...withoutCurrent];
-    });
     try {
+      // Commit the live record first. Do not expose an optimistic discovery card
+      // that the initial Firestore snapshot can immediately overwrite/remove.
       await syncLiveStreamToFirestore(publishedStream);
+      realtimeSocket.announceLiveStream(publishedStream);
+      setActiveStream((prev) => (prev && prev.id === publishedStream.id ? publishedStream : prev));
+      setLiveStreams((prev) => {
+        const withoutCurrent = prev.filter((s) => s.id !== publishedStream.id);
+        return [publishedStream, ...withoutCurrent];
+      });
       if (
         firebaseUser?.uid &&
         publishedStream.isActive !== false &&
@@ -3490,7 +3493,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .catch(() => {});
       }
     } catch (err) {
-      realtimeSocket.removeLiveStream(publishedStream.id);
+      console.error('[LiveStream] Firestore publish failed; discovery card was not announced:', err);
       throw err;
     }
   };
@@ -3783,9 +3786,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const openPartyRoom = (room: PartyRoom) => {
     const uid = auth.currentUser?.uid || currentUser.id;
-    setActivePartyRoom(room);
-    const mySeat = Array.isArray(room.seats)
-      ? room.seats.find((s: any) => s.user?.id === uid)
+    const isRoomHost = room.host?.id === uid;
+    const roomForSession = isRoomHost ? { ...room, hostPresent: true } : room;
+    if (isRoomHost && room.hostPresent === false) {
+      updatePartyRoomFields(room.id, { hostPresent: true, hostReturnedAt: new Date().toISOString() }).catch((error) => {
+        console.warn('[PartyRoom] Could not restore host presence:', error);
+      });
+    }
+    setActivePartyRoom(roomForSession);
+    const mySeat = Array.isArray(roomForSession.seats)
+      ? roomForSession.seats.find((s: any) => s.user?.id === uid)
       : null;
     setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
     setIsMicMuted(mySeat ? Boolean(mySeat.isMuted || mySeat.isHostMuted) : false);

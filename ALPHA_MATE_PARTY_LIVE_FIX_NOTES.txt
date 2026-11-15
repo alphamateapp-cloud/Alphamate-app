@@ -1,0 +1,51 @@
+ALPHA MATE – PARTY ROOM / LIVE DISCOVERY PATCH
+
+Changes included:
+1. Android Firestore transport:
+   - Native Capacitor builds initialize the configured Firestore database with
+     experimentalForceLongPolling=true and useFetchStreams=false.
+   - Party Room and Live Stream sync timeout increased from 9 seconds to 25 seconds.
+   - The configured custom Firestore database ID is preserved.
+
+2. Solo Live discovery card:
+   - The live stream record is committed to Firestore before the discovery card is
+     announced/published locally, preventing an optimistic card from flashing and
+     then being removed by the first Firestore snapshot.
+   - The host sends a Firestore heartbeat every 20 seconds while the live session
+     is active, so the card remains discoverable while the host is broadcasting.
+
+3. Party Room host presence:
+   - Party Room document stores hostPresent.
+   - When the host chooses Leave Room (Keep Open), hostPresent becomes false;
+     the room remains active and guests can stay.
+   - The host profile/avatar is replaced by a reserved empty host throne indicator.
+   - Other users cannot claim the host throne; guest seat handling is unchanged.
+   - When the owner re-enters their own room, hostPresent becomes true and the
+     host avatar/throne is restored.
+
+4. Preserved:
+   - Firebase Authentication native plugin registration from the previous repair.
+   - Existing WebRTC/SFU, Party voice, live audio, microphone and guest seat
+     mechanics were not intentionally changed.
+
+Build instructions:
+1. npm ci
+2. npm run build
+3. npx cap sync android
+4. cd android
+5. ./gradlew clean assembleRelease bundleRelease
+
+Use the SAME official Play Store upload keystore and signing credentials as the
+currently published app. Do not create a new signing key.
+
+IMPORTANT VALIDATION STATUS:
+- Source-level checks passed for all intended changes.
+- This environment did not contain node_modules or the official release keystore.
+- A release APK/AAB was NOT built or installed on a physical device here.
+- Before Play Store upload, test on at least two Android devices:
+  a. Create Party Room from APK; verify it creates and appears in discovery.
+  b. Host leaves with Keep Open; verify room stays visible and host throne is empty.
+  c. Host re-enters; verify host throne returns and is not claimable by guests.
+  d. Guest joins/leaves guest seats and party voice remains functional.
+  e. Start Solo Live; verify discovery card remains until host ends the stream.
+  f. Verify live voice/audio and reconnect behavior.

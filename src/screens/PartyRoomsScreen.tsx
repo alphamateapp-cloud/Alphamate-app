@@ -2152,6 +2152,9 @@ export const PartyRoomsScreen: React.FC = () => {
           />
         ) : (
           <div className="relative z-10 -mt-2 flex flex-col items-center px-2 pt-0 pb-1 shrink-0 w-full">
+          {/* Host throne and avatar are hidden while the owner is away; the throne remains reserved. */}
+          {activePartyRoom.hostPresent !== false ? (
+          <>
           {/* Royal Crown Emblem atop Host Avatar */}
           <div className="relative -mb-2.5 z-20">
             <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-amber-500 via-amber-300 to-yellow-200 flex items-center justify-center shadow-[0_0_16px_rgba(251,191,36,0.85)] border border-amber-100">
@@ -2159,7 +2162,7 @@ export const PartyRoomsScreen: React.FC = () => {
             </div>
           </div>
 
-          {/* Host Profile Picture with Multi-Layered Royal Golden Pedestal Frame */}
+          {/* Reserved Host Throne */}
           <div
             className="relative cursor-pointer group rounded-full p-1 bg-gradient-to-b from-amber-300/35 via-amber-500/15 to-amber-700/30 ring-1 ring-amber-400/55 shadow-[0_0_26px_rgba(251,191,36,0.32)]"
             onClick={() => {
@@ -2241,6 +2244,14 @@ export const PartyRoomsScreen: React.FC = () => {
               {isFollowingHost ? 'Following' : '+ Follow'}
             </button>
           </div>
+          </>
+          ) : (
+            <div className="flex flex-col items-center justify-center gap-2 py-3 px-5 rounded-2xl border border-dashed border-amber-400/35 bg-amber-500/5">
+              <Crown className="w-8 h-8 text-amber-400/70" />
+              <span className="text-[10px] font-black uppercase tracking-wider text-amber-300/80">Host Seat Reserved</span>
+              <span className="text-[9px] text-zinc-500">Waiting for {activePartyRoom.host.displayName} to return</span>
+            </div>
+          )}
 
           {/* Quick moderation bar if Host or Mod */}
           {canModerate && (
@@ -3335,10 +3346,16 @@ export const PartyRoomsScreen: React.FC = () => {
               <div className="space-y-3 mb-5">
                 {/* 1. Leave Room (Lounge stays open) */}
                 <button
-                  onClick={() => {
+                  onClick={async () => {
                     setShowExitConfirmModal(false);
+                    if (activePartyRoom?.id) {
+                      await updatePartyRoomFields(activePartyRoom.id, {
+                        hostPresent: false,
+                        hostLeftAt: new Date().toISOString(),
+                      }).catch((error) => console.warn('[PartyRoom] Host leave presence update failed:', error));
+                    }
                     closePartyRoom(false);
-                    showToast('Lounge is still active for guests! 🎙️');
+                    showToast('Lounge is still active. Your host seat is reserved! 🎙️');
                   }}
                   className="w-full p-3.5 rounded-2xl bg-[#1C1033] border border-[#A855F7]/30 hover:border-[#A855F7] flex items-start gap-3 text-left transition-all cursor-pointer group hover:bg-[#231540]"
                 >
@@ -3351,7 +3368,7 @@ export const PartyRoomsScreen: React.FC = () => {
                       <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold uppercase tracking-wider">Keep Open</span>
                     </div>
                     <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
-                      The room remains active. Seated guests and viewers can stay and chat. Your host throne remains reserved.
+                      The room remains active. Seated guests and viewers can stay and chat. Your host throne becomes empty and stays reserved for you.
                     </p>
                   </div>
                 </button>
