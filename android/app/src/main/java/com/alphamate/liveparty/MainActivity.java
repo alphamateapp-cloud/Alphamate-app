@@ -4,12 +4,21 @@ import android.media.AudioManager;
 import android.os.Bundle;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
+
 import com.getcapacitor.BridgeActivity;
+import io.capawesome.capacitorjs.plugins.firebase.authentication.FirebaseAuthenticationPlugin;
 
 public class MainActivity extends BridgeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        // Explicitly register Firebase Authentication on Android.
+        // This prevents the JS bridge error:
+        // "FirebaseAuthentication plugin is not implemented on android".
+        registerPlugin(FirebaseAuthenticationPlugin.class);
+
+        // Existing custom plugin; keep its registration unchanged.
         registerPlugin(KeepScreenOnPlugin.class);
+
         super.onCreate(savedInstanceState);
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
         try {

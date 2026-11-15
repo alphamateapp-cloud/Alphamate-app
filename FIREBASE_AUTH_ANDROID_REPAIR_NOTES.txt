@@ -1,0 +1,38 @@
+ALPHA MATE – FIREBASE AUTHENTICATION ANDROID REPAIR NOTES
+
+Observed app error:
+"FirebaseAuthentication" plugin is not implemented on android
+
+Source inspection found:
+- @capacitor-firebase/authentication 8.6.0 is present in package.json and package-lock.json.
+- Android Gradle settings include the capacitor-firebase-authentication module.
+- android/app/capacitor.build.gradle includes the native plugin dependency.
+- android/app/src/main/assets/capacitor.plugins.json contains the FirebaseAuthenticationPlugin classpath.
+- capacitor.config.ts enables the google.com provider.
+- google-services.json package name matches com.alphamate.liveparty.
+
+Repair applied:
+- MainActivity.java now explicitly registers
+  io.capawesome.capacitorjs.plugins.firebase.authentication.FirebaseAuthenticationPlugin
+  before super.onCreate(), while preserving KeepScreenOnPlugin registration and all existing audio/WebView code.
+
+IMPORTANT:
+This is a source-code repair only. A new APK has NOT been built or device-tested in this environment.
+The exported project did not include node_modules or the release signing keystore.
+
+Build from the project root:
+1. npm ci
+2. npm run build
+3. npx cap sync android
+4. cd android
+5. ./gradlew clean assembleRelease bundleRelease
+
+Use the existing official release keystore and credentials. Do not create a new signing key for an update to the existing Play Store app.
+
+After build, install the release APK on a physical Android device and test:
+- Google Sign-In
+- Email/password sign-in and registration
+- Logout and sign-in again
+- Existing party room and live voice behavior
+
+If the same plugin-not-implemented error remains after this build, inspect Android Logcat and the generated capacitor.plugins.json inside the newly built APK before changing Firebase project settings.
