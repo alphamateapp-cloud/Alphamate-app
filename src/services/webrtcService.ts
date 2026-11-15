@@ -632,11 +632,16 @@ class RealtimeSfuStreamingEngine {
     };
   }
 
+  public prewarmConnections(): void {
+    this.fetchCloudflareTurnCredentials().catch(() => {});
+    realtimeSocket.ensureConnected();
+  }
+
   public isCloudflareTurnActive(): boolean {
     return this.hasCloudflareTurn;
   }
 
-  private waitForIceGatheringComplete(pc: RTCPeerConnection, maxWaitMs: number = 1600): Promise<void> {
+  private waitForIceGatheringComplete(pc: RTCPeerConnection, maxWaitMs: number = 750): Promise<void> {
     if (pc.iceGatheringState === 'complete') {
       return Promise.resolve();
     }
@@ -664,7 +669,7 @@ class RealtimeSfuStreamingEngine {
         }
         const candStr = e.candidate.candidate || '';
         if ((candStr.includes(' typ srflx ') || candStr.includes(' typ relay ')) && !candidateSettleTimer) {
-          candidateSettleTimer = setTimeout(done, 220);
+          candidateSettleTimer = setTimeout(done, 75);
         }
       };
       const hardTimer = setTimeout(done, maxWaitMs);
@@ -910,7 +915,7 @@ class RealtimeSfuStreamingEngine {
         sdp: this.optimizeSdpForVoice(rawOffer.sdp || '', 24000),
       };
       await pc.setLocalDescription(offer);
-      await this.waitForIceGatheringComplete(pc, 1500);
+      await this.waitForIceGatheringComplete(pc, 750);
 
       const sfuTracksPayload = addedTransceivers.map((entry) => {
         if (!entry.transceiver.mid) {
@@ -944,7 +949,7 @@ class RealtimeSfuStreamingEngine {
             sdp: this.optimizeSdpForVoice(rawAnswer.sdp || '', 24000),
           };
           await pc.setLocalDescription(answer);
-          await this.waitForIceGatheringComplete(pc, 1200);
+          await this.waitForIceGatheringComplete(pc, 650);
           await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
             sessionDescription: {
               type: pc.localDescription!.type,
@@ -1043,7 +1048,7 @@ class RealtimeSfuStreamingEngine {
             sdp: this.optimizeSdpForVoice(rawAnswer.sdp || '', 24000),
           };
           await pc.setLocalDescription(answer);
-          await this.waitForIceGatheringComplete(pc, 1500);
+          await this.waitForIceGatheringComplete(pc, 750);
           await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
             sessionDescription: {
               type: pc.localDescription!.type,
@@ -2117,7 +2122,6 @@ class RealtimeSfuStreamingEngine {
     try {
       const mediaAndConfig = await Promise.all([
         this.getLocalMediaStream(facing, true),
-        this.ensureSfuBackendConfigured(),
         this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
       ]);
       stream = mediaAndConfig[0];
@@ -2486,10 +2490,7 @@ class RealtimeSfuStreamingEngine {
     }
 
     await this.getFirebaseIdToken();
-    await Promise.all([
-      this.ensureSfuBackendConfigured(),
-      this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
-    ]);
+    await this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]);
 
     const viewerSessionId = await this.createSfuSession();
     const pc = new RTCPeerConnection(this.getRtcConfiguration());
@@ -2529,7 +2530,7 @@ class RealtimeSfuStreamingEngine {
         firstTrackSettleTimer = setTimeout(() => {
           firstTrackSettleTimer = null;
           resolveTrackWaiter?.();
-        }, 1200);
+        }, 350);
       }
     };
 
@@ -3128,12 +3129,24 @@ class RealtimeSfuStreamingEngine {
 
     await this._stopPartyVoiceInternal(roomId, false, false);
     await this.getFirebaseIdToken();
-    await Promise.all([
-      this.ensureSfuBackendConfigured(),
+
+    const [subToken, _turnReady, preAcquiredStream, preAcquiredPubToken] = await Promise.all([
+      this.requestPartyRoomSessionToken(roomId, false),
       this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
+      !listenOnly
+        ? navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+            video: false,
+          })
+        : Promise.resolve(null),
+      !listenOnly ? this.requestPartyRoomSessionToken(roomId, true) : Promise.resolve(null),
     ]);
 
-    const subToken = await this.requestPartyRoomSessionToken(roomId, false);
     const subSfuSessionId = subToken.sfuSessionId;
     const subPc = new RTCPeerConnection(this.getRtcConfiguration());
 
@@ -3183,17 +3196,32 @@ class RealtimeSfuStreamingEngine {
       onReconnectNeeded: () => this.reconnectPartyVoice(roomId),
     });
 
-    try {
-      if (!listenOnly) {
-        await this.publishPartyLocalMic(session, isMuted);
-      }
+    // Attach presence & remote speaker listeners IMMEDIATELY so incoming audio plays without waiting for local mic ICE
+    this.startPartyHeartbeat(session);
+    this.attachPartyParticipantsListener(session);
 
-      await this.writePartyParticipantPresence(session);
-      this.startPartyHeartbeat(session);
-      this.attachPartyParticipantsListener(session);
+    try {
+      const presenceWritePromise = this.writePartyParticipantPresence(session);
+      if (!listenOnly) {
+        await this.publishPartyLocalMic(session, isMuted, {
+          preAcquiredStream: preAcquiredStream || undefined,
+          preAcquiredPubToken: preAcquiredPubToken || undefined,
+        });
+      } else {
+        await presenceWritePromise;
+      }
 
       return session.localStream;
     } catch (err) {
+      if (preAcquiredStream && session.localStream !== preAcquiredStream) {
+        preAcquiredStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
       await this._stopPartyVoiceInternal(roomId, false, false);
       throw err;
     }
@@ -3342,18 +3370,33 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
-  private async publishPartyLocalMic(session: PartySfuRoomSession, isMuted: boolean): Promise<void> {
+  private async publishPartyLocalMic(
+    session: PartySfuRoomSession,
+    isMuted: boolean,
+    preAcquired?: {
+      preAcquiredStream?: MediaStream;
+      preAcquiredPubToken?: { sfuSessionId: string; role: string; canPublish: boolean };
+    }
+  ): Promise<void> {
     await this.cleanupPartyPublisher(session);
 
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-        channelCount: 1,
-      },
-      video: false,
-    });
+    const [stream, pubToken] = await Promise.all([
+      preAcquired?.preAcquiredStream
+        ? Promise.resolve(preAcquired.preAcquiredStream)
+        : navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+              channelCount: 1,
+            },
+            video: false,
+          }),
+      preAcquired?.preAcquiredPubToken
+        ? Promise.resolve(preAcquired.preAcquiredPubToken)
+        : this.requestPartyRoomSessionToken(session.roomId, true),
+    ]);
+
     stream.getAudioTracks().forEach((t) => {
       t.enabled = !isMuted;
     });
@@ -3369,7 +3412,6 @@ class RealtimeSfuStreamingEngine {
     const trackName = `party-${session.roomId}-${session.userId}-${Date.now().toString(36)}`;
 
     try {
-      const pubToken = await this.requestPartyRoomSessionToken(session.roomId, true);
       pubSfuSessionId = pubToken.sfuSessionId;
       pubPc = new RTCPeerConnection(this.getRtcConfiguration());
 
@@ -3394,13 +3436,7 @@ class RealtimeSfuStreamingEngine {
 
       this.attachPartyPubMonitor(session, pubPc);
 
-      // Let ICE connect cleanly (or yield after 1.2s on fast paths while continuing to verify 25s below)
-      await Promise.race([
-        this.waitForPeerConnected(pubPc, 25000).catch(() => undefined),
-        this.delayMs(1200),
-      ]);
-
-      // Broadcast via WebSocket AND write Firestore presence so remote peers subscribe seamlessly
+      // Broadcast via WebSocket AND write Firestore presence immediately while ICE finishes converging
       realtimeSocket.sendRoomSignal('party', session.roomId, {
         type: 'voice_updated',
         peerId: session.userId,
@@ -3409,9 +3445,15 @@ class RealtimeSfuStreamingEngine {
         isPublishing: true,
       });
       await this.writePartyParticipantPresence(session);
-      await this.waitForPeerConnected(pubPc, 25000);
 
-      console.info('[Party SFU] Local mic published & ICE connected to Cloudflare SFU:', {
+      // Verify ICE completion without blocking caller/room join
+      this.waitForPeerConnected(pubPc, 25000).catch((err) => {
+        if (!session.isClosed && session.pubPc === pubPc) {
+          console.warn('[Party SFU] Publisher ICE convergence warning:', err?.message || err);
+        }
+      });
+
+      console.info('[Party SFU] Local mic published to Cloudflare SFU:', {
         roomId: session.roomId,
         pubSfuSessionId,
         trackName,

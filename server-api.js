@@ -154,6 +154,28 @@ export function createApiApp() {
     };
   }
 
+  let turnCache = null;
+  let turnCacheInFlight = null;
+
+  async function getCachedTurnIceServers(ttlSeconds = TURN_CREDENTIAL_TTL) {
+    const now = Date.now();
+    if (turnCache && now < turnCache.cachedUntil) {
+      return turnCache.payload;
+    }
+    if (!turnCacheInFlight) {
+      turnCacheInFlight = generateTurnIceServers(ttlSeconds)
+        .then((payload) => {
+          const ttlMs = Math.max(60_000, Math.min(20 * 60_000, (payload.ttl - 120) * 1000));
+          turnCache = { payload, cachedUntil: Date.now() + ttlMs };
+          return payload;
+        })
+        .finally(() => {
+          turnCacheInFlight = null;
+        });
+    }
+    return turnCacheInFlight;
+  }
+
   let healthCache = null;
   let healthCacheExpiresAt = 0;
   let healthRefreshInFlight = null;
@@ -302,8 +324,19 @@ export function createApiApp() {
     }
   });
 
+  const tokenVerifyCache = new Map();
+  const TOKEN_VERIFY_CACHE_TTL_MS = 90_000;
+
   async function verifyFirebaseIdToken(idToken) {
     if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY is not configured on the backend server.');
+    if (!idToken || typeof idToken !== 'string') return null;
+
+    const now = Date.now();
+    const cached = tokenVerifyCache.get(idToken);
+    if (cached && now < cached.expiresAt) {
+      return cached.user;
+    }
+
     const response = await fetchWithTimeout(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
       {
@@ -316,7 +349,21 @@ export function createApiApp() {
     if (!response.ok) return null;
     const data = await response.json();
     const user = data.users?.[0];
-    return user?.localId ? { uid: user.localId, email: user.email || null, emailVerified: !!user.emailVerified } : null;
+    const verified = user?.localId
+      ? { uid: user.localId, email: user.email || null, emailVerified: !!user.emailVerified }
+      : null;
+
+    if (verified) {
+      if (tokenVerifyCache.size >= 500) {
+        const oldestKey = tokenVerifyCache.keys().next().value;
+        if (oldestKey) tokenVerifyCache.delete(oldestKey);
+      }
+      tokenVerifyCache.set(idToken, {
+        user: verified,
+        expiresAt: now + TOKEN_VERIFY_CACHE_TTL_MS,
+      });
+    }
+    return verified;
   }
 
   async function requireFirebaseAuth(req, res, next) {
@@ -396,6 +443,27 @@ export function createApiApp() {
     return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
   }
 
+  const authDocCache = new Map();
+  const AUTH_DOC_CACHE_TTL_MS = 12_000;
+
+  async function fetchCachedFirestoreDocument(documentPath, idToken) {
+    const now = Date.now();
+    const cached = authDocCache.get(documentPath);
+    if (cached && now < cached.expiresAt) {
+      return cached.doc;
+    }
+    const fetched = await fetchFirestoreDocument(documentPath, idToken);
+    if (authDocCache.size >= 500) {
+      const oldestKey = authDocCache.keys().next().value;
+      if (oldestKey) authDocCache.delete(oldestKey);
+    }
+    authDocCache.set(documentPath, {
+      doc: fetched,
+      expiresAt: now + AUTH_DOC_CACHE_TTL_MS,
+    });
+    return fetched;
+  }
+
   async function authorizeRemoteTrackSubscriptions(req, tracks) {
     const remoteTracks = tracks.filter((t) => t.location === 'remote');
     if (!remoteTracks.length) return { ok: true };
@@ -414,9 +482,11 @@ export function createApiApp() {
     const idToken = req.firebaseIdToken;
 
     if (contextType === 'live') {
-      const firestoreDoc = await fetchFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken).catch(() => null);
       const memDoc = app.locals.realtimeRegistry?.getLiveStream?.(contextId) || null;
-      const streamDoc = firestoreDoc || memDoc;
+      const firestoreDoc = memDoc && memDoc.isActive !== false && memDoc.sfuSessionId
+        ? null
+        : await fetchCachedFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken).catch(() => null);
+      const streamDoc = memDoc || firestoreDoc;
       if (!streamDoc || streamDoc.isActive === false) {
         return { ok: false, status: 404, error: 'Live stream is not active or no longer exists.' };
       }
@@ -443,10 +513,11 @@ export function createApiApp() {
     }
 
     if (contextType === 'party') {
+      const memRoom = app.locals.realtimeRegistry?.getPartyRoom?.(contextId) || null;
       const roomDoc =
-        (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}`, idToken).catch(() => null)) ||
-        app.locals.realtimeRegistry?.getPartyRoom?.(contextId) ||
-        null;
+        (memRoom && memRoom.isActive !== false ? memRoom : null) ||
+        (await fetchCachedFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}`, idToken).catch(() => null)) ||
+        memRoom;
       if (!roomDoc || roomDoc.isActive === false) {
         return { ok: false, status: 404, error: 'Party room is closed or no longer exists.' };
       }
@@ -738,7 +809,7 @@ export function createApiApp() {
 
   app.get('/api/webrtc/turn-credentials', requireFirebaseAuth, async (_req, res) => {
     try {
-      const generated = await generateTurnIceServers(TURN_CREDENTIAL_TTL);
+      const generated = await getCachedTurnIceServers(TURN_CREDENTIAL_TTL);
       const hasStun = generated.iceServers.some((s) => {
         const urls = Array.isArray(s?.urls) ? s.urls : s?.urls ? [s.urls] : [];
         return urls.some((u) => typeof u === 'string' && u.startsWith('stun:'));
@@ -1095,7 +1166,7 @@ export function createApiApp() {
 
       const [sfuSession, turnCreds] = await Promise.all([
         callCloudflareSfu('/sessions/new', 'POST'),
-        generateTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
+        getCachedTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
       ]);
 
       if (!sfuSession?.sessionId) {
@@ -1142,10 +1213,11 @@ export function createApiApp() {
 
       const uid = req.firebaseUser.uid;
       const idToken = req.firebaseIdToken;
+      const memRoom = app.locals.realtimeRegistry?.getPartyRoom?.(roomId) || null;
       const roomDoc =
-        (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
-        app.locals.realtimeRegistry?.getPartyRoom?.(roomId) ||
-        null;
+        (memRoom && memRoom.isActive !== false ? memRoom : null) ||
+        (await fetchCachedFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
+        memRoom;
 
       if (!roomDoc || roomDoc.isActive === false) {
         return res.status(404).json({ success: false, error: 'Party room is closed or does not exist.' });
@@ -1173,7 +1245,7 @@ export function createApiApp() {
 
       const [sfuSession, turnCreds] = await Promise.all([
         callCloudflareSfu('/sessions/new', 'POST'),
-        generateTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
+        getCachedTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
       ]);
 
       if (!sfuSession?.sessionId) {

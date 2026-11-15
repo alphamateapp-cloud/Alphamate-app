@@ -210,6 +210,7 @@ export const PartyRoomsScreen: React.FC = () => {
   const startupAutoRetryCountRef = useRef<number>(0);
   const startupRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialParticipantsSeededRef = useRef<boolean>(false);
+  const wsInitialViewersSeededRef = useRef<boolean>(false);
   const notifiedJoinTimestampsRef = useRef<Map<string, number>>(new Map());
   const joinNotificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSyncedViewerCountRef = useRef<number>(-1);
@@ -960,6 +961,7 @@ export const PartyRoomsScreen: React.FC = () => {
       setRemoteSpeakingPeerIds(new Set());
       setJoinNotification(null);
       initialParticipantsSeededRef.current = false;
+      wsInitialViewersSeededRef.current = false;
       notifiedJoinTimestampsRef.current.clear();
       lastSyncedViewerCountRef.current = -1;
       lastSelfSpeakingSyncedRef.current = false;
@@ -992,10 +994,33 @@ export const PartyRoomsScreen: React.FC = () => {
     voiceHasConnectedRef.current = false;
     voiceParticipantsLoadedRef.current = false;
     initialParticipantsSeededRef.current = false;
+    wsInitialViewersSeededRef.current = false;
     notifiedJoinTimestampsRef.current.clear();
     lastSyncedViewerCountRef.current = -1;
     lastSelfSpeakingSyncedRef.current = false;
     setJoinNotification(null);
+
+    const triggerJoinBanner = (joinedUserId: string, displayName?: string) => {
+      if (!joinedUserId || joinedUserId === effectiveUserId) return;
+      const now = Date.now();
+      const lastNotified = notifiedJoinTimestampsRef.current.get(joinedUserId);
+      if (!lastNotified || now - lastNotified > 25_000) {
+        notifiedJoinTimestampsRef.current.set(joinedUserId, now);
+        if (joinNotificationTimerRef.current) {
+          clearTimeout(joinNotificationTimerRef.current);
+        }
+        setJoinNotification({
+          id: `${joinedUserId}_${now}`,
+          name: displayName || 'New Guest',
+        });
+        joinNotificationTimerRef.current = setTimeout(() => {
+          setJoinNotification(null);
+          joinNotificationTimerRef.current = null;
+        }, 3500);
+      } else {
+        notifiedJoinTimestampsRef.current.set(joinedUserId, now);
+      }
+    };
 
     // Record initial voice state so Effect #2 does not redundantly re-trigger startup
     lastVoiceModeRef.current = {
@@ -1069,25 +1094,7 @@ export const PartyRoomsScreen: React.FC = () => {
           }
 
           for (const p of participants) {
-            if (p.userId === effectiveUserId) continue;
-            const lastNotified = notifiedJoinTimestampsRef.current.get(p.userId);
-            if (!lastNotified || now - lastNotified > 25_000) {
-              notifiedJoinTimestampsRef.current.set(p.userId, now);
-              if (joinNotificationTimerRef.current) {
-                clearTimeout(joinNotificationTimerRef.current);
-              }
-              setJoinNotification({
-                id: `${p.userId}_${now}`,
-                name: p.displayName || 'New Guest',
-              });
-              joinNotificationTimerRef.current = setTimeout(() => {
-                setJoinNotification(null);
-                joinNotificationTimerRef.current = null;
-              }, 3500);
-            } else {
-              // Refresh timestamp while peer stays active so reconnects do not re-notify
-              notifiedJoinTimestampsRef.current.set(p.userId, now);
-            }
+            triggerJoinBanner(p.userId, p.displayName);
           }
         },
       })
@@ -1141,7 +1148,19 @@ export const PartyRoomsScreen: React.FC = () => {
     const unsubWsPartyRoom = realtimeSocket.onRoomEvent('party', roomId, (ev) => {
       if (cancelled) return;
       if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
-        setWsPartyViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
+        const viewersList = Array.isArray(ev.viewers) ? ev.viewers : [];
+        setWsPartyViewers(viewersList);
+        if (ev.type === 'room:state_init' || !wsInitialViewersSeededRef.current) {
+          wsInitialViewersSeededRef.current = true;
+          const now = Date.now();
+          viewersList.forEach((v: any) => {
+            if (v?.id) notifiedJoinTimestampsRef.current.set(v.id, now);
+          });
+        } else {
+          viewersList.forEach((v: any) => {
+            if (v?.id) triggerJoinBanner(v.id, v.displayName || v.username);
+          });
+        }
       }
     });
 

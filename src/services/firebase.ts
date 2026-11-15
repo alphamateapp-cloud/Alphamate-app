@@ -351,17 +351,102 @@ export async function syncUserProfileToFirestore(userData: any) {
   }
 }
 
+export type UserProfileFetchResult =
+  | { status: 'found'; data: any }
+  | { status: 'missing'; data: null }
+  | { status: 'error'; error: unknown; data: null };
+
+/**
+ * Partially update only the supplied fields on users/{userId} with merge:true.
+ * Prevents stale in-memory defaults from overwriting coins, level, uniqueId, or followers.
+ */
+export async function updateUserProfileFieldsInFirestore(
+  userId: string,
+  partialFields: Record<string, any>
+) {
+  if (!userId || !partialFields || typeof partialFields !== 'object') return;
+  const path = `users/${userId}`;
+  try {
+    const rawUpdate: Record<string, any> = {
+      ...partialFields,
+      updatedAt: new Date().toISOString(),
+    };
+    delete rawUpdate.password;
+
+    if (typeof partialFields.username === 'string') {
+      rawUpdate.usernameLower = partialFields.username.trim().toLowerCase();
+    }
+    if (typeof partialFields.displayName === 'string') {
+      rawUpdate.displayNameLower = partialFields.displayName.trim().toLowerCase();
+    }
+    if (typeof partialFields.uniqueId === 'string') {
+      rawUpdate.uniqueIdLower = partialFields.uniqueId.trim().toLowerCase();
+    }
+    if (typeof partialFields.avatar === 'string') {
+      rawUpdate.avatar = sanitizeAvatarString(partialFields.avatar);
+    }
+    if ('coverImage' in partialFields) {
+      const cover = partialFields.coverImage;
+      if (!(typeof cover === 'string' && cover.length > 0 && cover.length <= 80000)) {
+        delete rawUpdate.coverImage;
+      }
+    }
+
+    const sanitized = stripUndefinedFields(rawUpdate);
+    await setDoc(doc(db, 'users', userId), sanitized, { merge: true });
+  } catch (error) {
+    console.warn(`[Firestore] Partial profile update warning (${path}):`, error);
+  }
+}
+
+/**
+ * Server-first user profile lookup that clearly distinguishes missing docs from transient network errors.
+ */
+export async function getUserProfileFromFirestoreResult(
+  userId: string
+): Promise<UserProfileFetchResult> {
+  if (!userId) return { status: 'missing', data: null };
+  const path = `users/${userId}`;
+  const docRef = doc(db, 'users', userId);
+
+  try {
+    const serverSnap = await withFirestoreTimeout(
+      getDocFromServer(docRef),
+      7000,
+      'User profile server lookup'
+    );
+    return serverSnap.exists()
+      ? { status: 'found', data: serverSnap.data() }
+      : { status: 'missing', data: null };
+  } catch (serverErr: any) {
+    // Only fall back to local cache if server was unreachable/timed out.
+    try {
+      const cacheSnap = await getDoc(docRef);
+      if (cacheSnap.exists()) {
+        return { status: 'found', data: cacheSnap.data() };
+      }
+    } catch {
+      // ignore secondary cache error
+    }
+    if (serverErr?.code === 'permission-denied') {
+      try {
+        handleFirestoreError(serverErr, OperationType.GET, path);
+      } catch (handledErr) {
+        return { status: 'error', error: handledErr, data: null };
+      }
+    }
+    return { status: 'error', error: serverErr, data: null };
+  }
+}
+
 /**
  * Fetch User Profile from Firestore
  */
 export async function getUserProfileFromFirestore(userId: string) {
-  const path = `users/${userId}`;
-  try {
-    const snap = await getDoc(doc(db, 'users', userId));
-    return snap.exists() ? snap.data() : null;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, path);
-  }
+  const result = await getUserProfileFromFirestoreResult(userId);
+  if (result.status === 'found') return result.data;
+  if (result.status === 'missing') return null;
+  throw result.error;
 }
 
 /**

@@ -49,7 +49,9 @@ import {
   logoutUser,
   onAuthStateChanged,
   syncUserProfileToFirestore,
+  updateUserProfileFieldsInFirestore,
   getUserProfileFromFirestore,
+  getUserProfileFromFirestoreResult,
   subscribeToUserProfile,
   syncPartyRoomToFirestore,
   deletePartyRoomFromFirestore,
@@ -624,6 +626,127 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  const inFlightProfileHydrationsRef = React.useRef<Map<string, Promise<{ user: User; restricted: boolean }>>>(new Map());
+
+  const hydrateFirebaseUserProfile = async (
+    fbUser: FirebaseUser,
+    options?: {
+      forceVerified?: boolean;
+      overrideDefaults?: Partial<User>;
+      createIfMissing?: boolean;
+    }
+  ): Promise<{ user: User; restricted: boolean }> => {
+    const existingInFlight = inFlightProfileHydrationsRef.current.get(fbUser.uid);
+    if (existingInFlight) {
+      return existingInFlight;
+    }
+
+    const promise = (async () => {
+      const verified = Boolean(options?.forceVerified) || isFirebaseUserVerified(fbUser);
+      const defaults = buildNewUserFromFirebase(fbUser, options?.overrideDefaults);
+      const result = await getUserProfileFromFirestoreResult(fbUser.uid);
+
+      let mergedUser: User;
+      let shouldCreateRemote = false;
+
+      if (result.status === 'found' && result.data) {
+        const remote = result.data;
+        const pickNum = (val: unknown, fallback: number) =>
+          typeof val === 'number' && Number.isFinite(val) ? val : fallback;
+        const pickStr = (val: unknown, fallback: string) =>
+          typeof val === 'string' && val.trim().length > 0 ? val : fallback;
+
+        mergedUser = {
+          ...defaults,
+          ...remote,
+          id: fbUser.uid,
+          uniqueId: pickStr(remote.uniqueId, defaults.uniqueId),
+          username: pickStr(remote.username, defaults.username),
+          displayName: pickStr(remote.displayName, defaults.displayName),
+          email: (fbUser.email || remote.email || defaults.email || '').toLowerCase(),
+          avatar: pickStr(remote.avatar, fbUser.photoURL || defaults.avatar),
+          bio: typeof remote.bio === 'string' ? remote.bio : defaults.bio,
+          level: pickNum(remote.level, defaults.level),
+          xp: pickNum(remote.xp, defaults.xp),
+          nextLevelXp: pickNum(remote.nextLevelXp, defaults.nextLevelXp),
+          vipTier: pickNum(remote.vipTier, defaults.vipTier),
+          coins: pickNum(remote.coins, defaults.coins),
+          diamonds: pickNum(remote.diamonds, defaults.diamonds),
+          heldDiamonds: pickNum(remote.heldDiamonds, defaults.heldDiamonds || 0),
+          followersCount: pickNum(remote.followersCount, defaults.followersCount),
+          followingCount: pickNum(remote.followingCount, defaults.followingCount),
+          likesCount: pickNum(remote.likesCount, defaults.likesCount),
+          isVerified: verified || Boolean(remote.isVerified),
+          equippedBadgeIds: Array.isArray(remote.equippedBadgeIds) ? remote.equippedBadgeIds : defaults.equippedBadgeIds,
+        };
+
+        if (remote.notificationPreferences) {
+          const hydratedPrefs = pushService.setLocalPreferences({
+            ...DEFAULT_NOTIFICATION_PREFERENCES,
+            ...remote.notificationPreferences,
+            categories: {
+              ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+              ...(remote.notificationPreferences.categories || {}),
+            },
+          });
+          setNotificationPreferences(hydratedPrefs);
+        }
+
+        if (remote.dailyCheckInState && typeof remote.dailyCheckInState === 'object') {
+          const today = getTodayDateString();
+          const rc = remote.dailyCheckInState;
+          const hydratedCheckIn = {
+            streak: Number(rc.streak) || 0,
+            lastCheckInDate: rc.lastCheckInDate || null,
+            isClaimedToday: rc.lastCheckInDate === today,
+            history: Array.isArray(rc.history) ? rc.history : [],
+          };
+          setDailyCheckInState(hydratedCheckIn);
+          try {
+            localStorage.setItem('alphamate_daily_checkin', JSON.stringify(hydratedCheckIn));
+          } catch {
+            // ignore
+          }
+        }
+
+        // Only update minimal verified/authProvider metadata if needed — NEVER write full defaults over remote fields!
+        if (verified && !remote.isVerified) {
+          updateUserProfileFieldsInFirestore(fbUser.uid, { isVerified: true }).catch(() => {});
+        }
+      } else if (result.status === 'missing') {
+        mergedUser = defaults;
+        shouldCreateRemote = options?.createIfMissing !== false;
+        if (shouldCreateRemote) {
+          await syncUserProfileToFirestore(mergedUser).catch(() => {});
+        }
+      } else {
+        // Network/timeout error: preserve matching cached local profile if present, and NEVER overwrite Firestore!
+        let cachedForSameUid: Partial<User> | null = null;
+        try {
+          const raw = localStorage.getItem('alphamate_current_user');
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed?.id === fbUser.uid) cachedForSameUid = parsed;
+          }
+        } catch {
+          // ignore
+        }
+        mergedUser = cachedForSameUid
+          ? { ...defaults, ...cachedForSameUid, id: fbUser.uid, isVerified: verified || Boolean(cachedForSameUid.isVerified) }
+          : defaults;
+      }
+
+      const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
+      saveUserSession(mergedUser, verified && !restricted);
+      return { user: mergedUser, restricted };
+    })().finally(() => {
+      inFlightProfileHydrationsRef.current.delete(fbUser.uid);
+    });
+
+    inFlightProfileHydrationsRef.current.set(fbUser.uid, promise);
+    return promise;
+  };
+
   // Sync Firebase auth state (runs on boot & restores persisted device session automatically)
   useEffect(() => {
     let active = true;
@@ -638,37 +761,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsEmailVerified(verified);
 
         try {
-          const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
+          const { restricted } = await hydrateFirebaseUserProfile(fbUser, { createIfMissing: true });
           if (!active) return;
 
-          const mergedUser: User = remoteProfile
-            ? {
-                ...buildNewUserFromFirebase(fbUser),
-                ...remoteProfile,
-                id: fbUser.uid,
-                email: fbUser.email || remoteProfile.email || '',
-                displayName: remoteProfile.displayName || fbUser.displayName || 'Alpha Mate',
-                avatar: remoteProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
-                isVerified: verified || Boolean(remoteProfile.isVerified),
-              }
-            : buildNewUserFromFirebase(fbUser);
-
-          if (!remoteProfile) {
-            await syncUserProfileToFirestore(mergedUser).catch(() => {});
+          if (verified && !restricted) {
+            p2pStreamingEngine.prewarmConnections();
           }
-          if (remoteProfile?.notificationPreferences) {
-            const hydratedPrefs = pushService.setLocalPreferences({
-              ...DEFAULT_NOTIFICATION_PREFERENCES,
-              ...remoteProfile.notificationPreferences,
-              categories: {
-                ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
-                ...(remoteProfile.notificationPreferences.categories || {}),
-              },
-            });
-            setNotificationPreferences(hydratedPrefs);
-          }
-          const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
-          saveUserSession(mergedUser, verified && !restricted);
 
           // Restore an existing Firebase session directly into the app after
           // refresh/reopen. Preserve direct visits to /privacy, /terms, or /delete-account.
@@ -1211,6 +1309,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       // ignore
     }
 
+    const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+    if (activeUid) {
+      updateUserProfileFieldsInFirestore(activeUid, {
+        coins: (currentUserRef.current.coins || 0) + coinsAwarded,
+        dailyCheckInState: newState,
+      }).catch(() => {});
+    }
+
     return {
       success: true,
       coinsAwarded,
@@ -1473,9 +1579,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       lastSyncedBadgeSigRef.current = sig;
       syncUserBadgeStatsToFirestore(nextStats).catch(() => {});
       if (prevEquippedJoined !== nextEquippedJoined) {
-        syncUserProfileToFirestore({
-          ...currentUserRef.current,
-          id: firebaseUser.uid,
+        updateUserProfileFieldsInFirestore(firebaseUser.uid, {
           equippedBadgeIds: nextStats.equippedBadgeIds,
         }).catch(() => {});
         syncUserTimeSpentToLeaderboard(
@@ -1571,9 +1675,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (firebaseUser?.uid && isEmailVerified) {
       syncUserBadgeStatsToFirestore(updatedStats).catch(() => {});
-      syncUserProfileToFirestore({
-        ...currentUserRef.current,
-        id: firebaseUser.uid,
+      updateUserProfileFieldsInFirestore(firebaseUser.uid, {
         equippedBadgeIds: updatedEquipped,
       }).catch(() => {});
       syncUserTimeSpentToLeaderboard(
@@ -1625,16 +1727,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         setNotificationPreferences(syncedPrefs);
       }
-      setCurrentUser((prev) => ({
-        ...prev,
-        coins: typeof remoteProfile.coins === 'number' ? remoteProfile.coins : prev.coins,
-        diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
-        heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
-        notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
-        equippedBadgeIds: Array.isArray(remoteProfile.equippedBadgeIds)
-          ? remoteProfile.equippedBadgeIds
-          : prev.equippedBadgeIds,
-      }));
+      if (remoteProfile.dailyCheckInState && typeof remoteProfile.dailyCheckInState === 'object') {
+        const today = getTodayDateString();
+        const rc = remoteProfile.dailyCheckInState;
+        const syncedCheckIn = {
+          streak: Number(rc.streak) || 0,
+          lastCheckInDate: rc.lastCheckInDate || null,
+          isClaimedToday: rc.lastCheckInDate === today,
+          history: Array.isArray(rc.history) ? rc.history : [],
+        };
+        setDailyCheckInState(syncedCheckIn);
+        try {
+          localStorage.setItem('alphamate_daily_checkin', JSON.stringify(syncedCheckIn));
+        } catch {}
+      }
+      setCurrentUser((prev) => {
+        const updated: User = {
+          ...prev,
+          id: uid,
+          uniqueId: typeof remoteProfile.uniqueId === 'string' && remoteProfile.uniqueId ? remoteProfile.uniqueId : prev.uniqueId,
+          displayName: typeof remoteProfile.displayName === 'string' && remoteProfile.displayName ? remoteProfile.displayName : prev.displayName,
+          username: typeof remoteProfile.username === 'string' && remoteProfile.username ? remoteProfile.username : prev.username,
+          avatar: typeof remoteProfile.avatar === 'string' && remoteProfile.avatar ? remoteProfile.avatar : prev.avatar,
+          bio: typeof remoteProfile.bio === 'string' ? remoteProfile.bio : prev.bio,
+          level: typeof remoteProfile.level === 'number' ? remoteProfile.level : prev.level,
+          xp: typeof remoteProfile.xp === 'number' ? remoteProfile.xp : prev.xp,
+          nextLevelXp: typeof remoteProfile.nextLevelXp === 'number' ? remoteProfile.nextLevelXp : prev.nextLevelXp,
+          vipTier: typeof remoteProfile.vipTier === 'number' ? remoteProfile.vipTier : prev.vipTier,
+          coins: typeof remoteProfile.coins === 'number' ? remoteProfile.coins : prev.coins,
+          diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
+          heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
+          followersCount: typeof remoteProfile.followersCount === 'number' ? remoteProfile.followersCount : prev.followersCount,
+          followingCount: typeof remoteProfile.followingCount === 'number' ? remoteProfile.followingCount : prev.followingCount,
+          likesCount: typeof remoteProfile.likesCount === 'number' ? remoteProfile.likesCount : prev.likesCount,
+          activeFrame: typeof remoteProfile.activeFrame === 'string' ? remoteProfile.activeFrame : prev.activeFrame,
+          activeHonorTitle: typeof remoteProfile.activeHonorTitle === 'string' ? remoteProfile.activeHonorTitle : prev.activeHonorTitle,
+          accountStatus: remoteProfile.accountStatus || prev.accountStatus,
+          notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
+          equippedBadgeIds: Array.isArray(remoteProfile.equippedBadgeIds)
+            ? remoteProfile.equippedBadgeIds
+            : prev.equippedBadgeIds,
+        };
+        try {
+          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+        } catch {}
+        return updated;
+      });
     });
 
     const unsubNotifs = subscribeToUserNotifications(uid, (remoteItems) => {
@@ -1698,6 +1836,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubFollows = subscribeToMyFollowEdges(uid, (edges) => {
       setFollowingUserIds(edges.followingIds);
       setFollowerUserIds(edges.followerIds);
+      const nextFollowingCount = edges.followingIds.length;
+      const nextFollowersCount = edges.followerIds.length;
+      setCurrentUser((prev) => {
+        if (prev.followingCount === nextFollowingCount && prev.followersCount === nextFollowersCount) {
+          return prev;
+        }
+        const updated = {
+          ...prev,
+          followingCount: nextFollowingCount,
+          followersCount: nextFollowersCount,
+        };
+        try {
+          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+        } catch {}
+        updateUserProfileFieldsInFirestore(uid, {
+          followingCount: nextFollowingCount,
+          followersCount: nextFollowersCount,
+        }).catch(() => {});
+        return updated;
+      });
     });
 
     return () => {
@@ -2896,24 +3054,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      const existingProfile = await getUserProfileFromFirestore(fbUser.uid);
-      const userObj: User = existingProfile
-        ? {
-            ...buildNewUserFromFirebase(fbUser),
-            ...existingProfile,
-            id: fbUser.uid,
-            displayName: existingProfile.displayName || fbUser.displayName || 'Alpha Mate',
-            email: (fbUser.email || existingProfile.email || '').toLowerCase(),
-            avatar: existingProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
-            isVerified: true,
-          }
-        : buildNewUserFromFirebase(fbUser, { isVerified: true });
+      const { user: userObj, restricted } = await hydrateFirebaseUserProfile(fbUser, {
+        forceVerified: true,
+        createIfMissing: true,
+      });
 
-      await syncUserProfileToFirestore(userObj);
       setFirebaseUser(fbUser);
       setIsEmailVerified(true);
-      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
-      saveUserSession(userObj, !restricted);
+      if (!restricted) {
+        p2pStreamingEngine.prewarmConnections();
+      }
       if (!options?.skipRedirect) {
         if (restricted) {
           setScreenHistory(['welcome', 'account_recovery']);
@@ -2937,15 +3087,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setFirebaseUser(fbUser);
       setIsEmailVerified(verified);
 
-      const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
-      const userObj: User = remoteProfile
-        ? {
-            ...buildNewUserFromFirebase(fbUser),
-            ...remoteProfile,
-            id: fbUser.uid,
-            isVerified: verified,
-          }
-        : buildNewUserFromFirebase(fbUser, { isVerified: verified });
+      const { user: userObj, restricted } = await hydrateFirebaseUserProfile(fbUser, {
+        forceVerified: verified,
+        createIfMissing: verified,
+      });
 
       if (!verified) {
         saveUserSession(userObj, false);
@@ -2957,9 +3102,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
-      await syncUserProfileToFirestore(userObj).catch(() => {});
-      saveUserSession(userObj, !restricted);
+      if (!restricted) {
+        p2pStreamingEngine.prewarmConnections();
+      }
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
         setCurrentScreenState('account_recovery');
@@ -3017,13 +3162,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setFirebaseUser(refreshed);
     setIsEmailVerified(verified);
     if (verified) {
-      const remoteProfile = await getUserProfileFromFirestore(refreshed.uid).catch(() => null);
-      const userObj: User = remoteProfile
-        ? { ...buildNewUserFromFirebase(refreshed), ...remoteProfile, id: refreshed.uid, isVerified: true }
-        : buildNewUserFromFirebase(refreshed, { isVerified: true });
-      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
-      await syncUserProfileToFirestore(userObj).catch(() => {});
-      saveUserSession(userObj, !restricted);
+      const { restricted } = await hydrateFirebaseUserProfile(refreshed, {
+        forceVerified: true,
+        createIfMissing: true,
+      });
+      if (!restricted) {
+        p2pStreamingEngine.prewarmConnections();
+      }
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
         setCurrentScreenState('account_recovery');
@@ -3215,7 +3360,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser((prev) => {
       const updated = { ...prev, ...data };
       saveUserSession(updated, isAuthenticated);
-      syncUserProfileToFirestore(updated).catch(() => {});
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid || prev.id;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, data as Record<string, any>).catch(() => {});
+      }
 
       setRegisteredUsers((users) => {
         const newUsers = users.map((u) => (u.id === prev.id ? { ...u, ...data } : u));
@@ -4035,10 +4183,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addCoins = (amount: number, reason: string) => {
     setCoins((prev) => prev + amount);
     setCurrentUser((prev) => {
-      const updated = { ...prev, coins: (prev.coins || 0) + amount };
+      const nextCoins = (prev.coins || 0) + amount;
+      const updated = { ...prev, coins: nextCoins };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, { coins: nextCoins }).catch(() => {});
+      }
       return updated;
     });
 
@@ -4057,10 +4210,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addDiamonds = (amount: number, reason: string) => {
     setDiamonds((prev) => prev + amount);
     setCurrentUser((prev) => {
-      const updated = { ...prev, diamonds: (prev.diamonds || 0) + amount };
+      const nextDiamonds = (prev.diamonds || 0) + amount;
+      const updated = { ...prev, diamonds: nextDiamonds };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, { diamonds: nextDiamonds }).catch(() => {});
+      }
       return updated;
     });
 
@@ -4081,10 +4239,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await new Promise((res) => setTimeout(res, 800));
     setCoins((prev) => prev + amount);
     setCurrentUser((prev) => {
-      const updated = { ...prev, coins: (prev.coins || 0) + amount };
+      const nextCoins = (prev.coins || 0) + amount;
+      const updated = { ...prev, coins: nextCoins };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, { coins: nextCoins }).catch(() => {});
+      }
       return updated;
     });
 
@@ -4125,14 +4288,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHeldDiamonds((prev) => prev + diamondsNeeded);
 
     setCurrentUser((prev) => {
+      const nextDiamonds = Math.max(0, (prev.diamonds || 0) - diamondsNeeded);
+      const nextHeldDiamonds = (prev.heldDiamonds || 0) + diamondsNeeded;
       const updated = {
         ...prev,
-        diamonds: Math.max(0, (prev.diamonds || 0) - diamondsNeeded),
-        heldDiamonds: (prev.heldDiamonds || 0) + diamondsNeeded,
+        diamonds: nextDiamonds,
+        heldDiamonds: nextHeldDiamonds,
       };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, {
+          diamonds: nextDiamonds,
+          heldDiamonds: nextHeldDiamonds,
+        }).catch(() => {});
+      }
       return updated;
     });
 
@@ -4177,6 +4349,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, { activeFrame: frameId }).catch(() => {});
+      }
       return updated;
     });
   };
@@ -4187,6 +4363,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, { activeHonorTitle: title }).catch(() => {});
+      }
       return updated;
     });
   };
@@ -4205,14 +4385,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCoins((prev) => prev + diamondsAmount);
 
     setCurrentUser((prev) => {
+      const nextDiamonds = Math.max(0, (prev.diamonds || 0) - diamondsAmount);
+      const nextCoins = (prev.coins || 0) + diamondsAmount;
       const updated = {
         ...prev,
-        diamonds: Math.max(0, (prev.diamonds || 0) - diamondsAmount),
-        coins: (prev.coins || 0) + diamondsAmount,
+        diamonds: nextDiamonds,
+        coins: nextCoins,
       };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
+      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+      if (activeUid) {
+        updateUserProfileFieldsInFirestore(activeUid, {
+          diamonds: nextDiamonds,
+          coins: nextCoins,
+        }).catch(() => {});
+      }
       return updated;
     });
 
@@ -4237,9 +4426,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (currency === 'coins') {
       if (coins < cost) return false;
       setCoins((c) => c - cost);
+      setCurrentUser((prev) => {
+        const nextCoins = Math.max(0, (prev.coins || 0) - cost);
+        const updated = { ...prev, coins: nextCoins };
+        try {
+          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+        } catch {}
+        const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+        if (activeUid) {
+          updateUserProfileFieldsInFirestore(activeUid, { coins: nextCoins }).catch(() => {});
+        }
+        return updated;
+      });
     } else {
       if (diamonds < cost) return false;
       setDiamonds((d) => d - cost);
+      setCurrentUser((prev) => {
+        const nextDiamonds = Math.max(0, (prev.diamonds || 0) - cost);
+        const updated = { ...prev, diamonds: nextDiamonds };
+        try {
+          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
+        } catch {}
+        const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
+        if (activeUid) {
+          updateUserProfileFieldsInFirestore(activeUid, { diamonds: nextDiamonds }).catch(() => {});
+        }
+        return updated;
+      });
     }
 
     const newTx: WalletTransaction = {

@@ -139,6 +139,8 @@ export const LiveStreamScreen: React.FC = () => {
   const [viewerCount, setViewerCount] = useState(Math.max(1, activeStream?.viewerCount || 1));
   const [firestoreViewers, setFirestoreViewers] = useState<any[]>([]);
   const [wsViewers, setWsViewers] = useState<RealtimeViewerProfile[]>([]);
+  const wsViewersSeededRef = useRef<boolean>(false);
+  const notifiedWsViewerTimestampsRef = useRef<Map<string, number>>(new Map());
   const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
   const [remoteTrackTick, setRemoteTrackTick] = useState(0);
   const [durationSecs, setDurationSecs] = useState(0);
@@ -515,6 +517,9 @@ export const LiveStreamScreen: React.FC = () => {
       joinedAtMs: Date.now(),
     };
 
+    wsViewersSeededRef.current = false;
+    notifiedWsViewerTimestampsRef.current.clear();
+
     realtimeSocket.joinRoom('live', streamId, profile, totalHeartCount);
     joinLiveStreamViewer(streamId, profile).catch(() => {});
 
@@ -524,7 +529,45 @@ export const LiveStreamScreen: React.FC = () => {
 
     const unsubWsRoom = realtimeSocket.onRoomEvent('live', streamId, (ev) => {
       if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
-        setWsViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
+        const viewersList = Array.isArray(ev.viewers) ? ev.viewers : [];
+        setWsViewers(viewersList);
+
+        const now = Date.now();
+        if (ev.type === 'room:state_init' || !wsViewersSeededRef.current) {
+          wsViewersSeededRef.current = true;
+          viewersList.forEach((v: any) => {
+            if (v?.id) notifiedWsViewerTimestampsRef.current.set(v.id, now);
+          });
+        } else {
+          const newJoiners: Array<{
+            id: string;
+            user: string;
+            text: string;
+            vipLevel?: number;
+            level?: number;
+            isEntryNotice: boolean;
+          }> = [];
+          viewersList.forEach((v: any) => {
+            if (!v?.id || v.id === uid) return;
+            const lastAt = notifiedWsViewerTimestampsRef.current.get(v.id);
+            if (!lastAt || now - lastAt > 25_000) {
+              notifiedWsViewerTimestampsRef.current.set(v.id, now);
+              newJoiners.push({
+                id: `entry_${v.id}_${now}`,
+                user: v.displayName || v.username || 'Viewer',
+                text: 'joined the live!',
+                vipLevel: v.vipTier || 0,
+                level: v.level || 1,
+                isEntryNotice: true,
+              });
+            } else {
+              notifiedWsViewerTimestampsRef.current.set(v.id, now);
+            }
+          });
+          if (newJoiners.length > 0) {
+            setComments((prev) => [...prev.slice(-60), ...newJoiners]);
+          }
+        }
       } else if (ev.type === 'room:signal' && ev.signal?.type === 'stream_ended' && !isHost) {
         setIsBroadcastEnded(true);
       }
@@ -1040,8 +1083,8 @@ export const LiveStreamScreen: React.FC = () => {
     if (!activeStream?.id) return;
     const unsubscribe = subscribeToLiveStreamMessages(activeStream.id, (remoteComments) => {
       if (remoteComments && remoteComments.length > 0) {
-        setComments(
-          remoteComments.map((rc: any) => ({
+        setComments((prev) => {
+          const remoteMapped = remoteComments.map((rc: any) => ({
             id: rc.id,
             user: rc.user || 'Viewer',
             text: rc.text || '',
@@ -1049,8 +1092,10 @@ export const LiveStreamScreen: React.FC = () => {
             level: rc.level || 1,
             isGiftHighlight: rc.isGiftHighlight,
             isEntryNotice: rc.isEntryNotice,
-          }))
-        );
+          }));
+          const localNotices = prev.filter((c) => c.id.startsWith('entry_')).slice(-6);
+          return [...remoteMapped, ...localNotices];
+        });
       }
     });
     return () => {
