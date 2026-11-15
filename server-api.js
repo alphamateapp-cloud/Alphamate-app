@@ -63,12 +63,40 @@ export function createApiApp() {
     .map((v) => v.trim())
     .filter(Boolean);
 
+  function isOriginAllowed(origin) {
+    if (!origin) return true;
+    if (ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin)) return true;
+    try {
+      const parsed = new URL(origin);
+      const protocol = parsed.protocol.toLowerCase();
+      const host = parsed.hostname.toLowerCase();
+      if (
+        protocol === 'capacitor:' ||
+        protocol === 'ionic:' ||
+        host === 'localhost' ||
+        host === '127.0.0.1' ||
+        host === 'alphamate.app' ||
+        host === 'www.alphamate.app' ||
+        host.endsWith('.run.app') ||
+        host.endsWith('.pages.dev')
+      ) {
+        return true;
+      }
+    } catch {
+      // ignore malformed Origin headers
+    }
+    return false;
+  }
+
   app.use(express.json({ limit: '1mb' }));
 
   app.use((req, res, next) => {
     const origin = req.headers.origin || '';
-    const allowed = ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin);
-    if (allowed) res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes('*') ? '*' : origin);
+    if (ALLOWED_ORIGINS.includes('*')) {
+      res.header('Access-Control-Allow-Origin', '*');
+    } else if (origin && isOriginAllowed(origin)) {
+      res.header('Access-Control-Allow-Origin', origin);
+    }
     res.header('Vary', 'Origin');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Content-Length, Accept, Authorization, X-Upload-Id, X-Chunk-Index');
@@ -805,6 +833,63 @@ export function createApiApp() {
       return res.json({ success: true, counts: Object.fromEntries(totals), generatedAt: new Date().toISOString(),
         readOnly: true, note: 'Counts are read from the Alpha Mate Firestore database. Null means this collection count could not be read; it is not a fabricated zero.' });
     } catch (error) { return sendAdminError(res, error, 'dashboard'); }
+  });
+
+  const UPSTREAM_SFU_BACKEND_URL = (
+    process.env.SFU_UPSTREAM_API_URL ||
+    process.env.RAILWAY_API_URL ||
+    'https://api.alphamate.app'
+  )
+    .trim()
+    .replace(/\/$/, '');
+
+  async function forwardUnconfiguredMediaApiToUpstream(req, res) {
+    if (!UPSTREAM_SFU_BACKEND_URL || req.headers['x-alphamate-proxied'] === '1') {
+      return false;
+    }
+    try {
+      const targetUrl = `${UPSTREAM_SFU_BACKEND_URL}${req.originalUrl}`;
+      const headers = {
+        Accept: 'application/json',
+        'X-Alphamate-Proxied': '1',
+      };
+      if (req.headers.authorization) {
+        headers.Authorization = String(req.headers.authorization);
+      }
+      const method = (req.method || 'GET').toUpperCase();
+      const fetchOptions = { method, headers };
+      if (method !== 'GET' && method !== 'HEAD') {
+        headers['Content-Type'] = 'application/json';
+        fetchOptions.body = JSON.stringify(req.body ?? {});
+      }
+
+      const upstreamResp = await fetchWithTimeout(targetUrl, fetchOptions, 15000);
+      const text = await upstreamResp.text().catch(() => '');
+      const contentType = upstreamResp.headers.get('content-type') || 'application/json';
+      res.status(upstreamResp.status);
+      res.setHeader('Content-Type', contentType);
+      res.send(text);
+      return true;
+    } catch (err) {
+      console.warn('[SFU Proxy] Upstream forward error:', err?.message || err);
+      return false;
+    }
+  }
+
+  app.use('/api/webrtc/turn-credentials', async (req, res, next) => {
+    if (CLOUDFLARE_TURN_TOKEN_ID && CLOUDFLARE_TURN_API_TOKEN) {
+      return next();
+    }
+    const handled = await forwardUnconfiguredMediaApiToUpstream(req, res);
+    if (!handled) next();
+  });
+
+  app.use('/api/sfu', async (req, res, next) => {
+    if (REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN) {
+      return next();
+    }
+    const handled = await forwardUnconfiguredMediaApiToUpstream(req, res);
+    if (!handled) next();
   });
 
   app.get('/api/webrtc/turn-credentials', requireFirebaseAuth, async (_req, res) => {

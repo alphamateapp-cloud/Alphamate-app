@@ -20,6 +20,7 @@ import {
   deleteDoc,
   serverTimestamp,
 } from 'firebase/firestore';
+import { Capacitor } from '@capacitor/core';
 import { db, auth } from './firebase';
 import { realtimeSocket } from './realtimeSocket';
 import { User, SfuPublishedTrack } from '../types';
@@ -261,16 +262,39 @@ class RealtimeSfuStreamingEngine {
     return this.isValidCustomBackendUrl(envUrl);
   }
 
+  private preferSameOriginProxy: boolean = false;
+
+  private isLocalExpressPreviewHost(): boolean {
+    if (typeof window === 'undefined') return false;
+    if (Capacitor.isNativePlatform()) return false;
+    const host = window.location.hostname.toLowerCase();
+    return (
+      host.endsWith('.run.app') ||
+      host === '127.0.0.1' ||
+      (host === 'localhost' && window.location.port !== '')
+    );
+  }
+
   private getBackendApiBase(): string {
+    if (this.preferSameOriginProxy) {
+      return '';
+    }
     const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
     if (this.isValidCustomBackendUrl(envUrl)) {
       return envUrl.replace(/\/$/, '');
+    }
+    if (this.isLocalExpressPreviewHost()) {
+      return '';
     }
     return RealtimeSfuStreamingEngine.PRODUCTION_API_URL;
   }
 
   public getResolvedBackendApiBase(): string {
-    return this.getBackendApiBase();
+    const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
+    if (this.isValidCustomBackendUrl(envUrl)) {
+      return envUrl.replace(/\/$/, '');
+    }
+    return RealtimeSfuStreamingEngine.PRODUCTION_API_URL;
   }
 
   private async getFirebaseIdToken(forceRefresh: boolean = false): Promise<string> {
@@ -421,6 +445,14 @@ class RealtimeSfuStreamingEngine {
         return data as T;
       } catch (err: any) {
         lastError = err;
+        if (
+          err?.code === 'SFU_BACKEND_UNREACHABLE' &&
+          this.isLocalExpressPreviewHost() &&
+          !this.preferSameOriginProxy
+        ) {
+          this.preferSameOriginProxy = true;
+          return this.sfuFetch<T>(path, method, body, keepalive);
+        }
         const canRetryNetwork =
           !keepalive &&
           attempt < maxAttempts - 1 &&
