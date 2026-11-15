@@ -57,20 +57,10 @@ export const PartyRemoteAudioPlayer: React.FC<PartyRemoteAudioPlayerProps> = Rea
         onAutoplayStateChange(false);
       };
       const handleUnmute = () => {
-        if (isSpeakerOnRef.current) {
-          attemptPlay();
-        }
-      };
-      const handleStalled = () => {
-        if (isSpeakerOnRef.current && stream.getAudioTracks().some((t) => t.readyState === 'live')) {
-          attemptPlay();
-        }
+        attemptPlay();
       };
       const bindTrackListeners = (track: MediaStreamTrack) => {
         track.addEventListener('unmute', handleUnmute);
-      };
-      const unbindTrackListeners = (track: MediaStreamTrack) => {
-        track.removeEventListener('unmute', handleUnmute);
       };
       const audioTracks = stream.getAudioTracks();
       audioTracks.forEach(bindTrackListeners);
@@ -78,35 +68,23 @@ export const PartyRemoteAudioPlayer: React.FC<PartyRemoteAudioPlayerProps> = Rea
       const handleAddTrack = (e: MediaStreamTrackEvent) => {
         if (e.track?.kind === 'audio') {
           bindTrackListeners(e.track);
-          // Re-assign srcObject cleanly if element stalled on an earlier dead track
-          if (el.srcObject === stream) {
-            el.srcObject = null;
-            el.srcObject = stream;
-          }
           attemptPlay();
         }
       };
-      const handleRemoveTrack = (e: MediaStreamTrackEvent) => {
-        if (e.track?.kind === 'audio') {
-          unbindTrackListeners(e.track);
-        }
-      };
       stream.addEventListener('addtrack', handleAddTrack);
-      stream.addEventListener('removetrack', handleRemoveTrack);
       el.addEventListener('canplay', handleCanPlay);
       el.addEventListener('loadedmetadata', handleCanPlay);
       el.addEventListener('playing', handlePlaying);
-      el.addEventListener('stalled', handleStalled);
       attemptPlay();
 
       return () => {
         stream.removeEventListener('addtrack', handleAddTrack);
-        stream.removeEventListener('removetrack', handleRemoveTrack);
         el.removeEventListener('canplay', handleCanPlay);
         el.removeEventListener('loadedmetadata', handleCanPlay);
         el.removeEventListener('playing', handlePlaying);
-        el.removeEventListener('stalled', handleStalled);
-        stream.getAudioTracks().forEach(unbindTrackListeners);
+        stream.getAudioTracks().forEach((track) => {
+          track.removeEventListener('unmute', handleUnmute);
+        });
       };
     }, [stream, onAutoplayStateChange]);
 

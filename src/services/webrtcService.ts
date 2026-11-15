@@ -20,7 +20,6 @@ import {
   deleteDoc,
   serverTimestamp,
 } from 'firebase/firestore';
-import { Capacitor } from '@capacitor/core';
 import { db, auth } from './firebase';
 import { realtimeSocket } from './realtimeSocket';
 import { User, SfuPublishedTrack } from '../types';
@@ -156,7 +155,6 @@ interface PartySfuRoomSession {
   pendingMidToPeer: Map<string, string>;
   latestDesiredPeers: Map<string, DesiredPartyPeer>;
   activeRemoteStreams: Map<string, MediaStream>;
-  failedPeerCooldownUntil: Map<string, number>;
   onError?: (err: Error) => void;
   onConnectionStateChange?: (state: ConnectionState) => void;
   onParticipantsChange?: (participants: PartyParticipantPresence[]) => void;
@@ -174,10 +172,10 @@ export const CLOUDFLARE_TURN_URLS = [
   'turns:turn.cloudflare.com:5349?transport=tcp',
 ];
 
-export const PARTY_PARTICIPANT_STALE_MS = 45_000;
+export const PARTY_PARTICIPANT_STALE_MS = 15_000;
 const PARTY_HEARTBEAT_INTERVAL_MS = 4000;
-const RECONNECT_GRACE_MS = 7500;
-const MAX_RECONNECT_ATTEMPTS = 8;
+const RECONNECT_GRACE_MS = 2500;
+const MAX_RECONNECT_ATTEMPTS = 3;
 const LIVE_HEARTBEAT_INTERVAL_MS = 5000;
 
 class RealtimeSfuStreamingEngine {
@@ -209,13 +207,11 @@ class RealtimeSfuStreamingEngine {
   > = new Map();
   private sessionQueues: Map<string, Promise<unknown>> = new Map();
 
-  // Auto-reconnect, ABR & heartbeat coordination
+  // Auto-reconnect & heartbeat coordination
   private reconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  private disconnectDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private reconnectInFlight: Map<string, Promise<boolean>> = new Map();
   private reconnectAttempts: Map<string, number> = new Map();
   private hostHeartbeatTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
-  private hostAbrTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 
   // TURN & ICE state
   private customIceServers: RTCIceServer[] = [...DEFAULT_ICE_SERVERS];
@@ -263,39 +259,16 @@ class RealtimeSfuStreamingEngine {
     return this.isValidCustomBackendUrl(envUrl);
   }
 
-  private preferSameOriginProxy: boolean = false;
-
-  private isLocalExpressPreviewHost(): boolean {
-    if (typeof window === 'undefined') return false;
-    if (Capacitor.isNativePlatform()) return false;
-    const host = window.location.hostname.toLowerCase();
-    return (
-      host.endsWith('.run.app') ||
-      host === '127.0.0.1' ||
-      (host === 'localhost' && window.location.port !== '')
-    );
-  }
-
   private getBackendApiBase(): string {
-    if (this.preferSameOriginProxy) {
-      return '';
-    }
     const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
     if (this.isValidCustomBackendUrl(envUrl)) {
       return envUrl.replace(/\/$/, '');
-    }
-    if (this.isLocalExpressPreviewHost()) {
-      return '';
     }
     return RealtimeSfuStreamingEngine.PRODUCTION_API_URL;
   }
 
   public getResolvedBackendApiBase(): string {
-    const envUrl = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim();
-    if (this.isValidCustomBackendUrl(envUrl)) {
-      return envUrl.replace(/\/$/, '');
-    }
-    return RealtimeSfuStreamingEngine.PRODUCTION_API_URL;
+    return this.getBackendApiBase();
   }
 
   private async getFirebaseIdToken(forceRefresh: boolean = false): Promise<string> {
@@ -446,14 +419,6 @@ class RealtimeSfuStreamingEngine {
         return data as T;
       } catch (err: any) {
         lastError = err;
-        if (
-          err?.code === 'SFU_BACKEND_UNREACHABLE' &&
-          this.isLocalExpressPreviewHost() &&
-          !this.preferSameOriginProxy
-        ) {
-          this.preferSameOriginProxy = true;
-          return this.sfuFetch<T>(path, method, body, keepalive);
-        }
         const canRetryNetwork =
           !keepalive &&
           attempt < maxAttempts - 1 &&
@@ -665,16 +630,11 @@ class RealtimeSfuStreamingEngine {
     };
   }
 
-  public prewarmConnections(): void {
-    this.fetchCloudflareTurnCredentials().catch(() => {});
-    realtimeSocket.ensureConnected();
-  }
-
   public isCloudflareTurnActive(): boolean {
     return this.hasCloudflareTurn;
   }
 
-  private waitForIceGatheringComplete(pc: RTCPeerConnection, maxWaitMs: number = 750): Promise<void> {
+  private waitForIceGatheringComplete(pc: RTCPeerConnection, maxWaitMs: number = 1200): Promise<void> {
     if (pc.iceGatheringState === 'complete') {
       return Promise.resolve();
     }
@@ -702,7 +662,7 @@ class RealtimeSfuStreamingEngine {
         }
         const candStr = e.candidate.candidate || '';
         if ((candStr.includes(' typ srflx ') || candStr.includes(' typ relay ')) && !candidateSettleTimer) {
-          candidateSettleTimer = setTimeout(done, 75);
+          candidateSettleTimer = setTimeout(done, 180);
         }
       };
       const hardTimer = setTimeout(done, maxWaitMs);
@@ -711,7 +671,7 @@ class RealtimeSfuStreamingEngine {
     });
   }
 
-  private waitForPeerConnected(pc: RTCPeerConnection, timeoutMs: number = 25000): Promise<void> {
+  private waitForPeerConnected(pc: RTCPeerConnection, timeoutMs: number = 15000): Promise<void> {
     if (
       pc.connectionState === 'connected' ||
       pc.iceConnectionState === 'connected' ||
@@ -836,55 +796,6 @@ class RealtimeSfuStreamingEngine {
     };
   }
 
-  private optimizeSdpForVoice(sdp: string, maxAverageBitrate: number = 24000): string {
-    if (!sdp) return sdp;
-    try {
-      const opusPtMatch = sdp.match(/a=rtpmap:(\d+)\s+opus\/48000\/2/i);
-      if (!opusPtMatch?.[1]) return sdp;
-      const pt = opusPtMatch[1];
-      const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+([^\\r\\n]+)`, 'i');
-      const desiredParams: Record<string, string> = {
-        minptime: '10',
-        useinbandfec: '1',
-        usedtx: '1',
-        stereo: '0',
-        'sprop-stereo': '0',
-        maxaveragebitrate: String(maxAverageBitrate),
-      };
-      if (fmtpRegex.test(sdp)) {
-        return sdp.replace(fmtpRegex, (_full, existing) => {
-          const kv = new Map<string, string>();
-          String(existing)
-            .split(';')
-            .map((s) => s.trim())
-            .filter(Boolean)
-            .forEach((part) => {
-              const eq = part.indexOf('=');
-              if (eq > 0) {
-                kv.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
-              } else {
-                kv.set(part, '');
-              }
-            });
-          for (const [k, v] of Object.entries(desiredParams)) {
-            kv.set(k, v);
-          }
-          const rebuilt = Array.from(kv.entries())
-            .map(([k, v]) => (v ? `${k}=${v}` : k))
-            .join(';');
-          return `a=fmtp:${pt} ${rebuilt}`;
-        });
-      }
-      const rtpmapLine = new RegExp(`(a=rtpmap:${pt}\\s+opus\\/48000\\/2\\r?\\n)`, 'i');
-      const built = Object.entries(desiredParams)
-        .map(([k, v]) => `${k}=${v}`)
-        .join(';');
-      return sdp.replace(rtpmapLine, `$1a=fmtp:${pt} ${built}\r\n`);
-    } catch {
-      return sdp;
-    }
-  }
-
   private async publishTracksOnSession(
     sessionId: string,
     pc: RTCPeerConnection,
@@ -903,7 +814,7 @@ class RealtimeSfuStreamingEngine {
           direction: 'sendonly',
           streams: [stream],
         });
-        // Prefer Opus with in-band FEC + DTX for rock-solid voice on minimum mobile networks.
+        // Prefer Opus for voice and reserve bandwidth for audio on constrained links.
         if (item.track.kind === 'audio') {
           try {
             const audioCodecs = RTCRtpSender.getCapabilities?.('audio')?.codecs || [];
@@ -914,7 +825,7 @@ class RealtimeSfuStreamingEngine {
             }
             const params = transceiver.sender.getParameters();
             params.encodings = params.encodings?.length ? params.encodings : [{}];
-            params.encodings[0].maxBitrate = 24_000;
+            params.encodings[0].maxBitrate = 32_000;
             (params.encodings[0] as any).priority = 'high';
             (params.encodings[0] as any).networkPriority = 'high';
             await transceiver.sender.setParameters(params);
@@ -925,11 +836,9 @@ class RealtimeSfuStreamingEngine {
           try {
             const params = transceiver.sender.getParameters();
             params.encodings = params.encodings?.length ? params.encodings : [{}];
-            params.encodings[0].maxBitrate = 450_000;
-            params.encodings[0].maxFramerate = 24;
-            (params.encodings[0] as any).priority = 'low';
-            (params.encodings[0] as any).networkPriority = 'low';
-            (params as any).degradationPreference = 'balanced';
+            params.encodings[0].maxBitrate = 700_000;
+            params.encodings[0].maxFramerate = 30;
+            (params as any).degradationPreference = 'maintain-framerate';
             await transceiver.sender.setParameters(params);
           } catch (videoTuneErr) {
             console.warn('[WebRTC] Adaptive video tuning unavailable; using browser defaults.', videoTuneErr);
@@ -942,13 +851,9 @@ class RealtimeSfuStreamingEngine {
         });
       }
 
-      const rawOffer = await pc.createOffer();
-      const offer: RTCSessionDescriptionInit = {
-        type: rawOffer.type,
-        sdp: this.optimizeSdpForVoice(rawOffer.sdp || '', 24000),
-      };
+      const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await this.waitForIceGatheringComplete(pc, 750);
+      await this.waitForIceGatheringComplete(pc, 1200);
 
       const sfuTracksPayload = addedTransceivers.map((entry) => {
         if (!entry.transceiver.mid) {
@@ -976,13 +881,9 @@ class RealtimeSfuStreamingEngine {
       if (trackResp.sessionDescription?.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(trackResp.sessionDescription));
         if (trackResp.requiresImmediateRenegotiation && trackResp.sessionDescription.type === 'offer') {
-          const rawAnswer = await pc.createAnswer();
-          const answer: RTCSessionDescriptionInit = {
-            type: rawAnswer.type,
-            sdp: this.optimizeSdpForVoice(rawAnswer.sdp || '', 24000),
-          };
+          const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          await this.waitForIceGatheringComplete(pc, 650);
+          await this.waitForIceGatheringComplete(pc, 1000);
           await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
             sessionDescription: {
               type: pc.localDescription!.type,
@@ -1005,9 +906,6 @@ class RealtimeSfuStreamingEngine {
     const mids: string[] = [];
     const sections = sdp.split(/\r?\nm=/).slice(1);
     for (const sec of sections) {
-      if (/^(audio|video)\s+0\b/i.test(sec)) {
-        continue;
-      }
       const match = sec.match(/^[^\r\n]*[\s\S]*?\r?\na=mid:([^\r\n]+)/);
       if (match?.[1]) {
         mids.push(match[1].trim());
@@ -1025,14 +923,14 @@ class RealtimeSfuStreamingEngine {
   ): Promise<Array<{ mid: string; trackName: string; publisherSessionId: string }>> {
     return this.enqueueSessionOp(sessionId, async () => {
       const existingMids = new Set(
-        pc.getTransceivers().map((t) => t.mid).filter((m): m is string => m !== null && m !== undefined && m !== '')
+        pc.getTransceivers().map((t) => t.mid).filter((m): m is string => Boolean(m))
       );
 
       const resp = await this.sfuFetch<{
         requiresImmediateRenegotiation: boolean;
         sessionDescription: RTCSessionDescriptionInit | null;
         tracks: Array<{
-          mid?: string | number;
+          mid?: string;
           trackName?: string;
           sessionId?: string;
           errorCode?: string;
@@ -1053,10 +951,7 @@ class RealtimeSfuStreamingEngine {
       let fallbackCursor = 0;
 
       const assigned = (resp.tracks || []).map((t, idx) => {
-        let resolvedMid =
-          t.mid !== undefined && t.mid !== null && String(t.mid).trim() !== ''
-            ? String(t.mid).trim()
-            : '';
+        let resolvedMid = t.mid ? String(t.mid).trim() : '';
         if (!resolvedMid && fallbackCursor < sdpNewMids.length) {
           resolvedMid = sdpNewMids[fallbackCursor++];
         }
@@ -1078,13 +973,9 @@ class RealtimeSfuStreamingEngine {
       if (resp.sessionDescription?.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(resp.sessionDescription));
         if (resp.requiresImmediateRenegotiation || resp.sessionDescription.type === 'offer') {
-          const rawAnswer = await pc.createAnswer();
-          const answer: RTCSessionDescriptionInit = {
-            type: rawAnswer.type,
-            sdp: this.optimizeSdpForVoice(rawAnswer.sdp || '', 24000),
-          };
+          const answer = await pc.createAnswer();
           await pc.setLocalDescription(answer);
-          await this.waitForIceGatheringComplete(pc, 750);
+          await this.waitForIceGatheringComplete(pc, 1200);
           await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
             sessionDescription: {
               type: pc.localDescription!.type,
@@ -1205,16 +1096,15 @@ class RealtimeSfuStreamingEngine {
     const constraints: MediaStreamConstraints = {
       video: {
         facingMode: { ideal: facing },
-        width: { ideal: 640, max: 1280 },
-        height: { ideal: 360, max: 720 },
-        frameRate: { ideal: 24, max: 30 },
+        width: { ideal: 1280, max: 1920 },
+        height: { ideal: 720, max: 1080 },
+        frameRate: { ideal: 30, max: 60 },
       },
       audio: withAudio
         ? {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
-            channelCount: 1,
           }
         : false,
     };
@@ -1233,7 +1123,7 @@ class RealtimeSfuStreamingEngine {
       if (withAudio) {
         try {
           const audioOnlyStream = await this.requestMediaWithTimeout({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
             video: false,
           }, 8000, 'Microphone');
           this.localStream = audioOnlyStream;
@@ -1265,9 +1155,9 @@ class RealtimeSfuStreamingEngine {
       const newCamStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: nextFacing },
-          width: { ideal: 640, max: 1280 },
-          height: { ideal: 360, max: 720 },
-          frameRate: { ideal: 24, max: 30 },
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 },
+          frameRate: { ideal: 30, max: 60 },
         },
         audio: false,
       });
@@ -1377,11 +1267,6 @@ class RealtimeSfuStreamingEngine {
       clearTimeout(timer);
       this.reconnectTimers.delete(sessionKey);
     }
-    const debounce = this.disconnectDebounceTimers.get(sessionKey);
-    if (debounce) {
-      clearTimeout(debounce);
-      this.disconnectDebounceTimers.delete(sessionKey);
-    }
     if (resetAttempts) {
       this.reconnectAttempts.delete(sessionKey);
     }
@@ -1412,19 +1297,7 @@ class RealtimeSfuStreamingEngine {
       }
 
       if (connState === 'disconnected' || iceState === 'disconnected') {
-        // Debounce UI disconnected notification by 3.2s so brief mobile ICE blips recover silently
-        if (!this.disconnectDebounceTimers.has(sessionKey)) {
-          const debounceTimer = setTimeout(() => {
-            this.disconnectDebounceTimers.delete(sessionKey);
-            if (!opts.isSessionActive()) return;
-            const curConn = pc.connectionState;
-            const curIce = pc.iceConnectionState;
-            if (curConn !== 'connected' && curIce !== 'connected' && curIce !== 'completed') {
-              opts.onStateChange?.('disconnected');
-            }
-          }, 3200);
-          this.disconnectDebounceTimers.set(sessionKey, debounceTimer);
-        }
+        opts.onStateChange?.('disconnected');
         this.scheduleAutoReconnect(sessionKey, pc, RECONNECT_GRACE_MS, opts);
         return;
       }
@@ -1504,32 +1377,20 @@ class RealtimeSfuStreamingEngine {
         if (!opts.isSessionActive()) return false;
 
         if (attempt < MAX_RECONNECT_ATTEMPTS) {
-          // Mobile networks often recover in bursts. Use a longer capped backoff
-          // instead of exhausting the voice session after only three short retries.
-          const exponentialDelay = Math.min(30_000, 1500 * Math.pow(1.7, attempt - 1));
-          const jitter = Math.floor(Math.random() * 500);
+          const nextDelay = Math.min(8000, RECONNECT_GRACE_MS * attempt);
           const retryTimer = setTimeout(() => {
             this.reconnectTimers.delete(sessionKey);
             if (opts.isSessionActive()) {
               this.runAutoReconnectWithBackoff(sessionKey, opts).catch(() => {});
             }
-          }, exponentialDelay + jitter);
+          }, nextDelay);
           this.reconnectTimers.set(sessionKey, retryTimer);
           return false;
         }
 
-        // Keep the active room/session eligible for recovery during longer
-        // network outages. A later retry can recover without forcing the user
-        // to leave and rejoin the room.
-        this.reconnectAttempts.set(sessionKey, 0);
-        opts.onStateChange?.('disconnected');
-        const retryTimer = setTimeout(() => {
-          this.reconnectTimers.delete(sessionKey);
-          if (opts.isSessionActive()) {
-            this.runAutoReconnectWithBackoff(sessionKey, opts).catch(() => {});
-          }
-        }, 20_000);
-        this.reconnectTimers.set(sessionKey, retryTimer);
+        // Retries exhausted -> surface genuine failed state without faking success
+        this.reconnectAttempts.delete(sessionKey);
+        opts.onStateChange?.('failed');
         return false;
       } finally {
         this.reconnectInFlight.delete(sessionKey);
@@ -1635,7 +1496,7 @@ class RealtimeSfuStreamingEngine {
       if (audioTrack) tracksToPublish.push({ track: audioTrack, trackName: `${streamId}-audio-${suffix}` });
 
       const publishedTracks = await this.publishTracksOnSession(newSfuSessionId, newPc, tracksToPublish, stream);
-      await this.waitForPeerConnected(newPc, 25000);
+      await this.waitForPeerConnected(newPc, 15000);
 
       if (existing.isClosed || this.hostSfuSessions.get(streamId) !== existing) {
         newPc.close();
@@ -1654,7 +1515,6 @@ class RealtimeSfuStreamingEngine {
         publishedTracks,
       };
       this.hostSfuSessions.set(streamId, updatedSession);
-      this.startHostAdaptiveBitrateMonitor(streamId);
 
       this.monitorPeerConnection(sessionKey, newPc, {
         isSessionActive: () =>
@@ -1787,7 +1647,7 @@ class RealtimeSfuStreamingEngine {
       );
 
       await Promise.all([
-        this.waitForPeerConnected(newPc, 25000),
+        this.waitForPeerConnected(newPc, 15000),
         Promise.race([
           firstTrackPromise,
           new Promise<void>((_, reject) =>
@@ -1797,7 +1657,7 @@ class RealtimeSfuStreamingEngine {
               } else {
                 resolveTrackWaiter?.();
               }
-            }, 20000)
+            }, 12000)
           ),
         ]),
       ]);
@@ -1868,214 +1728,240 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
-  private emitPartyCompositeState(session: PartySfuRoomSession): void {
-    if (session.isClosed) return;
-    const needsSub = session.subscribedByPeerKey.size > 0 || session.latestDesiredPeers.size > 0;
-
-    const readPcState = (pc: RTCPeerConnection | null): ConnectionState => {
-      if (!pc) return 'disconnected';
-      const conn = pc.connectionState;
-      const ice = pc.iceConnectionState;
-      if (conn === 'connected' || ice === 'connected' || ice === 'completed') return 'connected';
-      if (conn === 'failed' || conn === 'closed' || ice === 'failed' || ice === 'closed') return 'failed';
-      if (conn === 'disconnected' || ice === 'disconnected') return 'disconnected';
-      return 'connecting';
-    };
-
-    const subState = needsSub ? readPcState(session.subPc) : 'connected';
-    const pubState = session.isPublishing ? readPcState(session.pubPc) : 'connected';
-
-    if (pubState === 'connected' && subState === 'connected') {
-      session.onConnectionStateChange?.('connected');
-    } else if (pubState === 'failed' || (needsSub && subState === 'failed')) {
-      session.onConnectionStateChange?.('failed');
-    } else if (pubState === 'disconnected' || (needsSub && subState === 'disconnected')) {
-      session.onConnectionStateChange?.('disconnected');
-    } else {
-      session.onConnectionStateChange?.('connecting');
-    }
+  private reconnectPartyVoice(roomId: string): Promise<boolean> {
+    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, () =>
+      this._reconnectPartyVoiceInternal(roomId)
+    );
   }
 
-  private attachPartySubMonitor(session: PartySfuRoomSession, subPc: RTCPeerConnection): void {
-    this.monitorPeerConnection(`party:${session.roomId}`, subPc, {
-      isSessionActive: () =>
-        !session.isClosed &&
-        this.partySfuSessions.get(session.roomId) === session &&
-        session.subPc === subPc &&
-        (session.subscribedByPeerKey.size > 0 || session.latestDesiredPeers.size > 0),
-      onStateChange: (state) => {
-        if (state === 'connecting') {
-          session.subConnectingSinceMs = Date.now();
-        }
-        this.emitPartyCompositeState(session);
-      },
-      onReconnectNeeded: () => this.reconnectPartySubscriber(session.roomId),
-    });
-  }
+  private async _reconnectPartyVoiceInternal(roomId: string): Promise<boolean> {
+    const existing = this.partySfuSessions.get(roomId);
+    if (!existing || existing.isClosed) return false;
 
-  private async rebuildPartySubscriberConnection(session: PartySfuRoomSession): Promise<boolean> {
-    if (session.isClosed) return false;
-    this.clearReconnectState(`party:${session.roomId}`, true);
+    console.info(`[Party SFU] Re-establishing Cloudflare SFU session for room ${roomId}...`);
 
-    const oldSubPc = session.subPc;
-    const oldSubSessionId = session.subSfuSessionId;
-
-    const subToken = await this.requestPartyRoomSessionToken(session.roomId, false);
-    if (session.isClosed) {
-      await this.deleteSfuSession(subToken.sfuSessionId);
+    try {
+      await this.getFirebaseIdToken(true);
+      await this.fetchCloudflareTurnCredentials(true).catch(() => {});
+    } catch {
       return false;
     }
 
-    const newSubPc = new RTCPeerConnection(this.getRtcConfiguration());
-    session.subSfuSessionId = subToken.sfuSessionId;
-    session.subPc = newSubPc;
-    session.subConnectingSinceMs = Date.now();
-    session.reconcileFailCount = 0;
-    session.subscribedByPeerKey.clear();
-    session.pendingMidToPeer.clear();
-    session.failedPeerCooldownUntil.clear();
-    if (session.reconcileRetryTimer) {
-      clearTimeout(session.reconcileRetryTimer);
-      session.reconcileRetryTimer = null;
-    }
+    if (existing.isClosed || this.partySfuSessions.get(roomId) !== existing) return false;
 
-    this.attachPartyTrackHandlers(session, newSubPc);
-    this.attachPartySubMonitor(session, newSubPc);
+    const userId = existing.userId;
+    const wasPublishing = existing.isPublishing;
+    const wasMuted = existing.isMuted;
 
-    if (oldSubPc) {
-      oldSubPc.onconnectionstatechange = null;
-      oldSubPc.oniceconnectionstatechange = null;
+    let newSubSessionId = '';
+    let newSubPc: RTCPeerConnection | null = null;
+    let newPubSessionId = '';
+    let newPubPc: RTCPeerConnection | null = null;
+    let newSession: PartySfuRoomSession | null = null;
+
+    try {
+      const subToken = await this.requestPartyRoomSessionToken(roomId, false);
+      newSubSessionId = subToken.sfuSessionId;
+      newSubPc = new RTCPeerConnection(this.getRtcConfiguration());
+
+      newSession = {
+        roomId,
+        userId,
+        profile: existing.profile,
+        joinedAtMs: existing.joinedAtMs,
+        subSfuSessionId: newSubSessionId,
+        subPc: newSubPc,
+        pubSfuSessionId: null,
+        pubPc: null,
+        localStream: null,
+        localTrackName: null,
+        localMid: null,
+        isPublishing: false,
+        isMuted: wasPublishing ? wasMuted : true,
+        isSpeaking: false,
+        isClosed: false,
+        subConnectingSinceMs: Date.now(),
+        pubConnectingSinceMs: Date.now(),
+        reconcileFailCount: 0,
+        unsubscribeParticipants: null,
+        heartbeatTimer: null,
+        reconcileRetryTimer: null,
+        subscribedByPeerKey: new Map(),
+        pendingMidToPeer: new Map(),
+        latestDesiredPeers: new Map(),
+        activeRemoteStreams: new Map(),
+        onError: existing.onError,
+        onConnectionStateChange: existing.onConnectionStateChange,
+        onParticipantsChange: existing.onParticipantsChange,
+      };
+
+      this.attachPartyTrackHandlers(newSession, newSubPc);
+
+      if (wasPublishing) {
+        const pubToken = await this.requestPartyRoomSessionToken(roomId, true);
+        newPubSessionId = pubToken.sfuSessionId;
+        newPubPc = new RTCPeerConnection(this.getRtcConfiguration());
+
+        const liveAudioTrack = existing.localStream
+          ?.getAudioTracks()
+          .find((t) => t.readyState === 'live');
+
+        if (liveAudioTrack && existing.localStream) {
+          liveAudioTrack.enabled = !wasMuted;
+          const trackName = `party-${roomId}-${userId}-${Date.now().toString(36)}`;
+          const published = await this.publishTracksOnSession(
+            newPubSessionId,
+            newPubPc,
+            [{ track: liveAudioTrack, trackName }],
+            existing.localStream
+          );
+          newSession.pubSfuSessionId = newPubSessionId;
+          newSession.pubPc = newPubPc;
+          newSession.localStream = existing.localStream;
+          newSession.localTrackName = trackName;
+          newSession.localMid = published[0]?.mid || null;
+          newSession.isPublishing = true;
+          newSession.isMuted = wasMuted;
+          this.isMuted = wasMuted;
+          await this.waitForPeerConnected(newPubPc, 15000);
+          this.attachPartyPubMonitor(newSession, newPubPc);
+        } else {
+          newPubPc.close();
+          await this.deleteSfuSession(newPubSessionId);
+          newPubPc = null;
+          newPubSessionId = '';
+          await this.publishPartyLocalMic(newSession, wasMuted);
+        }
+      }
+
+      if (existing.isClosed || this.partySfuSessions.get(roomId) !== existing) {
+        if (newSession.localStream && newSession.localStream !== existing.localStream) {
+          newSession.localStream.getTracks().forEach((t) => t.stop());
+        }
+        newSubPc.close();
+        await this.deleteSfuSession(newSubSessionId);
+        if (newSession.pubPc) {
+          newSession.pubPc.close();
+        }
+        if (newSession.pubSfuSessionId) {
+          await this.deleteSfuSession(newSession.pubSfuSessionId);
+        }
+        return false;
+      }
+
+      this.partySfuSessions.set(roomId, newSession);
+
+      this.monitorPeerConnection(`party:${roomId}`, newSubPc, {
+        isSessionActive: () =>
+          !newSession!.isClosed && this.partySfuSessions.get(roomId) === newSession,
+        onStateChange: (state) => {
+          if (state === 'connecting') {
+            newSession!.subConnectingSinceMs = Date.now();
+          }
+          newSession?.onConnectionStateChange?.(state);
+        },
+        onReconnectNeeded: () => this.reconnectPartyVoice(roomId),
+      });
+
+      await this.writePartyParticipantPresence(newSession);
+      this.startPartyHeartbeat(newSession);
+      this.attachPartyParticipantsListener(newSession);
+
+      existing.isClosed = true;
+      existing.subPc.onconnectionstatechange = null;
+      existing.subPc.oniceconnectionstatechange = null;
+      if (existing.pubPc) {
+        existing.pubPc.onconnectionstatechange = null;
+        existing.pubPc.oniceconnectionstatechange = null;
+      }
+      if (existing.heartbeatTimer) {
+        clearInterval(existing.heartbeatTimer);
+        existing.heartbeatTimer = null;
+      }
+      if (existing.reconcileRetryTimer) {
+        clearTimeout(existing.reconcileRetryTimer);
+        existing.reconcileRetryTimer = null;
+      }
+      if (existing.unsubscribeParticipants) {
+        existing.unsubscribeParticipants();
+        existing.unsubscribeParticipants = null;
+      }
+      if (existing.localStream && existing.localStream !== newSession.localStream) {
+        existing.localStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
       try {
-        oldSubPc.close();
+        existing.subPc.close();
       } catch {
         // ignore
       }
-    }
-    if (oldSubSessionId) {
-      this.deleteSfuSession(oldSubSessionId).catch(() => {});
-    }
-    return true;
-  }
-
-  private reconnectPartySubscriber(roomId: string): Promise<boolean> {
-    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, async () => {
-      const session = this.partySfuSessions.get(roomId);
-      if (!session || session.isClosed) return false;
-      const needsSub = session.subscribedByPeerKey.size > 0 || session.latestDesiredPeers.size > 0;
-      if (!needsSub) {
-        this.emitPartyCompositeState(session);
-        return true;
+      if (existing.pubPc) {
+        try {
+          existing.pubPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      this.deleteSfuSession(existing.subSfuSessionId).catch(() => {});
+      if (existing.pubSfuSessionId) {
+        this.deleteSfuSession(existing.pubSfuSessionId).catch(() => {});
       }
 
-      console.info(`[Party SFU] Recovering subscriber connection for room ${roomId} without interrupting local mic...`);
-      try {
-        await this.getFirebaseIdToken(true);
-        await this.fetchCloudflareTurnCredentials(true).catch(() => {});
-        if (session.isClosed || this.partySfuSessions.get(roomId) !== session) return false;
-
-        const rebuilt = await this.rebuildPartySubscriberConnection(session);
-        if (!rebuilt) return false;
-        await this.writePartyParticipantPresence(session).catch(() => {});
-        await this.reconcilePartySubscriptions(session);
-        this.emitPartyCompositeState(session);
-        return true;
-      } catch (err) {
-        console.warn('[Party SFU] Subscriber reconnect failed:', err);
-        return false;
+      if (wasPublishing) {
+        newSession.onConnectionStateChange?.('connected');
+      } else {
+        this.waitForPeerConnected(newSubPc, 15000)
+          .then(() => {
+            if (!newSession?.isClosed) newSession?.onConnectionStateChange?.('connected');
+          })
+          .catch(() => {});
       }
-    });
-  }
-
-  private reconnectPartyVoice(roomId: string): Promise<boolean> {
-    return this.refreshPartyVoice(roomId);
-  }
-
-  public refreshPartyVoice(roomId: string): Promise<boolean> {
-    return this.enqueueSessionOp(`party-lifecycle:${roomId}`, async () => {
-      const session = this.partySfuSessions.get(roomId);
-      if (!session || session.isClosed) return false;
-
-      console.info(`[Party SFU] Refreshing active party voice for room ${roomId}...`);
-      try {
-        await this.getFirebaseIdToken(true);
-        await this.fetchCloudflareTurnCredentials(true).catch(() => {});
-        if (session.isClosed || this.partySfuSessions.get(roomId) !== session) return false;
-
-        session.failedPeerCooldownUntil.clear();
-        session.reconcileFailCount = 0;
-
-        // 1. Recover or preserve publisher mic cleanly without dropping voiceParticipants presence
-        if (session.isPublishing) {
-          const hasLiveTrack = Boolean(
-            session.localStream?.getAudioTracks().some((t) => t.readyState === 'live')
-          );
-          const pubHealthy =
-            hasLiveTrack &&
-            session.pubPc &&
-            (session.pubPc.connectionState === 'connected' ||
-              session.pubPc.iceConnectionState === 'connected' ||
-              session.pubPc.iceConnectionState === 'completed');
-
-          if (!pubHealthy) {
-            await this.publishPartyLocalMic(session, session.isMuted);
-          } else {
-            session.localStream?.getAudioTracks().forEach((t) => {
-              t.enabled = !session.isMuted;
-            });
-            await this.writePartyParticipantPresence(session).catch(() => {});
-            if (session.pubSfuSessionId && session.localTrackName) {
-              realtimeSocket.sendRoomSignal('party', session.roomId, {
-                type: 'voice_updated',
-                peerId: session.userId,
-                sfuSessionId: session.pubSfuSessionId,
-                trackName: session.localTrackName,
-                isPublishing: true,
-              });
-            }
+      return true;
+    } catch (err) {
+      if (newSession?.localStream && newSession.localStream !== existing.localStream) {
+        newSession.localStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
           }
-        } else {
-          await this.writePartyParticipantPresence(session).catch(() => {});
-        }
-
-        // 2. Rebuild subscriber connection cleanly whenever remote speakers exist or subPc was degraded
-        const needsSub = session.latestDesiredPeers.size > 0 || session.subscribedByPeerKey.size > 0;
-        const subDead =
-          session.subPc.connectionState === 'closed' ||
-          session.subPc.connectionState === 'failed' ||
-          session.subPc.connectionState === 'disconnected' ||
-          session.subPc.iceConnectionState === 'failed' ||
-          session.subPc.iceConnectionState === 'disconnected' ||
-          session.subPc.signalingState === 'closed';
-
-        if (needsSub || subDead) {
-          await this.rebuildPartySubscriberConnection(session);
-        }
-
-        await this.reconcilePartySubscriptions(session).catch((err) => {
-          console.warn('[Party SFU] Refresh subscription reconcile warning:', err);
         });
-
-        this.emitPartyCompositeState(session);
-        return true;
-      } catch (err) {
-        console.warn('[Party SFU] Party voice refresh failed:', err);
-        return false;
       }
-    });
-  }
-
-  public primeAudioPlayback(): void {
-    try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-      if (!this.audioContext || this.audioContext.state === 'closed') {
-        this.audioContext = new AudioCtx();
+      if (newSubPc) {
+        try {
+          newSubPc.close();
+        } catch {
+          // ignore
+        }
       }
-      if (this.audioContext.state === 'suspended') {
-        this.audioContext.resume().catch(() => {});
+      if (newSubSessionId) {
+        await this.deleteSfuSession(newSubSessionId);
       }
-    } catch {
-      // Ignore if AudioContext cannot be created yet
+      if (newSession?.pubPc && newSession.pubPc !== newPubPc) {
+        try {
+          newSession.pubPc.close();
+        } catch {
+          // ignore
+        }
+      } else if (newPubPc) {
+        try {
+          newPubPc.close();
+        } catch {
+          // ignore
+        }
+      }
+      if (newSession?.pubSfuSessionId && newSession.pubSfuSessionId !== newPubSessionId) {
+        await this.deleteSfuSession(newSession.pubSfuSessionId);
+      } else if (newPubSessionId) {
+        await this.deleteSfuSession(newPubSessionId);
+      }
+      console.warn('[Party SFU] Reconnect failed:', err);
+      return false;
     }
   }
 
@@ -2132,6 +2018,7 @@ class RealtimeSfuStreamingEngine {
     try {
       const mediaAndConfig = await Promise.all([
         this.getLocalMediaStream(facing, true),
+        this.ensureSfuBackendConfigured(),
         this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
       ]);
       stream = mediaAndConfig[0];
@@ -2162,7 +2049,7 @@ class RealtimeSfuStreamingEngine {
               // ignore callback errors
             }
           }
-          await this.waitForPeerConnected(pc, 25000);
+          await this.waitForPeerConnected(pc, 15000);
           break;
         } catch (attemptErr: any) {
           if (pc) {
@@ -2215,7 +2102,6 @@ class RealtimeSfuStreamingEngine {
       });
       this.setBroadcastState(streamId, { isVideoOn, isMicOn });
       this.startLiveStreamHeartbeat(streamId);
-      this.startHostAdaptiveBitrateMonitor(streamId);
 
       return {
         stream,
@@ -2326,117 +2212,8 @@ class RealtimeSfuStreamingEngine {
     );
   }
 
-  private startHostAdaptiveBitrateMonitor(streamId: string): void {
-    this.stopHostAdaptiveBitrateMonitor(streamId);
-    const VIDEO_TIERS = [
-      { maxBitrate: 450_000, scale: 1, maxFramerate: 24 },
-      { maxBitrate: 250_000, scale: 1.35, maxFramerate: 20 },
-      { maxBitrate: 135_000, scale: 1.85, maxFramerate: 15 },
-      { maxBitrate: 70_000, scale: 2.5, maxFramerate: 10 },
-    ];
-    let currentTier = 0;
-    let healthyStreak = 0;
-    let prevLost = 0;
-    let prevSent = 0;
-
-    const timer = setInterval(async () => {
-      const session = this.hostSfuSessions.get(streamId);
-      if (!session || session.isClosed || session.pc.connectionState === 'closed') {
-        this.stopHostAdaptiveBitrateMonitor(streamId);
-        return;
-      }
-
-      try {
-        const stats = await session.pc.getStats();
-        let rttSeconds = 0;
-        let availableOutgoingBps = Infinity;
-        let packetsSent = 0;
-        let packetsLost = 0;
-
-        stats.forEach((report: any) => {
-          if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
-            if (typeof report.currentRoundTripTime === 'number') {
-              rttSeconds = report.currentRoundTripTime;
-            }
-            if (typeof report.availableOutgoingBitrate === 'number' && report.availableOutgoingBitrate > 0) {
-              availableOutgoingBps = report.availableOutgoingBitrate;
-            }
-          } else if (report.type === 'outbound-rtp' && report.kind === 'video') {
-            packetsSent += Number(report.packetsSent || 0);
-          } else if (report.type === 'remote-inbound-rtp' && report.kind === 'video') {
-            packetsLost += Number(report.packetsLost || 0);
-          }
-        });
-
-        const deltaSent = Math.max(0, packetsSent - prevSent);
-        const deltaLost = Math.max(0, packetsLost - prevLost);
-        prevSent = packetsSent;
-        prevLost = packetsLost;
-        const lossRatio = deltaSent + deltaLost > 8 ? deltaLost / (deltaSent + deltaLost) : 0;
-
-        const targetBps = VIDEO_TIERS[currentTier].maxBitrate;
-        const isCongested =
-          rttSeconds > 0.35 ||
-          lossRatio > 0.04 ||
-          (Number.isFinite(availableOutgoingBps) && availableOutgoingBps < targetBps + 40_000);
-
-        let nextTier = currentTier;
-        if (isCongested && currentTier < VIDEO_TIERS.length - 1) {
-          nextTier = currentTier + 1;
-          healthyStreak = 0;
-        } else if (!isCongested && rttSeconds < 0.22 && lossRatio < 0.015) {
-          healthyStreak += 1;
-          if (healthyStreak >= 3 && currentTier > 0) {
-            nextTier = currentTier - 1;
-            healthyStreak = 0;
-          }
-        } else {
-          healthyStreak = 0;
-        }
-
-        if (nextTier !== currentTier) {
-          currentTier = nextTier;
-          const profile = VIDEO_TIERS[currentTier];
-          const videoSender = session.pc.getSenders().find((s) => s.track?.kind === 'video');
-          if (videoSender) {
-            const params = videoSender.getParameters();
-            params.encodings = params.encodings?.length ? params.encodings : [{}];
-            params.encodings[0].maxBitrate = profile.maxBitrate;
-            params.encodings[0].maxFramerate = profile.maxFramerate;
-            params.encodings[0].scaleResolutionDownBy = profile.scale;
-            (params as any).degradationPreference = 'balanced';
-            await videoSender.setParameters(params).catch(() => {});
-          }
-          // Reinforce high priority on audio sender whenever video scales down
-          const audioSender = session.pc.getSenders().find((s) => s.track?.kind === 'audio');
-          if (audioSender) {
-            const aParams = audioSender.getParameters();
-            aParams.encodings = aParams.encodings?.length ? aParams.encodings : [{}];
-            aParams.encodings[0].maxBitrate = currentTier >= 2 ? 18_000 : 24_000;
-            (aParams.encodings[0] as any).priority = 'high';
-            (aParams.encodings[0] as any).networkPriority = 'high';
-            await audioSender.setParameters(aParams).catch(() => {});
-          }
-        }
-      } catch {
-        // Ignore transient getStats failures during ICE transitions
-      }
-    }, 2500);
-
-    this.hostAbrTimers.set(streamId, timer);
-  }
-
-  private stopHostAdaptiveBitrateMonitor(streamId: string): void {
-    const timer = this.hostAbrTimers.get(streamId);
-    if (timer) {
-      clearInterval(timer);
-      this.hostAbrTimers.delete(streamId);
-    }
-  }
-
   private async _stopHostBroadcastInternal(streamId: string, keepalive: boolean = false): Promise<void> {
     this.stopLiveStreamHeartbeat(streamId);
-    this.stopHostAdaptiveBitrateMonitor(streamId);
     this.clearReconnectState(`host:${streamId}`, true);
     const hostSession = this.hostSfuSessions.get(streamId);
     this.hostSfuSessions.delete(streamId);
@@ -2500,7 +2277,10 @@ class RealtimeSfuStreamingEngine {
     }
 
     await this.getFirebaseIdToken();
-    await this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]);
+    await Promise.all([
+      this.ensureSfuBackendConfigured(),
+      this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
+    ]);
 
     const viewerSessionId = await this.createSfuSession();
     const pc = new RTCPeerConnection(this.getRtcConfiguration());
@@ -2540,7 +2320,7 @@ class RealtimeSfuStreamingEngine {
         firstTrackSettleTimer = setTimeout(() => {
           firstTrackSettleTimer = null;
           resolveTrackWaiter?.();
-        }, 350);
+        }, 1200);
       }
     };
 
@@ -2556,7 +2336,7 @@ class RealtimeSfuStreamingEngine {
       );
 
       await Promise.all([
-        this.waitForPeerConnected(pc, 25000),
+        this.waitForPeerConnected(pc, 15000),
         Promise.race([
           firstTrackPromise,
           new Promise<void>((_, reject) =>
@@ -2566,7 +2346,7 @@ class RealtimeSfuStreamingEngine {
               } else {
                 resolveTrackWaiter?.();
               }
-            }, 20000)
+            }, 12000)
           ),
         ]),
       ]);
@@ -2836,14 +2616,9 @@ class RealtimeSfuStreamingEngine {
         return existingStream;
       }
       existingStream.getAudioTracks().forEach((oldTrack) => {
-        if (oldTrack.id !== track.id) {
+        if (oldTrack.readyState === 'ended') {
           try {
             existingStream.removeTrack(oldTrack);
-          } catch {
-            // ignore
-          }
-          try {
-            oldTrack.stop();
           } catch {
             // ignore
           }
@@ -2917,7 +2692,11 @@ class RealtimeSfuStreamingEngine {
         if (state === 'connecting') {
           session.pubConnectingSinceMs = Date.now();
         }
-        this.emitPartyCompositeState(session);
+        if (state === 'connected') {
+          session.onConnectionStateChange?.('connected');
+        } else if (state === 'disconnected' || state === 'failed') {
+          session.onConnectionStateChange?.(state);
+        }
       },
       onReconnectNeeded: () => this.reconnectPartyPublisher(session.roomId),
     });
@@ -2930,24 +2709,10 @@ class RealtimeSfuStreamingEngine {
       try {
         await this.getFirebaseIdToken(true);
         await this.fetchCloudflareTurnCredentials(true).catch(() => {});
-        const existingLiveStream = session.localStream?.getAudioTracks().some((t) => t.readyState === 'live')
-          ? session.localStream
-          : undefined;
-        await this.publishPartyLocalMic(
-          session,
-          session.isMuted,
-          {
-            ...(existingLiveStream ? { preAcquiredStream: existingLiveStream } : {}),
-            preservePublishIntent: true,
-          }
-        );
-        this.emitPartyCompositeState(session);
+        await this.publishPartyLocalMic(session, session.isMuted);
+        await this.writePartyParticipantPresence(session);
         return true;
       } catch (err) {
-        if (!session.isClosed) {
-          session.isPublishing = true;
-          this.emitPartyCompositeState(session);
-        }
         console.warn('[Party SFU] Publisher reconnect failed:', err);
         return false;
       }
@@ -2962,50 +2727,40 @@ class RealtimeSfuStreamingEngine {
       if (session.isClosed) return;
       this.writePartyParticipantPresence(session).catch(() => {});
 
-      const now = Date.now();
       // Periodically ensure no subscribed remote speakers were missed after transient errors
       if (session.latestDesiredPeers.size > 0) {
         const hasPendingOrMissing = Array.from(session.latestDesiredPeers.keys()).some(
-          (k) =>
-            !session.subscribedByPeerKey.has(k) &&
-            (session.failedPeerCooldownUntil.get(k) || 0) <= now
+          (k) => !session.subscribedByPeerKey.has(k)
         );
         if (hasPendingOrMissing) {
           this.reconcilePartySubscriptions(session).catch(() => {});
         }
       }
 
-      // Recover stalled subscriber WebRTC connections ONLY when remote speakers exist (never touch pubPc)
-      const hasSubIntent = session.subscribedByPeerKey.size > 0 || session.latestDesiredPeers.size > 0;
+      // Recover stalled subscriber WebRTC connections
+      const hasSubIntent = session.subscribedByPeerKey.size > 0;
       if (
         hasSubIntent &&
         (session.subPc.connectionState === 'failed' ||
-          session.subPc.connectionState === 'closed' ||
           session.subPc.iceConnectionState === 'failed' ||
           (session.subPc.connectionState === 'connecting' &&
-            now - session.subConnectingSinceMs > 18_000))
+            Date.now() - session.subConnectingSinceMs > 18_000))
       ) {
-        session.subConnectingSinceMs = now;
-        this.reconnectPartySubscriber(session.roomId).catch(() => {});
+        session.subConnectingSinceMs = Date.now();
+        this.reconnectPartyVoice(session.roomId).catch(() => {});
       }
 
       // Recover stalled publisher WebRTC connections independently
-      if (session.isPublishing) {
-        const hasLiveTrack = Boolean(
-          session.localStream?.getAudioTracks().some((t) => t.readyState === 'live')
-        );
-        if (
-          !hasLiveTrack ||
-          !session.pubPc ||
-          session.pubPc.connectionState === 'failed' ||
-          session.pubPc.connectionState === 'closed' ||
+      if (
+        session.isPublishing &&
+        session.pubPc &&
+        (session.pubPc.connectionState === 'failed' ||
           session.pubPc.iceConnectionState === 'failed' ||
           (session.pubPc.connectionState === 'connecting' &&
-            now - session.pubConnectingSinceMs > 18_000)
-        ) {
-          session.pubConnectingSinceMs = now;
-          this.reconnectPartyPublisher(session.roomId).catch(() => {});
-        }
+            Date.now() - session.pubConnectingSinceMs > 18_000))
+      ) {
+        session.pubConnectingSinceMs = Date.now();
+        this.reconnectPartyPublisher(session.roomId).catch(() => {});
       }
     }, PARTY_HEARTBEAT_INTERVAL_MS);
   }
@@ -3081,17 +2836,12 @@ class RealtimeSfuStreamingEngine {
           }
         });
 
-        for (const key of Array.from(session.failedPeerCooldownUntil.keys())) {
-          if (!desiredPeers.has(key)) {
-            session.failedPeerCooldownUntil.delete(key);
-          }
-        }
         session.latestDesiredPeers = desiredPeers;
         session.onParticipantsChange?.(Array.from(activeParticipantsByUid.values()));
 
         this.reconcilePartySubscriptions(session).catch((err: any) => {
           console.warn('[Party SFU] Subscription reconciliation error:', err);
-          if (err?.status === 403 || session.reconcileFailCount >= 4) {
+          if (err?.status === 403 || session.reconcileFailCount >= 2) {
             session.onError?.(err instanceof Error ? err : new Error(String(err)));
           }
         });
@@ -3107,19 +2857,15 @@ class RealtimeSfuStreamingEngine {
       if (event.type === 'room:signal' && event.signal?.type === 'voice_updated') {
         const { peerId, sfuSessionId, trackName, isPublishing } = event.signal;
         if (peerId && peerId !== session.userId && peerId !== auth.currentUser?.uid) {
-          for (const existingKey of Array.from(session.latestDesiredPeers.keys())) {
-            if (existingKey.startsWith(`${peerId}::`)) {
-              session.latestDesiredPeers.delete(existingKey);
-            }
-          }
           if (isPublishing && sfuSessionId && trackName) {
             const peerKey = `${peerId}::${sfuSessionId}::${trackName}`;
-            session.failedPeerCooldownUntil.delete(peerKey);
-            session.latestDesiredPeers.set(peerKey, {
-              peerId,
-              publisherSessionId: sfuSessionId,
-              trackName,
-            });
+            if (!session.latestDesiredPeers.has(peerKey)) {
+              session.latestDesiredPeers.set(peerKey, {
+                peerId,
+                publisherSessionId: sfuSessionId,
+                trackName,
+              });
+            }
           }
           this.reconcilePartySubscriptions(session).catch(() => {});
         }
@@ -3168,24 +2914,12 @@ class RealtimeSfuStreamingEngine {
 
     await this._stopPartyVoiceInternal(roomId, false, false);
     await this.getFirebaseIdToken();
-
-    const [subToken, _turnReady, preAcquiredStream, preAcquiredPubToken] = await Promise.all([
-      this.requestPartyRoomSessionToken(roomId, false),
+    await Promise.all([
+      this.ensureSfuBackendConfigured(),
       this.fetchCloudflareTurnCredentials().catch(() => [] as RTCIceServer[]),
-      !listenOnly
-        ? navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-              channelCount: 1,
-            },
-            video: false,
-          })
-        : Promise.resolve(null),
-      !listenOnly ? this.requestPartyRoomSessionToken(roomId, true) : Promise.resolve(null),
     ]);
 
+    const subToken = await this.requestPartyRoomSessionToken(roomId, false);
     const subSfuSessionId = subToken.sfuSessionId;
     const subPc = new RTCPeerConnection(this.getRtcConfiguration());
 
@@ -3215,7 +2949,6 @@ class RealtimeSfuStreamingEngine {
       pendingMidToPeer: new Map(),
       latestDesiredPeers: new Map(),
       activeRemoteStreams: new Map(),
-      failedPeerCooldownUntil: new Map(),
       onError: resolvedCallbacks?.onError,
       onConnectionStateChange: resolvedCallbacks?.onConnectionStateChange,
       onParticipantsChange: resolvedCallbacks?.onParticipantsChange,
@@ -3223,34 +2956,30 @@ class RealtimeSfuStreamingEngine {
     this.partySfuSessions.set(roomId, session);
 
     this.attachPartyTrackHandlers(session, subPc);
-    this.attachPartySubMonitor(session, subPc);
 
-    // Attach presence & remote speaker listeners IMMEDIATELY so incoming audio plays without waiting for local mic ICE
-    this.startPartyHeartbeat(session);
-    this.attachPartyParticipantsListener(session);
+    this.monitorPeerConnection(`party:${roomId}`, subPc, {
+      isSessionActive: () =>
+        !session.isClosed && this.partySfuSessions.get(roomId) === session,
+      onStateChange: (state) => {
+        if (state === 'connecting') {
+          session.subConnectingSinceMs = Date.now();
+        }
+        session.onConnectionStateChange?.(state);
+      },
+      onReconnectNeeded: () => this.reconnectPartyVoice(roomId),
+    });
 
     try {
-      const presenceWritePromise = this.writePartyParticipantPresence(session);
       if (!listenOnly) {
-        await this.publishPartyLocalMic(session, isMuted, {
-          preAcquiredStream: preAcquiredStream || undefined,
-          preAcquiredPubToken: preAcquiredPubToken || undefined,
-        });
-      } else {
-        await presenceWritePromise;
+        await this.publishPartyLocalMic(session, isMuted);
       }
+
+      await this.writePartyParticipantPresence(session);
+      this.startPartyHeartbeat(session);
+      this.attachPartyParticipantsListener(session);
 
       return session.localStream;
     } catch (err) {
-      if (preAcquiredStream && session.localStream !== preAcquiredStream) {
-        preAcquiredStream.getTracks().forEach((t) => {
-          try {
-            t.stop();
-          } catch {
-            // ignore
-          }
-        });
-      }
       await this._stopPartyVoiceInternal(roomId, false, false);
       throw err;
     }
@@ -3258,8 +2987,8 @@ class RealtimeSfuStreamingEngine {
 
   public updatePartySpeakingIndicator(roomId: string, isSpeaking: boolean): void {
     const session = this.partySfuSessions.get(roomId);
-    if (!session || session.isClosed || !session.isPublishing) return;
-    const effectiveSpeaking = Boolean(isSpeaking && !session.isMuted);
+    if (!session || session.isClosed) return;
+    const effectiveSpeaking = Boolean(isSpeaking && session.isPublishing && !session.isMuted);
     if (session.isSpeaking === effectiveSpeaking) return;
     session.isSpeaking = effectiveSpeaking;
 
@@ -3325,15 +3054,6 @@ class RealtimeSfuStreamingEngine {
       const hasLiveTrack = Boolean(
         session.localStream?.getAudioTracks().some((t) => t.readyState === 'live')
       );
-      const pubPcBroken =
-        !session.pubPc ||
-        session.pubPc.connectionState === 'closed' ||
-        session.pubPc.connectionState === 'failed' ||
-        session.pubPc.signalingState === 'closed';
-      if (pubPcBroken) {
-        await this.publishPartyLocalMic(session, isMuted);
-        return session.localStream;
-      }
       if (!hasLiveTrack && session.pubPc) {
         // Re-acquire hardware mic seamlessly if OS/Android reclaimed it
         try {
@@ -3408,34 +3128,18 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
-  private async publishPartyLocalMic(
-    session: PartySfuRoomSession,
-    isMuted: boolean,
-    preAcquired?: {
-      preAcquiredStream?: MediaStream;
-      preAcquiredPubToken?: { sfuSessionId: string; role: string; canPublish: boolean };
-      preservePublishIntent?: boolean;
-    }
-  ): Promise<void> {
+  private async publishPartyLocalMic(session: PartySfuRoomSession, isMuted: boolean): Promise<void> {
     await this.cleanupPartyPublisher(session);
 
-    const [stream, pubToken] = await Promise.all([
-      preAcquired?.preAcquiredStream
-        ? Promise.resolve(preAcquired.preAcquiredStream)
-        : navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-              channelCount: 1,
-            },
-            video: false,
-          }),
-      preAcquired?.preAcquiredPubToken
-        ? Promise.resolve(preAcquired.preAcquiredPubToken)
-        : this.requestPartyRoomSessionToken(session.roomId, true),
-    ]);
-
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1,
+      },
+      video: false,
+    });
     stream.getAudioTracks().forEach((t) => {
       t.enabled = !isMuted;
     });
@@ -3451,6 +3155,7 @@ class RealtimeSfuStreamingEngine {
     const trackName = `party-${session.roomId}-${session.userId}-${Date.now().toString(36)}`;
 
     try {
+      const pubToken = await this.requestPartyRoomSessionToken(session.roomId, true);
       pubSfuSessionId = pubToken.sfuSessionId;
       pubPc = new RTCPeerConnection(this.getRtcConfiguration());
 
@@ -3475,7 +3180,7 @@ class RealtimeSfuStreamingEngine {
 
       this.attachPartyPubMonitor(session, pubPc);
 
-      // Broadcast via WebSocket AND write Firestore presence immediately while ICE finishes converging
+      // Broadcast via WebSocket immediately AND write Firestore presence so remote peers pull track in <50ms
       realtimeSocket.sendRoomSignal('party', session.roomId, {
         type: 'voice_updated',
         peerId: session.userId,
@@ -3484,19 +3189,9 @@ class RealtimeSfuStreamingEngine {
         isPublishing: true,
       });
       await this.writePartyParticipantPresence(session);
+      await this.waitForPeerConnected(pubPc, 15000);
 
-      // Verify ICE completion without blocking caller/room join
-      this.waitForPeerConnected(pubPc, 25000)
-        .then(() => {
-          this.emitPartyCompositeState(session);
-        })
-        .catch((err) => {
-          if (!session.isClosed && session.pubPc === pubPc) {
-            console.warn('[Party SFU] Publisher ICE convergence warning:', err?.message || err);
-          }
-        });
-
-      console.info('[Party SFU] Local mic published to Cloudflare SFU:', {
+      console.info('[Party SFU] Local mic published & ICE connected to Cloudflare SFU:', {
         roomId: session.roomId,
         pubSfuSessionId,
         trackName,
@@ -3506,28 +3201,20 @@ class RealtimeSfuStreamingEngine {
         iceConnectionState: pubPc.iceConnectionState,
       });
     } catch (err) {
-      const reusedStream = Boolean(preAcquired?.preAcquiredStream && preAcquired.preAcquiredStream === stream);
-      const keepIntent = Boolean(preAcquired?.preservePublishIntent && !session.isClosed);
-      if (!keepIntent || !reusedStream) {
-        stream.getTracks().forEach((t) => {
-          try {
-            t.stop();
-          } catch {
-            // ignore
-          }
-        });
-        if (session.localStream === stream) {
-          session.localStream = null;
+      stream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
         }
+      });
+      if (session.localStream === stream) {
+        session.localStream = null;
       }
       session.localTrackName = null;
       session.localMid = null;
-      if (!keepIntent) {
-        session.isPublishing = false;
-        this.stopAudioAnalyser();
-      } else {
-        session.isPublishing = true;
-      }
+      session.isPublishing = false;
+      this.stopAudioAnalyser();
       if (pubPc) {
         pubPc.onconnectionstatechange = null;
         pubPc.oniceconnectionstatechange = null;
@@ -3545,15 +3232,6 @@ class RealtimeSfuStreamingEngine {
       }
       if (session.pubSfuSessionId === pubSfuSessionId) {
         session.pubSfuSessionId = null;
-      }
-      // Clear stale publishing state in Firestore & notify peers only if publish intent truly stopped
-      if (!session.isClosed && !keepIntent) {
-        this.writePartyParticipantPresence(session).catch(() => {});
-        realtimeSocket.sendRoomSignal('party', session.roomId, {
-          type: 'voice_updated',
-          peerId: session.userId,
-          isPublishing: false,
-        });
       }
       throw err;
     }
@@ -3578,14 +3256,6 @@ class RealtimeSfuStreamingEngine {
     this.stopAudioAnalyser();
 
     await this.cleanupPartyPublisher(session);
-    if (!session.isClosed) {
-      realtimeSocket.sendRoomSignal('party', session.roomId, {
-        type: 'voice_updated',
-        peerId: session.userId,
-        isPublishing: false,
-      });
-      this.emitPartyCompositeState(session);
-    }
   }
 
   private async writePartyParticipantPresence(session: PartySfuRoomSession): Promise<void> {
@@ -3622,98 +3292,10 @@ class RealtimeSfuStreamingEngine {
     });
   }
 
-  private async subscribeSingleOrBatchPartyTracks(
-    session: PartySfuRoomSession,
-    items: Array<DesiredPartyPeer & { peerKey: string }>
-  ): Promise<{ succeeded: number; hadFatalError: boolean; lastError: any }> {
-    const subscribeChunk = async (chunk: Array<DesiredPartyPeer & { peerKey: string }>) => {
-      const assigned = await this.subscribeTracksOnSession(
-        session.subSfuSessionId,
-        session.subPc,
-        chunk.map((item) => ({
-          publisherSessionId: item.publisherSessionId,
-          trackName: item.trackName,
-          peerId: item.peerId,
-        })),
-        {
-          contextType: 'party',
-          contextId: session.roomId,
-          speakerPeerIds: Array.from(new Set(chunk.map((i) => i.peerId))),
-        },
-        (mappedTracks) => {
-          for (const mt of mappedTracks) {
-            if (mt.mid && mt.peerId) {
-              session.pendingMidToPeer.set(mt.mid, mt.peerId);
-            }
-          }
-        }
-      );
-
-      chunk.forEach((item, idx) => {
-        const matched =
-          assigned.find((a) => a.trackName === item.trackName && a.publisherSessionId === item.publisherSessionId) ||
-          assigned[idx];
-        const mid = matched?.mid || '';
-        if (mid) {
-          session.pendingMidToPeer.set(mid, item.peerId);
-        }
-        const existingCanonical = session.activeRemoteStreams.get(item.peerId);
-        session.subscribedByPeerKey.set(item.peerKey, {
-          peerId: item.peerId,
-          publisherSessionId: item.publisherSessionId,
-          trackName: item.trackName,
-          mid,
-          stream: existingCanonical || new MediaStream(),
-        });
-      });
-
-      // Attach tracks immediately from WebRTC receivers if not already mapped via ontrack
-      session.subPc.getReceivers().forEach((receiver) => {
-        const transceiver = session.subPc.getTransceivers().find((t) => t.receiver === receiver);
-        const mid = transceiver?.mid;
-        if (!mid || !receiver.track || receiver.track.readyState !== 'live') return;
-        const peerId = session.pendingMidToPeer.get(mid);
-        if (!peerId) return;
-        this.ensureCanonicalRemoteAudioStream(session, peerId, receiver.track, mid);
-      });
-    };
-
-    try {
-      await subscribeChunk(items);
-      return { succeeded: items.length, hadFatalError: false, lastError: null };
-    } catch (batchErr: any) {
-      // If a single stale/unready peer caused 422/404/502 for the whole batch, isolate per-peer so valid speakers still connect
-      const status = Number(batchErr?.status || 0);
-      if (items.length > 1 && (status === 422 || status === 404 || status === 502 || status === 403)) {
-        let succeeded = 0;
-        let lastError: any = null;
-        for (const item of items) {
-          try {
-            await subscribeChunk([item]);
-            succeeded += 1;
-          } catch (singleErr: any) {
-            lastError = singleErr;
-            const singleStatus = Number(singleErr?.status || 0);
-            if (singleStatus === 422 || singleStatus === 404 || singleStatus === 403) {
-              session.failedPeerCooldownUntil.set(item.peerKey, Date.now() + 8_000);
-            }
-          }
-        }
-        return { succeeded, hadFatalError: succeeded === 0, lastError };
-      }
-
-      if (items.length === 1 && (status === 422 || status === 404 || status === 403)) {
-        session.failedPeerCooldownUntil.set(items[0].peerKey, Date.now() + 6_000);
-      }
-      return { succeeded: 0, hadFatalError: true, lastError: batchErr };
-    }
-  }
-
   private reconcilePartySubscriptions(session: PartySfuRoomSession): Promise<void> {
-    return this.enqueueSessionOp(`party-reconcile:${session.roomId}`, async () => {
-      if (session.isClosed) return;
+    return this.enqueueSessionOp(`party-reconcile:${session.subSfuSessionId}`, async () => {
+      if (session.isClosed || session.subPc.signalingState === 'closed') return;
       const desiredPeers = session.latestDesiredPeers;
-      const now = Date.now();
 
       // 1. Close tracks that left or stopped publishing
       const removedKeys: string[] = [];
@@ -3744,18 +3326,6 @@ class RealtimeSfuStreamingEngine {
         }
       }
       removedKeys.forEach((k) => session.subscribedByPeerKey.delete(k));
-      for (const peerId of Array.from(session.activeRemoteStreams.keys())) {
-        if (!activePeersAfterCleanup.has(peerId)) {
-          session.activeRemoteStreams.delete(peerId);
-          if (typeof window !== 'undefined') {
-            window.dispatchEvent(
-              new CustomEvent('alphamate-party-remote-stream-removed', {
-                detail: { roomId: session.roomId, peerId },
-              })
-            );
-          }
-        }
-      }
       if (midsToClose.length > 0) {
         await this.closeTracksOnSession(session.subSfuSessionId, session.subPc, midsToClose, false);
       }
@@ -3764,64 +3334,89 @@ class RealtimeSfuStreamingEngine {
       const toSubscribe: Array<DesiredPartyPeer & { peerKey: string }> = [];
       for (const [peerKey, info] of desiredPeers.entries()) {
         if (!session.subscribedByPeerKey.has(peerKey)) {
-          const cooldownUntil = session.failedPeerCooldownUntil.get(peerKey) || 0;
-          if (cooldownUntil <= now) {
-            toSubscribe.push({ peerKey, ...info });
-          }
+          toSubscribe.push({ peerKey, ...info });
         }
       }
       if (toSubscribe.length === 0) {
         session.reconcileFailCount = 0;
-        this.emitPartyCompositeState(session);
         return;
-      }
-
-      // If subscriber peer closed or failed while previously idle with 0 tracks, rebuild it cleanly before subscribing
-      if (
-        session.subPc.signalingState === 'closed' ||
-        session.subPc.connectionState === 'closed' ||
-        session.subPc.connectionState === 'failed' ||
-        session.subPc.iceConnectionState === 'closed' ||
-        session.subPc.iceConnectionState === 'failed'
-      ) {
-        await this.rebuildPartySubscriberConnection(session);
       }
 
       session.subConnectingSinceMs = Date.now();
 
-      const result = await this.subscribeSingleOrBatchPartyTracks(session, toSubscribe);
-      if (!result.hadFatalError || result.succeeded > 0) {
+      try {
+        const assigned = await this.subscribeTracksOnSession(
+          session.subSfuSessionId,
+          session.subPc,
+          toSubscribe.map((item) => ({
+            publisherSessionId: item.publisherSessionId,
+            trackName: item.trackName,
+            peerId: item.peerId,
+          })),
+          {
+            contextType: 'party',
+            contextId: session.roomId,
+            speakerPeerIds: Array.from(new Set(toSubscribe.map((i) => i.peerId))),
+          },
+          (mappedTracks) => {
+            for (const mt of mappedTracks) {
+              if (mt.mid && mt.peerId) {
+                session.pendingMidToPeer.set(mt.mid, mt.peerId);
+              }
+            }
+          }
+        );
+
+        toSubscribe.forEach((item, idx) => {
+          const matched =
+            assigned.find((a) => a.trackName === item.trackName && a.publisherSessionId === item.publisherSessionId) ||
+            assigned[idx];
+          const mid = matched?.mid || '';
+          if (mid) {
+            session.pendingMidToPeer.set(mid, item.peerId);
+          }
+          const existingCanonical = session.activeRemoteStreams.get(item.peerId);
+          session.subscribedByPeerKey.set(item.peerKey, {
+            peerId: item.peerId,
+            publisherSessionId: item.publisherSessionId,
+            trackName: item.trackName,
+            mid,
+            stream: existingCanonical || new MediaStream(),
+          });
+        });
+
+        // Attach tracks immediately from WebRTC receivers if not already mapped via ontrack
+        session.subPc.getReceivers().forEach((receiver) => {
+          const transceiver = session.subPc.getTransceivers().find((t) => t.receiver === receiver);
+          const mid = transceiver?.mid;
+          if (!mid || !receiver.track || receiver.track.readyState !== 'live') return;
+          const peerId = session.pendingMidToPeer.get(mid);
+          if (!peerId) return;
+          this.ensureCanonicalRemoteAudioStream(session, peerId, receiver.track, mid);
+        });
+
         session.reconcileFailCount = 0;
-        this.waitForPeerConnected(session.subPc, 25000)
+        this.waitForPeerConnected(session.subPc, 15000)
           .then(() => {
             if (!session.isClosed) {
-              this.emitPartyCompositeState(session);
+              session.onConnectionStateChange?.('connected');
             }
           })
           .catch((iceErr) => {
             console.warn('[Party SFU] Subscriber ICE confirmation failed:', iceErr?.message || iceErr);
           });
-        if (result.lastError && !session.isClosed && !session.reconcileRetryTimer) {
+      } catch (err) {
+        session.reconcileFailCount += 1;
+        if (!session.isClosed && !session.reconcileRetryTimer) {
           session.reconcileRetryTimer = setTimeout(() => {
             session.reconcileRetryTimer = null;
             if (!session.isClosed) {
               this.reconcilePartySubscriptions(session).catch(() => {});
             }
-          }, 6500);
+          }, 2200);
         }
-        return;
+        throw err;
       }
-
-      session.reconcileFailCount += 1;
-      if (!session.isClosed && !session.reconcileRetryTimer) {
-        session.reconcileRetryTimer = setTimeout(() => {
-          session.reconcileRetryTimer = null;
-          if (!session.isClosed) {
-            this.reconcilePartySubscriptions(session).catch(() => {});
-          }
-        }, 2500);
-      }
-      throw result.lastError || new Error('Unable to subscribe to remote party voice track.');
     });
   }
 
@@ -3866,15 +3461,6 @@ class RealtimeSfuStreamingEngine {
       if (session.unsubscribeParticipants) {
         session.unsubscribeParticipants();
         session.unsubscribeParticipants = null;
-      }
-      if (typeof window !== 'undefined') {
-        for (const peerId of session.activeRemoteStreams.keys()) {
-          window.dispatchEvent(
-            new CustomEvent('alphamate-party-remote-stream-removed', {
-              detail: { roomId: session.roomId, peerId },
-            })
-          );
-        }
       }
       session.activeRemoteStreams.clear();
       if (session.localStream) {

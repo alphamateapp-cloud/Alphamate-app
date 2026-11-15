@@ -1,11 +1,9 @@
 import { auth } from './firebase';
 
 const PRODUCTION_API_URL = 'https://api.alphamate.app';
-const RECONNECT_BASE_MS = 600;
-const RECONNECT_MAX_MS = 15000;
-const HEARTBEAT_MS = 18000;
-const HEARTBEAT_TIMEOUT_MS = 65000;
-const AUTH_TIMEOUT_MS = 20000;
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 25000;
+const HEARTBEAT_MS = 20000;
 
 export interface RealtimeViewerProfile {
   id: string;
@@ -92,9 +90,6 @@ class RealtimeSocketService {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
-  private authTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastPongAt = 0;
-  private lifecycleHandlersAttached = false;
 
   private activeJoinedRoom: {
     roomType: 'live' | 'party';
@@ -106,37 +101,6 @@ class RealtimeSocketService {
   private pendingOutbox: Array<Record<string, any>> = [];
   private discoveryListeners = new Set<(event: DiscoveryEvent) => void>();
   private roomListeners = new Map<string, Set<(event: RoomSocketEvent) => void>>();
-
-  constructor() {
-    this.attachLifecycleHandlers();
-  }
-
-  private attachLifecycleHandlers(): void {
-    if (this.lifecycleHandlersAttached || typeof window === 'undefined') return;
-    this.lifecycleHandlersAttached = true;
-
-    window.addEventListener('online', () => {
-      if (!this.manuallyDisconnected) void this.forceReconnect();
-    });
-    window.addEventListener('pageshow', () => this.handleForeground());
-    window.addEventListener('focus', () => this.handleForeground());
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible') this.handleForeground();
-    });
-  }
-
-  private handleForeground(): void {
-    if (this.manuallyDisconnected || !auth.currentUser || typeof navigator !== 'undefined' && navigator.onLine === false) return;
-    if (this.isConnecting || this.ws?.readyState === WebSocket.CONNECTING) return;
-    const socketIsOpen = !!this.ws && this.ws.readyState === WebSocket.OPEN;
-    const heartbeatExpired = this.lastPongAt > 0 && Date.now() - this.lastPongAt > HEARTBEAT_TIMEOUT_MS;
-    if (!socketIsOpen || heartbeatExpired) {
-      void this.forceReconnect();
-      return;
-    }
-    this.sendRaw({ type: 'ping' });
-    if (this.isAuthed) this.sendRaw({ type: 'discovery:get' });
-  }
 
   public ensureConnected(): void {
     if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return;
@@ -167,7 +131,6 @@ class RealtimeSocketService {
     }
     this.isAuthed = false;
     this.isConnecting = false;
-    this.lastPongAt = 0;
   }
 
   public async forceReconnect(): Promise<void> {
@@ -202,10 +165,6 @@ class RealtimeSocketService {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
     }
-    if (this.authTimer) {
-      clearTimeout(this.authTimer);
-      this.authTimer = null;
-    }
   }
 
   private async connectInternal(): Promise<void> {
@@ -229,12 +188,6 @@ class RealtimeSocketService {
       socket.onopen = () => {
         this.isConnecting = false;
         this.reconnectAttempts = 0;
-        this.lastPongAt = Date.now();
-        this.authTimer = setTimeout(() => {
-          if (this.ws === socket && !this.isAuthed) {
-            try { socket.close(4000, 'Authentication timeout'); } catch {}
-          }
-        }, AUTH_TIMEOUT_MS);
         this.startPingLoop();
       };
 
@@ -256,10 +209,6 @@ class RealtimeSocketService {
           clearInterval(this.pingTimer);
           this.pingTimer = null;
         }
-        if (this.authTimer) {
-          clearTimeout(this.authTimer);
-          this.authTimer = null;
-        }
         if (!this.manuallyDisconnected && auth.currentUser) {
           this.scheduleReconnect();
         }
@@ -274,12 +223,10 @@ class RealtimeSocketService {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer || this.manuallyDisconnected) return;
-    const exponential = Math.min(
+    const delay = Math.min(
       RECONNECT_MAX_MS,
-      RECONNECT_BASE_MS * Math.pow(1.65, Math.min(this.reconnectAttempts, 6))
+      RECONNECT_BASE_MS * Math.pow(1.7, Math.min(this.reconnectAttempts, 6))
     );
-    const jitter = Math.floor(Math.random() * 350);
-    const delay = Math.min(RECONNECT_MAX_MS, exponential + jitter);
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -293,10 +240,6 @@ class RealtimeSocketService {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => {
       if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        if (this.lastPongAt > 0 && Date.now() - this.lastPongAt > HEARTBEAT_TIMEOUT_MS) {
-          try { this.ws.close(4000, 'Heartbeat timeout'); } catch {}
-          return;
-        }
         this.sendRaw({ type: 'ping' });
       }
     }, HEARTBEAT_MS);
@@ -343,7 +286,6 @@ class RealtimeSocketService {
   }
 
   private handleIncomingMessage(rawData: any): void {
-    this.lastPongAt = Date.now();
     let msg: any;
     try {
       msg = JSON.parse(String(rawData));
@@ -352,16 +294,8 @@ class RealtimeSocketService {
     }
     if (!msg || typeof msg.type !== 'string') return;
 
-    if (msg.type === 'pong') {
-      return;
-    }
-
     if (msg.type === 'auth:ok') {
       this.isAuthed = true;
-      if (this.authTimer) {
-        clearTimeout(this.authTimer);
-        this.authTimer = null;
-      }
       this.emitDiscovery({
         type: 'discovery:snapshot',
         liveStreams: Array.isArray(msg.liveStreams) ? msg.liveStreams : [],

@@ -168,9 +168,6 @@ export interface PartyRoom {
   nowPlaying?: string;
   level?: 1 | 2 | 3;
   isActive?: boolean;
-  hostPresent?: boolean;
-  hostLeftAt?: string;
-  hostReturnedAt?: string;
   lastSeenAtMs?: number;
   createdAt?: string;
   updatedAt?: string;

@@ -31,20 +31,14 @@ export function mapFirestoreDocToUser(docId: string, data: Record<string, any>):
         .padStart(6, '0')}`
   ).trim();
 
-  const resolvedAvatar =
-    typeof data.photoURL === 'string' && data.photoURL.trim()
-      ? data.photoURL.trim()
-      : typeof data.avatar === 'string' && data.avatar.trim()
-      ? data.avatar.trim()
-      : DEFAULT_AVATAR;
-
   return {
     id: docId,
     uniqueId,
     username,
     displayName,
-    avatar: resolvedAvatar,
+    avatar: String(data.avatar || data.photoURL || DEFAULT_AVATAR),
     bio: String(data.bio || 'Alpha Mate Member'),
+    email: typeof data.email === 'string' ? data.email : undefined,
     followersCount: Number(data.followersCount || 0),
     followingCount: Number(data.followingCount || 0),
     likesCount: Number(data.likesCount || 0),

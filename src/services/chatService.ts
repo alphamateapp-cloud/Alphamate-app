@@ -1,9 +1,8 @@
-import { auth, db, storage } from './firebase';
+import { auth, db } from './firebase';
 import {
   arrayUnion,
   collection,
   doc,
-  DocumentData,
   getDoc,
   getDocs,
   increment,
@@ -11,17 +10,16 @@ import {
   onSnapshot,
   orderBy,
   query,
-  QueryDocumentSnapshot,
   serverTimestamp,
   setDoc,
-  startAfter,
   updateDoc,
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 
 /** Firestore-backed chat primitives. All operations require a Firebase-authenticated user. */
+const storage = getStorage();
 const uid = () => {
   const value = auth.currentUser?.uid;
   if (!value) throw new Error('Please sign in with your Firebase account to use chat.');
@@ -126,66 +124,16 @@ export type ChatPayload = {
   linkUrl?: string;
 };
 
-export type ChatMessagePageMeta = {
-  hasMore: boolean;
-  oldestDoc: QueryDocumentSnapshot<DocumentData> | null;
-};
-
 export function subscribeToMyChats(callback: (items: any[]) => void, onError?: (error: Error) => void) {
   const me = uid();
   const q = query(collection(db, 'chats'), where('participantIds', 'array-contains', me), orderBy('updatedAt', 'desc'), limit(100));
   return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => onError?.(e));
 }
 
-export function subscribeToChatMessages(
-  chatId: string,
-  callback: (items: any[], meta?: ChatMessagePageMeta) => void,
-  onError?: (error: Error) => void,
-  pageSize = 40
-) {
+export function subscribeToChatMessages(chatId: string, callback: (items: any[]) => void, onError?: (error: Error) => void) {
   uid();
-  const q = query(collection(db, 'chats', chatId, 'messages'), orderBy('createdAt', 'desc'), limit(pageSize));
-  return onSnapshot(
-    q,
-    (snap) => {
-      const oldestDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
-      const asc = [...snap.docs].reverse().map((d) => ({ id: d.id, ...d.data() }));
-      callback(asc, {
-        hasMore: snap.docs.length >= pageSize,
-        oldestDoc,
-      });
-    },
-    (e) => onError?.(e)
-  );
-}
-
-export async function fetchOlderChatMessages(
-  chatId: string,
-  cursorDoc: QueryDocumentSnapshot<DocumentData>,
-  pageSize = 40
-): Promise<{ items: any[]; hasMore: boolean; oldestDoc: QueryDocumentSnapshot<DocumentData> | null }> {
-  uid();
-  const q = query(
-    collection(db, 'chats', chatId, 'messages'),
-    orderBy('createdAt', 'desc'),
-    startAfter(cursorDoc),
-    limit(pageSize)
-  );
-  const snap = await getDocs(q);
-  const oldestDoc = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
-  const asc = [...snap.docs].reverse().map((d) => ({ id: d.id, ...d.data() }));
-  return {
-    items: asc,
-    hasMore: snap.docs.length >= pageSize,
-    oldestDoc,
-  };
-}
-
-export async function getChatThreadById(chatId: string): Promise<any | null> {
-  uid();
-  if (!chatId) return null;
-  const snap = await getDoc(doc(db, 'chats', chatId));
-  return snap.exists() ? { id: snap.id, ...snap.data() } : null;
+  const q = query(collection(db, 'chats', chatId, 'messages'), orderBy('createdAt', 'asc'), limit(300));
+  return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => onError?.(e));
 }
 
 export function subscribeToMyChatRequests(callback: (items: any[]) => void, onError?: (error: Error) => void) {
@@ -194,109 +142,46 @@ export function subscribeToMyChatRequests(callback: (items: any[]) => void, onEr
   return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => onError?.(e));
 }
 
-async function resolveTargetFirebaseUid(targetProfile: ChatProfile): Promise<string> {
-  const rawCandidate = String(targetProfile.id || targetProfile.uniqueId || '').trim();
-  if (!rawCandidate) {
-    throw new Error('Selected user profile does not have a valid account ID.');
-  }
-
-  // If rawCandidate is already an AM_ uniqueId or unverified ID, verify/resolve via users collection
-  if (!rawCandidate.startsWith('AM_')) {
-    const directSnap = await getDoc(doc(db, 'users', rawCandidate)).catch(() => null);
-    if (directSnap?.exists()) {
-      return directSnap.id;
-    }
-  }
-
-  const lookupUniqueId = String(
-    targetProfile.uniqueId || (rawCandidate.startsWith('AM_') ? rawCandidate : '')
-  )
-    .trim()
-    .toLowerCase();
-
-  if (lookupUniqueId) {
-    const byUniqueSnap = await getDocs(
-      query(collection(db, 'users'), where('uniqueIdLower', '==', lookupUniqueId), limit(1))
-    ).catch(() => null);
-    if (byUniqueSnap && !byUniqueSnap.empty) {
-      return byUniqueSnap.docs[0].id;
-    }
-  }
-
-  return rawCandidate;
-}
-
 /**
- * Create or return an existing 1:1 direct Firestore chat thread immediately,
- * deduplicating across existing chats for the same participant pair.
+ * Create or return an existing 1:1 direct Firestore chat thread immediately.
  */
 export async function getOrCreateDirectChat(meProfile: ChatProfile, targetProfile: ChatProfile): Promise<string> {
   const me = uid();
-  const targetUid = await resolveTargetFirebaseUid(targetProfile);
-  if (!targetUid || targetUid === me) {
+  if (!targetProfile.id || targetProfile.id === me) {
     throw new Error('Cannot start chat with yourself.');
   }
-
-  const participants = [me, targetUid].sort();
-  const deterministicChatId = `dm_${participants.map(safeId).join('_')}`;
-  const chatRef = doc(db, 'chats', deterministicChatId);
-
-  const meProfilePayload = {
-    id: me,
-    displayName: meProfile.displayName || auth.currentUser?.displayName || 'Alpha Mate User',
-    username: meProfile.username || '',
-    uniqueId: meProfile.uniqueId || '',
-    avatar: meProfile.avatar || auth.currentUser?.photoURL || '',
-  };
-  const targetProfilePayload = {
-    id: targetUid,
-    displayName: targetProfile.displayName || 'Alpha Mate User',
-    username: targetProfile.username || '',
-    uniqueId: targetProfile.uniqueId || '',
-    avatar: targetProfile.avatar || '',
-  };
-
+  const participants = [me, targetProfile.id].sort();
+  const chatId = `dm_${participants.map(safeId).join('_')}`;
+  const chatRef = doc(db, 'chats', chatId);
   const existing = await getDoc(chatRef);
-  if (existing.exists()) {
-    await updateDoc(chatRef, {
-      [`participantProfiles.${me}`]: meProfilePayload,
-      [`participantProfiles.${targetUid}`]: targetProfilePayload,
-      [`memberStatus.${me}`]: 'joined',
-      [`memberStatus.${targetUid}`]: 'joined',
+  if (!existing.exists()) {
+    await setDoc(chatRef, {
+      type: 'direct',
+      participantIds: participants,
+      participantProfiles: {
+        [me]: {
+          id: me,
+          displayName: meProfile.displayName || auth.currentUser?.displayName || 'Alpha Mate User',
+          username: meProfile.username || '',
+          uniqueId: meProfile.uniqueId || '',
+          avatar: meProfile.avatar || auth.currentUser?.photoURL || '',
+        },
+        [targetProfile.id]: {
+          id: targetProfile.id,
+          displayName: targetProfile.displayName || 'Alpha Mate User',
+          username: targetProfile.username || '',
+          uniqueId: targetProfile.uniqueId || '',
+          avatar: targetProfile.avatar || '',
+        },
+      },
+      createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
-    }).catch(() => {});
-    return deterministicChatId;
+      lastMessage: 'Connected on Alpha Mate',
+      lastSenderId: me,
+      unreadBy: { [me]: 0, [targetProfile.id]: 0 },
+    });
   }
-
-  // Deduplicate if a legacy DM document already exists for the same participant pair
-  const existingPairSnap = await getDocs(
-    query(collection(db, 'chats'), where('participantIds', 'array-contains', me), limit(100))
-  ).catch(() => null);
-  const legacyMatch = existingPairSnap?.docs.find((d) => {
-    const data = d.data() as any;
-    const pIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
-    return data.type === 'direct' && pIds.length === 2 && pIds.includes(targetUid);
-  });
-  if (legacyMatch) {
-    return legacyMatch.id;
-  }
-
-  await setDoc(chatRef, {
-    type: 'direct',
-    participantIds: participants,
-    memberStatus: { [me]: 'joined', [targetUid]: 'joined' },
-    participantProfiles: {
-      [me]: meProfilePayload,
-      [targetUid]: targetProfilePayload,
-    },
-    createdAt: serverTimestamp(),
-    updatedAt: serverTimestamp(),
-    lastMessage: 'Connected on Alpha Mate',
-    lastSenderId: me,
-    unreadBy: { [me]: 0, [targetUid]: 0 },
-  });
-
-  return deterministicChatId;
+  return chatId;
 }
 
 export async function markChatAsRead(chatId: string) {
@@ -510,22 +395,7 @@ export async function uploadChatMedia(chatId: string, file: File) {
 
 export async function markChatMessageRead(chatId: string, messageId: string) {
   const me = uid();
-  await updateDoc(doc(db, 'chats', chatId, 'messages', messageId), {
-    deliveredTo: arrayUnion(me),
-    readBy: arrayUnion(me),
-  });
-}
-
-export async function markChatMessagesDelivered(chatId: string, messageIds: string[]) {
-  const me = uid();
-  if (!chatId || messageIds.length === 0) return;
-  const batch = writeBatch(db);
-  messageIds.slice(0, 100).forEach((messageId) => {
-    batch.update(doc(db, 'chats', chatId, 'messages', messageId), {
-      deliveredTo: arrayUnion(me),
-    });
-  });
-  await batch.commit().catch(() => {});
+  await updateDoc(doc(db, 'chats', chatId, 'messages', messageId), { readBy: arrayUnion(me) });
 }
 
 export async function editChatMessage(chatId: string, messageId: string, text: string) {
@@ -557,21 +427,9 @@ export async function deleteChatMessage(chatId: string, messageId: string, every
 
 export async function setChatPresence(isOnline: boolean) {
   const me = uid();
-  const nowIso = new Date().toISOString();
-  await Promise.allSettled([
-    setDoc(doc(db, 'presence', me), { userId: me, online: isOnline, lastSeen: serverTimestamp() }, { merge: true }),
-    setDoc(doc(db, 'users', me), { uid: me, onlineStatus: isOnline, lastSeen: nowIso }, { merge: true }),
-  ]);
+  await setDoc(doc(db, 'presence', me), { userId: me, online: isOnline, lastSeen: serverTimestamp() }, { merge: true });
 }
 
-export function subscribeToChatPresence(
-  userId: string,
-  callback: (online: boolean, lastSeen?: any) => void,
-  onError?: (err: Error) => void
-) {
-  return onSnapshot(
-    doc(db, 'presence', userId),
-    (snap) => callback(Boolean(snap.data()?.online), snap.data()?.lastSeen),
-    (err) => onError?.(err)
-  );
+export function subscribeToChatPresence(userId: string, callback: (online: boolean, lastSeen?: any) => void) {
+  return onSnapshot(doc(db, 'presence', userId), (snap) => callback(!!snap.data()?.online, snap.data()?.lastSeen));
 }

@@ -63,40 +63,12 @@ export function createApiApp() {
     .map((v) => v.trim())
     .filter(Boolean);
 
-  function isOriginAllowed(origin) {
-    if (!origin) return true;
-    if (ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin)) return true;
-    try {
-      const parsed = new URL(origin);
-      const protocol = parsed.protocol.toLowerCase();
-      const host = parsed.hostname.toLowerCase();
-      if (
-        protocol === 'capacitor:' ||
-        protocol === 'ionic:' ||
-        host === 'localhost' ||
-        host === '127.0.0.1' ||
-        host === 'alphamate.app' ||
-        host === 'www.alphamate.app' ||
-        host.endsWith('.run.app') ||
-        host.endsWith('.pages.dev')
-      ) {
-        return true;
-      }
-    } catch {
-      // ignore malformed Origin headers
-    }
-    return false;
-  }
-
   app.use(express.json({ limit: '1mb' }));
 
   app.use((req, res, next) => {
     const origin = req.headers.origin || '';
-    if (ALLOWED_ORIGINS.includes('*')) {
-      res.header('Access-Control-Allow-Origin', '*');
-    } else if (origin && isOriginAllowed(origin)) {
-      res.header('Access-Control-Allow-Origin', origin);
-    }
+    const allowed = ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin);
+    if (allowed) res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes('*') ? '*' : origin);
     res.header('Vary', 'Origin');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Content-Length, Accept, Authorization, X-Upload-Id, X-Chunk-Index');
@@ -182,28 +154,6 @@ export function createApiApp() {
     };
   }
 
-  let turnCache = null;
-  let turnCacheInFlight = null;
-
-  async function getCachedTurnIceServers(ttlSeconds = TURN_CREDENTIAL_TTL) {
-    const now = Date.now();
-    if (turnCache && now < turnCache.cachedUntil) {
-      return turnCache.payload;
-    }
-    if (!turnCacheInFlight) {
-      turnCacheInFlight = generateTurnIceServers(ttlSeconds)
-        .then((payload) => {
-          const ttlMs = Math.max(60_000, Math.min(20 * 60_000, (payload.ttl - 120) * 1000));
-          turnCache = { payload, cachedUntil: Date.now() + ttlMs };
-          return payload;
-        })
-        .finally(() => {
-          turnCacheInFlight = null;
-        });
-    }
-    return turnCacheInFlight;
-  }
-
   let healthCache = null;
   let healthCacheExpiresAt = 0;
   let healthRefreshInFlight = null;
@@ -256,7 +206,7 @@ export function createApiApp() {
                 Accept: 'application/json',
               },
             },
-            5000
+            2500
           );
           // 401/403 means invalid App ID / Bearer token; 404/400/200 means credentials authenticated against Cloudflare SFU
           const authOk = resp.status !== 401 && resp.status !== 403 && resp.status < 500;
@@ -276,7 +226,7 @@ export function createApiApp() {
         try {
           await Promise.race([
             generateTurnIceServers(300),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('TURN health probe timed out')), 5000)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('TURN health probe timed out')), 2500)),
           ]);
           return { configured: true, valid: true };
         } catch (err) {
@@ -352,19 +302,8 @@ export function createApiApp() {
     }
   });
 
-  const tokenVerifyCache = new Map();
-  const TOKEN_VERIFY_CACHE_TTL_MS = 90_000;
-
   async function verifyFirebaseIdToken(idToken) {
     if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY is not configured on the backend server.');
-    if (!idToken || typeof idToken !== 'string') return null;
-
-    const now = Date.now();
-    const cached = tokenVerifyCache.get(idToken);
-    if (cached && now < cached.expiresAt) {
-      return cached.user;
-    }
-
     const response = await fetchWithTimeout(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
       {
@@ -377,21 +316,7 @@ export function createApiApp() {
     if (!response.ok) return null;
     const data = await response.json();
     const user = data.users?.[0];
-    const verified = user?.localId
-      ? { uid: user.localId, email: user.email || null, emailVerified: !!user.emailVerified }
-      : null;
-
-    if (verified) {
-      if (tokenVerifyCache.size >= 500) {
-        const oldestKey = tokenVerifyCache.keys().next().value;
-        if (oldestKey) tokenVerifyCache.delete(oldestKey);
-      }
-      tokenVerifyCache.set(idToken, {
-        user: verified,
-        expiresAt: now + TOKEN_VERIFY_CACHE_TTL_MS,
-      });
-    }
-    return verified;
+    return user?.localId ? { uid: user.localId, email: user.email || null, emailVerified: !!user.emailVerified } : null;
   }
 
   async function requireFirebaseAuth(req, res, next) {
@@ -471,27 +396,6 @@ export function createApiApp() {
     return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
   }
 
-  const authDocCache = new Map();
-  const AUTH_DOC_CACHE_TTL_MS = 12_000;
-
-  async function fetchCachedFirestoreDocument(documentPath, idToken) {
-    const now = Date.now();
-    const cached = authDocCache.get(documentPath);
-    if (cached && now < cached.expiresAt) {
-      return cached.doc;
-    }
-    const fetched = await fetchFirestoreDocument(documentPath, idToken);
-    if (authDocCache.size >= 500) {
-      const oldestKey = authDocCache.keys().next().value;
-      if (oldestKey) authDocCache.delete(oldestKey);
-    }
-    authDocCache.set(documentPath, {
-      doc: fetched,
-      expiresAt: now + AUTH_DOC_CACHE_TTL_MS,
-    });
-    return fetched;
-  }
-
   async function authorizeRemoteTrackSubscriptions(req, tracks) {
     const remoteTracks = tracks.filter((t) => t.location === 'remote');
     if (!remoteTracks.length) return { ok: true };
@@ -510,11 +414,7 @@ export function createApiApp() {
     const idToken = req.firebaseIdToken;
 
     if (contextType === 'live') {
-      const memDoc = app.locals.realtimeRegistry?.getLiveStream?.(contextId) || null;
-      const firestoreDoc = memDoc && memDoc.isActive !== false && memDoc.sfuSessionId
-        ? null
-        : await fetchCachedFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken).catch(() => null);
-      const streamDoc = memDoc || firestoreDoc;
+      const streamDoc = await fetchFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken);
       if (!streamDoc || streamDoc.isActive === false) {
         return { ok: false, status: 404, error: 'Live stream is not active or no longer exists.' };
       }
@@ -523,29 +423,20 @@ export function createApiApp() {
       if (blocked.includes(uid) || kicked.includes(uid)) {
         return { ok: false, status: 403, error: 'Access to this live stream is restricted.' };
       }
-      const allowedSessions = new Set(
-        [firestoreDoc?.sfuSessionId, memDoc?.sfuSessionId].filter((s) => typeof s === 'string' && s.length > 0)
-      );
-      if (allowedSessions.size > 0) {
-        const invalidSession = remoteTracks.some((t) => !allowedSessions.has(t.sessionId));
+      if (streamDoc.sfuSessionId) {
+        const invalidSession = remoteTracks.some((t) => t.sessionId !== streamDoc.sfuSessionId);
         if (invalidSession) {
-          return {
-            ok: false,
-            status: 409,
-            code: 'HOST_SESSION_CHANGED',
-            error: 'Requested track session does not match active host session.',
-          };
+          return { ok: false, status: 403, error: 'Requested track session does not match active host session.' };
         }
       }
       return { ok: true };
     }
 
     if (contextType === 'party') {
-      const memRoom = app.locals.realtimeRegistry?.getPartyRoom?.(contextId) || null;
       const roomDoc =
-        (memRoom && memRoom.isActive !== false ? memRoom : null) ||
-        (await fetchCachedFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}`, idToken).catch(() => null)) ||
-        memRoom;
+        (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(contextId)}`, idToken).catch(() => null)) ||
+        app.locals.realtimeRegistry?.getPartyRoom?.(contextId) ||
+        null;
       if (!roomDoc || roomDoc.isActive === false) {
         return { ok: false, status: 404, error: 'Party room is closed or no longer exists.' };
       }
@@ -593,37 +484,18 @@ export function createApiApp() {
       fetchOptions.body = JSON.stringify(body);
     }
 
-    let lastErr = null;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const response = await fetchWithTimeout(targetUrl, fetchOptions, 18000);
-        const data = await response.json().catch(() => ({}));
+    const response = await fetchWithTimeout(targetUrl, fetchOptions, 10000);
+    const data = await response.json().catch(() => ({}));
 
-        if (!response.ok || data?.errorCode) {
-          const description = data?.errorDescription || data?.error || `Cloudflare SFU error (${response.status})`;
-          const err = new Error(description);
-          err.statusCode = response.status === 404 || response.status === 410 ? 404 : 502;
-          err.sfuErrorCode = data?.errorCode || null;
-          if (attempt === 0 && (response.status >= 502 || response.status === 429)) {
-            lastErr = err;
-            await new Promise((r) => setTimeout(r, 200));
-            continue;
-          }
-          throw err;
-        }
-
-        return data;
-      } catch (err) {
-        lastErr = err;
-        const retryable = err?.code === 'UPSTREAM_TIMEOUT' || (err?.statusCode === 502 && !err?.sfuErrorCode);
-        if (attempt === 0 && retryable) {
-          await new Promise((r) => setTimeout(r, 200));
-          continue;
-        }
-        throw err;
-      }
+    if (!response.ok || data?.errorCode) {
+      const description = data?.errorDescription || data?.error || `Cloudflare SFU error (${response.status})`;
+      const err = new Error(description);
+      err.statusCode = response.status === 404 || response.status === 410 ? 404 : 502;
+      err.sfuErrorCode = data?.errorCode || null;
+      throw err;
     }
-    throw lastErr;
+
+    return data;
   }
 
   app.get('/api/auth/verify', async (req, res) => {
@@ -835,66 +707,9 @@ export function createApiApp() {
     } catch (error) { return sendAdminError(res, error, 'dashboard'); }
   });
 
-  const UPSTREAM_SFU_BACKEND_URL = (
-    process.env.SFU_UPSTREAM_API_URL ||
-    process.env.RAILWAY_API_URL ||
-    'https://api.alphamate.app'
-  )
-    .trim()
-    .replace(/\/$/, '');
-
-  async function forwardUnconfiguredMediaApiToUpstream(req, res) {
-    if (!UPSTREAM_SFU_BACKEND_URL || req.headers['x-alphamate-proxied'] === '1') {
-      return false;
-    }
-    try {
-      const targetUrl = `${UPSTREAM_SFU_BACKEND_URL}${req.originalUrl}`;
-      const headers = {
-        Accept: 'application/json',
-        'X-Alphamate-Proxied': '1',
-      };
-      if (req.headers.authorization) {
-        headers.Authorization = String(req.headers.authorization);
-      }
-      const method = (req.method || 'GET').toUpperCase();
-      const fetchOptions = { method, headers };
-      if (method !== 'GET' && method !== 'HEAD') {
-        headers['Content-Type'] = 'application/json';
-        fetchOptions.body = JSON.stringify(req.body ?? {});
-      }
-
-      const upstreamResp = await fetchWithTimeout(targetUrl, fetchOptions, 15000);
-      const text = await upstreamResp.text().catch(() => '');
-      const contentType = upstreamResp.headers.get('content-type') || 'application/json';
-      res.status(upstreamResp.status);
-      res.setHeader('Content-Type', contentType);
-      res.send(text);
-      return true;
-    } catch (err) {
-      console.warn('[SFU Proxy] Upstream forward error:', err?.message || err);
-      return false;
-    }
-  }
-
-  app.use('/api/webrtc/turn-credentials', async (req, res, next) => {
-    if (CLOUDFLARE_TURN_TOKEN_ID && CLOUDFLARE_TURN_API_TOKEN) {
-      return next();
-    }
-    const handled = await forwardUnconfiguredMediaApiToUpstream(req, res);
-    if (!handled) next();
-  });
-
-  app.use('/api/sfu', async (req, res, next) => {
-    if (REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN) {
-      return next();
-    }
-    const handled = await forwardUnconfiguredMediaApiToUpstream(req, res);
-    if (!handled) next();
-  });
-
   app.get('/api/webrtc/turn-credentials', requireFirebaseAuth, async (_req, res) => {
     try {
-      const generated = await getCachedTurnIceServers(TURN_CREDENTIAL_TTL);
+      const generated = await generateTurnIceServers(TURN_CREDENTIAL_TTL);
       const hasStun = generated.iceServers.some((s) => {
         const urls = Array.isArray(s?.urls) ? s.urls : s?.urls ? [s.urls] : [];
         return urls.some((u) => typeof u === 'string' && u.startsWith('stun:'));
@@ -1025,11 +840,7 @@ export function createApiApp() {
 
       const authz = await authorizeRemoteTrackSubscriptions(req, tracks);
       if (!authz.ok) {
-        return res.status(authz.status || 403).json({
-          success: false,
-          code: authz.code || undefined,
-          error: authz.error || 'Subscription not authorized.',
-        });
+        return res.status(authz.status || 403).json({ success: false, error: authz.error || 'Subscription not authorized.' });
       }
 
       const payload = { tracks };
@@ -1251,7 +1062,7 @@ export function createApiApp() {
 
       const [sfuSession, turnCreds] = await Promise.all([
         callCloudflareSfu('/sessions/new', 'POST'),
-        getCachedTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
+        generateTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
       ]);
 
       if (!sfuSession?.sessionId) {
@@ -1298,11 +1109,10 @@ export function createApiApp() {
 
       const uid = req.firebaseUser.uid;
       const idToken = req.firebaseIdToken;
-      const memRoom = app.locals.realtimeRegistry?.getPartyRoom?.(roomId) || null;
       const roomDoc =
-        (memRoom && memRoom.isActive !== false ? memRoom : null) ||
-        (await fetchCachedFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
-        memRoom;
+        (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
+        app.locals.realtimeRegistry?.getPartyRoom?.(roomId) ||
+        null;
 
       if (!roomDoc || roomDoc.isActive === false) {
         return res.status(404).json({ success: false, error: 'Party room is closed or does not exist.' });
@@ -1330,7 +1140,7 @@ export function createApiApp() {
 
       const [sfuSession, turnCreds] = await Promise.all([
         callCloudflareSfu('/sessions/new', 'POST'),
-        getCachedTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
+        generateTurnIceServers(TURN_CREDENTIAL_TTL).catch(() => null),
       ]);
 
       if (!sfuSession?.sessionId) {

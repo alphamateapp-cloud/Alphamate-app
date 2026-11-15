@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import { Capacitor } from '@capacitor/core';
 import {
   ScreenType,
@@ -49,13 +49,10 @@ import {
   logoutUser,
   onAuthStateChanged,
   syncUserProfileToFirestore,
-  updateUserProfileFieldsInFirestore,
   getUserProfileFromFirestore,
-  getUserProfileFromFirestoreResult,
   subscribeToUserProfile,
   syncPartyRoomToFirestore,
   deletePartyRoomFromFirestore,
-  updatePartyRoomFields,
   subscribeToPartyRooms,
   updatePartyRoomSeat,
   syncLiveStreamToFirestore,
@@ -115,7 +112,7 @@ import {
   subscribeToMyFollowEdges,
   setUserFollowStateFirestore,
 } from '../services/userDirectoryService';
-import { getOrCreateDirectChat, getChatThreadById, setChatPresence } from '../services/chatService';
+import { getOrCreateDirectChat } from '../services/chatService';
 
 export type RefreshScope =
   | 'home'
@@ -262,14 +259,8 @@ interface AppContextType {
   conversations: Conversation[];
   activeConversation: Conversation | null;
   openConversation: (conv: Conversation) => void;
-  openConversationByChatId: (
-    chatId: string,
-    fallbackSender?: { id?: string; displayName?: string; avatar?: string }
-  ) => Promise<void>;
   startDirectMessage: (user: User) => Promise<void>;
   sendMessage: (convId: string, text: string, imageUrl?: string) => void;
-  chatActionError: string | null;
-  clearChatActionError: () => void;
 
   // Video feed & Upload
   videos: VideoPost[];
@@ -596,19 +587,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const suggestedUsername = emailPrefix.toLowerCase().replace(/[^a-z0-9_]/g, '_') || `user_${fbUser.uid.slice(0, 6)}`;
     const verified = isFirebaseUserVerified(fbUser);
     const isGoogle = fbUser.providerData?.some((p) => p.providerId === 'google.com');
-    // A Firebase UID is stable for the same account on every device. Derive a
-    // repeatable public ID from it instead of generating a new random ID per login.
-    // Existing Firestore profiles are merged over this default below, so their
-    // already-issued uniqueId, coins, levels and other saved data remain unchanged.
-    let uidHash = 2166136261;
-    for (let i = 0; i < fbUser.uid.length; i += 1) {
-      uidHash = Math.imul(uidHash ^ fbUser.uid.charCodeAt(i), 16777619);
-    }
-    const stableUniqueId = `AM_${10000000 + ((uidHash >>> 0) % 90000000)}`;
 
     return {
       id: fbUser.uid,
-      uniqueId: stableUniqueId,
+      uniqueId: `AM_${Math.floor(100000 + Math.random() * 900000)}`,
       username: suggestedUsername,
       displayName: suggestedName,
       email: cleanEmail,
@@ -633,127 +615,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const inFlightProfileHydrationsRef = React.useRef<Map<string, Promise<{ user: User; restricted: boolean }>>>(new Map());
-
-  const hydrateFirebaseUserProfile = async (
-    fbUser: FirebaseUser,
-    options?: {
-      forceVerified?: boolean;
-      overrideDefaults?: Partial<User>;
-      createIfMissing?: boolean;
-    }
-  ): Promise<{ user: User; restricted: boolean }> => {
-    const existingInFlight = inFlightProfileHydrationsRef.current.get(fbUser.uid);
-    if (existingInFlight) {
-      return existingInFlight;
-    }
-
-    const promise = (async () => {
-      const verified = Boolean(options?.forceVerified) || isFirebaseUserVerified(fbUser);
-      const defaults = buildNewUserFromFirebase(fbUser, options?.overrideDefaults);
-      const result = await getUserProfileFromFirestoreResult(fbUser.uid);
-
-      let mergedUser: User;
-      let shouldCreateRemote = false;
-
-      if (result.status === 'found' && result.data) {
-        const remote = result.data;
-        const pickNum = (val: unknown, fallback: number) =>
-          typeof val === 'number' && Number.isFinite(val) ? val : fallback;
-        const pickStr = (val: unknown, fallback: string) =>
-          typeof val === 'string' && val.trim().length > 0 ? val : fallback;
-
-        mergedUser = {
-          ...defaults,
-          ...remote,
-          id: fbUser.uid,
-          uniqueId: pickStr(remote.uniqueId, defaults.uniqueId),
-          username: pickStr(remote.username, defaults.username),
-          displayName: pickStr(remote.displayName, defaults.displayName),
-          email: (fbUser.email || remote.email || defaults.email || '').toLowerCase(),
-          avatar: pickStr(remote.avatar, fbUser.photoURL || defaults.avatar),
-          bio: typeof remote.bio === 'string' ? remote.bio : defaults.bio,
-          level: pickNum(remote.level, defaults.level),
-          xp: pickNum(remote.xp, defaults.xp),
-          nextLevelXp: pickNum(remote.nextLevelXp, defaults.nextLevelXp),
-          vipTier: pickNum(remote.vipTier, defaults.vipTier),
-          coins: pickNum(remote.coins, defaults.coins),
-          diamonds: pickNum(remote.diamonds, defaults.diamonds),
-          heldDiamonds: pickNum(remote.heldDiamonds, defaults.heldDiamonds || 0),
-          followersCount: pickNum(remote.followersCount, defaults.followersCount),
-          followingCount: pickNum(remote.followingCount, defaults.followingCount),
-          likesCount: pickNum(remote.likesCount, defaults.likesCount),
-          isVerified: verified || Boolean(remote.isVerified),
-          equippedBadgeIds: Array.isArray(remote.equippedBadgeIds) ? remote.equippedBadgeIds : defaults.equippedBadgeIds,
-        };
-
-        if (remote.notificationPreferences) {
-          const hydratedPrefs = pushService.setLocalPreferences({
-            ...DEFAULT_NOTIFICATION_PREFERENCES,
-            ...remote.notificationPreferences,
-            categories: {
-              ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
-              ...(remote.notificationPreferences.categories || {}),
-            },
-          });
-          setNotificationPreferences(hydratedPrefs);
-        }
-
-        if (remote.dailyCheckInState && typeof remote.dailyCheckInState === 'object') {
-          const today = getTodayDateString();
-          const rc = remote.dailyCheckInState;
-          const hydratedCheckIn = {
-            streak: Number(rc.streak) || 0,
-            lastCheckInDate: rc.lastCheckInDate || null,
-            isClaimedToday: rc.lastCheckInDate === today,
-            history: Array.isArray(rc.history) ? rc.history : [],
-          };
-          setDailyCheckInState(hydratedCheckIn);
-          try {
-            localStorage.setItem('alphamate_daily_checkin', JSON.stringify(hydratedCheckIn));
-          } catch {
-            // ignore
-          }
-        }
-
-        // Only update minimal verified/authProvider metadata if needed — NEVER write full defaults over remote fields!
-        if (verified && !remote.isVerified) {
-          updateUserProfileFieldsInFirestore(fbUser.uid, { isVerified: true }).catch(() => {});
-        }
-      } else if (result.status === 'missing') {
-        mergedUser = defaults;
-        shouldCreateRemote = options?.createIfMissing !== false;
-        if (shouldCreateRemote) {
-          await syncUserProfileToFirestore(mergedUser).catch(() => {});
-        }
-      } else {
-        // Network/timeout error: preserve matching cached local profile if present, and NEVER overwrite Firestore!
-        let cachedForSameUid: Partial<User> | null = null;
-        try {
-          const raw = localStorage.getItem('alphamate_current_user');
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (parsed?.id === fbUser.uid) cachedForSameUid = parsed;
-          }
-        } catch {
-          // ignore
-        }
-        mergedUser = cachedForSameUid
-          ? { ...defaults, ...cachedForSameUid, id: fbUser.uid, isVerified: verified || Boolean(cachedForSameUid.isVerified) }
-          : defaults;
-      }
-
-      const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
-      saveUserSession(mergedUser, verified && !restricted);
-      return { user: mergedUser, restricted };
-    })().finally(() => {
-      inFlightProfileHydrationsRef.current.delete(fbUser.uid);
-    });
-
-    inFlightProfileHydrationsRef.current.set(fbUser.uid, promise);
-    return promise;
-  };
-
   // Sync Firebase auth state (runs on boot & restores persisted device session automatically)
   useEffect(() => {
     let active = true;
@@ -768,12 +629,37 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setIsEmailVerified(verified);
 
         try {
-          const { restricted } = await hydrateFirebaseUserProfile(fbUser, { createIfMissing: true });
+          const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
           if (!active) return;
 
-          if (verified && !restricted) {
-            p2pStreamingEngine.prewarmConnections();
+          const mergedUser: User = remoteProfile
+            ? {
+                ...buildNewUserFromFirebase(fbUser),
+                ...remoteProfile,
+                id: fbUser.uid,
+                email: fbUser.email || remoteProfile.email || '',
+                displayName: remoteProfile.displayName || fbUser.displayName || 'Alpha Mate',
+                avatar: remoteProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
+                isVerified: verified || Boolean(remoteProfile.isVerified),
+              }
+            : buildNewUserFromFirebase(fbUser);
+
+          if (!remoteProfile) {
+            await syncUserProfileToFirestore(mergedUser).catch(() => {});
           }
+          if (remoteProfile?.notificationPreferences) {
+            const hydratedPrefs = pushService.setLocalPreferences({
+              ...DEFAULT_NOTIFICATION_PREFERENCES,
+              ...remoteProfile.notificationPreferences,
+              categories: {
+                ...DEFAULT_NOTIFICATION_PREFERENCES.categories,
+                ...(remoteProfile.notificationPreferences.categories || {}),
+              },
+            });
+            setNotificationPreferences(hydratedPrefs);
+          }
+          const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
+          saveUserSession(mergedUser, verified && !restricted);
 
           // Restore an existing Firebase session directly into the app after
           // refresh/reopen. Preserve direct visits to /privacy, /terms, or /delete-account.
@@ -837,14 +723,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
-  const pendingSeatOpRef = useRef<{
-    roomId: string;
-    user: User;
-    seatIndex: number | null;
-    muted: boolean;
-    startedAt: number;
-  } | null>(null);
-
   // Real-time Firestore + WebSocket discovery listeners (rebinds automatically on auth transitions)
   useEffect(() => {
     let firestoreRooms: PartyRoom[] = [];
@@ -874,26 +752,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActivePartyRoom((currentActive) => {
         if (!currentActive) return null;
         const fresh = nextRooms.find((r) => r.id === currentActive.id);
-        if (!fresh) return currentActive;
-        const nextRoom = { ...currentActive, ...fresh };
-        const pendingOp = pendingSeatOpRef.current;
-        if (
-          pendingOp &&
-          pendingOp.roomId === nextRoom.id &&
-          now - pendingOp.startedAt < 10_000 &&
-          Array.isArray(nextRoom.seats)
-        ) {
-          nextRoom.seats = nextRoom.seats.map((s: any) => {
-            if (pendingOp.seatIndex !== null && Number(s.seatIndex) === pendingOp.seatIndex) {
-              return { ...s, user: pendingOp.user, isMuted: pendingOp.muted };
-            }
-            if (s.user?.id === pendingOp.user.id && Number(s.seatIndex) !== pendingOp.seatIndex) {
-              return { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false };
-            }
-            return s;
-          });
-        }
-        return nextRoom;
+        return fresh ? { ...currentActive, ...fresh } : currentActive;
       });
     };
 
@@ -1189,8 +1048,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Chat
   const [conversations, setConversations] = useState<Conversation[]>(MOCK_CONVERSATIONS);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
-  const [chatActionError, setChatActionError] = useState<string | null>(null);
-  const clearChatActionError = () => setChatActionError(null);
 
   // Videos
   const [videos, setVideos] = useState<VideoPost[]>(MOCK_VIDEOS);
@@ -1343,14 +1200,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem('alphamate_daily_checkin', JSON.stringify(newState));
     } catch {
       // ignore
-    }
-
-    const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-    if (activeUid) {
-      updateUserProfileFieldsInFirestore(activeUid, {
-        coins: (currentUserRef.current.coins || 0) + coinsAwarded,
-        dailyCheckInState: newState,
-      }).catch(() => {});
     }
 
     return {
@@ -1615,7 +1464,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       lastSyncedBadgeSigRef.current = sig;
       syncUserBadgeStatsToFirestore(nextStats).catch(() => {});
       if (prevEquippedJoined !== nextEquippedJoined) {
-        updateUserProfileFieldsInFirestore(firebaseUser.uid, {
+        syncUserProfileToFirestore({
+          ...currentUserRef.current,
+          id: firebaseUser.uid,
           equippedBadgeIds: nextStats.equippedBadgeIds,
         }).catch(() => {});
         syncUserTimeSpentToLeaderboard(
@@ -1711,7 +1562,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (firebaseUser?.uid && isEmailVerified) {
       syncUserBadgeStatsToFirestore(updatedStats).catch(() => {});
-      updateUserProfileFieldsInFirestore(firebaseUser.uid, {
+      syncUserProfileToFirestore({
+        ...currentUserRef.current,
+        id: firebaseUser.uid,
         equippedBadgeIds: updatedEquipped,
       }).catch(() => {});
       syncUserTimeSpentToLeaderboard(
@@ -1763,52 +1616,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         setNotificationPreferences(syncedPrefs);
       }
-      if (remoteProfile.dailyCheckInState && typeof remoteProfile.dailyCheckInState === 'object') {
-        const today = getTodayDateString();
-        const rc = remoteProfile.dailyCheckInState;
-        const syncedCheckIn = {
-          streak: Number(rc.streak) || 0,
-          lastCheckInDate: rc.lastCheckInDate || null,
-          isClaimedToday: rc.lastCheckInDate === today,
-          history: Array.isArray(rc.history) ? rc.history : [],
-        };
-        setDailyCheckInState(syncedCheckIn);
-        try {
-          localStorage.setItem('alphamate_daily_checkin', JSON.stringify(syncedCheckIn));
-        } catch {}
-      }
-      setCurrentUser((prev) => {
-        const updated: User = {
-          ...prev,
-          id: uid,
-          uniqueId: typeof remoteProfile.uniqueId === 'string' && remoteProfile.uniqueId ? remoteProfile.uniqueId : prev.uniqueId,
-          displayName: typeof remoteProfile.displayName === 'string' && remoteProfile.displayName ? remoteProfile.displayName : prev.displayName,
-          username: typeof remoteProfile.username === 'string' && remoteProfile.username ? remoteProfile.username : prev.username,
-          avatar: typeof remoteProfile.avatar === 'string' && remoteProfile.avatar ? remoteProfile.avatar : prev.avatar,
-          bio: typeof remoteProfile.bio === 'string' ? remoteProfile.bio : prev.bio,
-          level: typeof remoteProfile.level === 'number' ? remoteProfile.level : prev.level,
-          xp: typeof remoteProfile.xp === 'number' ? remoteProfile.xp : prev.xp,
-          nextLevelXp: typeof remoteProfile.nextLevelXp === 'number' ? remoteProfile.nextLevelXp : prev.nextLevelXp,
-          vipTier: typeof remoteProfile.vipTier === 'number' ? remoteProfile.vipTier : prev.vipTier,
-          coins: typeof remoteProfile.coins === 'number' ? remoteProfile.coins : prev.coins,
-          diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
-          heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
-          followersCount: typeof remoteProfile.followersCount === 'number' ? remoteProfile.followersCount : prev.followersCount,
-          followingCount: typeof remoteProfile.followingCount === 'number' ? remoteProfile.followingCount : prev.followingCount,
-          likesCount: typeof remoteProfile.likesCount === 'number' ? remoteProfile.likesCount : prev.likesCount,
-          activeFrame: typeof remoteProfile.activeFrame === 'string' ? remoteProfile.activeFrame : prev.activeFrame,
-          activeHonorTitle: typeof remoteProfile.activeHonorTitle === 'string' ? remoteProfile.activeHonorTitle : prev.activeHonorTitle,
-          accountStatus: remoteProfile.accountStatus || prev.accountStatus,
-          notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
-          equippedBadgeIds: Array.isArray(remoteProfile.equippedBadgeIds)
-            ? remoteProfile.equippedBadgeIds
-            : prev.equippedBadgeIds,
-        };
-        try {
-          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
-        } catch {}
-        return updated;
-      });
+      setCurrentUser((prev) => ({
+        ...prev,
+        coins: typeof remoteProfile.coins === 'number' ? remoteProfile.coins : prev.coins,
+        diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
+        heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
+        notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
+        equippedBadgeIds: Array.isArray(remoteProfile.equippedBadgeIds)
+          ? remoteProfile.equippedBadgeIds
+          : prev.equippedBadgeIds,
+      }));
     });
 
     const unsubNotifs = subscribeToUserNotifications(uid, (remoteItems) => {
@@ -1872,26 +1689,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubFollows = subscribeToMyFollowEdges(uid, (edges) => {
       setFollowingUserIds(edges.followingIds);
       setFollowerUserIds(edges.followerIds);
-      const nextFollowingCount = edges.followingIds.length;
-      const nextFollowersCount = edges.followerIds.length;
-      setCurrentUser((prev) => {
-        if (prev.followingCount === nextFollowingCount && prev.followersCount === nextFollowersCount) {
-          return prev;
-        }
-        const updated = {
-          ...prev,
-          followingCount: nextFollowingCount,
-          followersCount: nextFollowersCount,
-        };
-        try {
-          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
-        } catch {}
-        updateUserProfileFieldsInFirestore(uid, {
-          followingCount: nextFollowingCount,
-          followersCount: nextFollowersCount,
-        }).catch(() => {});
-        return updated;
-      });
     });
 
     return () => {
@@ -3090,16 +2887,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      const { user: userObj, restricted } = await hydrateFirebaseUserProfile(fbUser, {
-        forceVerified: true,
-        createIfMissing: true,
-      });
+      const existingProfile = await getUserProfileFromFirestore(fbUser.uid);
+      const userObj: User = existingProfile
+        ? {
+            ...buildNewUserFromFirebase(fbUser),
+            ...existingProfile,
+            id: fbUser.uid,
+            displayName: existingProfile.displayName || fbUser.displayName || 'Alpha Mate',
+            email: (fbUser.email || existingProfile.email || '').toLowerCase(),
+            avatar: existingProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
+            isVerified: true,
+          }
+        : buildNewUserFromFirebase(fbUser, { isVerified: true });
 
+      await syncUserProfileToFirestore(userObj);
       setFirebaseUser(fbUser);
       setIsEmailVerified(true);
-      if (!restricted) {
-        p2pStreamingEngine.prewarmConnections();
-      }
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      saveUserSession(userObj, !restricted);
       if (!options?.skipRedirect) {
         if (restricted) {
           setScreenHistory(['welcome', 'account_recovery']);
@@ -3123,10 +2928,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setFirebaseUser(fbUser);
       setIsEmailVerified(verified);
 
-      const { user: userObj, restricted } = await hydrateFirebaseUserProfile(fbUser, {
-        forceVerified: verified,
-        createIfMissing: verified,
-      });
+      const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
+      const userObj: User = remoteProfile
+        ? {
+            ...buildNewUserFromFirebase(fbUser),
+            ...remoteProfile,
+            id: fbUser.uid,
+            isVerified: verified,
+          }
+        : buildNewUserFromFirebase(fbUser, { isVerified: verified });
 
       if (!verified) {
         saveUserSession(userObj, false);
@@ -3138,9 +2948,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      if (!restricted) {
-        p2pStreamingEngine.prewarmConnections();
-      }
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      await syncUserProfileToFirestore(userObj).catch(() => {});
+      saveUserSession(userObj, !restricted);
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
         setCurrentScreenState('account_recovery');
@@ -3198,13 +3008,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setFirebaseUser(refreshed);
     setIsEmailVerified(verified);
     if (verified) {
-      const { restricted } = await hydrateFirebaseUserProfile(refreshed, {
-        forceVerified: true,
-        createIfMissing: true,
-      });
-      if (!restricted) {
-        p2pStreamingEngine.prewarmConnections();
-      }
+      const remoteProfile = await getUserProfileFromFirestore(refreshed.uid).catch(() => null);
+      const userObj: User = remoteProfile
+        ? { ...buildNewUserFromFirebase(refreshed), ...remoteProfile, id: refreshed.uid, isVerified: true }
+        : buildNewUserFromFirebase(refreshed, { isVerified: true });
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      await syncUserProfileToFirestore(userObj).catch(() => {});
+      saveUserSession(userObj, !restricted);
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
         setCurrentScreenState('account_recovery');
@@ -3233,12 +3043,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setIsMicMuted(false);
     setActiveStream(null);
     setActiveConversation(null);
-
-    const uidToClean = firebaseUser?.uid || auth.currentUser?.uid || currentUser?.id;
-    if (uidToClean) {
-      await pushService.removeCurrentDeviceToken(uidToClean).catch(() => {});
-    }
-    await setChatPresence(false).catch(() => {});
 
     try {
       await logoutUser();
@@ -3402,10 +3206,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser((prev) => {
       const updated = { ...prev, ...data };
       saveUserSession(updated, isAuthenticated);
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid || prev.id;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, data as Record<string, any>).catch(() => {});
-      }
+      syncUserProfileToFirestore(updated).catch(() => {});
 
       setRegisteredUsers((users) => {
         const newUsers = users.map((u) => (u.id === prev.id ? { ...u, ...data } : u));
@@ -3457,16 +3258,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const publishLiveStream = async (publishedStream: LiveStream) => {
+    realtimeSocket.announceLiveStream(publishedStream);
+    setActiveStream((prev) => (prev && prev.id === publishedStream.id ? publishedStream : prev));
+    setLiveStreams((prev) => {
+      const withoutCurrent = prev.filter((s) => s.id !== publishedStream.id);
+      return [publishedStream, ...withoutCurrent];
+    });
     try {
-      // Commit the live record first. Do not expose an optimistic discovery card
-      // that the initial Firestore snapshot can immediately overwrite/remove.
       await syncLiveStreamToFirestore(publishedStream);
-      realtimeSocket.announceLiveStream(publishedStream);
-      setActiveStream((prev) => (prev && prev.id === publishedStream.id ? publishedStream : prev));
-      setLiveStreams((prev) => {
-        const withoutCurrent = prev.filter((s) => s.id !== publishedStream.id);
-        return [publishedStream, ...withoutCurrent];
-      });
       if (
         firebaseUser?.uid &&
         publishedStream.isActive !== false &&
@@ -3493,7 +3292,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           .catch(() => {});
       }
     } catch (err) {
-      console.error('[LiveStream] Firestore publish failed; discovery card was not announced:', err);
+      realtimeSocket.removeLiveStream(publishedStream.id);
       throw err;
     }
   };
@@ -3786,16 +3585,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const openPartyRoom = (room: PartyRoom) => {
     const uid = auth.currentUser?.uid || currentUser.id;
-    const isRoomHost = room.host?.id === uid;
-    const roomForSession = isRoomHost ? { ...room, hostPresent: true } : room;
-    if (isRoomHost && room.hostPresent === false) {
-      updatePartyRoomFields(room.id, { hostPresent: true, hostReturnedAt: new Date().toISOString() }).catch((error) => {
-        console.warn('[PartyRoom] Could not restore host presence:', error);
-      });
-    }
-    setActivePartyRoom(roomForSession);
-    const mySeat = Array.isArray(roomForSession.seats)
-      ? roomForSession.seats.find((s: any) => s.user?.id === uid)
+    setActivePartyRoom(room);
+    const mySeat = Array.isArray(room.seats)
+      ? room.seats.find((s: any) => s.user?.id === uid)
       : null;
     setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
     setIsMicMuted(mySeat ? Boolean(mySeat.isMuted || mySeat.isHostMuted) : false);
@@ -3889,15 +3681,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       : null;
     const nextSeatMuted = isLeaving ? false : Boolean(targetServerSeat?.isHostMuted);
 
-    // Protect optimistic seat claim from stale Firestore/WS discovery snapshots while transaction commits
-    pendingSeatOpRef.current = {
-      roomId: room.id,
-      user: effectiveUser,
-      seatIndex: isLeaving ? null : seatIndex,
-      muted: nextSeatMuted,
-      startedAt: Date.now(),
-    };
-
     // Immediate optimistic update
     setUserSeatIndex(isLeaving ? null : seatIndex);
     setIsMicMuted(nextSeatMuted);
@@ -3928,15 +3711,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       nextSeatMuted
     );
 
-    if (pendingSeatOpRef.current?.roomId === room.id && pendingSeatOpRef.current?.user.id === effectiveUser.id) {
-      pendingSeatOpRef.current = null;
-    }
-
     if (result.success && result.seats) {
       const verifiedRoom = { ...room, seats: result.seats };
       setActivePartyRoom(verifiedRoom);
       setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? verifiedRoom : item)));
-      realtimeSocket.announcePartyRoom({ id: room.id, seats: result.seats });
       const mySeat = result.seats.find((s: any) => s.user?.id === effectiveUser.id);
       setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
       if (mySeat) {
@@ -3998,159 +3776,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const startDirectMessage = async (targetUser: User) => {
-    setChatActionError(null);
     const myUid = auth.currentUser?.uid;
-    if (!myUid) {
-      const msg = 'Please sign in with your Firebase account before starting a chat.';
-      setChatActionError(msg);
-      return;
-    }
-    if (!targetUser?.id || targetUser.id === myUid) {
-      const msg = targetUser?.id === myUid ? 'You cannot message your own account.' : 'Selected user profile is missing a valid ID.';
-      setChatActionError(msg);
-      return;
-    }
+    let chatId = `conv_${targetUser.id || Date.now()}`;
 
-    let chatId: string;
-    try {
-      chatId = await getOrCreateDirectChat(
-        {
-          id: myUid,
-          displayName: currentUser.displayName,
-          username: currentUser.username,
-          uniqueId: currentUser.uniqueId,
-          avatar: currentUser.avatar,
-        },
-        {
-          id: targetUser.id,
-          displayName: targetUser.displayName,
-          username: targetUser.username,
-          uniqueId: targetUser.uniqueId,
-          avatar: targetUser.avatar,
-        }
-      );
-    } catch (err: any) {
-      console.error('Direct chat initialization failed:', err);
-      const errMsg = err?.message || 'Unable to open chat due to permissions or network connectivity.';
-      setChatActionError(errMsg);
-      return;
+    if (myUid && targetUser.id && targetUser.id !== myUid) {
+      try {
+        chatId = await getOrCreateDirectChat(
+          {
+            id: myUid,
+            displayName: currentUser.displayName,
+            username: currentUser.username,
+            uniqueId: currentUser.uniqueId,
+            avatar: currentUser.avatar,
+          },
+          {
+            id: targetUser.id,
+            displayName: targetUser.displayName,
+            username: targetUser.username,
+            uniqueId: targetUser.uniqueId,
+            avatar: targetUser.avatar,
+          }
+        );
+      } catch (err) {
+        console.warn('Direct chat initialization fallback:', err);
+      }
     }
 
     const existingConv = conversations.find(
       (c) => c.id === chatId || (!c.isGroup && c.user?.id === targetUser.id)
     );
-    const convToOpen: Conversation = existingConv
-      ? { ...existingConv, id: chatId, user: targetUser }
-      : {
-          id: chatId,
-          user: targetUser,
-          lastMessage: 'Connected on Alpha Mate',
-          lastTimestamp: 'Just now',
-          unreadCount: 0,
-          isGroup: false,
-          messages: [],
-        };
+    const convToOpen: Conversation = existingConv || {
+      id: chatId,
+      user: targetUser,
+      lastMessage: 'Connected on Alpha Mate',
+      lastTimestamp: 'Just now',
+      unreadCount: 0,
+      isGroup: false,
+      messages: [],
+    };
     setActiveConversation(convToOpen);
     setCurrentScreen('chat_conversation');
-  };
-
-  const openConversationByChatId = async (
-    chatId: string,
-    fallbackSender?: { id?: string; displayName?: string; avatar?: string }
-  ) => {
-    const cleanChatId = String(chatId || '').trim();
-    if (!cleanChatId) {
-      setActiveTabState('chat');
-      setCurrentScreen('chat');
-      return;
-    }
-
-    const existingConv = conversations.find((c) => c.id === cleanChatId);
-    if (existingConv) {
-      setActiveConversation(existingConv);
-      setCurrentScreen('chat_conversation');
-      return;
-    }
-
-    const myUid = auth.currentUser?.uid || currentUser.id;
-    try {
-      const thread = auth.currentUser?.uid ? await getChatThreadById(cleanChatId) : null;
-      if (thread) {
-        const isGroup = thread.type === 'group';
-        const participantIds: string[] = Array.isArray(thread.participantIds) ? thread.participantIds : [];
-        const otherId = participantIds.find((id) => id !== myUid) || fallbackSender?.id || myUid;
-        const profile = thread.participantProfiles?.[otherId] || {};
-        const directoryMatch = realUsers.find((u) => u.id === otherId);
-
-        const partnerUser: User = {
-          ...CURRENT_USER,
-          ...(directoryMatch || {}),
-          id: otherId,
-          displayName:
-            profile.displayName ||
-            directoryMatch?.displayName ||
-            fallbackSender?.displayName ||
-            'Alpha Mate User',
-          username: profile.username || directoryMatch?.username || '',
-          uniqueId: profile.uniqueId || directoryMatch?.uniqueId || '',
-          avatar: profile.avatar || directoryMatch?.avatar || fallbackSender?.avatar || '',
-        };
-
-        const groupMembers: User[] = Object.entries(thread.participantProfiles || {}).map(
-          ([id, val]: [string, any]) => ({
-            ...CURRENT_USER,
-            id,
-            displayName: val?.displayName || 'Member',
-            username: val?.username || '',
-            uniqueId: val?.uniqueId || '',
-            avatar: val?.avatar || '',
-          })
-        );
-
-        const conv: Conversation = {
-          id: cleanChatId,
-          user: partnerUser,
-          lastMessage: thread.lastMessage || '',
-          lastTimestamp: thread.updatedAt?.toDate?.()?.toLocaleString?.() || 'Just now',
-          unreadCount: Number(thread.unreadBy?.[myUid] || 0),
-          isGroup,
-          groupName: thread.groupName,
-          groupMembers,
-          messages: [],
-        };
-        setActiveConversation(conv);
-        setCurrentScreen('chat_conversation');
-        return;
-      }
-    } catch (err) {
-      console.warn('openConversationByChatId lookup failed:', err);
-    }
-
-    if (fallbackSender?.id || cleanChatId.startsWith('dm_')) {
-      const dmOtherId = fallbackSender?.id || cleanChatId;
-      const directoryMatch = fallbackSender?.id ? realUsers.find((u) => u.id === fallbackSender.id) : undefined;
-      const conv: Conversation = {
-        id: cleanChatId,
-        user: {
-          ...CURRENT_USER,
-          ...(directoryMatch || {}),
-          id: dmOtherId,
-          displayName: directoryMatch?.displayName || fallbackSender?.displayName || 'Alpha Mate User',
-          avatar: directoryMatch?.avatar || fallbackSender?.avatar || '',
-        },
-        lastMessage: '',
-        lastTimestamp: 'Just now',
-        unreadCount: 0,
-        isGroup: false,
-        messages: [],
-      };
-      setActiveConversation(conv);
-      setCurrentScreen('chat_conversation');
-      return;
-    }
-
-    setActiveTabState('chat');
-    setCurrentScreen('chat');
   };
 
   const sendMessage = (convId: string, text: string, imageUrl?: string) => {
@@ -4361,15 +4026,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addCoins = (amount: number, reason: string) => {
     setCoins((prev) => prev + amount);
     setCurrentUser((prev) => {
-      const nextCoins = (prev.coins || 0) + amount;
-      const updated = { ...prev, coins: nextCoins };
+      const updated = { ...prev, coins: (prev.coins || 0) + amount };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, { coins: nextCoins }).catch(() => {});
-      }
       return updated;
     });
 
@@ -4388,15 +4048,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addDiamonds = (amount: number, reason: string) => {
     setDiamonds((prev) => prev + amount);
     setCurrentUser((prev) => {
-      const nextDiamonds = (prev.diamonds || 0) + amount;
-      const updated = { ...prev, diamonds: nextDiamonds };
+      const updated = { ...prev, diamonds: (prev.diamonds || 0) + amount };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, { diamonds: nextDiamonds }).catch(() => {});
-      }
       return updated;
     });
 
@@ -4417,15 +4072,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await new Promise((res) => setTimeout(res, 800));
     setCoins((prev) => prev + amount);
     setCurrentUser((prev) => {
-      const nextCoins = (prev.coins || 0) + amount;
-      const updated = { ...prev, coins: nextCoins };
+      const updated = { ...prev, coins: (prev.coins || 0) + amount };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, { coins: nextCoins }).catch(() => {});
-      }
       return updated;
     });
 
@@ -4466,23 +4116,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setHeldDiamonds((prev) => prev + diamondsNeeded);
 
     setCurrentUser((prev) => {
-      const nextDiamonds = Math.max(0, (prev.diamonds || 0) - diamondsNeeded);
-      const nextHeldDiamonds = (prev.heldDiamonds || 0) + diamondsNeeded;
       const updated = {
         ...prev,
-        diamonds: nextDiamonds,
-        heldDiamonds: nextHeldDiamonds,
+        diamonds: Math.max(0, (prev.diamonds || 0) - diamondsNeeded),
+        heldDiamonds: (prev.heldDiamonds || 0) + diamondsNeeded,
       };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, {
-          diamonds: nextDiamonds,
-          heldDiamonds: nextHeldDiamonds,
-        }).catch(() => {});
-      }
       return updated;
     });
 
@@ -4527,10 +4168,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, { activeFrame: frameId }).catch(() => {});
-      }
       return updated;
     });
   };
@@ -4541,10 +4178,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, { activeHonorTitle: title }).catch(() => {});
-      }
       return updated;
     });
   };
@@ -4563,23 +4196,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCoins((prev) => prev + diamondsAmount);
 
     setCurrentUser((prev) => {
-      const nextDiamonds = Math.max(0, (prev.diamonds || 0) - diamondsAmount);
-      const nextCoins = (prev.coins || 0) + diamondsAmount;
       const updated = {
         ...prev,
-        diamonds: nextDiamonds,
-        coins: nextCoins,
+        diamonds: Math.max(0, (prev.diamonds || 0) - diamondsAmount),
+        coins: (prev.coins || 0) + diamondsAmount,
       };
       try {
         localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
       } catch {}
-      const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-      if (activeUid) {
-        updateUserProfileFieldsInFirestore(activeUid, {
-          diamonds: nextDiamonds,
-          coins: nextCoins,
-        }).catch(() => {});
-      }
       return updated;
     });
 
@@ -4604,33 +4228,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (currency === 'coins') {
       if (coins < cost) return false;
       setCoins((c) => c - cost);
-      setCurrentUser((prev) => {
-        const nextCoins = Math.max(0, (prev.coins || 0) - cost);
-        const updated = { ...prev, coins: nextCoins };
-        try {
-          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
-        } catch {}
-        const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-        if (activeUid) {
-          updateUserProfileFieldsInFirestore(activeUid, { coins: nextCoins }).catch(() => {});
-        }
-        return updated;
-      });
     } else {
       if (diamonds < cost) return false;
       setDiamonds((d) => d - cost);
-      setCurrentUser((prev) => {
-        const nextDiamonds = Math.max(0, (prev.diamonds || 0) - cost);
-        const updated = { ...prev, diamonds: nextDiamonds };
-        try {
-          localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
-        } catch {}
-        const activeUid = firebaseUser?.uid || auth.currentUser?.uid;
-        if (activeUid) {
-          updateUserProfileFieldsInFirestore(activeUid, { diamonds: nextDiamonds }).catch(() => {});
-        }
-        return updated;
-      });
     }
 
     const newTx: WalletTransaction = {
@@ -4855,11 +4455,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         conversations,
         activeConversation,
         openConversation,
-        openConversationByChatId,
         startDirectMessage,
         sendMessage,
-        chatActionError,
-        clearChatActionError,
         videos,
         uploadInitialMode,
         openUploadScreen,

@@ -33,21 +33,11 @@ export const PushNotificationBanner: React.FC = () => {
     openLiveStream,
     partyRooms,
     openPartyRoom,
-    openConversationByChatId,
   } = useApp();
 
   const handleBannerClick = useCallback(
     (banner: ActivePushBanner) => {
       const data = banner.data || {};
-      if (data.chatId) {
-        void openConversationByChatId(String(data.chatId), {
-          id: data.senderId,
-          displayName: data.senderName,
-          avatar: data.senderAvatar,
-        });
-        setActiveBanner(null);
-        return;
-      }
       if (data.streamId) {
         const matchedStream = liveStreams.find((s) => s.id === data.streamId);
         if (matchedStream) {
@@ -94,15 +84,7 @@ export const PushNotificationBanner: React.FC = () => {
 
       setActiveBanner(null);
     },
-    [
-      openConversationByChatId,
-      liveStreams,
-      openLiveStream,
-      partyRooms,
-      openPartyRoom,
-      setCurrentScreen,
-      setActiveTab,
-    ]
+    [liveStreams, openLiveStream, partyRooms, openPartyRoom, setCurrentScreen, setActiveTab]
   );
 
   useEffect(() => {

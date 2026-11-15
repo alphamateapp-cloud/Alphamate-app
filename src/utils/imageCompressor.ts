@@ -69,20 +69,6 @@ export async function compressImage(
 }
 
 /**
- * Compress an image File to a lightweight JPEG Blob suitable for Firebase Storage upload.
- */
-export async function compressImageToBlob(
-  file: File,
-  maxWidth = 512,
-  maxHeight = 512,
-  quality = 0.8
-): Promise<Blob> {
-  const dataUrl = await compressImage(file, maxWidth, maxHeight, quality);
-  const res = await fetch(dataUrl);
-  return await res.blob();
-}
-
-/**
  * Truncates or replaces oversized data URLs (> 50KB)
  * with a reliable standard avatar or placeholder to guard Firestore writes
  */

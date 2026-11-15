@@ -774,7 +774,7 @@ export const RegisterScreen: React.FC = () => {
                   <span className="px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 text-[9px] font-black">Ready</span>
                 </div>
                 <p className="text-[10px] text-zinc-400 mb-1">
-                  Package Name: <span className="font-mono text-white select-all">com.alphamate.liveparty</span>
+                  Package Name: <span className="font-mono text-white select-all">com.alphamate.live</span>
                 </p>
                 <p className="text-[9.5px] text-zinc-500">
                   Add Android App in Firebase Console with this package name to download <code className="text-zinc-300">google-services.json</code>.
@@ -790,7 +790,7 @@ export const RegisterScreen: React.FC = () => {
                   <span className="px-1.5 py-0.2 rounded bg-purple-500/20 text-purple-300 text-[9px] font-black">Ready</span>
                 </div>
                 <p className="text-[10px] text-zinc-400 mb-1">
-                  Bundle ID: <span className="font-mono text-white select-all">com.alphamate.liveparty</span>
+                  Bundle ID: <span className="font-mono text-white select-all">com.alphamate.live</span>
                 </p>
                 <p className="text-[9.5px] text-zinc-500">
                   Add iOS App in Firebase Console with this bundle ID to download <code className="text-zinc-300">GoogleService-Info.plist</code>.

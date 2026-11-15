@@ -87,17 +87,14 @@ npm run android:open
 
 ### 6. Automated 1-Click Cloud Build & Signed Release (GitHub Actions)
 If your code is hosted on GitHub, an automated workflow is included in `.github/workflows/build-android.yml`:
-- Go to **Settings > Secrets and variables > Actions** on your GitHub repository and confirm these secrets exist. The workflow reads only the four explicitly named signing secrets below; it does not enumerate or dump all repository secrets:
+- Go to **Settings > Secrets and variables > Actions** on your GitHub repository and confirm these secrets exist:
   - `ANDROID_KEYSTORE_BASE64` (or `KEYSTORE_BASE64`) — base64-encoded `.jks` keystore file
   - `ANDROID_KEYSTORE_PASSWORD` (or `KEYSTORE_PASSWORD`) — keystore store password
   - `ANDROID_KEY_ALIAS` (or `KEY_ALIAS`, defaults to `alphamate`) — key alias
   - `ANDROID_KEY_PASSWORD` (or `KEY_PASSWORD`, defaults to keystore password) — key password
   - `VITE_RAILWAY_API_URL` (Repository Secret or Variable) — your deployed Railway backend URL (`https://...up.railway.app`) for Live SFU & TURN
 - Go to **Actions** tab -> **Build Android APK and AAB** -> **Run workflow**.
-- The workflow requires the official Play Store upload keystore before producing release artifacts. It builds and verifies both **signed `app-release.apk`** (`alphamate-release-apk`) and **signed `app-release.aab`** (`alphamate-release-aab`).
-- If official signing secrets are missing or invalid, the workflow stops with a clear error instead of producing a temporary preview-signed APK that cannot be used for Play Store updates.
-- Required GitHub Actions Repository Secrets: `ANDROID_KEYSTORE_BASE64` and `ANDROID_KEYSTORE_PASSWORD`.
-- Optional: `ANDROID_KEY_ALIAS` (auto-detected if omitted) and `ANDROID_KEY_PASSWORD` (defaults to the store password).
+- When keystore secrets are present, `build-android.yml` builds and verifies **signed `app-release.apk`** (`alphamate-release-apk`) and **signed `app-release.aab`** (`alphamate-release-aab`).
 
 ---
 
@@ -153,46 +150,3 @@ Alpha Mate includes full native push notifications via `@capacitor/push-notifica
 
 In addition to native APK/AAB, Alpha Mate includes a full Web App Manifest (`public/manifest.json`) and Service Worker:
 - On Android Chrome, tap the in-app **"Install on This Android Device"** button in **Settings > Android APK & AAB Hub** or select **"Install App"** from the browser menu to install instantly without compiling.
-
-
-## Firebase Google Sign-In — Release SHA Fingerprints
-
-The GitHub Actions workflow prints the release keystore certificate's public SHA-1
-and SHA-256 fingerprints in the workflow log and the run's **Summary** after the
-keystore has been validated. Add both fingerprints to Firebase Console:
-**Project settings → General → Your apps → Alpha Mate Android → SHA certificate fingerprints**.
-
-Only public certificate fingerprints are printed. The keystore file, passwords,
-private key material, and repository secrets are never printed or uploaded as artifacts.
-After adding fingerprints, download the refreshed `google-services.json`, replace
-`android/app/google-services.json`, and build again.
-\n\nThe SHA fingerprint step uses the existing ALPHAMATE_STORE_PASSWORD and ALPHAMATE_KEY_ALIAS repository secrets explicitly. It reads only the public certificate details with keytool and prints SHA-1/SHA-256 to the Actions log and run summary. It does not print passwords or private key material.\n
-
-## Native Google Sign-In (Capacitor Android)
-
-The Android app now uses `@capacitor-firebase/authentication` 8.x with the
-native Google account chooser (`google.com` provider). After native sign-in,
-the returned Google ID token is exchanged with Firebase JS Auth using
-`GoogleAuthProvider.credential()` and `signInWithCredential()`. This keeps the
-same JavaScript Firebase Auth session used by the existing Firestore, chat,
-search, and profile code. Web builds continue to use the existing Firebase
-popup flow. Native sign-out clears both native and JS Auth sessions.
-
-Android Google provider build flags are enabled in `android/variables.gradle`:
-`rgcfaIncludeGoogle = true` and `androidxCredentialsVersion = '1.3.0'`.
-
-After pushing this ZIP, GitHub Actions must install the added package and run
-`npx cap sync android` before building. Verify Google Sign-In on an installed
-release APK; source-level checks alone do not prove the native OAuth flow works.
-
-
-## Railway root-level package manager fix
-
-This archive is flattened: app files are directly at archive root. Copy the
-archive contents into the GitHub repository root (or exact Railway Root Directory),
-not into a nested `alphamate_safe_work/` folder.
-
-`package.json` explicitly selects `npm@10.9.2`; `package-lock.json` includes
-`@capacitor-firebase/authentication` 8.6.0. The stale root Bun lockfile is absent.
-After syncing, verify root package.json has `packageManager: npm@10.9.2` and
-the root bun.lock/bun.lockb files are deleted. Railway should detect npm.

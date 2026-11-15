@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.monthlyLeaderboardMaintenance = exports.sendPushOnChatMessageCreated = exports.sendPushOnNotificationCreated = exports.processExpiredAccountDeletions = exports.cleanupStaleLiveStreams = void 0;
+exports.sendPushOnNotificationCreated = exports.processExpiredAccountDeletions = exports.cleanupStaleLiveStreams = void 0;
 const app_1 = require("firebase-admin/app");
 const firestore_1 = require("firebase-admin/firestore");
 const auth_1 = require("firebase-admin/auth");
@@ -286,91 +286,6 @@ function mapNotificationTypeToAndroidChannel(type) {
             return 'alpha_agency_chat';
     }
 }
-function isValidPushToken(token) {
-    if (typeof token !== 'string')
-        return false;
-    const trimmed = token.trim();
-    return (trimmed.length >= 10 &&
-        !trimmed.startsWith('web_push_') &&
-        !trimmed.startsWith('web-simulated-token-'));
-}
-async function collectUserFcmTokens(userId, userData) {
-    const byToken = new Map();
-    try {
-        const tokenSnap = await db.collection('users').doc(userId).collection('fcmTokens').get();
-        for (const d of tokenSnap.docs) {
-            const t = d.get('token');
-            if (isValidPushToken(t)) {
-                const trimmed = t.trim();
-                if (!byToken.has(trimmed)) {
-                    byToken.set(trimmed, { token: trimmed, tokenDocId: d.id });
-                }
-            }
-        }
-    }
-    catch (err) {
-        logger.warn('Could not read fcmTokens subcollection', { userId, err });
-    }
-    const legacyToken = userData.pushNotificationToken;
-    if (isValidPushToken(legacyToken)) {
-        const trimmed = legacyToken.trim();
-        if (!byToken.has(trimmed)) {
-            byToken.set(trimmed, { token: trimmed });
-        }
-    }
-    return Array.from(byToken.values());
-}
-async function sendFcmMulticastWithCleanup(params) {
-    const { userId, resolvedTokens, legacyTokenOnUser, title, body, data, channelId, collapseKey } = params;
-    if (resolvedTokens.length === 0)
-        return;
-    const messaging = (0, messaging_1.getMessaging)(app);
-    const tokens = resolvedTokens.map((t) => t.token);
-    for (let i = 0; i < tokens.length; i += 500) {
-        const chunkEntries = resolvedTokens.slice(i, i + 500);
-        const chunkTokens = chunkEntries.map((e) => e.token);
-        const res = await messaging.sendEachForMulticast({
-            tokens: chunkTokens,
-            notification: { title, body },
-            data,
-            android: {
-                priority: 'high',
-                ...(collapseKey ? { collapseKey } : {}),
-                notification: {
-                    channelId,
-                    sound: 'default',
-                },
-            },
-            apns: {
-                payload: {
-                    aps: {
-                        sound: 'default',
-                        badge: 1,
-                    },
-                },
-            },
-        });
-        const cleanupOps = [];
-        res.responses.forEach((resp, idx) => {
-            if (resp.success)
-                return;
-            const errCode = resp.error?.code;
-            const entry = chunkEntries[idx];
-            if (errCode === 'messaging/registration-token-not-registered' ||
-                errCode === 'messaging/invalid-registration-token') {
-                if (entry?.tokenDocId) {
-                    cleanupOps.push(db.collection('users').doc(userId).collection('fcmTokens').doc(entry.tokenDocId).delete().catch(() => { }));
-                }
-                if (typeof legacyTokenOnUser === 'string' && legacyTokenOnUser.trim() === entry?.token) {
-                    cleanupOps.push(db.collection('users').doc(userId).update({ pushNotificationToken: null }).catch(() => { }));
-                }
-            }
-        });
-        if (cleanupOps.length > 0) {
-            await Promise.allSettled(cleanupOps);
-        }
-    }
-}
 /**
  * Firestore trigger: dispatches a real FCM push notification whenever a
  * notification document is written to `users/{userId}/notifications/{notificationId}`
@@ -385,10 +300,6 @@ exports.sendPushOnNotificationCreated = (0, firestore_2.onDocumentCreated)({
         return;
     const userId = event.params.userId;
     const notif = snapshot.data();
-    if (notif.skipPush === true)
-        return;
-    if (notif.senderId && String(notif.senderId) === userId)
-        return;
     const notifType = String(notif.type || 'system');
     const title = String(notif.title || 'Alpha Mate');
     const body = String(notif.message || '');
@@ -411,17 +322,19 @@ exports.sendPushOnNotificationCreated = (0, firestore_2.onDocumentCreated)({
             });
             return;
         }
-        const resolvedTokens = await collectUserFcmTokens(userId, userData);
-        if (resolvedTokens.length === 0)
+        const token = typeof userData.pushNotificationToken === 'string' ? userData.pushNotificationToken.trim() : '';
+        if (!token ||
+            token.startsWith('web_push_') ||
+            token.startsWith('web-simulated-token-')) {
             return;
+        }
         const channelId = mapNotificationTypeToAndroidChannel(notifType);
-        await sendFcmMulticastWithCleanup({
-            userId,
-            resolvedTokens,
-            legacyTokenOnUser: userData.pushNotificationToken,
-            title,
-            body,
-            channelId,
+        await (0, messaging_1.getMessaging)(app).send({
+            token,
+            notification: {
+                title,
+                body,
+            },
             data: {
                 notificationId: event.params.notificationId,
                 type: notifType,
@@ -434,6 +347,21 @@ exports.sendPushOnNotificationCreated = (0, firestore_2.onDocumentCreated)({
                 chatId: String(notif.chatId || ''),
                 senderId: String(notif.senderId || ''),
             },
+            android: {
+                priority: 'high',
+                notification: {
+                    channelId,
+                    sound: 'default',
+                },
+            },
+            apns: {
+                payload: {
+                    aps: {
+                        sound: 'default',
+                        badge: 1,
+                    },
+                },
+            },
         });
     }
     catch (err) {
@@ -442,148 +370,6 @@ exports.sendPushOnNotificationCreated = (0, firestore_2.onDocumentCreated)({
             notificationId: event.params.notificationId,
             errorCode: err?.code,
             errorMessage: err?.message,
-        });
-    }
-});
-/**
- * Firestore trigger: dispatches a server-side FCM push notification to all eligible recipients
- * whenever a persistent chat message is created in `chats/{chatId}/messages/{messageId}`.
- * Excludes the sender, declined members, and users who blocked the sender.
- */
-exports.sendPushOnChatMessageCreated = (0, firestore_2.onDocumentCreated)({
-    document: 'chats/{chatId}/messages/{messageId}',
-    database: FIRESTORE_DATABASE_ID,
-}, async (event) => {
-    const msgSnap = event.data;
-    if (!msgSnap)
-        return;
-    const chatId = event.params.chatId;
-    const messageId = event.params.messageId;
-    const msg = msgSnap.data();
-    const senderId = String(msg.senderId || '').trim();
-    if (!senderId)
-        return;
-    try {
-        const chatSnap = await db.collection('chats').doc(chatId).get();
-        if (!chatSnap.exists)
-            return;
-        const chatData = chatSnap.data();
-        const participantIds = Array.isArray(chatData.participantIds)
-            ? chatData.participantIds.map((id) => String(id)).filter(Boolean)
-            : [];
-        const memberStatus = (chatData.memberStatus || {});
-        const participantProfiles = (chatData.participantProfiles || {});
-        const recipients = participantIds.filter((pid) => pid !== senderId && memberStatus[pid] !== 'declined');
-        if (recipients.length === 0)
-            return;
-        let senderName = String(participantProfiles?.[senderId]?.displayName || '').trim();
-        if (!senderName) {
-            const senderSnap = await db.collection('users').doc(senderId).get().catch(() => null);
-            senderName = String(senderSnap?.get('displayName') || 'Alpha Mate User').trim();
-        }
-        const rawText = String(msg.text || '').trim();
-        const mediaType = String(msg.mediaType || '').trim();
-        const preview = rawText ||
-            (mediaType === 'image'
-                ? '📷 Sent a photo'
-                : mediaType === 'video'
-                    ? '🎥 Sent a video'
-                    : mediaType === 'audio'
-                        ? '🎙️ Sent a voice message'
-                        : '📎 Sent an attachment');
-        const isGroup = chatData.type === 'group';
-        const title = isGroup
-            ? `💬 ${String(chatData.groupName || 'Group Chat')}`
-            : `💬 ${senderName}`;
-        const body = isGroup ? `${senderName}: ${preview}`.slice(0, 240) : preview.slice(0, 240);
-        await Promise.allSettled(recipients.map(async (recipientId) => {
-            const [userSnap, blockedSnap] = await Promise.all([
-                db.collection('users').doc(recipientId).get(),
-                db.collection('users').doc(recipientId).collection('blockedUsers').doc(senderId).get(),
-            ]);
-            if (!userSnap.exists || blockedSnap.exists)
-                return;
-            const userData = userSnap.data();
-            const prefs = userData.notificationPreferences;
-            if (prefs?.enabled === false)
-                return;
-            if (prefs?.categories && prefs.categories.messages === false)
-                return;
-            const resolvedTokens = await collectUserFcmTokens(recipientId, userData);
-            if (resolvedTokens.length === 0)
-                return;
-            await sendFcmMulticastWithCleanup({
-                userId: recipientId,
-                resolvedTokens,
-                legacyTokenOnUser: userData.pushNotificationToken,
-                title,
-                body,
-                channelId: 'alpha_social_alerts',
-                collapseKey: `chat_${chatId}`,
-                data: {
-                    type: 'message',
-                    category: 'messages',
-                    screen: 'chat_conversation',
-                    tab: 'chat',
-                    chatId,
-                    messageId,
-                    senderId,
-                    senderName,
-                },
-            });
-        }));
-    }
-    catch (err) {
-        logger.warn('FCM send failed for chat message', {
-            chatId,
-            messageId,
-            errorCode: err?.code,
-            errorMessage: err?.message,
-        });
-    }
-});
-/**
- * Scheduled Cloud Function running daily at 00:05 UTC to enforce the monthly
- * leaderboard retention policy: keeps the active calendar month and up to 1 previous
- * calendar month (max ~1-2 months), deleting expired monthly entry partitions.
- */
-exports.monthlyLeaderboardMaintenance = (0, scheduler_1.onSchedule)({
-    schedule: '5 0 * * *',
-    timeZone: 'UTC',
-    timeoutSeconds: 180,
-    memory: '256MiB',
-}, async () => {
-    const now = new Date();
-    const currentYear = now.getUTCFullYear();
-    const currentMonth = now.getUTCMonth(); // 0..11
-    const formatKey = (y, mZero) => `${y}-${String(mZero + 1).padStart(2, '0')}`;
-    const prevDate = new Date(Date.UTC(currentYear, currentMonth - 1, 1));
-    const allowedMonthKeys = new Set([
-        formatKey(currentYear, currentMonth),
-        formatKey(prevDate.getUTCFullYear(), prevDate.getUTCMonth()),
-    ]);
-    const monthsSnap = await db.collection('leaderboardMonths').listDocuments();
-    let purgedEntries = 0;
-    for (const monthDocRef of monthsSnap) {
-        if (allowedMonthKeys.has(monthDocRef.id))
-            continue;
-        const entriesSnap = await monthDocRef.collection('entries').limit(450).get();
-        if (!entriesSnap.empty) {
-            const batch = db.batch();
-            for (const entryDoc of entriesSnap.docs) {
-                batch.delete(entryDoc.ref);
-            }
-            await batch.commit();
-            purgedEntries += entriesSnap.size;
-        }
-        if (entriesSnap.size < 450) {
-            await monthDocRef.delete().catch(() => { });
-        }
-    }
-    if (purgedEntries > 0) {
-        logger.info('Purged expired monthly leaderboard partitions', {
-            keptMonths: Array.from(allowedMonthKeys),
-            purgedEntries,
         });
     }
 });

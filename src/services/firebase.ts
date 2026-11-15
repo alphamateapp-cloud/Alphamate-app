@@ -17,12 +17,11 @@ import {
   reload,
   signOut,
   onAuthStateChanged,
-  updateProfile as updateFirebaseAuthProfile,
   User as FirebaseUser,
 } from 'firebase/auth';
 import {
   getFirestore,
-  initializeFirestore,
+  enableNetwork,
   doc,
   getDoc,
   getDocFromServer,
@@ -42,13 +41,6 @@ import {
   getDocs,
   increment,
 } from 'firebase/firestore';
-import {
-  getStorage,
-  ref as storageRef,
-  uploadBytesResumable,
-  uploadBytes,
-  getDownloadURL,
-} from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
 
@@ -56,35 +48,15 @@ import { sanitizeAvatarString } from '../utils/imageCompressor';
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // CRITICAL: The app will break without passing firestoreDatabaseId
-// Android/iOS Capacitor WebViews can fail to establish Firestore WebChannel
-// streams on some mobile networks. Force long-polling only on native builds.
-function createFirestoreInstance() {
-  if (Capacitor.isNativePlatform()) {
-    try {
-      return initializeFirestore(
-        app,
-        { experimentalForceLongPolling: true, useFetchStreams: false },
-        firebaseConfig.firestoreDatabaseId
-      );
-    } catch (error) {
-      // Another module may already have initialized this database instance.
-      console.warn('Firestore already initialized; using existing instance.', error);
-      return getFirestore(app, firebaseConfig.firestoreDatabaseId);
-    }
-  }
-  return getFirestore(app, firebaseConfig.firestoreDatabaseId);
-}
-export const db = createFirestoreInstance();
-export const storage = getStorage(app);
-
-// Capacitor WebViews need durable JS-SDK auth persistence so the native Google
-// credential can be exchanged into the same JS Firebase session used by Firestore.
+export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+// Use durable IndexedDB persistence in Capacitor Android so the Firebase JS SDK
+// keeps the same session after native Google Sign-In returns an ID token.
 function createFirebaseAuth() {
   if (Capacitor.isNativePlatform()) {
     try {
       return initializeAuth(app, { persistence: indexedDBLocalPersistence });
     } catch (error) {
-      // Safe fallback if another module initialized Auth first.
+      // Another module may already have initialized Auth.
       console.warn('Firebase Auth already initialized; using existing instance.', error);
       return getAuth(app);
     }
@@ -101,7 +73,7 @@ googleProvider.setCustomParameters({
 // =========================================================================
 // ERROR HANDLER CONFORMING TO FirestoreErrorInfo
 // =========================================================================
-async function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs: number = 25000, label: string = 'Firestore operation'): Promise<T> {
+async function withFirestoreTimeout<T>(promise: Promise<T>, timeoutMs: number = 9000, label: string = 'Firestore operation'): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
@@ -199,18 +171,16 @@ export function isFirebaseUserVerified(fbUser: FirebaseUser | null | undefined):
 }
 
 /**
- * Google Sign-In:
- * - Android/iOS Capacitor: use native Google account chooser, then exchange its
- *   ID token into the Firebase JavaScript Auth session used by Firestore/app state.
- * - Web: preserve the existing Firebase popup + redirect fallback flow.
+ * Sign In with Google Popup (with automatic Redirect fallback if popups are blocked)
  */
 export async function signInWithGoogle() {
   try {
     if (Capacitor.isNativePlatform()) {
+      // Native Google account chooser -> Google ID token -> Firebase JS Auth session.
       const nativeResult = await FirebaseAuthentication.signInWithGoogle();
       const idToken = nativeResult.credential?.idToken;
       if (!idToken) {
-        throw new Error('Google Sign-In did not return an ID token. Check the Android OAuth client and signing SHA fingerprints in Firebase.');
+        throw new Error('Google Sign-In did not return an ID token. Verify the Play App Signing SHA-1/SHA-256 and Firebase Google provider configuration.');
       }
       const credential = GoogleAuthProvider.credential(idToken);
       const webResult = await signInWithCredential(auth, credential);
@@ -232,7 +202,11 @@ export async function signInWithGoogle() {
       await signInWithRedirect(auth, googleProvider);
       return null;
     }
-    console.error('Google Sign-In Error:', error);
+    // Never log OAuth tokens or credentials.
+    console.error('Google Sign-In Error:', {
+      code: error?.code,
+      message: error?.message,
+    });
     throw error;
   }
 }
@@ -241,7 +215,7 @@ export async function signInWithGoogle() {
  * Resolve any pending Google redirect sign-in on boot
  */
 export async function consumeGoogleRedirectResult(): Promise<FirebaseUser | null> {
-  // Native Capacitor Google Sign-In does not use Firebase web redirect handlers.
+  // Native Capacitor Google Sign-In does not use browser redirect handling.
   if (Capacitor.isNativePlatform()) return null;
   try {
     const result = await getRedirectResult(auth);
@@ -311,12 +285,6 @@ export async function sendPasswordReset(email: string) {
  */
 export async function logoutUser() {
   try {
-    if (Capacitor.isNativePlatform()) {
-      // Clear both native Firebase Auth and the JS Auth session.
-      await FirebaseAuthentication.signOut().catch((nativeError) => {
-        console.warn('Native Firebase sign-out warning:', nativeError);
-      });
-    }
     await signOut(auth);
   } catch (error: any) {
     console.error('Sign-Out Error:', error);
@@ -350,37 +318,24 @@ function stripUndefinedFields<T>(value: T): T {
 }
 
 /**
- * Save / Update User Profile in Firestore with standardized identity & presence fields.
+ * Save / Update User Profile in Firestore
  */
 export async function syncUserProfileToFirestore(userData: any) {
   if (!userData?.id) return;
   const path = `users/${userData.id}`;
   try {
     const { password: _omitPassword, coverImage, ...restUser } = userData;
-    const nowIso = new Date().toISOString();
-    const safeAvatar = sanitizeAvatarString(userData.avatar || userData.photoURL);
     const rawProfile: Record<string, any> = {
       ...restUser,
-      id: userData.id,
-      uid: userData.id,
-      uniqueUserId: userData.uniqueUserId || userData.uniqueId || userData.id,
       usernameLower: String(userData.username || '').trim().toLowerCase(),
       displayNameLower: String(userData.displayName || '').trim().toLowerCase(),
       uniqueIdLower: String(userData.uniqueId || '').trim().toLowerCase(),
-      avatar: safeAvatar,
-      photoURL: safeAvatar,
-      onlineStatus: userData.onlineStatus !== undefined ? Boolean(userData.onlineStatus) : true,
-      lastSeen: userData.lastSeen || nowIso,
-      createdAt: userData.createdAt || nowIso,
-      updatedAt: nowIso,
+      avatar: sanitizeAvatarString(userData.avatar),
+      updatedAt: new Date().toISOString(),
     };
 
-    // Allow HTTPS Firebase Storage cover URLs or small fallback cover strings
-    if (
-      typeof coverImage === 'string' &&
-      coverImage.length > 0 &&
-      (coverImage.startsWith('https://') || coverImage.length <= 80000)
-    ) {
+    // Prevent oversized base64 cover images (>80KB) or undefined values from breaking setDoc
+    if (typeof coverImage === 'string' && coverImage.length > 0 && coverImage.length <= 80000) {
       rawProfile.coverImage = coverImage;
     }
 
@@ -391,209 +346,17 @@ export async function syncUserProfileToFirestore(userData: any) {
   }
 }
 
-export type UserProfileFetchResult =
-  | { status: 'found'; data: any }
-  | { status: 'missing'; data: null }
-  | { status: 'error'; error: unknown; data: null };
-
-/**
- * Partially update only the supplied fields on users/{userId} with merge:true.
- * Prevents stale in-memory defaults from overwriting coins, level, uniqueId, or followers.
- */
-export async function updateUserProfileFieldsInFirestore(
-  userId: string,
-  partialFields: Record<string, any>
-) {
-  if (!userId || !partialFields || typeof partialFields !== 'object') return;
-  const path = `users/${userId}`;
-  try {
-    const nowIso = new Date().toISOString();
-    const rawUpdate: Record<string, any> = {
-      ...partialFields,
-      uid: userId,
-      updatedAt: nowIso,
-    };
-    delete rawUpdate.password;
-
-    if (typeof partialFields.username === 'string') {
-      rawUpdate.usernameLower = partialFields.username.trim().toLowerCase();
-    }
-    if (typeof partialFields.displayName === 'string') {
-      rawUpdate.displayNameLower = partialFields.displayName.trim().toLowerCase();
-    }
-    if (typeof partialFields.uniqueId === 'string') {
-      rawUpdate.uniqueIdLower = partialFields.uniqueId.trim().toLowerCase();
-      rawUpdate.uniqueUserId = partialFields.uniqueId;
-    }
-    if (typeof partialFields.avatar === 'string' || typeof partialFields.photoURL === 'string') {
-      const safeAvatar = sanitizeAvatarString(partialFields.avatar || partialFields.photoURL);
-      rawUpdate.avatar = safeAvatar;
-      rawUpdate.photoURL = safeAvatar;
-    }
-    if ('coverImage' in partialFields) {
-      const cover = partialFields.coverImage;
-      if (cover === undefined || cover === null) {
-        rawUpdate.coverImage = null;
-      } else if (
-        !(typeof cover === 'string' && cover.length > 0 && (cover.startsWith('https://') || cover.length <= 80000))
-      ) {
-        delete rawUpdate.coverImage;
-      }
-    }
-
-    const sanitized = stripUndefinedFields(rawUpdate);
-    await setDoc(doc(db, 'users', userId), sanitized, { merge: true });
-  } catch (error) {
-    console.warn(`[Firestore] Partial profile update warning (${path}):`, error);
-  }
-}
-
-/**
- * Upload compressed profile avatar to Firebase Storage at `users/{uid}/profile/profile_image`
- * and persist the resulting HTTPS download URL into `users/{uid}` (`photoURL` + `avatar`).
- */
-export async function uploadUserProfileAvatar(
-  fileOrBlob: File | Blob,
-  onProgress?: (percent: number) => void
-): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) {
-    throw new Error('Please sign in to upload your profile picture.');
-  }
-  const contentType =
-    fileOrBlob instanceof File && fileOrBlob.type?.startsWith('image/')
-      ? fileOrBlob.type
-      : fileOrBlob.type || 'image/jpeg';
-
-  if (fileOrBlob.size > 5 * 1024 * 1024) {
-    throw new Error('Profile photo must be 5 MB or smaller.');
-  }
-
-  const objectRef = storageRef(storage, `users/${uid}/profile/profile_image`);
-  const downloadUrl = await new Promise<string>((resolve, reject) => {
-    const task = uploadBytesResumable(objectRef, fileOrBlob, {
-      contentType,
-      cacheControl: 'public,max-age=3600',
-    });
-
-    task.on(
-      'state_changed',
-      (snap) => {
-        if (snap.totalBytes > 0) {
-          onProgress?.(Math.min(100, Math.round((snap.bytesTransferred / snap.totalBytes) * 100)));
-        }
-      },
-      (err) => reject(err),
-      async () => {
-        try {
-          const url = await getDownloadURL(task.snapshot.ref);
-          resolve(url);
-        } catch (err) {
-          reject(err);
-        }
-      }
-    );
-  });
-
-  await setDoc(
-    doc(db, 'users', uid),
-    {
-      uid,
-      avatar: downloadUrl,
-      photoURL: downloadUrl,
-      updatedAt: new Date().toISOString(),
-    },
-    { merge: true }
-  );
-
-  if (auth.currentUser) {
-    await updateFirebaseAuthProfile(auth.currentUser, { photoURL: downloadUrl }).catch(() => {});
-  }
-
-  return downloadUrl;
-}
-
-/**
- * Upload profile cover banner image to Firebase Storage at `users/{uid}/profile/cover_image`
- * and persist its HTTPS download URL into `users/{uid}`.
- */
-export async function uploadUserCoverImage(fileOrBlob: File | Blob): Promise<string> {
-  const uid = auth.currentUser?.uid;
-  if (!uid) {
-    throw new Error('Please sign in to upload your cover image.');
-  }
-  if (fileOrBlob.size > 5 * 1024 * 1024) {
-    throw new Error('Cover image must be 5 MB or smaller.');
-  }
-  const contentType = fileOrBlob.type?.startsWith('image/') ? fileOrBlob.type : 'image/jpeg';
-  const objectRef = storageRef(storage, `users/${uid}/profile/cover_image`);
-  await uploadBytes(objectRef, fileOrBlob, {
-    contentType,
-    cacheControl: 'public,max-age=3600',
-  });
-  const downloadUrl = await getDownloadURL(objectRef);
-
-  await setDoc(
-    doc(db, 'users', uid),
-    {
-      uid,
-      coverImage: downloadUrl,
-      updatedAt: new Date().toISOString(),
-    },
-    { merge: true }
-  );
-
-  return downloadUrl;
-}
-
-/**
- * Server-first user profile lookup that clearly distinguishes missing docs from transient network errors.
- */
-export async function getUserProfileFromFirestoreResult(
-  userId: string
-): Promise<UserProfileFetchResult> {
-  if (!userId) return { status: 'missing', data: null };
-  const path = `users/${userId}`;
-  const docRef = doc(db, 'users', userId);
-
-  try {
-    const serverSnap = await withFirestoreTimeout(
-      getDocFromServer(docRef),
-      7000,
-      'User profile server lookup'
-    );
-    return serverSnap.exists()
-      ? { status: 'found', data: serverSnap.data() }
-      : { status: 'missing', data: null };
-  } catch (serverErr: any) {
-    // Only fall back to local cache if server was unreachable/timed out.
-    try {
-      const cacheSnap = await getDoc(docRef);
-      if (cacheSnap.exists()) {
-        return { status: 'found', data: cacheSnap.data() };
-      }
-    } catch {
-      // ignore secondary cache error
-    }
-    if (serverErr?.code === 'permission-denied') {
-      try {
-        handleFirestoreError(serverErr, OperationType.GET, path);
-      } catch (handledErr) {
-        return { status: 'error', error: handledErr, data: null };
-      }
-    }
-    return { status: 'error', error: serverErr, data: null };
-  }
-}
-
 /**
  * Fetch User Profile from Firestore
  */
 export async function getUserProfileFromFirestore(userId: string) {
-  const result = await getUserProfileFromFirestoreResult(userId);
-  if (result.status === 'found') return result.data;
-  if (result.status === 'missing') return null;
-  throw result.error;
+  const path = `users/${userId}`;
+  try {
+    const snap = await getDoc(doc(db, 'users', userId));
+    return snap.exists() ? snap.data() : null;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+  }
 }
 
 /**
@@ -632,7 +395,6 @@ export async function syncPartyRoomToFirestore(room: any) {
       totalGiftCoins: Number(room.totalGiftCoins) || 0,
       isActive: room.isActive !== false,
       roomStatus: room.isActive !== false ? 'ready' : 'ended',
-      hostPresent: room.hostPresent !== false,
       coverImageUrl: typeof room.coverImageUrl === 'string' && room.coverImageUrl.startsWith('https://') ? room.coverImageUrl : '',
       backgroundTheme: room.backgroundTheme || 'from-[#1E103A] to-[#0A0614]',
       nowPlaying: room.nowPlaying || '',
@@ -674,7 +436,7 @@ export async function syncPartyRoomToFirestore(room: any) {
 
     await withFirestoreTimeout(
       setDoc(doc(db, 'partyRooms', room.id), stripUndefinedFields(sanitizedRoom), { merge: true }),
-      25000,
+      9000,
       'Party Room sync'
     );
   } catch (error) {
@@ -944,7 +706,7 @@ export async function syncLiveStreamToFirestore(stream: any) {
 
     await withFirestoreTimeout(
       setDoc(doc(db, 'liveStreams', stream.id), stripUndefinedFields(sanitizedStream), { merge: true }),
-      25000,
+      9000,
       'Live Stream sync'
     );
   } catch (error) {
@@ -1992,8 +1754,7 @@ export async function recoverFirestoreNetwork(): Promise<{ online: boolean; erro
     return { online: false, error: 'You appear to be offline. Please check your internet connection.' };
   }
   try {
-    // Do NOT call enableNetwork(db) when network was never disabled; redundant calls
-    // while PersistentWriteStream is active trigger Firestore JS SDK assertion c050.
+    await enableNetwork(db).catch(() => {});
     await withFirestoreTimeout(getDocFromServer(doc(db, 'test', 'connection')), 5500, 'Network connection check');
     return { online: true };
   } catch (err: any) {

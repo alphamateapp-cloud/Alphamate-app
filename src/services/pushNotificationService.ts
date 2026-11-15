@@ -6,8 +6,8 @@ import {
   ActionPerformed,
   PermissionStatus,
 } from '@capacitor/push-notifications';
-import { deleteDoc, doc, getDoc, setDoc } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { doc, setDoc } from 'firebase/firestore';
+import { db, handleFirestoreError, OperationType } from './firebase';
 import {
   NotificationCategoryKey,
   NotificationEventType,
@@ -160,7 +160,6 @@ const PREFS_STORAGE_KEY = 'alphamate_notification_prefs';
 class PushNotificationService {
   private token: string | null = null;
   private isInitialized = false;
-  private activeUserId: string | null = null;
   private preferences: NotificationPreferences = DEFAULT_NOTIFICATION_PREFERENCES;
   private onNotificationReceivedHandlers: Array<(notification: PushNotificationSchema) => void> = [];
   private onNotificationActionPerformedHandlers: Array<(action: ActionPerformed) => void> = [];
@@ -173,15 +172,6 @@ class PushNotificationService {
       // ignore
     }
     this.preferences = this.getPreferences();
-  }
-
-  private buildTokenDocId(token: string): string {
-    let hash = 2166136261;
-    for (let i = 0; i < token.length; i++) {
-      hash ^= token.charCodeAt(i);
-      hash = Math.imul(hash, 16777619);
-    }
-    return `tok_${(hash >>> 0).toString(36)}_${token.length}`;
   }
 
   public isNative(): boolean {
@@ -428,7 +418,7 @@ class PushNotificationService {
 
     try {
       let permStatus = await PushNotifications.checkPermissions();
-      if (permStatus.receive === 'prompt' || permStatus.receive === 'prompt-with-rationale') {
+      if (permStatus.receive === 'prompt') {
         permStatus = await PushNotifications.requestPermissions();
       }
 
@@ -439,7 +429,7 @@ class PushNotificationService {
       return {
         isSupported: true,
         isNative: true,
-        permission: permStatus.receive === 'prompt-with-rationale' ? 'prompt' : (permStatus.receive as 'prompt' | 'granted' | 'denied'),
+        permission: permStatus.receive as 'prompt' | 'granted' | 'denied',
         token: this.token,
         error: null,
       };
@@ -508,68 +498,23 @@ class PushNotificationService {
   }
 
   public async syncTokenToUserDoc(userId: string): Promise<boolean> {
-    this.activeUserId = userId || this.activeUserId;
-    const effectiveToken = this.token;
-    if (!userId || !effectiveToken) return false;
-    if (auth.currentUser?.uid && auth.currentUser.uid !== userId) return false;
-
-    const nowIso = new Date().toISOString();
-    const platform = Capacitor.isNativePlatform() ? 'android' : 'web';
-    const isRealDeviceToken =
-      effectiveToken.length >= 10 &&
-      !effectiveToken.startsWith('web_push_') &&
-      !effectiveToken.startsWith('web-simulated-token-');
-
+    if (!userId || !this.token) return false;
+    const path = `users/${userId}`;
     try {
       await setDoc(
         doc(db, 'users', userId),
         {
-          pushNotificationToken: effectiveToken,
-          pushPlatform: platform,
-          pushLastActiveAt: nowIso,
+          pushNotificationToken: this.token,
+          pushPlatform: Capacitor.isNativePlatform() ? 'android' : 'web',
+          pushLastActiveAt: new Date().toISOString(),
           notificationPreferences: this.getPreferences(),
         },
         { merge: true }
       );
-
-      if (isRealDeviceToken) {
-        const tokenId = this.buildTokenDocId(effectiveToken);
-        const deviceLabel =
-          typeof navigator !== 'undefined' ? String(navigator.userAgent || platform).slice(0, 120) : platform;
-        await setDoc(
-          doc(db, 'users', userId, 'fcmTokens', tokenId),
-          {
-            token: effectiveToken,
-            platform,
-            deviceLabel,
-            updatedAt: nowIso,
-            createdAt: nowIso,
-          },
-          { merge: true }
-        );
-      }
       return true;
     } catch (error) {
       console.warn('[PushService] Could not sync push token to Firestore:', error);
       return false;
-    }
-  }
-
-  public async removeCurrentDeviceToken(userId: string): Promise<void> {
-    const token = this.token;
-    if (!userId || !token) return;
-    if (auth.currentUser?.uid && auth.currentUser.uid !== userId) return;
-
-    const tokenId = this.buildTokenDocId(token);
-    await deleteDoc(doc(db, 'users', userId, 'fcmTokens', tokenId)).catch(() => {});
-
-    try {
-      const userSnap = await getDoc(doc(db, 'users', userId));
-      if (userSnap.exists() && userSnap.data()?.pushNotificationToken === token) {
-        await setDoc(doc(db, 'users', userId), { pushNotificationToken: null }, { merge: true });
-      }
-    } catch {
-      // ignore non-fatal logout cleanup error
     }
   }
 

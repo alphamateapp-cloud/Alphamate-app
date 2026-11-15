@@ -210,7 +210,6 @@ export const PartyRoomsScreen: React.FC = () => {
   const startupAutoRetryCountRef = useRef<number>(0);
   const startupRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const initialParticipantsSeededRef = useRef<boolean>(false);
-  const wsInitialViewersSeededRef = useRef<boolean>(false);
   const notifiedJoinTimestampsRef = useRef<Map<string, number>>(new Map());
   const joinNotificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSyncedViewerCountRef = useRef<number>(-1);
@@ -961,7 +960,6 @@ export const PartyRoomsScreen: React.FC = () => {
       setRemoteSpeakingPeerIds(new Set());
       setJoinNotification(null);
       initialParticipantsSeededRef.current = false;
-      wsInitialViewersSeededRef.current = false;
       notifiedJoinTimestampsRef.current.clear();
       lastSyncedViewerCountRef.current = -1;
       lastSelfSpeakingSyncedRef.current = false;
@@ -994,54 +992,16 @@ export const PartyRoomsScreen: React.FC = () => {
     voiceHasConnectedRef.current = false;
     voiceParticipantsLoadedRef.current = false;
     initialParticipantsSeededRef.current = false;
-    wsInitialViewersSeededRef.current = false;
     notifiedJoinTimestampsRef.current.clear();
     lastSyncedViewerCountRef.current = -1;
     lastSelfSpeakingSyncedRef.current = false;
     setJoinNotification(null);
-
-    const triggerJoinBanner = (joinedUserId: string, displayName?: string) => {
-      if (!joinedUserId || joinedUserId === effectiveUserId) return;
-      const now = Date.now();
-      const lastNotified = notifiedJoinTimestampsRef.current.get(joinedUserId);
-      if (!lastNotified || now - lastNotified > 25_000) {
-        notifiedJoinTimestampsRef.current.set(joinedUserId, now);
-        if (joinNotificationTimerRef.current) {
-          clearTimeout(joinNotificationTimerRef.current);
-        }
-        setJoinNotification({
-          id: `${joinedUserId}_${now}`,
-          name: displayName || 'New Guest',
-        });
-        joinNotificationTimerRef.current = setTimeout(() => {
-          setJoinNotification(null);
-          joinNotificationTimerRef.current = null;
-        }, 3500);
-      } else {
-        notifiedJoinTimestampsRef.current.set(joinedUserId, now);
-      }
-    };
 
     // Record initial voice state so Effect #2 does not redundantly re-trigger startup
     lastVoiceModeRef.current = {
       key: sessionIdentityKey,
       canSpeak: initialCanSpeak,
       muted: initialMuted,
-    };
-
-    let voiceDisconnectBannerTimer: ReturnType<typeof setTimeout> | null = null;
-    let voiceFailedBannerTimer: ReturnType<typeof setTimeout> | null = null;
-    const clearDisconnectBannerTimer = () => {
-      if (voiceDisconnectBannerTimer) {
-        clearTimeout(voiceDisconnectBannerTimer);
-        voiceDisconnectBannerTimer = null;
-      }
-    };
-    const clearFailedBannerTimer = () => {
-      if (voiceFailedBannerTimer) {
-        clearTimeout(voiceFailedBannerTimer);
-        voiceFailedBannerTimer = null;
-      }
     };
 
     setPartyVoiceError(null);
@@ -1057,41 +1017,22 @@ export const PartyRoomsScreen: React.FC = () => {
           countryFlag: currentUser.countryFlag,
           isHost: isUserHost,
         },
-        onError: () => {
-          if (cancelled || voiceDisconnectBannerTimer || voiceFailedBannerTimer) return;
-          voiceDisconnectBannerTimer = setTimeout(() => {
-            voiceDisconnectBannerTimer = null;
-            if (!cancelled) {
-              setPartyVoiceError('Weak network — Party voice is reconnecting…');
-            }
-          }, 4500);
+        onError: (err) => {
+          if (!cancelled) {
+            setPartyVoiceError('Alpha Mate is reconnecting your Party voice…');
+          }
         },
         onConnectionStateChange: (connState) => {
           if (cancelled) return;
           if (connState === 'connected') {
             voiceHasConnectedRef.current = true;
-            clearDisconnectBannerTimer();
-            clearFailedBannerTimer();
             setPartyVoiceError(null);
           } else if (connState === 'disconnected') {
-            if (voiceHasConnectedRef.current && !voiceDisconnectBannerTimer && !voiceFailedBannerTimer) {
-              voiceDisconnectBannerTimer = setTimeout(() => {
-                voiceDisconnectBannerTimer = null;
-                if (!cancelled) {
-                  setPartyVoiceError('Weak network — Party voice is reconnecting…');
-                }
-              }, 4500);
+            if (voiceHasConnectedRef.current) {
+              setPartyVoiceError('Alpha Mate Party Voice is reconnecting…');
             }
           } else if (connState === 'failed') {
-            clearDisconnectBannerTimer();
-            if (!voiceFailedBannerTimer) {
-              voiceFailedBannerTimer = setTimeout(() => {
-                voiceFailedBannerTimer = null;
-                if (!cancelled) {
-                  setPartyVoiceError('Party Voice connection lost. Tap Retry to reconnect.');
-                }
-              }, 2500);
-            }
+            setPartyVoiceError('Party Voice connection lost. Please try reconnecting.');
           }
         },
         onParticipantsChange: (participants) => {
@@ -1109,7 +1050,25 @@ export const PartyRoomsScreen: React.FC = () => {
           }
 
           for (const p of participants) {
-            triggerJoinBanner(p.userId, p.displayName);
+            if (p.userId === effectiveUserId) continue;
+            const lastNotified = notifiedJoinTimestampsRef.current.get(p.userId);
+            if (!lastNotified || now - lastNotified > 25_000) {
+              notifiedJoinTimestampsRef.current.set(p.userId, now);
+              if (joinNotificationTimerRef.current) {
+                clearTimeout(joinNotificationTimerRef.current);
+              }
+              setJoinNotification({
+                id: `${p.userId}_${now}`,
+                name: p.displayName || 'New Guest',
+              });
+              joinNotificationTimerRef.current = setTimeout(() => {
+                setJoinNotification(null);
+                joinNotificationTimerRef.current = null;
+              }, 3500);
+            } else {
+              // Refresh timestamp while peer stays active so reconnects do not re-notify
+              notifiedJoinTimestampsRef.current.set(p.userId, now);
+            }
           }
         },
       })
@@ -1163,19 +1122,7 @@ export const PartyRoomsScreen: React.FC = () => {
     const unsubWsPartyRoom = realtimeSocket.onRoomEvent('party', roomId, (ev) => {
       if (cancelled) return;
       if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
-        const viewersList = Array.isArray(ev.viewers) ? ev.viewers : [];
-        setWsPartyViewers(viewersList);
-        if (ev.type === 'room:state_init' || !wsInitialViewersSeededRef.current) {
-          wsInitialViewersSeededRef.current = true;
-          const now = Date.now();
-          viewersList.forEach((v: any) => {
-            if (v?.id) notifiedJoinTimestampsRef.current.set(v.id, now);
-          });
-        } else {
-          viewersList.forEach((v: any) => {
-            if (v?.id) triggerJoinBanner(v.id, v.displayName || v.username);
-          });
-        }
+        setWsPartyViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
       }
     });
 
@@ -1188,8 +1135,6 @@ export const PartyRoomsScreen: React.FC = () => {
 
     return () => {
       cancelled = true;
-      clearDisconnectBannerTimer();
-      clearFailedBannerTimer();
       unsubWsPartyRoom();
       realtimeSocket.leaveRoom('party', roomId);
       if (startupRetryTimerRef.current) {
@@ -1358,12 +1303,9 @@ export const PartyRoomsScreen: React.FC = () => {
   }, [activePartyRoom?.id]);
 
   useEffect(() => {
-    if (!activePartyRoom?.id) return;
+    if (!activePartyRoom?.id || !partyAudioAutoplayBlocked) return;
     const handleGestureUnlock = () => {
-      p2pStreamingEngine.primeAudioPlayback();
-      if (partyAudioAutoplayBlocked || partyAudioElsRef.current.size > 0) {
-        unlockAllRemoteAudioPlayback().catch(() => {});
-      }
+      unlockAllRemoteAudioPlayback().catch(() => {});
     };
     window.addEventListener('pointerdown', handleGestureUnlock, { passive: true });
     window.addEventListener('touchstart', handleGestureUnlock, { passive: true });
@@ -1375,40 +1317,16 @@ export const PartyRoomsScreen: React.FC = () => {
     };
   }, [activePartyRoom?.id, partyAudioAutoplayBlocked, unlockAllRemoteAudioPlayback]);
 
-  // Scoped recovery when user pulls down or taps Refresh/Retry inside the active Party Room
+  // Scoped recovery when user pulls down or taps Refresh inside the active Party Room
   useEffect(() => {
     if (partyRefreshTick <= 0 || partyRefreshTick === lastHandledPartyRefreshTickRef.current) return;
     lastHandledPartyRefreshTickRef.current = partyRefreshTick;
-    const roomId = activePartyRoom?.id;
-    if (!roomId) return;
+    if (!activePartyRoom?.id) return;
 
-    let cancelled = false;
     setPartyVoiceError(null);
-    p2pStreamingEngine.primeAudioPlayback();
+    setPartyVoiceRetryToken((prev) => prev + 1);
     unlockAllRemoteAudioPlayback().catch(() => {});
-
-    p2pStreamingEngine
-      .refreshPartyVoice(roomId)
-      .then((refreshed) => {
-        if (cancelled) return;
-        if (refreshed) {
-          setRemotePartyStreams(p2pStreamingEngine.getActivePartyRemoteStreams(roomId));
-          unlockAllRemoteAudioPlayback().catch(() => {});
-          showToast('Party Room & audio refreshed');
-        } else {
-          setPartyVoiceRetryToken((prev) => prev + 1);
-          showToast('Party Room & audio refreshed');
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setPartyVoiceRetryToken((prev) => prev + 1);
-        showToast('Party Room & audio refreshed');
-      });
-
-    return () => {
-      cancelled = true;
-    };
+    showToast('Party Room & audio refreshed');
   }, [partyRefreshTick, activePartyRoom?.id, unlockAllRemoteAudioPlayback]);
 
   // Build deduplicated active audience list strictly from real live voiceParticipants + self
@@ -2102,8 +2020,6 @@ export const PartyRoomsScreen: React.FC = () => {
               <button
                 onClick={() => {
                   setPartyVoiceError(null);
-                  p2pStreamingEngine.primeAudioPlayback();
-                  void unlockAllRemoteAudioPlayback();
                   void refreshScope('party_room');
                 }}
                 className="text-amber-300 hover:text-white font-bold cursor-pointer"
@@ -2151,20 +2067,17 @@ export const PartyRoomsScreen: React.FC = () => {
             onSeatClick={handleSeatClick}
           />
         ) : (
-          <div className="relative z-10 -mt-2 flex flex-col items-center px-2 pt-0 pb-1 shrink-0 w-full">
-          {/* Host throne and avatar are hidden while the owner is away; the throne remains reserved. */}
-          {activePartyRoom.hostPresent !== false ? (
-          <>
+          <div className="relative z-10 -mt-3 flex flex-col items-center px-2 pt-0 pb-1 shrink-0 w-full">
           {/* Royal Crown Emblem atop Host Avatar */}
-          <div className="relative -mb-2.5 z-20">
-            <div className="w-7 h-7 rounded-full bg-gradient-to-tr from-amber-500 via-amber-300 to-yellow-200 flex items-center justify-center shadow-[0_0_16px_rgba(251,191,36,0.85)] border border-amber-100">
-              <Crown className="w-4 h-4 text-black fill-black" />
+          <div className="relative -mb-1.5 z-10">
+            <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-amber-400 via-amber-300 to-yellow-500 flex items-center justify-center shadow-[0_0_12px_rgba(251,191,36,0.8)] border border-amber-200">
+              <Crown className="w-3.5 h-3.5 text-black fill-black" />
             </div>
           </div>
 
-          {/* Reserved Host Throne */}
+          {/* Host Profile Picture with Multi-Layered Glowing Circular Frame */}
           <div
-            className="relative cursor-pointer group rounded-full p-1 bg-gradient-to-b from-amber-300/35 via-amber-500/15 to-amber-700/30 ring-1 ring-amber-400/55 shadow-[0_0_26px_rgba(251,191,36,0.32)]"
+            className="relative cursor-pointer group"
             onClick={() => {
               if (isHost) {
                 const nextState = !isHostMicMuted;
@@ -2181,22 +2094,22 @@ export const PartyRoomsScreen: React.FC = () => {
             {/* Host Speaking Soundwave Waves (strictly live audio, never shown when muted) */}
             {effectiveHostSpeaking && (
               <>
-                <div className="absolute -inset-1.5 rounded-full border border-[#EC4899]/75 animate-ping opacity-75" />
-                <div className="absolute -inset-3 rounded-full border border-amber-400/45 animate-pulse" />
+                <div className="absolute -inset-1.5 rounded-full border border-[#EC4899]/70 animate-ping opacity-75" />
+                <div className="absolute -inset-3 rounded-full border border-[#A855F7]/40 animate-pulse" />
               </>
             )}
 
-            {/* Glowing Host Profile Frame (visibly larger than participant seats) */}
+            {/* Glowing Host Profile Frame with Animated Breathing VIP Frame */}
             <VipAvatarFrame
               avatarUrl={activePartyRoom.host.avatar}
               vipTier={activePartyRoom.host.vipTier || 3}
-              size="lg"
+              size="md"
               showCrownBadge={true}
             />
 
             {/* Host Microphone Status Badge */}
             <div
-              className={`absolute bottom-0.5 right-0.5 w-5 h-5 rounded-full flex items-center justify-center border border-white/40 shadow-md z-20 ${
+              className={`absolute bottom-0 right-0 w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md ${
                 effectiveHostMicMuted ? 'bg-rose-600 text-white' : 'bg-emerald-500 text-black'
               }`}
             >
@@ -2244,14 +2157,6 @@ export const PartyRoomsScreen: React.FC = () => {
               {isFollowingHost ? 'Following' : '+ Follow'}
             </button>
           </div>
-          </>
-          ) : (
-            <div className="flex flex-col items-center justify-center gap-2 py-3 px-5 rounded-2xl border border-dashed border-amber-400/35 bg-amber-500/5">
-              <Crown className="w-8 h-8 text-amber-400/70" />
-              <span className="text-[10px] font-black uppercase tracking-wider text-amber-300/80">Host Seat Reserved</span>
-              <span className="text-[9px] text-zinc-500">Waiting for {activePartyRoom.host.displayName} to return</span>
-            </div>
-          )}
 
           {/* Quick moderation bar if Host or Mod */}
           {canModerate && (
@@ -2280,24 +2185,24 @@ export const PartyRoomsScreen: React.FC = () => {
           {/* ===================================================================
               GUEST SEATS GRID – POSITIONED IMMEDIATELY UNDER HOST!
              =================================================================== */}
-          <div className="w-full mt-2">
+          <div className="w-full mt-1.5">
             {partyLevel === 1 && (
               /* PARTY LEVEL 1: 1 Host + 4 Guest Seats (1 Row of 4 right below Host) */
-              <div className="grid grid-cols-4 gap-x-3 gap-y-2 max-w-[340px] mx-auto w-full">
+              <div className="grid grid-cols-4 gap-2 max-w-xs mx-auto w-full">
                 {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'lg'))}
               </div>
             )}
 
             {partyLevel === 2 && (
               /* PARTY LEVEL 2: 1 Host + 8 Guest Seats (2 Rows of 4 right below Host) */
-              <div className="grid grid-cols-4 gap-x-2.5 gap-y-2 max-w-[340px] mx-auto w-full">
+              <div className="grid grid-cols-4 gap-x-2 gap-y-1.5 max-w-xs mx-auto w-full">
                 {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'md'))}
               </div>
             )}
 
             {partyLevel === 3 && (
               /* PARTY LEVEL 3: 1 Host + 15 Guest Seats (3 Rows of 5 right below Host) */
-              <div className="grid grid-cols-5 gap-x-1.5 gap-y-1.5 max-w-sm mx-auto w-full">
+              <div className="grid grid-cols-5 gap-x-1 gap-y-1 max-w-sm mx-auto w-full">
                 {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'sm'))}
               </div>
             )}
@@ -2440,8 +2345,8 @@ export const PartyRoomsScreen: React.FC = () => {
               </button>
             </form>
 
-            {/* Bottom Row: Action Buttons with Equal Sizing & Spacing */}
-            <div className="grid gap-1.5 w-full" style={{ gridTemplateColumns: `repeat(${isHost ? 5 : (isModerator || userSeatIndex !== null) ? 3 : 2}, minmax(0, 1fr))` }}>
+            {/* Bottom Row: 5 Action Buttons with Equal Sizing & Spacing */}
+            <div className="grid gap-1.5 w-full" style={{ gridTemplateColumns: `repeat(${isHost ? 5 : isModerator ? 4 : (userSeatIndex !== null ? 2 : 1)}, minmax(0, 1fr))` }}>
               {/* Host-only room music management */}
               {isHost && <button
                 onClick={() => setShowMusicModal(true)}
@@ -2505,8 +2410,8 @@ export const PartyRoomsScreen: React.FC = () => {
                 </span>
               </button>}
 
-              {/* Room speaker audio control for all participants (host, guests, viewers) */}
-              <button
+              {/* Room playback control is host/moderator only */}
+              {(isHost || isModerator) && <button
                 onClick={() => {
                   const nextSpeakerOn = !isSpeakerOn;
                   isSpeakerOnRef.current = nextSpeakerOn;
@@ -2531,7 +2436,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 <span className="text-[8px] font-black truncate max-w-full mt-0.5">
                   {isSpeakerOn ? 'Audio On' : 'Muted'}
                 </span>
-              </button>
+              </button>}
 
               {/* 4. Gift Button */}
               <button
@@ -3346,16 +3251,10 @@ export const PartyRoomsScreen: React.FC = () => {
               <div className="space-y-3 mb-5">
                 {/* 1. Leave Room (Lounge stays open) */}
                 <button
-                  onClick={async () => {
+                  onClick={() => {
                     setShowExitConfirmModal(false);
-                    if (activePartyRoom?.id) {
-                      await updatePartyRoomFields(activePartyRoom.id, {
-                        hostPresent: false,
-                        hostLeftAt: new Date().toISOString(),
-                      }).catch((error) => console.warn('[PartyRoom] Host leave presence update failed:', error));
-                    }
                     closePartyRoom(false);
-                    showToast('Lounge is still active. Your host seat is reserved! 🎙️');
+                    showToast('Lounge is still active for guests! 🎙️');
                   }}
                   className="w-full p-3.5 rounded-2xl bg-[#1C1033] border border-[#A855F7]/30 hover:border-[#A855F7] flex items-start gap-3 text-left transition-all cursor-pointer group hover:bg-[#231540]"
                 >
@@ -3368,7 +3267,7 @@ export const PartyRoomsScreen: React.FC = () => {
                       <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold uppercase tracking-wider">Keep Open</span>
                     </div>
                     <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
-                      The room remains active. Seated guests and viewers can stay and chat. Your host throne becomes empty and stays reserved for you.
+                      The room remains active. Seated guests and viewers can stay and chat. Your host throne remains reserved.
                     </p>
                   </div>
                 </button>
@@ -3461,56 +3360,44 @@ export const PartyRoomsScreen: React.FC = () => {
 
           {/* Seat Avatar Container */}
           {isOccupied ? (
-            <div className="rounded-full p-0.5 bg-gradient-to-b from-amber-400/25 via-amber-500/10 to-amber-800/20 ring-1 ring-amber-400/35 shadow-[0_0_12px_rgba(251,191,36,0.2)]">
-              <VipAvatarFrame
-                avatarUrl={seat.user!.avatar}
-                vipTier={seat.user!.vipTier || 0}
-                size={sizeVariant === 'sm' ? 'sm' : 'md'}
-                showCrownBadge={false}
-              />
-            </div>
+            <VipAvatarFrame
+              avatarUrl={seat.user!.avatar}
+              vipTier={seat.user!.vipTier || 0}
+              size={sizeVariant === 'sm' ? 'sm' : 'md'}
+              showCrownBadge={false}
+            />
           ) : seat.isLocked ? (
-            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[64px] h-[54px] sm:w-[70px] sm:h-[58px]' : sizeVariant === 'md' ? 'w-[58px] h-[48px]' : 'w-[48px] h-[40px]'}`}>
-              <div className="w-11 h-11 rounded-2xl bg-[#180E2B]/90 border border-amber-400/45 flex items-center justify-center shadow-[0_0_12px_rgba(245,158,11,0.22)]">
-                <Lock className="w-4 h-4 text-amber-300" />
+            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[62px] h-[52px] sm:w-[68px] sm:h-[56px]' : sizeVariant === 'md' ? 'w-[54px] h-[46px]' : 'w-[44px] h-[38px]'}`}>
+              <div className="w-11 h-11 rounded-full bg-zinc-900/80 border border-amber-500/40 flex items-center justify-center shadow-inner">
+                <Lock className="w-4 h-4 text-amber-400" />
               </div>
             </div>
           ) : (
-            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[64px] h-[54px] sm:w-[70px] sm:h-[58px]' : sizeVariant === 'md' ? 'w-[58px] h-[48px]' : 'w-[48px] h-[40px]'}`}>
-              <svg viewBox="0 0 92 74" className="w-full h-full overflow-visible drop-shadow-[0_4px_10px_rgba(245,158,11,0.38)]" aria-hidden="true">
+            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[62px] h-[52px] sm:w-[68px] sm:h-[56px]' : sizeVariant === 'md' ? 'w-[54px] h-[46px]' : 'w-[44px] h-[38px]'}`}>
+              <svg viewBox="0 0 88 68" className="w-full h-full overflow-visible drop-shadow-[0_0_9px_rgba(251,191,36,0.55)]" aria-hidden="true">
                 <defs>
                   <linearGradient id={`goldSofa-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#FFF7BD" />
-                    <stop offset="35%" stopColor="#F5C542" />
-                    <stop offset="75%" stopColor="#C47B14" />
-                    <stop offset="100%" stopColor="#7C4107" />
+                    <stop offset="0%" stopColor="#FFF2A6" />
+                    <stop offset="38%" stopColor="#F7C94B" />
+                    <stop offset="72%" stopColor="#C98519" />
+                    <stop offset="100%" stopColor="#8B4B0B" />
                   </linearGradient>
-                  <linearGradient id={`goldCushion-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#FFF8CC" />
-                    <stop offset="45%" stopColor="#F8D26A" />
-                    <stop offset="100%" stopColor="#D69224" />
-                  </linearGradient>
-                  <linearGradient id={`goldArm-${seat.seatIndex}`} x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0%" stopColor="#FFEFA4" />
-                    <stop offset="60%" stopColor="#D99422" />
-                    <stop offset="100%" stopColor="#8F4C0B" />
+                  <linearGradient id={`goldSeat-${seat.seatIndex}`} x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0%" stopColor="#FFEFA0" />
+                    <stop offset="55%" stopColor="#E6A92E" />
+                    <stop offset="100%" stopColor="#A85C0C" />
                   </linearGradient>
                 </defs>
-                {/* Sofa legs */}
-                <path d="M18 56 L15 66 L22 66 L25 57 M74 56 L77 66 L70 66 L67 57" fill="#A66110" stroke="#FFE28A" strokeWidth="1.4" strokeLinejoin="round" />
-                {/* Backrest outer crest */}
-                <path d="M20 34 C20 13, 33 7, 46 7 C59 7, 72 13, 72 34 L72 52 L20 52 Z" fill={`url(#goldSofa-${seat.seatIndex})`} stroke="#FFE899" strokeWidth="1.8" />
-                {/* Inner plush cushion panel */}
-                <rect x="21" y="14" width="50" height="40" rx="14" fill={`url(#goldCushion-${seat.seatIndex})`} stroke="#C7811A" strokeWidth="1.4" />
-                {/* Left and right rounded armrests */}
-                <rect x="8" y="31" width="15" height="25" rx="7.5" fill={`url(#goldArm-${seat.seatIndex})`} stroke="#FFE899" strokeWidth="1.5" />
-                <rect x="69" y="31" width="15" height="25" rx="7.5" fill={`url(#goldArm-${seat.seatIndex})`} stroke="#FFE899" strokeWidth="1.5" />
-                {/* Lower base trim cushion */}
-                <rect x="17" y="48" width="58" height="10" rx="5" fill={`url(#goldSofa-${seat.seatIndex})`} stroke="#FFE899" strokeWidth="1.4" />
-                {/* Clean stacked + above seat number centered inside upper cushion */}
-                <text x="46" y="31" textAnchor="middle" fontSize="15" fontWeight="900" fill="#4E2704">+</text>
-                <text x="46" y="44.5" textAnchor="middle" fontSize="11.5" fontWeight="900" fill="#5D3006">{seat.seatIndex + 1}</text>
+                <path d="M17 31 Q10 25 8 34 L7 48 Q7 54 14 55 L74 55 Q81 54 81 48 L80 34 Q78 25 71 31 L68 40 L20 40 Z" fill={`url(#goldSofa-${seat.seatIndex})`} stroke="#FFE58A" strokeWidth="2" />
+                <rect x="15" y="35" width="58" height="19" rx="7" fill={`url(#goldSeat-${seat.seatIndex})`} stroke="#FFF0A0" strokeWidth="1.6" />
+                <path d="M19 37 Q44 30 69 37 L67 47 Q44 53 21 47 Z" fill="#F9D66B" stroke="#B87518" strokeWidth="1.2" />
+                <path d="M12 49 L17 62 L23 62 L22 54 M66 54 L65 62 L72 62 L77 49" fill="#B87518" stroke="#FFE28A" strokeWidth="1.8" strokeLinejoin="round" />
+                <path d="M22 28 Q44 17 66 28" fill="none" stroke="#FFF0A0" strokeWidth="2" strokeLinecap="round" />
+                <circle cx="44" cy="29" r="8" fill="#FFE58A" stroke="#B87518" strokeWidth="1.5" />
+                <path d="M44 24 L46 28 L51 29 L47 32 L48 36 L44 34 L40 36 L41 32 L37 29 L42 28 Z" fill="#9A570C" />
+                <text x="44" y="47" textAnchor="middle" fontSize="10" fontWeight="900" fill="#6E3908">{seat.seatIndex + 1}</text>
               </svg>
+              <span className="absolute inset-x-0 -bottom-0.5 text-center text-[7px] font-black text-amber-50 drop-shadow">+</span>
             </div>
           )}
 

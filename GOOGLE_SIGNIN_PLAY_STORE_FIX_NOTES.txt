@@ -1,0 +1,45 @@
+ALPHA MATE – GOOGLE SIGN-IN FIX (SOURCE PATCH)
+
+Observed production symptom:
+After choosing a Google account in the Google Play-installed Android app, the app showed:
+"[16] Account reauth failed."
+
+Source issue identified:
+The current source used Firebase Web SDK signInWithPopup() for Google Sign-In on Android Capacitor. The native Android Firebase Authentication plugin was not included/registered in this source revision.
+
+Changes applied:
+1. Added @capacitor-firebase/authentication ^8.6.0 to package.json and package-lock.json.
+2. Updated src/services/firebase.ts:
+   - Uses native FirebaseAuthentication.signInWithGoogle() on Capacitor platforms.
+   - Exchanges the returned Google ID token into the existing Firebase JS Auth session using GoogleAuthProvider.credential() and signInWithCredential().
+   - Uses IndexedDB persistence for the Firebase JS Auth session on native Capacitor.
+   - Keeps web signInWithPopup()/redirect behavior for browsers.
+   - Prevents browser redirect-result handling on native platforms.
+   - Logs error code/message only; does not log OAuth tokens.
+3. Added Android Gradle module/dependency wiring.
+4. Added Firebase Authentication plugin registration metadata and explicit MainActivity registration.
+
+Preserved:
+- Existing Firebase project and Firestore database ID.
+- Existing app package ID.
+- Existing Email/Password authentication functions.
+- Existing app features and source files.
+
+IMPORTANT VALIDATION STATUS:
+This source patch has been inspected and packaged, but it has NOT been installed/built/tested on a physical Android device in this environment.
+The developer must run:
+  npm ci
+  npm run build
+  npx cap sync android
+  cd android
+  ./gradlew clean assembleRelease bundleRelease
+
+Then install the new signed APK from the same Play App Signing lineage and test:
+- Google account chooser
+- Firebase sign-in after selecting account
+- Existing account and first-time Google account
+- Logout and sign-in again
+- Email/password login
+- Party room and live voice regression tests
+
+Use the existing release keystore and alias for updates. Do not upload to Play production until device testing passes.

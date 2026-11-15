@@ -18,13 +18,12 @@ import {
   subscribeToLiveStreamMessages,
   sendLiveStreamMessage,
   updateLiveStreamFields,
-  updateLiveStreamHeartbeat,
   deleteLiveStreamFromFirestore,
   joinLiveStreamViewer,
   leaveLiveStreamViewer,
   subscribeToLiveStreamViewers,
 } from '../services/firebase';
-import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { doc, onSnapshot } from 'firebase/firestore';
 import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
 import {
   X,
@@ -105,26 +104,6 @@ export const LiveStreamScreen: React.FC = () => {
     setActiveRole(isHostByUser ? 'host' : 'viewer');
   }, [activeStream?.id, isHostByUser]);
 
-  // Keep the host's live discovery card fresh while the broadcast is active.
-  // Discovery hides streams with stale heartbeat timestamps.
-  useEffect(() => {
-    if (!activeStream?.id || !isHostByUser || !activeStream.sfuSessionId) return;
-    let cancelled = false;
-    const sendHeartbeat = () => {
-      if (!cancelled) {
-        updateLiveStreamHeartbeat(activeStream.id).catch((error) => {
-          console.warn('[LiveStream] Host heartbeat update failed:', error);
-        });
-      }
-    };
-    sendHeartbeat();
-    const heartbeatTimer = window.setInterval(sendHeartbeat, 20000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(heartbeatTimer);
-    };
-  }, [activeStream?.id, activeStream?.sfuSessionId, isHostByUser]);
-
   // Moderation & Audience state (Moderator limit: 10)
   const [moderatorIds, setModeratorIds] = useState<string[]>(
     activeStream?.moderatorIds || []
@@ -160,8 +139,6 @@ export const LiveStreamScreen: React.FC = () => {
   const [viewerCount, setViewerCount] = useState(Math.max(1, activeStream?.viewerCount || 1));
   const [firestoreViewers, setFirestoreViewers] = useState<any[]>([]);
   const [wsViewers, setWsViewers] = useState<RealtimeViewerProfile[]>([]);
-  const wsViewersSeededRef = useRef<boolean>(false);
-  const notifiedWsViewerTimestampsRef = useRef<Map<string, number>>(new Map());
   const [remoteMediaStream, setRemoteMediaStream] = useState<MediaStream | null>(null);
   const [remoteTrackTick, setRemoteTrackTick] = useState(0);
   const [durationSecs, setDurationSecs] = useState(0);
@@ -438,21 +415,17 @@ export const LiveStreamScreen: React.FC = () => {
     const source = remoteMediaStream || remoteStreamRef.current;
     if (!audioEl || !source) return;
 
+    let audioOnly = new MediaStream(source.getAudioTracks());
     const syncAudioTracks = () => {
       const currentAudioTracks = source.getAudioTracks();
-      if (currentAudioTracks.length === 0) return;
-      currentAudioTracks.forEach((track) => {
-        track.enabled = true;
-      });
-      const existingAudio = audioEl.srcObject as MediaStream | null;
-      const existingTrackIds = existingAudio ? existingAudio.getAudioTracks().map((t) => t.id).join(',') : '';
-      const nextTrackIds = currentAudioTracks.map((t) => t.id).join(',');
-      if (!existingAudio || existingTrackIds !== nextTrackIds) {
-        audioEl.srcObject = new MediaStream(currentAudioTracks);
-      }
+      audioOnly = new MediaStream(currentAudioTracks);
+      audioEl.srcObject = audioOnly;
       audioEl.autoplay = true;
       audioEl.muted = isRemoteAudioMuted;
       audioEl.volume = 1;
+      currentAudioTracks.forEach((track) => {
+        track.enabled = true;
+      });
     };
 
     const attemptAudioPlayback = () => {
@@ -488,36 +461,10 @@ export const LiveStreamScreen: React.FC = () => {
       source.getAudioTracks().forEach((track) => track.removeEventListener('unmute', attemptAudioPlayback));
       audioEl.removeEventListener('canplay', attemptAudioPlayback);
       audioEl.removeEventListener('playing', onPlaying);
+      audioEl.pause();
+      audioEl.srcObject = null;
     };
-  }, [activeRole, activeStream?.id, remoteMediaStream, remoteTrackTick]);
-
-  // Toggle viewer audio mute without tearing down srcObject or interrupting buffer
-  useEffect(() => {
-    if (activeRole !== 'viewer') return;
-    const audioEl = remoteAudioRef.current;
-    if (!audioEl) return;
-    audioEl.muted = isRemoteAudioMuted;
-    audioEl.volume = 1;
-    if (!isRemoteAudioMuted && audioEl.srcObject && audioEl.paused) {
-      audioEl
-        .play()
-        .then(() => setAutoplayBlocked(false))
-        .catch(() => setAutoplayBlocked(true));
-    } else if (isRemoteAudioMuted) {
-      setAutoplayBlocked(false);
-    }
-  }, [activeRole, isRemoteAudioMuted]);
-
-  // Clear viewer audio element only on unmount or role/stream change
-  useEffect(() => {
-    return () => {
-      const audioEl = remoteAudioRef.current;
-      if (audioEl) {
-        audioEl.pause();
-        audioEl.srcObject = null;
-      }
-    };
-  }, [activeRole, activeStream?.id]);
+  }, [activeRole, activeStream?.id, isRemoteAudioMuted, remoteMediaStream, remoteTrackTick, streamStatus]);
 
   // Real-time viewer presence & accurate viewer list (WebSocket + Firestore liveStreams/{id}/viewers)
   useEffect(() => {
@@ -538,9 +485,6 @@ export const LiveStreamScreen: React.FC = () => {
       joinedAtMs: Date.now(),
     };
 
-    wsViewersSeededRef.current = false;
-    notifiedWsViewerTimestampsRef.current.clear();
-
     realtimeSocket.joinRoom('live', streamId, profile, totalHeartCount);
     joinLiveStreamViewer(streamId, profile).catch(() => {});
 
@@ -550,45 +494,7 @@ export const LiveStreamScreen: React.FC = () => {
 
     const unsubWsRoom = realtimeSocket.onRoomEvent('live', streamId, (ev) => {
       if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
-        const viewersList = Array.isArray(ev.viewers) ? ev.viewers : [];
-        setWsViewers(viewersList);
-
-        const now = Date.now();
-        if (ev.type === 'room:state_init' || !wsViewersSeededRef.current) {
-          wsViewersSeededRef.current = true;
-          viewersList.forEach((v: any) => {
-            if (v?.id) notifiedWsViewerTimestampsRef.current.set(v.id, now);
-          });
-        } else {
-          const newJoiners: Array<{
-            id: string;
-            user: string;
-            text: string;
-            vipLevel?: number;
-            level?: number;
-            isEntryNotice: boolean;
-          }> = [];
-          viewersList.forEach((v: any) => {
-            if (!v?.id || v.id === uid) return;
-            const lastAt = notifiedWsViewerTimestampsRef.current.get(v.id);
-            if (!lastAt || now - lastAt > 25_000) {
-              notifiedWsViewerTimestampsRef.current.set(v.id, now);
-              newJoiners.push({
-                id: `entry_${v.id}_${now}`,
-                user: v.displayName || v.username || 'Viewer',
-                text: 'joined the live!',
-                vipLevel: v.vipTier || 0,
-                level: v.level || 1,
-                isEntryNotice: true,
-              });
-            } else {
-              notifiedWsViewerTimestampsRef.current.set(v.id, now);
-            }
-          });
-          if (newJoiners.length > 0) {
-            setComments((prev) => [...prev.slice(-60), ...newJoiners]);
-          }
-        }
+        setWsViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
       } else if (ev.type === 'room:signal' && ev.signal?.type === 'stream_ended' && !isHost) {
         setIsBroadcastEnded(true);
       }
@@ -697,17 +603,10 @@ export const LiveStreamScreen: React.FC = () => {
       subscribedSfuKeyRef.current = null;
       remoteStreamRef.current = null;
 
-      let viewerRetryCount = 0;
-      let viewerRetryTimer: ReturnType<typeof setTimeout> | null = null;
-
       const attemptViewerSubscribe = async (sfuSessionId: string, publishedTracks: any[], meta?: any) => {
         const trackKey = `${sfuSessionId}:${publishedTracks.map((t) => t.trackName).join(',')}`;
         if (subscribedSfuKeyRef.current === trackKey) return;
         subscribedSfuKeyRef.current = trackKey;
-        if (viewerRetryTimer) {
-          clearTimeout(viewerRetryTimer);
-          viewerRetryTimer = null;
-        }
         setStreamStatus('connecting');
         setStreamError(null);
 
@@ -726,17 +625,15 @@ export const LiveStreamScreen: React.FC = () => {
                   setStreamStatus('connecting');
                   setStreamError(null);
                 } else if (connState === 'connected') {
-                  viewerRetryCount = 0;
                   setStreamStatus('live');
                   setStreamError(null);
                 } else if (connState === 'failed') {
-                  setStreamStatus('connecting');
-                  setStreamError(null);
+                  setStreamStatus('error');
+                  setStreamError('Network Error — Alpha Mate could not reconnect. Tap Retry.');
                 }
               },
               onStreamReconnected: (reconnectedStream) => {
                 if (!isMounted) return;
-                viewerRetryCount = 0;
                 remoteStreamRef.current = reconnectedStream;
                 setRemoteMediaStream(reconnectedStream);
                 setRemoteTrackTick((t) => t + 1);
@@ -765,7 +662,6 @@ export const LiveStreamScreen: React.FC = () => {
           );
 
           if (!isMounted) return;
-          viewerRetryCount = 0;
           remoteStreamRef.current = stream;
           setRemoteMediaStream(stream);
           setRemoteTrackTick((t) => t + 1);
@@ -779,41 +675,11 @@ export const LiveStreamScreen: React.FC = () => {
             videoEl.muted = true;
             videoEl.play().catch(() => {});
           }
-        } catch (err: any) {
+        } catch (err) {
           if (!isMounted) return;
           subscribedSfuKeyRef.current = null;
-          const isFatalAuthOrEnded = err?.status === 404 || err?.code === 'SFU_NOT_CONFIGURED';
-          if (!isFatalAuthOrEnded && viewerRetryCount < 4) {
-            viewerRetryCount += 1;
-            setStreamStatus('connecting');
-            setStreamError(null);
-            const delay = Math.min(4500, 900 * viewerRetryCount);
-            viewerRetryTimer = setTimeout(async () => {
-              viewerRetryTimer = null;
-              if (!isMounted) return;
-              try {
-                const freshSnap = await getDoc(doc(db, 'liveStreams', activeStream.id));
-                if (!isMounted) return;
-                if (!freshSnap.exists() || freshSnap.data()?.isActive === false) {
-                  setIsBroadcastEnded(true);
-                  return;
-                }
-                const freshData = freshSnap.data() as any;
-                if (freshData?.sfuSessionId && Array.isArray(freshData?.publishedTracks) && freshData.publishedTracks.length > 0) {
-                  attemptViewerSubscribe(freshData.sfuSessionId, freshData.publishedTracks, freshData);
-                  return;
-                }
-              } catch {
-                // fallback to previous metadata on transient Firestore read hiccup
-              }
-              if (isMounted && sfuSessionId && publishedTracks.length > 0) {
-                attemptViewerSubscribe(sfuSessionId, publishedTracks, meta);
-              }
-            }, delay);
-            return;
-          }
           setStreamStatus('error');
-          setStreamError('Weak network — could not connect to broadcast. Tap Retry.');
+          setStreamError('Alpha Mate is reconnecting your Live connection…');
         }
       };
 
@@ -841,18 +707,14 @@ export const LiveStreamScreen: React.FC = () => {
 
         if (data.sfuSessionId && Array.isArray(data.publishedTracks) && data.publishedTracks.length > 0) {
           attemptViewerSubscribe(data.sfuSessionId, data.publishedTracks, data);
-        } else if (!subscribedSfuKeyRef.current) {
-          setStreamStatus('connecting');
-          setStreamError(null);
+        } else {
+          setStreamStatus('error');
+          setStreamError('Host media stream is not active yet.');
         }
       });
 
       return () => {
         isMounted = false;
-        if (viewerRetryTimer) {
-          clearTimeout(viewerRetryTimer);
-          viewerRetryTimer = null;
-        }
         unsubDoc();
         window.removeEventListener('pagehide', handlePageHide);
         window.removeEventListener('beforeunload', handlePageHide);
@@ -1104,8 +966,8 @@ export const LiveStreamScreen: React.FC = () => {
     if (!activeStream?.id) return;
     const unsubscribe = subscribeToLiveStreamMessages(activeStream.id, (remoteComments) => {
       if (remoteComments && remoteComments.length > 0) {
-        setComments((prev) => {
-          const remoteMapped = remoteComments.map((rc: any) => ({
+        setComments(
+          remoteComments.map((rc: any) => ({
             id: rc.id,
             user: rc.user || 'Viewer',
             text: rc.text || '',
@@ -1113,10 +975,8 @@ export const LiveStreamScreen: React.FC = () => {
             level: rc.level || 1,
             isGiftHighlight: rc.isGiftHighlight,
             isEntryNotice: rc.isEntryNotice,
-          }));
-          const localNotices = prev.filter((c) => c.id.startsWith('entry_')).slice(-6);
-          return [...remoteMapped, ...localNotices];
-        });
+          }))
+        );
       }
     });
     return () => {
@@ -2099,7 +1959,7 @@ export const LiveStreamScreen: React.FC = () => {
               <div className="flex items-center justify-between p-3 rounded-xl bg-[#110A22]">
                 <span className="text-xs text-white">Stream Quality</span>
                 <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 text-xs font-bold border border-emerald-500/30">
-                  Adaptive HD (Voice-First)
+                  1080p 60FPS
                 </span>
               </div>
 

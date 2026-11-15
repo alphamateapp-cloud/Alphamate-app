@@ -126,30 +126,9 @@ export const PublicUserProfileModal: React.FC = () => {
           <div className="flex items-end justify-between gap-3">
             <div className="relative">
               <img
-                src={
-                  viewingPublicUser.avatar ||
-                  `data:image/svg+xml;utf8,${encodeURIComponent(
-                    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7928CA"/><stop offset="100%" stop-color="#EC4899"/></linearGradient></defs><rect width="80" height="80" rx="40" fill="url(#g)"/><text x="40" y="50" text-anchor="middle" font-family="Arial,sans-serif" font-size="32" font-weight="bold" fill="#fff">${(
-                      viewingPublicUser.displayName || 'A'
-                    )
-                      .charAt(0)
-                      .toUpperCase()}</text></svg>`
-                  )}`
-                }
+                src={viewingPublicUser.avatar}
                 alt={viewingPublicUser.displayName}
                 referrerPolicy="no-referrer"
-                onError={(e) => {
-                  const target = e.currentTarget;
-                  if (target.dataset.fallbackApplied) return;
-                  target.dataset.fallbackApplied = '1';
-                  target.src = `data:image/svg+xml;utf8,${encodeURIComponent(
-                    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7928CA"/><stop offset="100%" stop-color="#EC4899"/></linearGradient></defs><rect width="80" height="80" rx="40" fill="url(#g)"/><text x="40" y="50" text-anchor="middle" font-family="Arial,sans-serif" font-size="32" font-weight="bold" fill="#fff">${(
-                      viewingPublicUser.displayName || 'A'
-                    )
-                      .charAt(0)
-                      .toUpperCase()}</text></svg>`
-                  )}`;
-                }}
                 className="w-20 h-20 rounded-full object-cover border-4 border-[#110A22] shadow-xl bg-[#1A1033]"
               />
               {viewingPublicUser.countryFlag && (

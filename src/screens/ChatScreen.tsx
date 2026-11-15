@@ -7,23 +7,18 @@ import {
   subscribeToMyChatRequests,
   subscribeToMyChats,
   subscribeToChatMessages,
-  fetchOlderChatMessages,
   createGroupChat,
   sendChatMessage,
   setChatPresence,
-  subscribeToChatPresence,
   uploadChatMedia,
   markChatMessageRead,
-  markChatMessagesDelivered,
   markChatAsRead,
   deleteChatMessage,
   subscribeToMyGroupInvites,
   respondToGroupInvite,
   searchFirebaseUsers,
   getOrCreateDirectChat,
-  ChatPayload,
 } from '../services/chatService';
-import { DocumentData, QueryDocumentSnapshot } from 'firebase/firestore';
 import { auth } from '../services/firebase';
 import { Conversation, User, ChatMessage } from '../types';
 import {
@@ -54,61 +49,16 @@ import {
   UserPlus,
   UserCheck,
   Eye,
-  Clock,
-  AlertCircle,
-  WifiOff,
-  ChevronUp,
-  Loader2,
-  RefreshCw,
 } from 'lucide-react';
 
 type RequestItem = { id: string; user: User; message: string; time: string };
-type DeliveryState = 'sending' | 'sent' | 'delivered' | 'read' | 'failed';
 type LocalMessage = ChatMessage & {
   replyTo?: string;
   deletedForEveryone?: boolean;
   edited?: boolean;
   kind?: 'text' | 'image' | 'video' | 'audio' | 'link';
-  deliveryState?: DeliveryState;
-  errorText?: string;
-  resolvedServerId?: string;
-  retryPayload?: ChatPayload;
-  retryOtherIds?: string[];
 };
-
 const EMOJIS = ['💜', '❤️', '😂', '😍', '🔥', '👑', '🎉', '🥰', '👏', '✨', '🌹', '👍'];
-
-const buildAvatarFallback = (name?: string) => {
-  const initial = (name || 'A').trim().charAt(0).toUpperCase() || 'A';
-  return `data:image/svg+xml;utf8,${encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7928CA"/><stop offset="100%" stop-color="#EC4899"/></linearGradient></defs><rect width="64" height="64" rx="32" fill="url(#g)"/><text x="32" y="41" text-anchor="middle" font-family="Arial,sans-serif" font-size="26" font-weight="bold" fill="#fff">${initial}</text></svg>`
-  )}`;
-};
-
-const applyAvatarFallback = (e: React.SyntheticEvent<HTMLImageElement>, name?: string) => {
-  const target = e.currentTarget;
-  if (target.dataset.fallbackApplied) return;
-  target.dataset.fallbackApplied = '1';
-  target.src = buildAvatarFallback(name);
-};
-
-const formatLastSeenLabel = (lastSeen?: any): string => {
-  if (!lastSeen) return '';
-  const date: Date | null =
-    typeof lastSeen?.toDate === 'function'
-      ? lastSeen.toDate()
-      : typeof lastSeen === 'string' || typeof lastSeen === 'number'
-      ? new Date(lastSeen)
-      : null;
-  if (!date || Number.isNaN(date.getTime())) return '';
-  const diffMs = Date.now() - date.getTime();
-  if (diffMs < 60_000) return 'Last seen just now';
-  if (diffMs < 3_600_000) return `Last seen ${Math.max(1, Math.floor(diffMs / 60_000))}m ago`;
-  if (diffMs < 86_400_000) {
-    return `Last seen ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
-  }
-  return `Last seen ${date.toLocaleDateString()}`;
-};
 
 export const ChatScreen: React.FC = () => {
   const {
@@ -154,18 +104,6 @@ export const ChatScreen: React.FC = () => {
   const [localGroups, setLocalGroups] = useState<Conversation[]>([]);
   const [firebaseChats, setFirebaseChats] = useState<Conversation[]>([]);
   const [firebaseMessages, setFirebaseMessages] = useState<LocalMessage[]>([]);
-  const [olderMessages, setOlderMessages] = useState<LocalMessage[]>([]);
-  const [hasMoreMessages, setHasMoreMessages] = useState(false);
-  const [oldestMessageDoc, setOldestMessageDoc] = useState<QueryDocumentSnapshot<DocumentData> | null>(null);
-  const [loadingOlder, setLoadingOlder] = useState(false);
-  const [pendingMessages, setPendingMessages] = useState<LocalMessage[]>([]);
-  const [chatLoadError, setChatLoadError] = useState<string | null>(null);
-  const [isOnline, setIsOnline] = useState<boolean>(
-    typeof navigator !== 'undefined' ? navigator.onLine : true
-  );
-  const [partnerPresence, setPartnerPresence] = useState<{ online: boolean; lastSeen?: any }>({
-    online: false,
-  });
   const [foundUsers, setFoundUsers] = useState<User[]>([]);
   const [userSearchLoading, setUserSearchLoading] = useState(false);
   const [groupInvites, setGroupInvites] = useState<any[]>([]);
@@ -175,24 +113,11 @@ export const ChatScreen: React.FC = () => {
   const videoRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLElement>(null);
-  const hasLoadedOlderRef = useRef(false);
 
   const directoryUsers = useMemo(
     () => (realUsers.length > 0 ? realUsers : registeredUsers).filter((u) => u.id !== currentUser.id),
     [realUsers, registeredUsers, currentUser.id]
   );
-
-  // Track device network online/offline status for honest chat state feedback
-  useEffect(() => {
-    const onOnline = () => setIsOnline(true);
-    const onOffline = () => setIsOnline(false);
-    window.addEventListener('online', onOnline);
-    window.addEventListener('offline', onOffline);
-    return () => {
-      window.removeEventListener('online', onOnline);
-      window.removeEventListener('offline', onOffline);
-    };
-  }, []);
 
   // Real-time Firestore Chat Requests, Conversations, Group Invites & Presence
   useEffect(() => {
@@ -200,7 +125,6 @@ export const ChatScreen: React.FC = () => {
     let unsubscribeRequests: (() => void) | undefined;
     let unsubscribeChats: (() => void) | undefined;
     let unsubscribeGroupInvites: (() => void) | undefined;
-    setChatLoadError(null);
     try {
       unsubscribeRequests = subscribeToMyChatRequests((items) =>
         setRequests(
@@ -218,46 +142,39 @@ export const ChatScreen: React.FC = () => {
           }))
         )
       );
-      unsubscribeChats = subscribeToMyChats(
-        (items) => {
-          setChatLoadError(null);
-          setFirebaseChats(
-            items.map((item: any) => {
-              const otherId = (item.participantIds || []).find((id: string) => id !== currentUser.id);
-              const profile = item.participantProfiles?.[otherId] || {};
-              const isGroup = item.type === 'group';
-              return {
-                id: item.id,
-                inviteStatus: item.memberStatus?.[currentUser.id],
-                user: {
-                  id: otherId || currentUser.id,
-                  uniqueId: profile.uniqueId || '',
-                  displayName: profile.displayName || 'Alpha Mate User',
-                  username: profile.username || '',
-                  avatar: profile.avatar || '',
-                } as User,
-                groupName: item.groupName,
-                isGroup,
-                groupMembers: Object.entries(item.participantProfiles || {}).map(
-                  ([id, value]: any) => ({ id, ...value } as User)
-                ),
-                lastMessage: item.lastMessage || '',
-                lastTimestamp: item.updatedAt?.toDate?.()?.toLocaleString?.() || 'Just now',
-                unreadCount: Number(item.unreadBy?.[currentUser.id] || 0),
-                messages: [],
-              } as Conversation;
-            })
-          );
-        },
-        (err) => {
-          setChatLoadError(err?.message || 'Unable to sync conversations. Tap Retry.');
-        }
+      unsubscribeChats = subscribeToMyChats((items) =>
+        setFirebaseChats(
+          items.map((item: any) => {
+            const otherId = (item.participantIds || []).find((id: string) => id !== currentUser.id);
+            const profile = item.participantProfiles?.[otherId] || {};
+            const isGroup = item.type === 'group';
+            return {
+              id: item.id,
+              inviteStatus: item.memberStatus?.[currentUser.id],
+              user: {
+                id: otherId || currentUser.id,
+                uniqueId: profile.uniqueId || '',
+                displayName: profile.displayName || 'Alpha Mate User',
+                username: profile.username || '',
+                avatar: profile.avatar || '',
+              } as User,
+              groupName: item.groupName,
+              isGroup,
+              groupMembers: Object.entries(item.participantProfiles || {}).map(
+                ([id, value]: any) => ({ id, ...value } as User)
+              ),
+              lastMessage: item.lastMessage || '',
+              lastTimestamp: item.updatedAt?.toDate?.()?.toLocaleString?.() || 'Just now',
+              unreadCount: Number(item.unreadBy?.[currentUser.id] || 0),
+              messages: [],
+            } as Conversation;
+          })
+        )
       );
       unsubscribeGroupInvites = subscribeToMyGroupInvites(setGroupInvites);
       setChatPresence(true).catch(() => {});
-    } catch (error: any) {
+    } catch (error) {
       console.warn('Chat listener unavailable:', error);
-      setChatLoadError(error?.message || 'Chat listener unavailable.');
     }
 
     const handleOffline = () => setChatPresence(false).catch(() => {});
@@ -271,38 +188,7 @@ export const ChatScreen: React.FC = () => {
     };
   }, [currentUser.id, chatRefreshEpoch]);
 
-  // Reset pagination & optimistic buffers when switching active conversation
-  useEffect(() => {
-    hasLoadedOlderRef.current = false;
-    setOlderMessages([]);
-    setHasMoreMessages(false);
-    setOldestMessageDoc(null);
-    setPendingMessages([]);
-    setChatLoadError(null);
-  }, [activeConversation?.id]);
-
-  // Subscribe to real partner presence for direct chats
-  useEffect(() => {
-    const partnerId = activeConversation?.user?.id;
-    if (
-      !activeConversation ||
-      activeConversation.isGroup ||
-      !partnerId ||
-      partnerId === currentUser.id ||
-      auth.currentUser?.uid !== currentUser.id
-    ) {
-      setPartnerPresence({ online: false });
-      return;
-    }
-
-    return subscribeToChatPresence(
-      partnerId,
-      (online, lastSeen) => setPartnerPresence({ online, lastSeen }),
-      () => setPartnerPresence({ online: false })
-    );
-  }, [activeConversation?.id, activeConversation?.isGroup, activeConversation?.user?.id, currentUser.id]);
-
-  // Real-time Firestore messages listener for active conversation (paginated latest 40)
+  // Real-time Firestore messages listener for active conversation
   useEffect(() => {
     if (!activeConversation?.id || !auth.currentUser || auth.currentUser.uid !== currentUser.id) {
       setFirebaseMessages([]);
@@ -318,137 +204,51 @@ export const ChatScreen: React.FC = () => {
 
     markChatAsRead(activeConversation.id).catch(() => {});
 
-    return subscribeToChatMessages(
-      activeConversation.id,
-      (items, meta) => {
-        setChatLoadError(null);
-        const undeliveredIds: string[] = [];
-        items.forEach((m: any) => {
-          if (m.senderId !== currentUser.id) {
-            if (!(m.deliveredTo || []).includes(currentUser.id)) {
-              undeliveredIds.push(m.id);
-            }
-            if (!(m.readBy || []).includes(currentUser.id)) {
-              markChatMessageRead(activeConversation.id, m.id).catch(() => {});
-            }
-          }
-        });
-        if (undeliveredIds.length > 0) {
-          markChatMessagesDelivered(activeConversation.id, undeliveredIds).catch(() => {});
+    return subscribeToChatMessages(activeConversation.id, (items) => {
+      items.forEach((m: any) => {
+        if (m.senderId !== currentUser.id && !(m.readBy || []).includes(currentUser.id)) {
+          markChatMessageRead(activeConversation.id, m.id).catch(() => {});
         }
-
-        if (!hasLoadedOlderRef.current && meta) {
-          setHasMoreMessages(meta.hasMore);
-          setOldestMessageDoc(meta.oldestDoc);
-        }
-
-        const mapped: LocalMessage[] = items.map((m: any) => {
-          const isMe = m.senderId === currentUser.id;
-          const readOthers = Array.isArray(m.readBy)
-            ? m.readBy.some((id: string) => id && id !== currentUser.id)
-            : false;
-          const deliveredOthers = Array.isArray(m.deliveredTo)
-            ? m.deliveredTo.some((id: string) => id && id !== currentUser.id)
-            : false;
-          const deliveryState: DeliveryState = readOthers
-            ? 'read'
-            : deliveredOthers
-            ? 'delivered'
-            : 'sent';
-
-          return {
-            id: m.id,
-            senderId: m.senderId,
-            senderName:
-              isMe
-                ? currentUser.displayName
-                : activeConversation.user?.displayName || 'Member',
-            senderAvatar:
-              isMe
-                ? currentUser.avatar
-                : activeConversation.user?.avatar || '',
-            text: m.deletedForEveryone ? 'This message was deleted' : m.text || '',
-            imageUrl: m.mediaUrl || undefined,
-            timestamp:
-              m.createdAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
-              'Just now',
-            isRead: readOthers,
-            isMe,
-            edited: !!m.edited,
-            replyTo: m.replyTo,
-            deliveryState,
-          };
-        });
-
-        setFirebaseMessages(mapped);
-        const liveIds = new Set(mapped.map((m) => m.id));
-        setPendingMessages((prev) =>
-          prev.filter((p) => !p.resolvedServerId || !liveIds.has(p.resolvedServerId))
-        );
-      },
-      (err) => {
-        setChatLoadError(err?.message || 'Unable to load conversation messages.');
-      },
-      40
-    );
+      });
+      setFirebaseMessages(
+        items.map(
+          (m: any) =>
+            ({
+              id: m.id,
+              senderId: m.senderId,
+              senderName:
+                m.senderId === currentUser.id
+                  ? currentUser.displayName
+                  : activeConversation.user?.displayName || 'Member',
+              senderAvatar:
+                m.senderId === currentUser.id
+                  ? currentUser.avatar
+                  : activeConversation.user?.avatar || '',
+              text: m.deletedForEveryone ? 'This message was deleted' : m.text || '',
+              imageUrl: m.mediaUrl || undefined,
+              timestamp:
+                m.createdAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
+                'Just now',
+              isRead: (m.readBy || []).length > 1,
+              isMe: m.senderId === currentUser.id,
+              edited: !!m.edited,
+              replyTo: m.replyTo,
+            } as LocalMessage)
+        )
+      );
+    });
   }, [activeConversation?.id, firebaseChats.length, currentUser.id, chatRefreshEpoch]);
 
-  const handleLoadOlderMessages = async () => {
-    if (!activeConversation?.id || !oldestMessageDoc || loadingOlder) return;
-    setLoadingOlder(true);
-    try {
-      const res = await fetchOlderChatMessages(activeConversation.id, oldestMessageDoc, 40);
-      hasLoadedOlderRef.current = true;
-      setHasMoreMessages(res.hasMore);
-      if (res.oldestDoc) {
-        setOldestMessageDoc(res.oldestDoc);
-      }
-      const mappedOlder: LocalMessage[] = res.items.map((m: any) => {
-        const isMe = m.senderId === currentUser.id;
-        const readOthers = Array.isArray(m.readBy)
-          ? m.readBy.some((id: string) => id && id !== currentUser.id)
-          : false;
-        const deliveredOthers = Array.isArray(m.deliveredTo)
-          ? m.deliveredTo.some((id: string) => id && id !== currentUser.id)
-          : false;
-        return {
-          id: m.id,
-          senderId: m.senderId,
-          senderName: isMe ? currentUser.displayName : activeConversation.user?.displayName || 'Member',
-          senderAvatar: isMe ? currentUser.avatar : activeConversation.user?.avatar || '',
-          text: m.deletedForEveryone ? 'This message was deleted' : m.text || '',
-          imageUrl: m.mediaUrl || undefined,
-          timestamp:
-            m.createdAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
-            'Earlier',
-          isRead: readOthers,
-          isMe,
-          edited: !!m.edited,
-          replyTo: m.replyTo,
-          deliveryState: readOthers ? 'read' : deliveredOthers ? 'delivered' : 'sent',
-        };
-      });
-      setOlderMessages((prev) => {
-        const seen = new Set(prev.map((m) => m.id));
-        return [...mappedOlder.filter((m) => !seen.has(m.id)), ...prev];
-      });
-    } catch (err: any) {
-      showToast(err?.message || 'Failed to load older messages.');
-    } finally {
-      setLoadingOlder(false);
-    }
-  };
-
-  // Scroll to bottom when latest live/pending messages grow (do NOT snap when prepending older history)
-  const latestStreamCount = activeConversation
+  // Scroll to bottom when active messages update (real-time or local)
+  const activeMessagesCount = activeConversation
     ? firebaseChats.some((c) => c.id === activeConversation.id) || activeConversation.id.startsWith('dm_')
-      ? firebaseMessages.length + pendingMessages.length
+      ? firebaseMessages.length
       : activeConversation.messages.length
     : 0;
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [latestStreamCount, activeConversation?.id]);
+  }, [activeMessagesCount, activeConversation?.id]);
 
   const allConversations = useMemo(
     () => [
@@ -627,66 +427,13 @@ export const ChatScreen: React.FC = () => {
         activeConversation.id.startsWith('dm_'))
   );
 
-  const sendOptimisticFirestoreMessage = async (
-    chatId: string,
-    payload: ChatPayload,
-    otherIds: string[],
-    kind: LocalMessage['kind'] = 'text',
-    existingLocalId?: string
-  ) => {
-    const localId = existingLocalId || `pending_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-    const optimisticMsg: LocalMessage = {
-      id: localId,
-      senderId: currentUser.id,
-      senderName: currentUser.displayName,
-      senderAvatar: currentUser.avatar,
-      text: payload.text || '',
-      imageUrl: payload.mediaUrl,
-      timestamp: 'Sending...',
-      isRead: false,
-      isMe: true,
-      kind,
-      replyTo: payload.replyTo,
-      deliveryState: 'sending',
-      errorText: undefined,
-      retryPayload: payload,
-      retryOtherIds: otherIds,
-    };
-
-    setPendingMessages((prev) =>
-      existingLocalId
-        ? prev.map((m) => (m.id === existingLocalId ? { ...m, deliveryState: 'sending', errorText: undefined } : m))
-        : [...prev, optimisticMsg]
-    );
-
-    try {
-      const serverMsgId = await sendChatMessage(chatId, payload, otherIds);
-      setPendingMessages((prev) =>
-        prev.map((m) => (m.id === localId ? { ...m, resolvedServerId: serverMsgId, deliveryState: 'sent' } : m))
-      );
-    } catch (error: any) {
-      console.error('Firebase chat send failed:', error);
-      const errText = !isOnline
-        ? 'Offline — tap to retry'
-        : error?.message || 'Failed to send — tap to retry';
-      setPendingMessages((prev) =>
-        prev.map((m) =>
-          m.id === localId
-            ? { ...m, deliveryState: 'failed', timestamp: 'Failed', errorText: errText }
-            : m
-        )
-      );
-      showToast(errText);
-    }
-  };
-
   const send = (text = draft, mediaUrl?: string, kind: LocalMessage['kind'] = 'text') => {
     if (!activeConversation || (!text.trim() && !mediaUrl)) return;
     if (editMessage) {
       if (auth.currentUser?.uid === currentUser.id && isFirestoreActiveChat) {
         import('../services/chatService')
           .then((m) => m.editChatMessage(activeConversation.id, editMessage.id, text))
-          .catch((e) => showToast(e?.message || 'Unable to edit message.'));
+          .catch((e) => console.error(e));
       }
       setEditMessage(null);
       setDraft('');
@@ -700,8 +447,8 @@ export const ChatScreen: React.FC = () => {
     if (auth.currentUser?.uid === currentUser.id && isFirestoreActiveChat) {
       const otherIds = activeConversation.isGroup
         ? (activeConversation.groupMembers || []).map((m) => m.id).filter((id) => id !== currentUser.id)
-        : [activeConversation.user?.id].filter((id): id is string => Boolean(id));
-      void sendOptimisticFirestoreMessage(
+        : [activeConversation.user?.id].filter(Boolean);
+      sendChatMessage(
         activeConversation.id,
         {
           text: messageText,
@@ -709,9 +456,8 @@ export const ChatScreen: React.FC = () => {
           mediaType: kind === 'text' || kind === 'link' ? undefined : kind,
           replyTo: replyTo?.id,
         },
-        otherIds,
-        kind
-      );
+        otherIds
+      ).catch((error) => console.error('Firebase chat send failed:', error));
     } else if (localGroups.some((group) => group.id === activeConversation.id)) {
       const newMessage: LocalMessage = {
         id: `group_msg_${Date.now()}`,
@@ -724,7 +470,6 @@ export const ChatScreen: React.FC = () => {
         isRead: false,
         isMe: true,
         kind,
-        deliveryState: 'sent',
       };
       const updated = {
         ...activeConversation,
@@ -734,12 +479,11 @@ export const ChatScreen: React.FC = () => {
       };
       setLocalGroups((prev) => prev.map((group) => (group.id === updated.id ? updated : group)));
       openConversation(updated);
-      dispatchMessageNotifications(messageText);
     } else {
       sendMessage(activeConversation.id, messageText, mediaUrl);
-      dispatchMessageNotifications(messageText);
     }
 
+    dispatchMessageNotifications(messageText);
     setDraft('');
     setReplyTo(null);
     setShowEmoji(false);
@@ -753,13 +497,13 @@ export const ChatScreen: React.FC = () => {
         const url = await uploadChatMedia(activeConversation.id, file);
         const otherIds = activeConversation.isGroup
           ? (activeConversation.groupMembers || []).map((m) => m.id).filter((id) => id !== currentUser.id)
-          : [activeConversation.user?.id].filter((id): id is string => Boolean(id));
-        await sendOptimisticFirestoreMessage(
+          : [activeConversation.user?.id].filter(Boolean);
+        await sendChatMessage(
           activeConversation.id,
           { text: file.name, mediaUrl: url, mediaType: kind },
-          otherIds,
-          kind
+          otherIds
         );
+        dispatchMessageNotifications(`Sent a ${kind}: ${file.name}`);
       } else {
         const reader = new FileReader();
         reader.onload = () => send(file.name, String(reader.result), kind);
@@ -827,23 +571,7 @@ export const ChatScreen: React.FC = () => {
 
   if (activeConversation) {
     const partner = activeConversation.user;
-    const mergedFirestoreMessages: LocalMessage[] = (() => {
-      const byId = new Map<string, LocalMessage>();
-      olderMessages.forEach((m) => byId.set(m.id, m));
-      firebaseMessages.forEach((m) => byId.set(m.id, m));
-      const base = Array.from(byId.values());
-      const remainingPending = pendingMessages.filter(
-        (p) => !p.resolvedServerId || !byId.has(p.resolvedServerId)
-      );
-      return [...base, ...remainingPending];
-    })();
-    const messages = (isFirestoreActiveChat ? mergedFirestoreMessages : activeConversation.messages) as LocalMessage[];
-    const headerAvatarSrc = activeConversation.isGroup
-      ? activeConversation.groupMembers?.[0]?.avatar || partner?.avatar || buildAvatarFallback(activeConversation.groupName)
-      : partner?.avatar || buildAvatarFallback(partner?.displayName);
-    const headerTitle = activeConversation.isGroup ? activeConversation.groupName : partner?.displayName;
-    const lastSeenLabel = !activeConversation.isGroup ? formatLastSeenLabel(partnerPresence.lastSeen) : '';
-
+    const messages = (isFirestoreActiveChat ? firebaseMessages : activeConversation.messages) as LocalMessage[];
     return (
       <div className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-[#090510] text-white">
         <header className="shrink-0 border-b border-purple-500/20 bg-[#130922]/95 px-3 pb-3 pt-[max(14px,env(safe-area-inset-top))]">
@@ -863,13 +591,15 @@ export const ChatScreen: React.FC = () => {
               className="relative cursor-pointer"
             >
               <img
-                src={headerAvatarSrc}
-                alt={headerTitle}
-                referrerPolicy="no-referrer"
-                onError={(e) => applyAvatarFallback(e, headerTitle)}
-                className="h-11 w-11 rounded-full border border-fuchsia-400/60 object-cover bg-[#1F153B]"
+                src={
+                  activeConversation.isGroup
+                    ? activeConversation.groupMembers?.[0]?.avatar || partner?.avatar
+                    : partner?.avatar
+                }
+                alt={activeConversation.isGroup ? activeConversation.groupName : partner?.displayName}
+                className="h-11 w-11 rounded-full border border-fuchsia-400/60 object-cover"
               />
-              {!activeConversation.isGroup && partnerPresence.online && (
+              {!activeConversation.isGroup && (
                 <i className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-[#130922] bg-emerald-400" />
               )}
             </div>
@@ -881,19 +611,15 @@ export const ChatScreen: React.FC = () => {
               }}
               className="min-w-0 flex-1 cursor-pointer"
             >
-              <div className="truncate text-[15px] font-bold">{headerTitle}</div>
-              <div
-                className={`text-[11px] ${
-                  !activeConversation.isGroup && partnerPresence.online
-                    ? 'text-emerald-400'
-                    : 'text-zinc-400'
-                }`}
-              >
+              <div className="truncate text-[15px] font-bold">
+                {activeConversation.isGroup ? activeConversation.groupName : partner?.displayName}
+              </div>
+              <div className="text-[11px] text-emerald-400">
                 {activeConversation.isGroup
                   ? `${activeConversation.groupMembers?.length || 1} members`
-                  : partnerPresence.online
-                  ? 'Online'
-                  : lastSeenLabel || (partner?.username ? `@${partner.username}` : 'Offline')}
+                  : partner?.username
+                  ? `@${partner.username}`
+                  : 'Real-Time Chat'}
               </div>
             </div>
             <button
@@ -919,26 +645,6 @@ export const ChatScreen: React.FC = () => {
             </button>
           </div>
         </header>
-
-        {!isOnline && (
-          <div className="mx-3 mt-2 flex items-center gap-2 rounded-xl border border-amber-400/35 bg-amber-500/15 px-3 py-2 text-[11px] font-semibold text-amber-200">
-            <WifiOff size={14} className="shrink-0" />
-            <span>You are offline. Messages sent now may fail and can be tapped to retry.</span>
-          </div>
-        )}
-
-        {chatLoadError && (
-          <div className="mx-3 mt-2 flex items-center justify-between gap-2 rounded-xl border border-rose-400/35 bg-rose-500/15 px-3 py-2 text-[11px] font-semibold text-rose-200">
-            <span className="truncate">{chatLoadError}</span>
-            <button
-              type="button"
-              onClick={() => refreshScope('chat')}
-              className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-white/20 shrink-0 cursor-pointer"
-            >
-              <RefreshCw size={11} /> Retry
-            </button>
-          </div>
-        )}
 
         {callState !== 'idle' && (
           <div className="mx-3 mt-3 flex items-center justify-between rounded-2xl border border-purple-400/30 bg-purple-950/70 p-3">
@@ -967,25 +673,6 @@ export const ChatScreen: React.FC = () => {
             label="Refreshing messages..."
             onRefresh={() => refreshScope('chat')}
           />
-
-          {isFirestoreActiveChat && hasMoreMessages && (
-            <div className="flex justify-center pb-1">
-              <button
-                type="button"
-                disabled={loadingOlder}
-                onClick={handleLoadOlderMessages}
-                className="inline-flex items-center gap-1.5 rounded-full border border-purple-400/30 bg-purple-950/70 px-3.5 py-1.5 text-[11px] font-bold text-purple-200 hover:bg-purple-900/80 disabled:opacity-60 cursor-pointer"
-              >
-                {loadingOlder ? (
-                  <Loader2 size={13} className="animate-spin" />
-                ) : (
-                  <ChevronUp size={13} />
-                )}
-                <span>{loadingOlder ? 'Loading history...' : 'Load older messages'}</span>
-              </button>
-            </div>
-          )}
-
           <div className="mx-auto w-fit rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[10px] text-zinc-400">
             Today · Alpha Mate Real-Time Chat
           </div>
@@ -994,75 +681,42 @@ export const ChatScreen: React.FC = () => {
               Say hello to start chatting in real time! 👋
             </div>
           )}
-          {messages.map((msg) => {
-            const isPendingOrFailed = msg.deliveryState === 'sending' || msg.deliveryState === 'failed';
-            return (
-              <div key={msg.id} className={`flex ${msg.isMe ? 'justify-end' : 'justify-start'}`}>
-                <div className={`max-w-[82%] ${msg.isMe ? 'items-end' : 'items-start'} flex flex-col`}>
-                  {msg.replyTo && (
-                    <div className="mb-1 rounded-lg bg-black/30 px-3 py-1 text-[10px] text-purple-200">
-                      Replying to a message
-                    </div>
-                  )}
-                  <button
-                    onContextMenu={(e) => {
-                      e.preventDefault();
-                      if (!isPendingOrFailed) setMenuMessage(msg);
-                    }}
-                    onClick={() => {
-                      if (msg.deliveryState === 'failed' && msg.retryPayload && activeConversation?.id) {
-                        void sendOptimisticFirestoreMessage(
-                          activeConversation.id,
-                          msg.retryPayload,
-                          msg.retryOtherIds || [],
-                          msg.kind || 'text',
-                          msg.id
-                        );
-                        return;
-                      }
-                      if (!isPendingOrFailed) setMenuMessage(msg);
-                    }}
-                    className={`rounded-2xl px-3.5 py-2.5 text-left text-[13px] leading-relaxed shadow-lg transition-opacity ${
-                      msg.deliveryState === 'sending' ? 'opacity-75' : ''
-                    } ${
-                      msg.deliveryState === 'failed'
-                        ? 'rounded-br-sm border border-rose-400/60 bg-rose-950/75'
-                        : msg.isMe
-                        ? 'rounded-br-sm bg-gradient-to-br from-[#8B27D8] to-[#D52DAB]'
-                        : 'rounded-bl-sm border border-purple-400/15 bg-[#211332]'
-                    }`}
-                  >
-                    {msg.imageUrl &&
-                      (msg.imageUrl.startsWith('data:video') ? (
-                        <video src={msg.imageUrl} controls className="mb-2 max-h-48 rounded-xl" />
-                      ) : (
-                        <img src={msg.imageUrl} className="mb-2 max-h-52 rounded-xl object-cover" />
-                      ))}
-                    {msg.text && <span>{msg.text}</span>}
-                    {msg.edited && <span className="ml-2 text-[9px] opacity-70">edited</span>}
-                  </button>
-                  <div className="mt-1 flex items-center gap-1 px-1 text-[10px] text-zinc-500">
-                    <span>{msg.deliveryState === 'failed' ? msg.errorText || 'Tap to retry' : msg.timestamp}</span>
-                    {msg.isMe && (
-                      <>
-                        {msg.deliveryState === 'sending' ? (
-                          <Clock size={12} className="text-zinc-400" />
-                        ) : msg.deliveryState === 'failed' ? (
-                          <AlertCircle size={12} className="text-rose-400" />
-                        ) : msg.deliveryState === 'read' ? (
-                          <CheckCheck size={13} className="text-cyan-300" />
-                        ) : msg.deliveryState === 'delivered' ? (
-                          <CheckCheck size={13} className="text-zinc-400" />
-                        ) : (
-                          <Check size={12} className="text-zinc-400" />
-                        )}
-                      </>
-                    )}
+          {messages.map((msg) => (
+            <div key={msg.id} className={`flex ${msg.isMe ? 'justify-end' : 'justify-start'}`}>
+              <div className={`max-w-[82%] ${msg.isMe ? 'items-end' : 'items-start'} flex flex-col`}>
+                {msg.replyTo && (
+                  <div className="mb-1 rounded-lg bg-black/30 px-3 py-1 text-[10px] text-purple-200">
+                    Replying to a message
                   </div>
+                )}
+                <button
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setMenuMessage(msg);
+                  }}
+                  onClick={() => setMenuMessage(msg)}
+                  className={`rounded-2xl px-3.5 py-2.5 text-left text-[13px] leading-relaxed shadow-lg ${
+                    msg.isMe
+                      ? 'rounded-br-sm bg-gradient-to-br from-[#8B27D8] to-[#D52DAB]'
+                      : 'rounded-bl-sm border border-purple-400/15 bg-[#211332]'
+                  }`}
+                >
+                  {msg.imageUrl &&
+                    (msg.imageUrl.startsWith('data:video') ? (
+                      <video src={msg.imageUrl} controls className="mb-2 max-h-48 rounded-xl" />
+                    ) : (
+                      <img src={msg.imageUrl} className="mb-2 max-h-52 rounded-xl object-cover" />
+                    ))}
+                  {msg.text && <span>{msg.text}</span>}
+                  {msg.edited && <span className="ml-2 text-[9px] opacity-70">edited</span>}
+                </button>
+                <div className="mt-1 flex items-center gap-1 px-1 text-[10px] text-zinc-500">
+                  <span>{msg.timestamp}</span>
+                  {msg.isMe && <CheckCheck size={13} className="text-cyan-300" />}
                 </div>
               </div>
-            );
-          })}
+            </div>
+          ))}
           <div ref={chatEndRef} />
         </main>
 
@@ -1341,26 +995,6 @@ export const ChatScreen: React.FC = () => {
         )}
       </header>
 
-      {!isOnline && (
-        <div className="mx-3 mt-3 flex items-center gap-2 rounded-xl border border-amber-400/35 bg-amber-500/15 px-3 py-2 text-[11px] font-semibold text-amber-200">
-          <WifiOff size={14} className="shrink-0" />
-          <span>Offline mode — check your internet connection to sync new messages.</span>
-        </div>
-      )}
-
-      {chatLoadError && (
-        <div className="mx-3 mt-3 flex items-center justify-between gap-2 rounded-xl border border-rose-400/35 bg-rose-500/15 px-3 py-2 text-[11px] font-semibold text-rose-200">
-          <span className="truncate">{chatLoadError}</span>
-          <button
-            type="button"
-            onClick={() => refreshScope('chat')}
-            className="inline-flex items-center gap-1 rounded-lg bg-white/10 px-2.5 py-1 text-[10px] font-bold text-white hover:bg-white/20 shrink-0 cursor-pointer"
-          >
-            <RefreshCw size={11} /> Retry
-          </button>
-        </div>
-      )}
-
       {tab === 'requests' ? (
         <section className="space-y-3 p-4">
           <div className="mb-4 rounded-2xl border border-amber-400/20 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-100">
@@ -1402,12 +1036,7 @@ export const ChatScreen: React.FC = () => {
             requests.map((r) => (
               <div key={r.id} className="rounded-2xl border border-purple-400/20 bg-[#160d25] p-3">
                 <div className="flex items-center gap-3">
-                  <img
-                    src={r.user.avatar || buildAvatarFallback(r.user.displayName)}
-                    referrerPolicy="no-referrer"
-                    onError={(e) => applyAvatarFallback(e, r.user.displayName)}
-                    className="h-12 w-12 rounded-full object-cover bg-[#1F153B]"
-                  />
+                  <img src={r.user.avatar} className="h-12 w-12 rounded-full object-cover" />
                   <div className="min-w-0 flex-1">
                     <p className="font-bold">{r.user.displayName}</p>
                     <p className="text-[11px] text-zinc-500">
@@ -1470,10 +1099,9 @@ export const ChatScreen: React.FC = () => {
                           className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
                         >
                           <img
-                            src={u.avatar || buildAvatarFallback(u.displayName)}
+                            src={u.avatar || currentUser.avatar}
                             referrerPolicy="no-referrer"
-                            onError={(e) => applyAvatarFallback(e, u.displayName)}
-                            className="h-10 w-10 rounded-full object-cover border border-purple-400/30 shrink-0 bg-[#1F153B]"
+                            className="h-10 w-10 rounded-full object-cover border border-purple-400/30 shrink-0"
                           />
                           <div className="min-w-0 flex-1">
                             <b className="block text-xs sm:text-sm text-white truncate">{u.displayName}</b>
@@ -1537,15 +1165,12 @@ export const ChatScreen: React.FC = () => {
               >
                 <div className="relative shrink-0">
                   <img
-                    src={
-                      c.isGroup
-                        ? c.groupMembers?.[0]?.avatar || c.user.avatar || buildAvatarFallback(c.groupName)
-                        : c.user.avatar || buildAvatarFallback(c.user.displayName)
-                    }
-                    referrerPolicy="no-referrer"
-                    onError={(e) => applyAvatarFallback(e, c.isGroup ? c.groupName : c.user.displayName)}
-                    className="h-14 w-14 rounded-full border border-purple-400/30 object-cover bg-[#1F153B]"
+                    src={c.isGroup ? c.groupMembers?.[0]?.avatar || c.user.avatar : c.user.avatar}
+                    className="h-14 w-14 rounded-full border border-purple-400/30 object-cover"
                   />
+                  {!c.isGroup && (
+                    <i className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-[#090510] bg-emerald-400" />
+                  )}
                   {c.isGroup && (
                     <span className="absolute -bottom-1 -right-1 rounded-full bg-purple-600 p-1">
                       <Users size={11} />
@@ -1655,12 +1280,7 @@ export const ChatScreen: React.FC = () => {
                   }
                   className="flex w-full items-center gap-3 rounded-xl p-2 text-left cursor-pointer hover:bg-white/5"
                 >
-                  <img
-                    src={u.avatar || buildAvatarFallback(u.displayName)}
-                    referrerPolicy="no-referrer"
-                    onError={(e) => applyAvatarFallback(e, u.displayName)}
-                    className="h-10 w-10 rounded-full object-cover bg-[#1F153B]"
-                  />
+                  <img src={u.avatar} className="h-10 w-10 rounded-full object-cover" />
                   <span className="flex-1 text-sm">
                     {u.displayName}
                     <small className="block text-zinc-500">
