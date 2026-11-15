@@ -1004,6 +1004,14 @@ export const PartyRoomsScreen: React.FC = () => {
       muted: initialMuted,
     };
 
+    let voiceDisconnectBannerTimer: ReturnType<typeof setTimeout> | null = null;
+    const clearDisconnectBannerTimer = () => {
+      if (voiceDisconnectBannerTimer) {
+        clearTimeout(voiceDisconnectBannerTimer);
+        voiceDisconnectBannerTimer = null;
+      }
+    };
+
     setPartyVoiceError(null);
     p2pStreamingEngine
       .startPartyVoice(roomId, effectiveUserId, initialMuted, !initialCanSpeak, {
@@ -1017,22 +1025,33 @@ export const PartyRoomsScreen: React.FC = () => {
           countryFlag: currentUser.countryFlag,
           isHost: isUserHost,
         },
-        onError: (err) => {
-          if (!cancelled) {
-            setPartyVoiceError('Alpha Mate is reconnecting your Party voice…');
-          }
+        onError: () => {
+          if (cancelled || voiceDisconnectBannerTimer) return;
+          voiceDisconnectBannerTimer = setTimeout(() => {
+            voiceDisconnectBannerTimer = null;
+            if (!cancelled) {
+              setPartyVoiceError('Weak network — Party voice is reconnecting…');
+            }
+          }, 4500);
         },
         onConnectionStateChange: (connState) => {
           if (cancelled) return;
           if (connState === 'connected') {
             voiceHasConnectedRef.current = true;
+            clearDisconnectBannerTimer();
             setPartyVoiceError(null);
           } else if (connState === 'disconnected') {
-            if (voiceHasConnectedRef.current) {
-              setPartyVoiceError('Alpha Mate Party Voice is reconnecting…');
+            if (voiceHasConnectedRef.current && !voiceDisconnectBannerTimer) {
+              voiceDisconnectBannerTimer = setTimeout(() => {
+                voiceDisconnectBannerTimer = null;
+                if (!cancelled) {
+                  setPartyVoiceError('Weak network — Party voice is reconnecting…');
+                }
+              }, 4500);
             }
           } else if (connState === 'failed') {
-            setPartyVoiceError('Party Voice connection lost. Please try reconnecting.');
+            clearDisconnectBannerTimer();
+            setPartyVoiceError('Party Voice connection lost. Tap Retry to reconnect.');
           }
         },
         onParticipantsChange: (participants) => {
@@ -1135,6 +1154,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
     return () => {
       cancelled = true;
+      clearDisconnectBannerTimer();
       unsubWsPartyRoom();
       realtimeSocket.leaveRoom('party', roomId);
       if (startupRetryTimerRef.current) {
@@ -2345,8 +2365,8 @@ export const PartyRoomsScreen: React.FC = () => {
               </button>
             </form>
 
-            {/* Bottom Row: 5 Action Buttons with Equal Sizing & Spacing */}
-            <div className="grid gap-1.5 w-full" style={{ gridTemplateColumns: `repeat(${isHost ? 5 : isModerator ? 4 : (userSeatIndex !== null ? 2 : 1)}, minmax(0, 1fr))` }}>
+            {/* Bottom Row: Action Buttons with Equal Sizing & Spacing */}
+            <div className="grid gap-1.5 w-full" style={{ gridTemplateColumns: `repeat(${isHost ? 5 : (isModerator || userSeatIndex !== null) ? 3 : 2}, minmax(0, 1fr))` }}>
               {/* Host-only room music management */}
               {isHost && <button
                 onClick={() => setShowMusicModal(true)}
@@ -2410,8 +2430,8 @@ export const PartyRoomsScreen: React.FC = () => {
                 </span>
               </button>}
 
-              {/* Room playback control is host/moderator only */}
-              {(isHost || isModerator) && <button
+              {/* Room speaker audio control for all participants (host, guests, viewers) */}
+              <button
                 onClick={() => {
                   const nextSpeakerOn = !isSpeakerOn;
                   isSpeakerOnRef.current = nextSpeakerOn;
@@ -2436,7 +2456,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 <span className="text-[8px] font-black truncate max-w-full mt-0.5">
                   {isSpeakerOn ? 'Audio On' : 'Muted'}
                 </span>
-              </button>}
+              </button>
 
               {/* 4. Gift Button */}
               <button

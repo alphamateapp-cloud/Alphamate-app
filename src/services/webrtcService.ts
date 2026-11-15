@@ -172,9 +172,9 @@ export const CLOUDFLARE_TURN_URLS = [
   'turns:turn.cloudflare.com:5349?transport=tcp',
 ];
 
-export const PARTY_PARTICIPANT_STALE_MS = 15_000;
+export const PARTY_PARTICIPANT_STALE_MS = 45_000;
 const PARTY_HEARTBEAT_INTERVAL_MS = 4000;
-const RECONNECT_GRACE_MS = 2500;
+const RECONNECT_GRACE_MS = 7500;
 const MAX_RECONNECT_ATTEMPTS = 8;
 const LIVE_HEARTBEAT_INTERVAL_MS = 5000;
 
@@ -207,11 +207,13 @@ class RealtimeSfuStreamingEngine {
   > = new Map();
   private sessionQueues: Map<string, Promise<unknown>> = new Map();
 
-  // Auto-reconnect & heartbeat coordination
+  // Auto-reconnect, ABR & heartbeat coordination
   private reconnectTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private disconnectDebounceTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   private reconnectInFlight: Map<string, Promise<boolean>> = new Map();
   private reconnectAttempts: Map<string, number> = new Map();
   private hostHeartbeatTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+  private hostAbrTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
 
   // TURN & ICE state
   private customIceServers: RTCIceServer[] = [...DEFAULT_ICE_SERVERS];
@@ -634,7 +636,7 @@ class RealtimeSfuStreamingEngine {
     return this.hasCloudflareTurn;
   }
 
-  private waitForIceGatheringComplete(pc: RTCPeerConnection, maxWaitMs: number = 1200): Promise<void> {
+  private waitForIceGatheringComplete(pc: RTCPeerConnection, maxWaitMs: number = 1600): Promise<void> {
     if (pc.iceGatheringState === 'complete') {
       return Promise.resolve();
     }
@@ -662,7 +664,7 @@ class RealtimeSfuStreamingEngine {
         }
         const candStr = e.candidate.candidate || '';
         if ((candStr.includes(' typ srflx ') || candStr.includes(' typ relay ')) && !candidateSettleTimer) {
-          candidateSettleTimer = setTimeout(done, 180);
+          candidateSettleTimer = setTimeout(done, 220);
         }
       };
       const hardTimer = setTimeout(done, maxWaitMs);
@@ -671,7 +673,7 @@ class RealtimeSfuStreamingEngine {
     });
   }
 
-  private waitForPeerConnected(pc: RTCPeerConnection, timeoutMs: number = 15000): Promise<void> {
+  private waitForPeerConnected(pc: RTCPeerConnection, timeoutMs: number = 25000): Promise<void> {
     if (
       pc.connectionState === 'connected' ||
       pc.iceConnectionState === 'connected' ||
@@ -796,6 +798,55 @@ class RealtimeSfuStreamingEngine {
     };
   }
 
+  private optimizeSdpForVoice(sdp: string, maxAverageBitrate: number = 24000): string {
+    if (!sdp) return sdp;
+    try {
+      const opusPtMatch = sdp.match(/a=rtpmap:(\d+)\s+opus\/48000\/2/i);
+      if (!opusPtMatch?.[1]) return sdp;
+      const pt = opusPtMatch[1];
+      const fmtpRegex = new RegExp(`a=fmtp:${pt}\\s+([^\\r\\n]+)`, 'i');
+      const desiredParams: Record<string, string> = {
+        minptime: '10',
+        useinbandfec: '1',
+        usedtx: '1',
+        stereo: '0',
+        'sprop-stereo': '0',
+        maxaveragebitrate: String(maxAverageBitrate),
+      };
+      if (fmtpRegex.test(sdp)) {
+        return sdp.replace(fmtpRegex, (_full, existing) => {
+          const kv = new Map<string, string>();
+          String(existing)
+            .split(';')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .forEach((part) => {
+              const eq = part.indexOf('=');
+              if (eq > 0) {
+                kv.set(part.slice(0, eq).trim(), part.slice(eq + 1).trim());
+              } else {
+                kv.set(part, '');
+              }
+            });
+          for (const [k, v] of Object.entries(desiredParams)) {
+            kv.set(k, v);
+          }
+          const rebuilt = Array.from(kv.entries())
+            .map(([k, v]) => (v ? `${k}=${v}` : k))
+            .join(';');
+          return `a=fmtp:${pt} ${rebuilt}`;
+        });
+      }
+      const rtpmapLine = new RegExp(`(a=rtpmap:${pt}\\s+opus\\/48000\\/2\\r?\\n)`, 'i');
+      const built = Object.entries(desiredParams)
+        .map(([k, v]) => `${k}=${v}`)
+        .join(';');
+      return sdp.replace(rtpmapLine, `$1a=fmtp:${pt} ${built}\r\n`);
+    } catch {
+      return sdp;
+    }
+  }
+
   private async publishTracksOnSession(
     sessionId: string,
     pc: RTCPeerConnection,
@@ -814,7 +865,7 @@ class RealtimeSfuStreamingEngine {
           direction: 'sendonly',
           streams: [stream],
         });
-        // Prefer Opus for voice and reserve bandwidth for audio on constrained links.
+        // Prefer Opus with in-band FEC + DTX for rock-solid voice on minimum mobile networks.
         if (item.track.kind === 'audio') {
           try {
             const audioCodecs = RTCRtpSender.getCapabilities?.('audio')?.codecs || [];
@@ -825,7 +876,7 @@ class RealtimeSfuStreamingEngine {
             }
             const params = transceiver.sender.getParameters();
             params.encodings = params.encodings?.length ? params.encodings : [{}];
-            params.encodings[0].maxBitrate = 32_000;
+            params.encodings[0].maxBitrate = 24_000;
             (params.encodings[0] as any).priority = 'high';
             (params.encodings[0] as any).networkPriority = 'high';
             await transceiver.sender.setParameters(params);
@@ -836,9 +887,11 @@ class RealtimeSfuStreamingEngine {
           try {
             const params = transceiver.sender.getParameters();
             params.encodings = params.encodings?.length ? params.encodings : [{}];
-            params.encodings[0].maxBitrate = 700_000;
-            params.encodings[0].maxFramerate = 30;
-            (params as any).degradationPreference = 'maintain-framerate';
+            params.encodings[0].maxBitrate = 450_000;
+            params.encodings[0].maxFramerate = 24;
+            (params.encodings[0] as any).priority = 'low';
+            (params.encodings[0] as any).networkPriority = 'low';
+            (params as any).degradationPreference = 'balanced';
             await transceiver.sender.setParameters(params);
           } catch (videoTuneErr) {
             console.warn('[WebRTC] Adaptive video tuning unavailable; using browser defaults.', videoTuneErr);
@@ -851,9 +904,13 @@ class RealtimeSfuStreamingEngine {
         });
       }
 
-      const offer = await pc.createOffer();
+      const rawOffer = await pc.createOffer();
+      const offer: RTCSessionDescriptionInit = {
+        type: rawOffer.type,
+        sdp: this.optimizeSdpForVoice(rawOffer.sdp || '', 24000),
+      };
       await pc.setLocalDescription(offer);
-      await this.waitForIceGatheringComplete(pc, 1200);
+      await this.waitForIceGatheringComplete(pc, 1500);
 
       const sfuTracksPayload = addedTransceivers.map((entry) => {
         if (!entry.transceiver.mid) {
@@ -881,9 +938,13 @@ class RealtimeSfuStreamingEngine {
       if (trackResp.sessionDescription?.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(trackResp.sessionDescription));
         if (trackResp.requiresImmediateRenegotiation && trackResp.sessionDescription.type === 'offer') {
-          const answer = await pc.createAnswer();
+          const rawAnswer = await pc.createAnswer();
+          const answer: RTCSessionDescriptionInit = {
+            type: rawAnswer.type,
+            sdp: this.optimizeSdpForVoice(rawAnswer.sdp || '', 24000),
+          };
           await pc.setLocalDescription(answer);
-          await this.waitForIceGatheringComplete(pc, 1000);
+          await this.waitForIceGatheringComplete(pc, 1200);
           await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
             sessionDescription: {
               type: pc.localDescription!.type,
@@ -923,14 +984,14 @@ class RealtimeSfuStreamingEngine {
   ): Promise<Array<{ mid: string; trackName: string; publisherSessionId: string }>> {
     return this.enqueueSessionOp(sessionId, async () => {
       const existingMids = new Set(
-        pc.getTransceivers().map((t) => t.mid).filter((m): m is string => Boolean(m))
+        pc.getTransceivers().map((t) => t.mid).filter((m): m is string => m !== null && m !== undefined && m !== '')
       );
 
       const resp = await this.sfuFetch<{
         requiresImmediateRenegotiation: boolean;
         sessionDescription: RTCSessionDescriptionInit | null;
         tracks: Array<{
-          mid?: string;
+          mid?: string | number;
           trackName?: string;
           sessionId?: string;
           errorCode?: string;
@@ -951,7 +1012,10 @@ class RealtimeSfuStreamingEngine {
       let fallbackCursor = 0;
 
       const assigned = (resp.tracks || []).map((t, idx) => {
-        let resolvedMid = t.mid ? String(t.mid).trim() : '';
+        let resolvedMid =
+          t.mid !== undefined && t.mid !== null && String(t.mid).trim() !== ''
+            ? String(t.mid).trim()
+            : '';
         if (!resolvedMid && fallbackCursor < sdpNewMids.length) {
           resolvedMid = sdpNewMids[fallbackCursor++];
         }
@@ -973,9 +1037,13 @@ class RealtimeSfuStreamingEngine {
       if (resp.sessionDescription?.sdp) {
         await pc.setRemoteDescription(new RTCSessionDescription(resp.sessionDescription));
         if (resp.requiresImmediateRenegotiation || resp.sessionDescription.type === 'offer') {
-          const answer = await pc.createAnswer();
+          const rawAnswer = await pc.createAnswer();
+          const answer: RTCSessionDescriptionInit = {
+            type: rawAnswer.type,
+            sdp: this.optimizeSdpForVoice(rawAnswer.sdp || '', 24000),
+          };
           await pc.setLocalDescription(answer);
-          await this.waitForIceGatheringComplete(pc, 1200);
+          await this.waitForIceGatheringComplete(pc, 1500);
           await this.sfuFetch(`/api/sfu/sessions/${encodeURIComponent(sessionId)}/renegotiate`, 'PUT', {
             sessionDescription: {
               type: pc.localDescription!.type,
@@ -1096,15 +1164,16 @@ class RealtimeSfuStreamingEngine {
     const constraints: MediaStreamConstraints = {
       video: {
         facingMode: { ideal: facing },
-        width: { ideal: 1280, max: 1920 },
-        height: { ideal: 720, max: 1080 },
-        frameRate: { ideal: 30, max: 60 },
+        width: { ideal: 640, max: 1280 },
+        height: { ideal: 360, max: 720 },
+        frameRate: { ideal: 24, max: 30 },
       },
       audio: withAudio
         ? {
             echoCancellation: true,
             noiseSuppression: true,
             autoGainControl: true,
+            channelCount: 1,
           }
         : false,
     };
@@ -1123,7 +1192,7 @@ class RealtimeSfuStreamingEngine {
       if (withAudio) {
         try {
           const audioOnlyStream = await this.requestMediaWithTimeout({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
             video: false,
           }, 8000, 'Microphone');
           this.localStream = audioOnlyStream;
@@ -1155,9 +1224,9 @@ class RealtimeSfuStreamingEngine {
       const newCamStream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: nextFacing },
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 },
-          frameRate: { ideal: 30, max: 60 },
+          width: { ideal: 640, max: 1280 },
+          height: { ideal: 360, max: 720 },
+          frameRate: { ideal: 24, max: 30 },
         },
         audio: false,
       });
@@ -1267,6 +1336,11 @@ class RealtimeSfuStreamingEngine {
       clearTimeout(timer);
       this.reconnectTimers.delete(sessionKey);
     }
+    const debounce = this.disconnectDebounceTimers.get(sessionKey);
+    if (debounce) {
+      clearTimeout(debounce);
+      this.disconnectDebounceTimers.delete(sessionKey);
+    }
     if (resetAttempts) {
       this.reconnectAttempts.delete(sessionKey);
     }
@@ -1297,7 +1371,19 @@ class RealtimeSfuStreamingEngine {
       }
 
       if (connState === 'disconnected' || iceState === 'disconnected') {
-        opts.onStateChange?.('disconnected');
+        // Debounce UI disconnected notification by 3.2s so brief mobile ICE blips recover silently
+        if (!this.disconnectDebounceTimers.has(sessionKey)) {
+          const debounceTimer = setTimeout(() => {
+            this.disconnectDebounceTimers.delete(sessionKey);
+            if (!opts.isSessionActive()) return;
+            const curConn = pc.connectionState;
+            const curIce = pc.iceConnectionState;
+            if (curConn !== 'connected' && curIce !== 'connected' && curIce !== 'completed') {
+              opts.onStateChange?.('disconnected');
+            }
+          }, 3200);
+          this.disconnectDebounceTimers.set(sessionKey, debounceTimer);
+        }
         this.scheduleAutoReconnect(sessionKey, pc, RECONNECT_GRACE_MS, opts);
         return;
       }
@@ -1508,7 +1594,7 @@ class RealtimeSfuStreamingEngine {
       if (audioTrack) tracksToPublish.push({ track: audioTrack, trackName: `${streamId}-audio-${suffix}` });
 
       const publishedTracks = await this.publishTracksOnSession(newSfuSessionId, newPc, tracksToPublish, stream);
-      await this.waitForPeerConnected(newPc, 15000);
+      await this.waitForPeerConnected(newPc, 25000);
 
       if (existing.isClosed || this.hostSfuSessions.get(streamId) !== existing) {
         newPc.close();
@@ -1527,6 +1613,7 @@ class RealtimeSfuStreamingEngine {
         publishedTracks,
       };
       this.hostSfuSessions.set(streamId, updatedSession);
+      this.startHostAdaptiveBitrateMonitor(streamId);
 
       this.monitorPeerConnection(sessionKey, newPc, {
         isSessionActive: () =>
@@ -1659,7 +1746,7 @@ class RealtimeSfuStreamingEngine {
       );
 
       await Promise.all([
-        this.waitForPeerConnected(newPc, 15000),
+        this.waitForPeerConnected(newPc, 25000),
         Promise.race([
           firstTrackPromise,
           new Promise<void>((_, reject) =>
@@ -1669,7 +1756,7 @@ class RealtimeSfuStreamingEngine {
               } else {
                 resolveTrackWaiter?.();
               }
-            }, 12000)
+            }, 20000)
           ),
         ]),
       ]);
@@ -1835,7 +1922,7 @@ class RealtimeSfuStreamingEngine {
           newSession.isPublishing = true;
           newSession.isMuted = wasMuted;
           this.isMuted = wasMuted;
-          await this.waitForPeerConnected(newPubPc, 15000);
+          await this.waitForPeerConnected(newPubPc, 25000);
           this.attachPartyPubMonitor(newSession, newPubPc);
         } else {
           newPubPc.close();
@@ -1927,7 +2014,7 @@ class RealtimeSfuStreamingEngine {
       if (wasPublishing) {
         newSession.onConnectionStateChange?.('connected');
       } else {
-        this.waitForPeerConnected(newSubPc, 15000)
+        this.waitForPeerConnected(newSubPc, 25000)
           .then(() => {
             if (!newSession?.isClosed) newSession?.onConnectionStateChange?.('connected');
           })
@@ -2061,7 +2148,7 @@ class RealtimeSfuStreamingEngine {
               // ignore callback errors
             }
           }
-          await this.waitForPeerConnected(pc, 15000);
+          await this.waitForPeerConnected(pc, 25000);
           break;
         } catch (attemptErr: any) {
           if (pc) {
@@ -2114,6 +2201,7 @@ class RealtimeSfuStreamingEngine {
       });
       this.setBroadcastState(streamId, { isVideoOn, isMicOn });
       this.startLiveStreamHeartbeat(streamId);
+      this.startHostAdaptiveBitrateMonitor(streamId);
 
       return {
         stream,
@@ -2224,8 +2312,117 @@ class RealtimeSfuStreamingEngine {
     );
   }
 
+  private startHostAdaptiveBitrateMonitor(streamId: string): void {
+    this.stopHostAdaptiveBitrateMonitor(streamId);
+    const VIDEO_TIERS = [
+      { maxBitrate: 450_000, scale: 1, maxFramerate: 24 },
+      { maxBitrate: 250_000, scale: 1.35, maxFramerate: 20 },
+      { maxBitrate: 135_000, scale: 1.85, maxFramerate: 15 },
+      { maxBitrate: 70_000, scale: 2.5, maxFramerate: 10 },
+    ];
+    let currentTier = 0;
+    let healthyStreak = 0;
+    let prevLost = 0;
+    let prevSent = 0;
+
+    const timer = setInterval(async () => {
+      const session = this.hostSfuSessions.get(streamId);
+      if (!session || session.isClosed || session.pc.connectionState === 'closed') {
+        this.stopHostAdaptiveBitrateMonitor(streamId);
+        return;
+      }
+
+      try {
+        const stats = await session.pc.getStats();
+        let rttSeconds = 0;
+        let availableOutgoingBps = Infinity;
+        let packetsSent = 0;
+        let packetsLost = 0;
+
+        stats.forEach((report: any) => {
+          if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+            if (typeof report.currentRoundTripTime === 'number') {
+              rttSeconds = report.currentRoundTripTime;
+            }
+            if (typeof report.availableOutgoingBitrate === 'number' && report.availableOutgoingBitrate > 0) {
+              availableOutgoingBps = report.availableOutgoingBitrate;
+            }
+          } else if (report.type === 'outbound-rtp' && report.kind === 'video') {
+            packetsSent += Number(report.packetsSent || 0);
+          } else if (report.type === 'remote-inbound-rtp' && report.kind === 'video') {
+            packetsLost += Number(report.packetsLost || 0);
+          }
+        });
+
+        const deltaSent = Math.max(0, packetsSent - prevSent);
+        const deltaLost = Math.max(0, packetsLost - prevLost);
+        prevSent = packetsSent;
+        prevLost = packetsLost;
+        const lossRatio = deltaSent + deltaLost > 8 ? deltaLost / (deltaSent + deltaLost) : 0;
+
+        const targetBps = VIDEO_TIERS[currentTier].maxBitrate;
+        const isCongested =
+          rttSeconds > 0.35 ||
+          lossRatio > 0.04 ||
+          (Number.isFinite(availableOutgoingBps) && availableOutgoingBps < targetBps + 40_000);
+
+        let nextTier = currentTier;
+        if (isCongested && currentTier < VIDEO_TIERS.length - 1) {
+          nextTier = currentTier + 1;
+          healthyStreak = 0;
+        } else if (!isCongested && rttSeconds < 0.22 && lossRatio < 0.015) {
+          healthyStreak += 1;
+          if (healthyStreak >= 3 && currentTier > 0) {
+            nextTier = currentTier - 1;
+            healthyStreak = 0;
+          }
+        } else {
+          healthyStreak = 0;
+        }
+
+        if (nextTier !== currentTier) {
+          currentTier = nextTier;
+          const profile = VIDEO_TIERS[currentTier];
+          const videoSender = session.pc.getSenders().find((s) => s.track?.kind === 'video');
+          if (videoSender) {
+            const params = videoSender.getParameters();
+            params.encodings = params.encodings?.length ? params.encodings : [{}];
+            params.encodings[0].maxBitrate = profile.maxBitrate;
+            params.encodings[0].maxFramerate = profile.maxFramerate;
+            params.encodings[0].scaleResolutionDownBy = profile.scale;
+            (params as any).degradationPreference = 'balanced';
+            await videoSender.setParameters(params).catch(() => {});
+          }
+          // Reinforce high priority on audio sender whenever video scales down
+          const audioSender = session.pc.getSenders().find((s) => s.track?.kind === 'audio');
+          if (audioSender) {
+            const aParams = audioSender.getParameters();
+            aParams.encodings = aParams.encodings?.length ? aParams.encodings : [{}];
+            aParams.encodings[0].maxBitrate = currentTier >= 2 ? 18_000 : 24_000;
+            (aParams.encodings[0] as any).priority = 'high';
+            (aParams.encodings[0] as any).networkPriority = 'high';
+            await audioSender.setParameters(aParams).catch(() => {});
+          }
+        }
+      } catch {
+        // Ignore transient getStats failures during ICE transitions
+      }
+    }, 2500);
+
+    this.hostAbrTimers.set(streamId, timer);
+  }
+
+  private stopHostAdaptiveBitrateMonitor(streamId: string): void {
+    const timer = this.hostAbrTimers.get(streamId);
+    if (timer) {
+      clearInterval(timer);
+      this.hostAbrTimers.delete(streamId);
+    }
+  }
+
   private async _stopHostBroadcastInternal(streamId: string, keepalive: boolean = false): Promise<void> {
     this.stopLiveStreamHeartbeat(streamId);
+    this.stopHostAdaptiveBitrateMonitor(streamId);
     this.clearReconnectState(`host:${streamId}`, true);
     const hostSession = this.hostSfuSessions.get(streamId);
     this.hostSfuSessions.delete(streamId);
@@ -2348,7 +2545,7 @@ class RealtimeSfuStreamingEngine {
       );
 
       await Promise.all([
-        this.waitForPeerConnected(pc, 15000),
+        this.waitForPeerConnected(pc, 25000),
         Promise.race([
           firstTrackPromise,
           new Promise<void>((_, reject) =>
@@ -2358,7 +2555,7 @@ class RealtimeSfuStreamingEngine {
               } else {
                 resolveTrackWaiter?.();
               }
-            }, 12000)
+            }, 20000)
           ),
         ]),
       ]);
@@ -2628,9 +2825,14 @@ class RealtimeSfuStreamingEngine {
         return existingStream;
       }
       existingStream.getAudioTracks().forEach((oldTrack) => {
-        if (oldTrack.readyState === 'ended') {
+        if (oldTrack.id !== track.id) {
           try {
             existingStream.removeTrack(oldTrack);
+          } catch {
+            // ignore
+          }
+          try {
+            oldTrack.stop();
           } catch {
             // ignore
           }
@@ -3192,7 +3394,13 @@ class RealtimeSfuStreamingEngine {
 
       this.attachPartyPubMonitor(session, pubPc);
 
-      // Broadcast via WebSocket immediately AND write Firestore presence so remote peers pull track in <50ms
+      // Let ICE connect cleanly (or yield after 1.2s on fast paths while continuing to verify 25s below)
+      await Promise.race([
+        this.waitForPeerConnected(pubPc, 25000).catch(() => undefined),
+        this.delayMs(1200),
+      ]);
+
+      // Broadcast via WebSocket AND write Firestore presence so remote peers subscribe seamlessly
       realtimeSocket.sendRoomSignal('party', session.roomId, {
         type: 'voice_updated',
         peerId: session.userId,
@@ -3201,7 +3409,7 @@ class RealtimeSfuStreamingEngine {
         isPublishing: true,
       });
       await this.writePartyParticipantPresence(session);
-      await this.waitForPeerConnected(pubPc, 15000);
+      await this.waitForPeerConnected(pubPc, 25000);
 
       console.info('[Party SFU] Local mic published & ICE connected to Cloudflare SFU:', {
         roomId: session.roomId,
@@ -3244,6 +3452,15 @@ class RealtimeSfuStreamingEngine {
       }
       if (session.pubSfuSessionId === pubSfuSessionId) {
         session.pubSfuSessionId = null;
+      }
+      // Clear stale publishing state in Firestore & notify peers so nobody gets stuck subscribing to a dead SFU session
+      if (!session.isClosed) {
+        this.writePartyParticipantPresence(session).catch(() => {});
+        realtimeSocket.sendRoomSignal('party', session.roomId, {
+          type: 'voice_updated',
+          peerId: session.userId,
+          isPublishing: false,
+        });
       }
       throw err;
     }
@@ -3408,7 +3625,7 @@ class RealtimeSfuStreamingEngine {
         });
 
         session.reconcileFailCount = 0;
-        this.waitForPeerConnected(session.subPc, 15000)
+        this.waitForPeerConnected(session.subPc, 25000)
           .then(() => {
             if (!session.isClosed) {
               session.onConnectionStateChange?.('connected');

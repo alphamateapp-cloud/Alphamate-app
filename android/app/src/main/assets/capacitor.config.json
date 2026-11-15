@@ -13,6 +13,12 @@
 		"backgroundColor": "#09070F"
 	},
 	"plugins": {
+		"FirebaseAuthentication": {
+			"skipNativeAuth": false,
+			"providers": [
+				"google.com"
+			]
+		},
 		"StatusBar": {
 			"style": "DARK",
 			"backgroundColor": "#09070F"

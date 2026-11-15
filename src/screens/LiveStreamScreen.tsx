@@ -23,7 +23,7 @@ import {
   leaveLiveStreamViewer,
   subscribeToLiveStreamViewers,
 } from '../services/firebase';
-import { doc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
 import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
 import {
   X,
@@ -415,17 +415,21 @@ export const LiveStreamScreen: React.FC = () => {
     const source = remoteMediaStream || remoteStreamRef.current;
     if (!audioEl || !source) return;
 
-    let audioOnly = new MediaStream(source.getAudioTracks());
     const syncAudioTracks = () => {
       const currentAudioTracks = source.getAudioTracks();
-      audioOnly = new MediaStream(currentAudioTracks);
-      audioEl.srcObject = audioOnly;
-      audioEl.autoplay = true;
-      audioEl.muted = isRemoteAudioMuted;
-      audioEl.volume = 1;
+      if (currentAudioTracks.length === 0) return;
       currentAudioTracks.forEach((track) => {
         track.enabled = true;
       });
+      const existingAudio = audioEl.srcObject as MediaStream | null;
+      const existingTrackIds = existingAudio ? existingAudio.getAudioTracks().map((t) => t.id).join(',') : '';
+      const nextTrackIds = currentAudioTracks.map((t) => t.id).join(',');
+      if (!existingAudio || existingTrackIds !== nextTrackIds) {
+        audioEl.srcObject = new MediaStream(currentAudioTracks);
+      }
+      audioEl.autoplay = true;
+      audioEl.muted = isRemoteAudioMuted;
+      audioEl.volume = 1;
     };
 
     const attemptAudioPlayback = () => {
@@ -461,10 +465,36 @@ export const LiveStreamScreen: React.FC = () => {
       source.getAudioTracks().forEach((track) => track.removeEventListener('unmute', attemptAudioPlayback));
       audioEl.removeEventListener('canplay', attemptAudioPlayback);
       audioEl.removeEventListener('playing', onPlaying);
-      audioEl.pause();
-      audioEl.srcObject = null;
     };
-  }, [activeRole, activeStream?.id, isRemoteAudioMuted, remoteMediaStream, remoteTrackTick, streamStatus]);
+  }, [activeRole, activeStream?.id, remoteMediaStream, remoteTrackTick]);
+
+  // Toggle viewer audio mute without tearing down srcObject or interrupting buffer
+  useEffect(() => {
+    if (activeRole !== 'viewer') return;
+    const audioEl = remoteAudioRef.current;
+    if (!audioEl) return;
+    audioEl.muted = isRemoteAudioMuted;
+    audioEl.volume = 1;
+    if (!isRemoteAudioMuted && audioEl.srcObject && audioEl.paused) {
+      audioEl
+        .play()
+        .then(() => setAutoplayBlocked(false))
+        .catch(() => setAutoplayBlocked(true));
+    } else if (isRemoteAudioMuted) {
+      setAutoplayBlocked(false);
+    }
+  }, [activeRole, isRemoteAudioMuted]);
+
+  // Clear viewer audio element only on unmount or role/stream change
+  useEffect(() => {
+    return () => {
+      const audioEl = remoteAudioRef.current;
+      if (audioEl) {
+        audioEl.pause();
+        audioEl.srcObject = null;
+      }
+    };
+  }, [activeRole, activeStream?.id]);
 
   // Real-time viewer presence & accurate viewer list (WebSocket + Firestore liveStreams/{id}/viewers)
   useEffect(() => {
@@ -603,10 +633,17 @@ export const LiveStreamScreen: React.FC = () => {
       subscribedSfuKeyRef.current = null;
       remoteStreamRef.current = null;
 
+      let viewerRetryCount = 0;
+      let viewerRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
       const attemptViewerSubscribe = async (sfuSessionId: string, publishedTracks: any[], meta?: any) => {
         const trackKey = `${sfuSessionId}:${publishedTracks.map((t) => t.trackName).join(',')}`;
         if (subscribedSfuKeyRef.current === trackKey) return;
         subscribedSfuKeyRef.current = trackKey;
+        if (viewerRetryTimer) {
+          clearTimeout(viewerRetryTimer);
+          viewerRetryTimer = null;
+        }
         setStreamStatus('connecting');
         setStreamError(null);
 
@@ -625,15 +662,17 @@ export const LiveStreamScreen: React.FC = () => {
                   setStreamStatus('connecting');
                   setStreamError(null);
                 } else if (connState === 'connected') {
+                  viewerRetryCount = 0;
                   setStreamStatus('live');
                   setStreamError(null);
                 } else if (connState === 'failed') {
-                  setStreamStatus('error');
-                  setStreamError('Network Error — Alpha Mate could not reconnect. Tap Retry.');
+                  setStreamStatus('connecting');
+                  setStreamError(null);
                 }
               },
               onStreamReconnected: (reconnectedStream) => {
                 if (!isMounted) return;
+                viewerRetryCount = 0;
                 remoteStreamRef.current = reconnectedStream;
                 setRemoteMediaStream(reconnectedStream);
                 setRemoteTrackTick((t) => t + 1);
@@ -662,6 +701,7 @@ export const LiveStreamScreen: React.FC = () => {
           );
 
           if (!isMounted) return;
+          viewerRetryCount = 0;
           remoteStreamRef.current = stream;
           setRemoteMediaStream(stream);
           setRemoteTrackTick((t) => t + 1);
@@ -675,11 +715,41 @@ export const LiveStreamScreen: React.FC = () => {
             videoEl.muted = true;
             videoEl.play().catch(() => {});
           }
-        } catch (err) {
+        } catch (err: any) {
           if (!isMounted) return;
           subscribedSfuKeyRef.current = null;
+          const isFatalAuthOrEnded = err?.status === 404 || err?.code === 'SFU_NOT_CONFIGURED';
+          if (!isFatalAuthOrEnded && viewerRetryCount < 4) {
+            viewerRetryCount += 1;
+            setStreamStatus('connecting');
+            setStreamError(null);
+            const delay = Math.min(4500, 900 * viewerRetryCount);
+            viewerRetryTimer = setTimeout(async () => {
+              viewerRetryTimer = null;
+              if (!isMounted) return;
+              try {
+                const freshSnap = await getDoc(doc(db, 'liveStreams', activeStream.id));
+                if (!isMounted) return;
+                if (!freshSnap.exists() || freshSnap.data()?.isActive === false) {
+                  setIsBroadcastEnded(true);
+                  return;
+                }
+                const freshData = freshSnap.data() as any;
+                if (freshData?.sfuSessionId && Array.isArray(freshData?.publishedTracks) && freshData.publishedTracks.length > 0) {
+                  attemptViewerSubscribe(freshData.sfuSessionId, freshData.publishedTracks, freshData);
+                  return;
+                }
+              } catch {
+                // fallback to previous metadata on transient Firestore read hiccup
+              }
+              if (isMounted && sfuSessionId && publishedTracks.length > 0) {
+                attemptViewerSubscribe(sfuSessionId, publishedTracks, meta);
+              }
+            }, delay);
+            return;
+          }
           setStreamStatus('error');
-          setStreamError('Alpha Mate is reconnecting your Live connection…');
+          setStreamError('Weak network — could not connect to broadcast. Tap Retry.');
         }
       };
 
@@ -707,14 +777,18 @@ export const LiveStreamScreen: React.FC = () => {
 
         if (data.sfuSessionId && Array.isArray(data.publishedTracks) && data.publishedTracks.length > 0) {
           attemptViewerSubscribe(data.sfuSessionId, data.publishedTracks, data);
-        } else {
-          setStreamStatus('error');
-          setStreamError('Host media stream is not active yet.');
+        } else if (!subscribedSfuKeyRef.current) {
+          setStreamStatus('connecting');
+          setStreamError(null);
         }
       });
 
       return () => {
         isMounted = false;
+        if (viewerRetryTimer) {
+          clearTimeout(viewerRetryTimer);
+          viewerRetryTimer = null;
+        }
         unsubDoc();
         window.removeEventListener('pagehide', handlePageHide);
         window.removeEventListener('beforeunload', handlePageHide);
@@ -1959,7 +2033,7 @@ export const LiveStreamScreen: React.FC = () => {
               <div className="flex items-center justify-between p-3 rounded-xl bg-[#110A22]">
                 <span className="text-xs text-white">Stream Quality</span>
                 <span className="px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 text-xs font-bold border border-emerald-500/30">
-                  1080p 60FPS
+                  Adaptive HD (Voice-First)
                 </span>
               </div>
 

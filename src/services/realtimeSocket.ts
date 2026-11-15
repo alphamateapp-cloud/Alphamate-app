@@ -1,11 +1,11 @@
 import { auth } from './firebase';
 
 const PRODUCTION_API_URL = 'https://api.alphamate.app';
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 25000;
-const HEARTBEAT_MS = 20000;
-const HEARTBEAT_TIMEOUT_MS = 55000;
-const AUTH_TIMEOUT_MS = 12000;
+const RECONNECT_BASE_MS = 600;
+const RECONNECT_MAX_MS = 15000;
+const HEARTBEAT_MS = 18000;
+const HEARTBEAT_TIMEOUT_MS = 65000;
+const AUTH_TIMEOUT_MS = 20000;
 
 export interface RealtimeViewerProfile {
   id: string;
@@ -134,6 +134,7 @@ class RealtimeSocketService {
       void this.forceReconnect();
       return;
     }
+    this.sendRaw({ type: 'ping' });
     if (this.isAuthed) this.sendRaw({ type: 'discovery:get' });
   }
 
@@ -273,10 +274,12 @@ class RealtimeSocketService {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer || this.manuallyDisconnected) return;
-    const delay = Math.min(
+    const exponential = Math.min(
       RECONNECT_MAX_MS,
-      RECONNECT_BASE_MS * Math.pow(1.7, Math.min(this.reconnectAttempts, 6))
+      RECONNECT_BASE_MS * Math.pow(1.65, Math.min(this.reconnectAttempts, 6))
     );
+    const jitter = Math.floor(Math.random() * 350);
+    const delay = Math.min(RECONNECT_MAX_MS, exponential + jitter);
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -340,6 +343,7 @@ class RealtimeSocketService {
   }
 
   private handleIncomingMessage(rawData: any): void {
+    this.lastPongAt = Date.now();
     let msg: any;
     try {
       msg = JSON.parse(String(rawData));
@@ -349,7 +353,6 @@ class RealtimeSocketService {
     if (!msg || typeof msg.type !== 'string') return;
 
     if (msg.type === 'pong') {
-      this.lastPongAt = Date.now();
       return;
     }
 

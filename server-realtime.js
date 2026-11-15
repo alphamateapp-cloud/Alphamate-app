@@ -2,7 +2,8 @@ import { WebSocketServer } from 'ws';
 
 const LIVE_TTL_MS = 120_000;
 const PARTY_TTL_MS = 12 * 60 * 60_000;
-const HEARTBEAT_INTERVAL_MS = 25_000;
+const HEARTBEAT_INTERVAL_MS = 20_000;
+const MAX_MISSED_PONGS = 3;
 
 function isValidId(value) {
   return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
@@ -195,6 +196,8 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
   }
 
   function handleMessage(ws, raw) {
+    ws.isAlive = true;
+    ws.missedPongs = 0;
     let msg;
     try {
       msg = JSON.parse(String(raw));
@@ -400,12 +403,14 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
 
   wss.on('connection', (ws, _req, initialToken) => {
     ws.isAlive = true;
+    ws.missedPongs = 0;
     ws.isAuthed = false;
     ws.uid = null;
     ws.joinedRooms = new Set();
 
     ws.on('pong', () => {
       ws.isAlive = true;
+      ws.missedPongs = 0;
     });
 
     ws.on('message', (data) => handleMessage(ws, data));
@@ -437,7 +442,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
             // ignore
           }
         }
-      }, 10_000);
+      }, 20_000);
       ws.once('close', () => clearTimeout(authTimeout));
     }
   });
@@ -461,12 +466,15 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     pruneExpiredDiscovery();
     for (const ws of wss.clients) {
       if (ws.isAlive === false) {
-        try {
-          ws.terminate();
-        } catch {
-          // ignore
+        ws.missedPongs = (ws.missedPongs || 0) + 1;
+        if (ws.missedPongs >= MAX_MISSED_PONGS) {
+          try {
+            ws.terminate();
+          } catch {
+            // ignore
+          }
+          continue;
         }
-        continue;
       }
       ws.isAlive = false;
       try {

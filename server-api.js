@@ -206,7 +206,7 @@ export function createApiApp() {
                 Accept: 'application/json',
               },
             },
-            2500
+            5000
           );
           // 401/403 means invalid App ID / Bearer token; 404/400/200 means credentials authenticated against Cloudflare SFU
           const authOk = resp.status !== 401 && resp.status !== 403 && resp.status < 500;
@@ -226,7 +226,7 @@ export function createApiApp() {
         try {
           await Promise.race([
             generateTurnIceServers(300),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('TURN health probe timed out')), 2500)),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('TURN health probe timed out')), 5000)),
           ]);
           return { configured: true, valid: true };
         } catch (err) {
@@ -414,7 +414,9 @@ export function createApiApp() {
     const idToken = req.firebaseIdToken;
 
     if (contextType === 'live') {
-      const streamDoc = await fetchFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken);
+      const firestoreDoc = await fetchFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken).catch(() => null);
+      const memDoc = app.locals.realtimeRegistry?.getLiveStream?.(contextId) || null;
+      const streamDoc = firestoreDoc || memDoc;
       if (!streamDoc || streamDoc.isActive === false) {
         return { ok: false, status: 404, error: 'Live stream is not active or no longer exists.' };
       }
@@ -423,10 +425,18 @@ export function createApiApp() {
       if (blocked.includes(uid) || kicked.includes(uid)) {
         return { ok: false, status: 403, error: 'Access to this live stream is restricted.' };
       }
-      if (streamDoc.sfuSessionId) {
-        const invalidSession = remoteTracks.some((t) => t.sessionId !== streamDoc.sfuSessionId);
+      const allowedSessions = new Set(
+        [firestoreDoc?.sfuSessionId, memDoc?.sfuSessionId].filter((s) => typeof s === 'string' && s.length > 0)
+      );
+      if (allowedSessions.size > 0) {
+        const invalidSession = remoteTracks.some((t) => !allowedSessions.has(t.sessionId));
         if (invalidSession) {
-          return { ok: false, status: 403, error: 'Requested track session does not match active host session.' };
+          return {
+            ok: false,
+            status: 409,
+            code: 'HOST_SESSION_CHANGED',
+            error: 'Requested track session does not match active host session.',
+          };
         }
       }
       return { ok: true };
@@ -484,18 +494,37 @@ export function createApiApp() {
       fetchOptions.body = JSON.stringify(body);
     }
 
-    const response = await fetchWithTimeout(targetUrl, fetchOptions, 10000);
-    const data = await response.json().catch(() => ({}));
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const response = await fetchWithTimeout(targetUrl, fetchOptions, 18000);
+        const data = await response.json().catch(() => ({}));
 
-    if (!response.ok || data?.errorCode) {
-      const description = data?.errorDescription || data?.error || `Cloudflare SFU error (${response.status})`;
-      const err = new Error(description);
-      err.statusCode = response.status === 404 || response.status === 410 ? 404 : 502;
-      err.sfuErrorCode = data?.errorCode || null;
-      throw err;
+        if (!response.ok || data?.errorCode) {
+          const description = data?.errorDescription || data?.error || `Cloudflare SFU error (${response.status})`;
+          const err = new Error(description);
+          err.statusCode = response.status === 404 || response.status === 410 ? 404 : 502;
+          err.sfuErrorCode = data?.errorCode || null;
+          if (attempt === 0 && (response.status >= 502 || response.status === 429)) {
+            lastErr = err;
+            await new Promise((r) => setTimeout(r, 200));
+            continue;
+          }
+          throw err;
+        }
+
+        return data;
+      } catch (err) {
+        lastErr = err;
+        const retryable = err?.code === 'UPSTREAM_TIMEOUT' || (err?.statusCode === 502 && !err?.sfuErrorCode);
+        if (attempt === 0 && retryable) {
+          await new Promise((r) => setTimeout(r, 200));
+          continue;
+        }
+        throw err;
+      }
     }
-
-    return data;
+    throw lastErr;
   }
 
   app.get('/api/auth/verify', async (req, res) => {
@@ -840,7 +869,11 @@ export function createApiApp() {
 
       const authz = await authorizeRemoteTrackSubscriptions(req, tracks);
       if (!authz.ok) {
-        return res.status(authz.status || 403).json({ success: false, error: authz.error || 'Subscription not authorized.' });
+        return res.status(authz.status || 403).json({
+          success: false,
+          code: authz.code || undefined,
+          error: authz.error || 'Subscription not authorized.',
+        });
       }
 
       const payload = { tracks };
