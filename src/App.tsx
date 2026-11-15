@@ -36,6 +36,7 @@ import { PushNotificationSettingsModal } from './components/modals/PushNotificat
 import { GlobalWeeklyLeaderboardModal } from './components/leaderboard/GlobalWeeklyLeaderboard';
 import { UserBadgesModal } from './components/badges/UserBadgesModal';
 import { PublicUserProfileModal } from './components/modals/PublicUserProfileModal';
+import { KeepScreenAwakeController } from './services/keepScreenAwake';
 
 const PUBLIC_AUTH_SCREENS = new Set([
   'splash',
@@ -68,6 +69,8 @@ const AppContent: React.FC = () => {
     refreshScope,
   } = useApp();
   const mainTabScrollRef = useRef<HTMLDivElement>(null);
+  const keepAwakeControllerRef = useRef<KeepScreenAwakeController | null>(null);
+  if (!keepAwakeControllerRef.current) keepAwakeControllerRef.current = new KeepScreenAwakeController();
 
   const isRestrictedLifecycleAccount = Boolean(
     firebaseUser &&
@@ -96,6 +99,17 @@ const AppContent: React.FC = () => {
       setCurrentScreen('welcome');
     }
   }, [deviceMode, firebaseAuthLoading, isRestrictedLifecycleAccount, isSessionReadyAndAuthed, currentScreen, setCurrentScreen]);
+
+  // Prevent the display from sleeping while any participant is inside a live or party session.
+  // This applies equally to hosts, viewers, party creators, and guests, and is released on exit.
+  const isActiveMediaSession = currentScreen === 'live_stream' || Boolean(activeStream) ||
+    currentScreen === 'party_room' || activePartyRoom !== null;
+  useEffect(() => {
+    void keepAwakeControllerRef.current?.setActive(isActiveMediaSession);
+    return () => {
+      void keepAwakeControllerRef.current?.setActive(false);
+    };
+  }, [isActiveMediaSession]);
 
   // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
   useEffect(() => {
