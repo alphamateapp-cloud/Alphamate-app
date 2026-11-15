@@ -214,9 +214,30 @@ export const SearchScreen: React.FC = () => {
                   <div className="flex items-center gap-3 min-w-0 flex-1">
                     <div className="relative shrink-0">
                       <img
-                        src={user.avatar}
+                        src={
+                          user.avatar ||
+                          `data:image/svg+xml;utf8,${encodeURIComponent(
+                            `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7928CA"/><stop offset="100%" stop-color="#EC4899"/></linearGradient></defs><rect width="64" height="64" rx="32" fill="url(#g)"/><text x="32" y="40" text-anchor="middle" font-family="Arial,sans-serif" font-size="26" font-weight="bold" fill="#fff">${(
+                              user.displayName || 'A'
+                            )
+                              .charAt(0)
+                              .toUpperCase()}</text></svg>`
+                          )}`
+                        }
                         alt={user.displayName}
                         referrerPolicy="no-referrer"
+                        onError={(e) => {
+                          const target = e.currentTarget;
+                          if (target.dataset.fallbackApplied) return;
+                          target.dataset.fallbackApplied = '1';
+                          target.src = `data:image/svg+xml;utf8,${encodeURIComponent(
+                            `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7928CA"/><stop offset="100%" stop-color="#EC4899"/></linearGradient></defs><rect width="64" height="64" rx="32" fill="url(#g)"/><text x="32" y="40" text-anchor="middle" font-family="Arial,sans-serif" font-size="26" font-weight="bold" fill="#fff">${(
+                              user.displayName || 'A'
+                            )
+                              .charAt(0)
+                              .toUpperCase()}</text></svg>`
+                          )}`;
+                        }}
                         className="w-12 h-12 rounded-full object-cover border border-[#A855F7]/50 bg-[#1F153B]"
                       />
                       {user.countryFlag && (

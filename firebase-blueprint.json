@@ -6,12 +6,18 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
         "uniqueId": { "type": "string", "maxLength": 64 },
+        "uniqueUserId": { "type": "string", "maxLength": 64 },
         "username": { "type": "string", "maxLength": 64 },
         "displayName": { "type": "string", "maxLength": 64 },
         "email": { "type": "string", "format": "email", "maxLength": 128 },
-        "avatar": { "type": "string", "maxLength": 1024 },
+        "avatar": { "type": "string", "maxLength": 2048 },
+        "photoURL": { "type": "string", "maxLength": 2048 },
+        "coverImage": { "type": "string", "maxLength": 2048 },
         "bio": { "type": "string", "maxLength": 512 },
+        "onlineStatus": { "type": "boolean" },
+        "lastSeen": { "type": "string", "format": "date-time" },
         "followersCount": { "type": "number" },
         "followingCount": { "type": "number" },
         "likesCount": { "type": "number" },
@@ -34,6 +40,63 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "displayName", "level", "vipTier", "coins", "diamonds"]
+    },
+    "FcmToken": {
+      "title": "FcmToken",
+      "description": "Per-device FCM registration token under users/{userId}/fcmTokens/{tokenId}",
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "maxLength": 1024 },
+        "platform": { "type": "string", "enum": ["android", "ios", "web"] },
+        "deviceLabel": { "type": "string", "maxLength": 128 },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["token", "platform", "updatedAt"]
+    },
+    "ChatThread": {
+      "title": "ChatThread",
+      "description": "Direct or group chat metadata under chats/{chatId}",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["direct", "group"] },
+        "participantIds": { "type": "array" },
+        "participantProfiles": { "type": "object" },
+        "memberStatus": { "type": "object" },
+        "lastMessage": { "type": "string", "maxLength": 4000 },
+        "lastSenderId": { "type": "string", "maxLength": 128 },
+        "unreadBy": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "participantIds"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "Real-time chat message under chats/{chatId}/messages/{messageId}",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string", "maxLength": 128 },
+        "text": { "type": "string", "maxLength": 4000 },
+        "mediaUrl": { "type": "string", "maxLength": 2048 },
+        "mediaType": { "type": "string", "enum": ["image", "video", "audio", "file"] },
+        "readBy": { "type": "array" },
+        "deliveredTo": { "type": "array" },
+        "deletedFor": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["senderId", "text"]
+    },
+    "UserPresence": {
+      "title": "UserPresence",
+      "description": "Online presence and last seen timestamp under presence/{userId}",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "online": { "type": "boolean" },
+        "lastSeen": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "online"]
     },
     "Notification": {
       "title": "Notification",
@@ -419,6 +482,22 @@
     "/liveStreams/{streamId}/heartEvents/{eventId}": {
       "schema": "HeartEvent",
       "description": "Double-tap heart events inside a live stream"
+    },
+    "/users/{userId}/fcmTokens/{tokenId}": {
+      "schema": "FcmToken",
+      "description": "Multi-device FCM push tokens registered for each authenticated user"
+    },
+    "/chats/{chatId}": {
+      "schema": "ChatThread",
+      "description": "Direct and group chat metadata"
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "ChatMessage",
+      "description": "Persistent real-time messages inside a chat"
+    },
+    "/presence/{userId}": {
+      "schema": "UserPresence",
+      "description": "Real-time user online status and last seen"
     },
     "/liveStreams/{streamId}/viewers/{viewerId}": {
       "schema": "LiveViewer",

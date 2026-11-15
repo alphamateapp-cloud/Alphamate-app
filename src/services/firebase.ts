@@ -17,11 +17,11 @@ import {
   reload,
   signOut,
   onAuthStateChanged,
+  updateProfile as updateFirebaseAuthProfile,
   User as FirebaseUser,
 } from 'firebase/auth';
 import {
   getFirestore,
-  enableNetwork,
   doc,
   getDoc,
   getDocFromServer,
@@ -41,6 +41,13 @@ import {
   getDocs,
   increment,
 } from 'firebase/firestore';
+import {
+  getStorage,
+  ref as storageRef,
+  uploadBytesResumable,
+  uploadBytes,
+  getDownloadURL,
+} from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
 
@@ -49,6 +56,7 @@ const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
 // CRITICAL: The app will break without passing firestoreDatabaseId
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const storage = getStorage(app);
 
 // Capacitor WebViews need durable JS-SDK auth persistence so the native Google
 // credential can be exchanged into the same JS Firebase session used by Firestore.
@@ -323,24 +331,37 @@ function stripUndefinedFields<T>(value: T): T {
 }
 
 /**
- * Save / Update User Profile in Firestore
+ * Save / Update User Profile in Firestore with standardized identity & presence fields.
  */
 export async function syncUserProfileToFirestore(userData: any) {
   if (!userData?.id) return;
   const path = `users/${userData.id}`;
   try {
     const { password: _omitPassword, coverImage, ...restUser } = userData;
+    const nowIso = new Date().toISOString();
+    const safeAvatar = sanitizeAvatarString(userData.avatar || userData.photoURL);
     const rawProfile: Record<string, any> = {
       ...restUser,
+      id: userData.id,
+      uid: userData.id,
+      uniqueUserId: userData.uniqueUserId || userData.uniqueId || userData.id,
       usernameLower: String(userData.username || '').trim().toLowerCase(),
       displayNameLower: String(userData.displayName || '').trim().toLowerCase(),
       uniqueIdLower: String(userData.uniqueId || '').trim().toLowerCase(),
-      avatar: sanitizeAvatarString(userData.avatar),
-      updatedAt: new Date().toISOString(),
+      avatar: safeAvatar,
+      photoURL: safeAvatar,
+      onlineStatus: userData.onlineStatus !== undefined ? Boolean(userData.onlineStatus) : true,
+      lastSeen: userData.lastSeen || nowIso,
+      createdAt: userData.createdAt || nowIso,
+      updatedAt: nowIso,
     };
 
-    // Prevent oversized base64 cover images (>80KB) or undefined values from breaking setDoc
-    if (typeof coverImage === 'string' && coverImage.length > 0 && coverImage.length <= 80000) {
+    // Allow HTTPS Firebase Storage cover URLs or small fallback cover strings
+    if (
+      typeof coverImage === 'string' &&
+      coverImage.length > 0 &&
+      (coverImage.startsWith('https://') || coverImage.length <= 80000)
+    ) {
       rawProfile.coverImage = coverImage;
     }
 
@@ -367,9 +388,11 @@ export async function updateUserProfileFieldsInFirestore(
   if (!userId || !partialFields || typeof partialFields !== 'object') return;
   const path = `users/${userId}`;
   try {
+    const nowIso = new Date().toISOString();
     const rawUpdate: Record<string, any> = {
       ...partialFields,
-      updatedAt: new Date().toISOString(),
+      uid: userId,
+      updatedAt: nowIso,
     };
     delete rawUpdate.password;
 
@@ -381,13 +404,20 @@ export async function updateUserProfileFieldsInFirestore(
     }
     if (typeof partialFields.uniqueId === 'string') {
       rawUpdate.uniqueIdLower = partialFields.uniqueId.trim().toLowerCase();
+      rawUpdate.uniqueUserId = partialFields.uniqueId;
     }
-    if (typeof partialFields.avatar === 'string') {
-      rawUpdate.avatar = sanitizeAvatarString(partialFields.avatar);
+    if (typeof partialFields.avatar === 'string' || typeof partialFields.photoURL === 'string') {
+      const safeAvatar = sanitizeAvatarString(partialFields.avatar || partialFields.photoURL);
+      rawUpdate.avatar = safeAvatar;
+      rawUpdate.photoURL = safeAvatar;
     }
     if ('coverImage' in partialFields) {
       const cover = partialFields.coverImage;
-      if (!(typeof cover === 'string' && cover.length > 0 && cover.length <= 80000)) {
+      if (cover === undefined || cover === null) {
+        rawUpdate.coverImage = null;
+      } else if (
+        !(typeof cover === 'string' && cover.length > 0 && (cover.startsWith('https://') || cover.length <= 80000))
+      ) {
         delete rawUpdate.coverImage;
       }
     }
@@ -397,6 +427,104 @@ export async function updateUserProfileFieldsInFirestore(
   } catch (error) {
     console.warn(`[Firestore] Partial profile update warning (${path}):`, error);
   }
+}
+
+/**
+ * Upload compressed profile avatar to Firebase Storage at `users/{uid}/profile/profile_image`
+ * and persist the resulting HTTPS download URL into `users/{uid}` (`photoURL` + `avatar`).
+ */
+export async function uploadUserProfileAvatar(
+  fileOrBlob: File | Blob,
+  onProgress?: (percent: number) => void
+): Promise<string> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) {
+    throw new Error('Please sign in to upload your profile picture.');
+  }
+  const contentType =
+    fileOrBlob instanceof File && fileOrBlob.type?.startsWith('image/')
+      ? fileOrBlob.type
+      : fileOrBlob.type || 'image/jpeg';
+
+  if (fileOrBlob.size > 5 * 1024 * 1024) {
+    throw new Error('Profile photo must be 5 MB or smaller.');
+  }
+
+  const objectRef = storageRef(storage, `users/${uid}/profile/profile_image`);
+  const downloadUrl = await new Promise<string>((resolve, reject) => {
+    const task = uploadBytesResumable(objectRef, fileOrBlob, {
+      contentType,
+      cacheControl: 'public,max-age=3600',
+    });
+
+    task.on(
+      'state_changed',
+      (snap) => {
+        if (snap.totalBytes > 0) {
+          onProgress?.(Math.min(100, Math.round((snap.bytesTransferred / snap.totalBytes) * 100)));
+        }
+      },
+      (err) => reject(err),
+      async () => {
+        try {
+          const url = await getDownloadURL(task.snapshot.ref);
+          resolve(url);
+        } catch (err) {
+          reject(err);
+        }
+      }
+    );
+  });
+
+  await setDoc(
+    doc(db, 'users', uid),
+    {
+      uid,
+      avatar: downloadUrl,
+      photoURL: downloadUrl,
+      updatedAt: new Date().toISOString(),
+    },
+    { merge: true }
+  );
+
+  if (auth.currentUser) {
+    await updateFirebaseAuthProfile(auth.currentUser, { photoURL: downloadUrl }).catch(() => {});
+  }
+
+  return downloadUrl;
+}
+
+/**
+ * Upload profile cover banner image to Firebase Storage at `users/{uid}/profile/cover_image`
+ * and persist its HTTPS download URL into `users/{uid}`.
+ */
+export async function uploadUserCoverImage(fileOrBlob: File | Blob): Promise<string> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) {
+    throw new Error('Please sign in to upload your cover image.');
+  }
+  if (fileOrBlob.size > 5 * 1024 * 1024) {
+    throw new Error('Cover image must be 5 MB or smaller.');
+  }
+  const contentType = fileOrBlob.type?.startsWith('image/') ? fileOrBlob.type : 'image/jpeg';
+  const objectRef = storageRef(storage, `users/${uid}/profile/cover_image`);
+  await uploadBytes(objectRef, fileOrBlob, {
+    contentType,
+    cacheControl: 'public,max-age=3600',
+  });
+  const downloadUrl = await getDownloadURL(objectRef);
+
+  await setDoc(
+    doc(db, 'users', uid),
+    {
+      uid,
+      coverImage: downloadUrl,
+      updatedAt: new Date().toISOString(),
+    },
+    { merge: true }
+  );
+
+  return downloadUrl;
 }
 
 /**
@@ -1844,7 +1972,8 @@ export async function recoverFirestoreNetwork(): Promise<{ online: boolean; erro
     return { online: false, error: 'You appear to be offline. Please check your internet connection.' };
   }
   try {
-    await enableNetwork(db).catch(() => {});
+    // Do NOT call enableNetwork(db) when network was never disabled; redundant calls
+    // while PersistentWriteStream is active trigger Firestore JS SDK assertion c050.
     await withFirestoreTimeout(getDocFromServer(doc(db, 'test', 'connection')), 5500, 'Network connection check');
     return { online: true };
   } catch (err: any) {

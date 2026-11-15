@@ -6,7 +6,8 @@ import { JoinAgencyModal } from '../components/modals/JoinAgencyModal';
 import { TopAchievementsModal } from '../components/modals/TopAchievementsModal';
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { copyToClipboard } from '../utils/clipboard';
-import { compressImage } from '../utils/imageCompressor';
+import { compressImageToBlob } from '../utils/imageCompressor';
+import { auth, uploadUserCoverImage } from '../services/firebase';
 import { LevelBadgeTag } from '../components/brand/LevelBadgeTag';
 import { UserBadgeStrip } from '../components/badges/UserBadgeIcon';
 import { ProfileBadgeShowcase } from '../components/badges/UserBadgesModal';
@@ -158,18 +159,23 @@ export const UserProfileScreen: React.FC = () => {
     setTimeout(() => setCopiedId(false), 2000);
   };
 
-  // Cover Image File Handler (Camera or Gallery)
+  // Cover Image File Handler (Camera or Gallery -> Firebase Storage)
   const handleCoverFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      try {
-        const compressed = await compressImage(file, 800, 450, 0.75);
-        updateUserProfile({ coverImage: compressed });
-        showToast('Cover photo updated successfully!');
-        setShowCoverModal(false);
-      } catch {
-        showToast('Error processing cover image. Please choose another.');
+    if (!file) return;
+    try {
+      if (!auth.currentUser?.uid) {
+        showToast('Please sign in first to update your cover photo.');
+        return;
       }
+      showToast('Uploading cover photo...');
+      const blob = await compressImageToBlob(file, 960, 540, 0.8);
+      const url = await uploadUserCoverImage(blob);
+      updateUserProfile({ coverImage: url });
+      showToast('Cover photo updated successfully!');
+      setShowCoverModal(false);
+    } catch (err: any) {
+      showToast(err?.message || 'Error uploading cover image. Please try again.');
     }
   };
 

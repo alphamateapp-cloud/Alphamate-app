@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useRef } from 'react';
 import { Capacitor } from '@capacitor/core';
 import {
   ScreenType,
@@ -114,7 +114,7 @@ import {
   subscribeToMyFollowEdges,
   setUserFollowStateFirestore,
 } from '../services/userDirectoryService';
-import { getOrCreateDirectChat } from '../services/chatService';
+import { getOrCreateDirectChat, getChatThreadById, setChatPresence } from '../services/chatService';
 
 export type RefreshScope =
   | 'home'
@@ -261,8 +261,14 @@ interface AppContextType {
   conversations: Conversation[];
   activeConversation: Conversation | null;
   openConversation: (conv: Conversation) => void;
+  openConversationByChatId: (
+    chatId: string,
+    fallbackSender?: { id?: string; displayName?: string; avatar?: string }
+  ) => Promise<void>;
   startDirectMessage: (user: User) => Promise<void>;
   sendMessage: (convId: string, text: string, imageUrl?: string) => void;
+  chatActionError: string | null;
+  clearChatActionError: () => void;
 
   // Video feed & Upload
   videos: VideoPost[];
@@ -830,6 +836,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, []);
 
+  const pendingSeatOpRef = useRef<{
+    roomId: string;
+    user: User;
+    seatIndex: number | null;
+    muted: boolean;
+    startedAt: number;
+  } | null>(null);
+
   // Real-time Firestore + WebSocket discovery listeners (rebinds automatically on auth transitions)
   useEffect(() => {
     let firestoreRooms: PartyRoom[] = [];
@@ -859,7 +873,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setActivePartyRoom((currentActive) => {
         if (!currentActive) return null;
         const fresh = nextRooms.find((r) => r.id === currentActive.id);
-        return fresh ? { ...currentActive, ...fresh } : currentActive;
+        if (!fresh) return currentActive;
+        const nextRoom = { ...currentActive, ...fresh };
+        const pendingOp = pendingSeatOpRef.current;
+        if (
+          pendingOp &&
+          pendingOp.roomId === nextRoom.id &&
+          now - pendingOp.startedAt < 10_000 &&
+          Array.isArray(nextRoom.seats)
+        ) {
+          nextRoom.seats = nextRoom.seats.map((s: any) => {
+            if (pendingOp.seatIndex !== null && Number(s.seatIndex) === pendingOp.seatIndex) {
+              return { ...s, user: pendingOp.user, isMuted: pendingOp.muted };
+            }
+            if (s.user?.id === pendingOp.user.id && Number(s.seatIndex) !== pendingOp.seatIndex) {
+              return { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false };
+            }
+            return s;
+          });
+        }
+        return nextRoom;
       });
     };
 
@@ -1155,6 +1188,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Chat
   const [conversations, setConversations] = useState<Conversation[]>(MOCK_CONVERSATIONS);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
+  const [chatActionError, setChatActionError] = useState<string | null>(null);
+  const clearChatActionError = () => setChatActionError(null);
 
   // Videos
   const [videos, setVideos] = useState<VideoPost[]>(MOCK_VIDEOS);
@@ -3198,6 +3233,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveStream(null);
     setActiveConversation(null);
 
+    const uidToClean = firebaseUser?.uid || auth.currentUser?.uid || currentUser?.id;
+    if (uidToClean) {
+      await pushService.removeCurrentDeviceToken(uidToClean).catch(() => {});
+    }
+    await setChatPresence(false).catch(() => {});
+
     try {
       await logoutUser();
     } catch (e) {
@@ -3838,6 +3879,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       : null;
     const nextSeatMuted = isLeaving ? false : Boolean(targetServerSeat?.isHostMuted);
 
+    // Protect optimistic seat claim from stale Firestore/WS discovery snapshots while transaction commits
+    pendingSeatOpRef.current = {
+      roomId: room.id,
+      user: effectiveUser,
+      seatIndex: isLeaving ? null : seatIndex,
+      muted: nextSeatMuted,
+      startedAt: Date.now(),
+    };
+
     // Immediate optimistic update
     setUserSeatIndex(isLeaving ? null : seatIndex);
     setIsMicMuted(nextSeatMuted);
@@ -3868,10 +3918,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       nextSeatMuted
     );
 
+    if (pendingSeatOpRef.current?.roomId === room.id && pendingSeatOpRef.current?.user.id === effectiveUser.id) {
+      pendingSeatOpRef.current = null;
+    }
+
     if (result.success && result.seats) {
       const verifiedRoom = { ...room, seats: result.seats };
       setActivePartyRoom(verifiedRoom);
       setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? verifiedRoom : item)));
+      realtimeSocket.announcePartyRoom({ id: room.id, seats: result.seats });
       const mySeat = result.seats.find((s: any) => s.user?.id === effectiveUser.id);
       setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
       if (mySeat) {
@@ -3933,46 +3988,159 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const startDirectMessage = async (targetUser: User) => {
+    setChatActionError(null);
     const myUid = auth.currentUser?.uid;
-    let chatId = `conv_${targetUser.id || Date.now()}`;
+    if (!myUid) {
+      const msg = 'Please sign in with your Firebase account before starting a chat.';
+      setChatActionError(msg);
+      return;
+    }
+    if (!targetUser?.id || targetUser.id === myUid) {
+      const msg = targetUser?.id === myUid ? 'You cannot message your own account.' : 'Selected user profile is missing a valid ID.';
+      setChatActionError(msg);
+      return;
+    }
 
-    if (myUid && targetUser.id && targetUser.id !== myUid) {
-      try {
-        chatId = await getOrCreateDirectChat(
-          {
-            id: myUid,
-            displayName: currentUser.displayName,
-            username: currentUser.username,
-            uniqueId: currentUser.uniqueId,
-            avatar: currentUser.avatar,
-          },
-          {
-            id: targetUser.id,
-            displayName: targetUser.displayName,
-            username: targetUser.username,
-            uniqueId: targetUser.uniqueId,
-            avatar: targetUser.avatar,
-          }
-        );
-      } catch (err) {
-        console.warn('Direct chat initialization fallback:', err);
-      }
+    let chatId: string;
+    try {
+      chatId = await getOrCreateDirectChat(
+        {
+          id: myUid,
+          displayName: currentUser.displayName,
+          username: currentUser.username,
+          uniqueId: currentUser.uniqueId,
+          avatar: currentUser.avatar,
+        },
+        {
+          id: targetUser.id,
+          displayName: targetUser.displayName,
+          username: targetUser.username,
+          uniqueId: targetUser.uniqueId,
+          avatar: targetUser.avatar,
+        }
+      );
+    } catch (err: any) {
+      console.error('Direct chat initialization failed:', err);
+      const errMsg = err?.message || 'Unable to open chat due to permissions or network connectivity.';
+      setChatActionError(errMsg);
+      return;
     }
 
     const existingConv = conversations.find(
       (c) => c.id === chatId || (!c.isGroup && c.user?.id === targetUser.id)
     );
-    const convToOpen: Conversation = existingConv || {
-      id: chatId,
-      user: targetUser,
-      lastMessage: 'Connected on Alpha Mate',
-      lastTimestamp: 'Just now',
-      unreadCount: 0,
-      isGroup: false,
-      messages: [],
-    };
+    const convToOpen: Conversation = existingConv
+      ? { ...existingConv, id: chatId, user: targetUser }
+      : {
+          id: chatId,
+          user: targetUser,
+          lastMessage: 'Connected on Alpha Mate',
+          lastTimestamp: 'Just now',
+          unreadCount: 0,
+          isGroup: false,
+          messages: [],
+        };
     setActiveConversation(convToOpen);
     setCurrentScreen('chat_conversation');
+  };
+
+  const openConversationByChatId = async (
+    chatId: string,
+    fallbackSender?: { id?: string; displayName?: string; avatar?: string }
+  ) => {
+    const cleanChatId = String(chatId || '').trim();
+    if (!cleanChatId) {
+      setActiveTabState('chat');
+      setCurrentScreen('chat');
+      return;
+    }
+
+    const existingConv = conversations.find((c) => c.id === cleanChatId);
+    if (existingConv) {
+      setActiveConversation(existingConv);
+      setCurrentScreen('chat_conversation');
+      return;
+    }
+
+    const myUid = auth.currentUser?.uid || currentUser.id;
+    try {
+      const thread = auth.currentUser?.uid ? await getChatThreadById(cleanChatId) : null;
+      if (thread) {
+        const isGroup = thread.type === 'group';
+        const participantIds: string[] = Array.isArray(thread.participantIds) ? thread.participantIds : [];
+        const otherId = participantIds.find((id) => id !== myUid) || fallbackSender?.id || myUid;
+        const profile = thread.participantProfiles?.[otherId] || {};
+        const directoryMatch = realUsers.find((u) => u.id === otherId);
+
+        const partnerUser: User = {
+          ...CURRENT_USER,
+          ...(directoryMatch || {}),
+          id: otherId,
+          displayName:
+            profile.displayName ||
+            directoryMatch?.displayName ||
+            fallbackSender?.displayName ||
+            'Alpha Mate User',
+          username: profile.username || directoryMatch?.username || '',
+          uniqueId: profile.uniqueId || directoryMatch?.uniqueId || '',
+          avatar: profile.avatar || directoryMatch?.avatar || fallbackSender?.avatar || '',
+        };
+
+        const groupMembers: User[] = Object.entries(thread.participantProfiles || {}).map(
+          ([id, val]: [string, any]) => ({
+            ...CURRENT_USER,
+            id,
+            displayName: val?.displayName || 'Member',
+            username: val?.username || '',
+            uniqueId: val?.uniqueId || '',
+            avatar: val?.avatar || '',
+          })
+        );
+
+        const conv: Conversation = {
+          id: cleanChatId,
+          user: partnerUser,
+          lastMessage: thread.lastMessage || '',
+          lastTimestamp: thread.updatedAt?.toDate?.()?.toLocaleString?.() || 'Just now',
+          unreadCount: Number(thread.unreadBy?.[myUid] || 0),
+          isGroup,
+          groupName: thread.groupName,
+          groupMembers,
+          messages: [],
+        };
+        setActiveConversation(conv);
+        setCurrentScreen('chat_conversation');
+        return;
+      }
+    } catch (err) {
+      console.warn('openConversationByChatId lookup failed:', err);
+    }
+
+    if (fallbackSender?.id || cleanChatId.startsWith('dm_')) {
+      const dmOtherId = fallbackSender?.id || cleanChatId;
+      const directoryMatch = fallbackSender?.id ? realUsers.find((u) => u.id === fallbackSender.id) : undefined;
+      const conv: Conversation = {
+        id: cleanChatId,
+        user: {
+          ...CURRENT_USER,
+          ...(directoryMatch || {}),
+          id: dmOtherId,
+          displayName: directoryMatch?.displayName || fallbackSender?.displayName || 'Alpha Mate User',
+          avatar: directoryMatch?.avatar || fallbackSender?.avatar || '',
+        },
+        lastMessage: '',
+        lastTimestamp: 'Just now',
+        unreadCount: 0,
+        isGroup: false,
+        messages: [],
+      };
+      setActiveConversation(conv);
+      setCurrentScreen('chat_conversation');
+      return;
+    }
+
+    setActiveTabState('chat');
+    setCurrentScreen('chat');
   };
 
   const sendMessage = (convId: string, text: string, imageUrl?: string) => {
@@ -4677,8 +4845,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         conversations,
         activeConversation,
         openConversation,
+        openConversationByChatId,
         startDirectMessage,
         sendMessage,
+        chatActionError,
+        clearChatActionError,
         videos,
         uploadInitialMode,
         openUploadScreen,

@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
-import { compressImage } from '../../utils/imageCompressor';
+import { compressImage, compressImageToBlob } from '../../utils/imageCompressor';
+import { auth, uploadUserProfileAvatar } from '../../services/firebase';
 import {
   X,
   Camera,
@@ -46,6 +47,8 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [pendingAvatarFile, setPendingAvatarFile] = useState<File | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
   // Hidden file inputs
   const galleryInputRef = useRef<HTMLInputElement>(null);
@@ -78,15 +81,15 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
   const bioWordsCount = bio.trim() ? bio.trim().split(/\s+/).length : 0;
   const maxWords = 300;
 
-  // Handle Photo Selection via FileReader with client-side compression
+  // Handle Photo Selection via FileReader with client-side compression & Storage upload on save
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     try {
-      // Compress and resize avatar to max 360x360 compact JPEG (< 40KB)
-      const compressed = await compressImage(file, 360, 360, 0.75);
-      setAvatar(compressed);
+      const compressedPreview = await compressImage(file, 480, 480, 0.8);
+      setAvatar(compressedPreview);
+      setPendingAvatarFile(file);
       setErrorMessage('');
     } catch {
       setErrorMessage('Could not process image. Please try another photo.');
@@ -103,7 +106,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
   };
 
   // Save Profile Handler
-  const handleSave = (e: React.FormEvent) => {
+  const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     setSuccessMessage('');
@@ -152,9 +155,23 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
     }
 
     setIsSaving(true);
-    setTimeout(() => {
+    try {
+      let resolvedAvatarUrl = avatar;
+      if (pendingAvatarFile) {
+        if (!auth.currentUser?.uid) {
+          throw new Error('Please sign in with your Firebase account before uploading a photo.');
+        }
+        setUploadProgress(5);
+        const compressedBlob = await compressImageToBlob(pendingAvatarFile, 512, 512, 0.82);
+        resolvedAvatarUrl = await uploadUserProfileAvatar(compressedBlob, (pct) => {
+          setUploadProgress(pct);
+        });
+        setAvatar(resolvedAvatarUrl);
+        setPendingAvatarFile(null);
+      }
+
       const updates: any = {
-        avatar,
+        avatar: resolvedAvatarUrl,
         bio: bio.trim(),
         dob,
       };
@@ -170,12 +187,16 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
       }
 
       updateUserProfile(updates);
-      setIsSaving(false);
       setSuccessMessage('Profile updated successfully!');
       setTimeout(() => {
         onClose();
-      }, 700);
-    }, 400);
+      }, 650);
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Failed to upload profile photo. Please try again.');
+    } finally {
+      setIsSaving(false);
+      setUploadProgress(null);
+    }
   };
 
   return (
@@ -272,7 +293,10 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
                 {PRESET_AVATARS.map((pUrl, i) => (
                   <div
                     key={i}
-                    onClick={() => setAvatar(pUrl)}
+                    onClick={() => {
+                      setAvatar(pUrl);
+                      setPendingAvatarFile(null);
+                    }}
                     className={`w-7 h-7 rounded-full overflow-hidden border-2 cursor-pointer transition ${
                       avatar === pUrl ? 'border-[#EC4899] scale-110' : 'border-white/20 opacity-70 hover:opacity-100'
                     }`}
@@ -282,6 +306,19 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
                 ))}
               </div>
             </div>
+            {uploadProgress !== null && (
+              <div className="w-full max-w-xs mt-2">
+                <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#A855F7] to-[#EC4899] transition-all duration-150"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+                <p className="text-[10px] text-center text-purple-300 mt-1">
+                  Uploading photo ({uploadProgress}%)...
+                </p>
+              </div>
+            )}
           </div>
 
           {/* ======================================================== */}

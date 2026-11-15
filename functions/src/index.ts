@@ -298,6 +298,121 @@ function mapNotificationTypeToAndroidChannel(type: string): string {
   }
 }
 
+function isValidPushToken(token: unknown): token is string {
+  if (typeof token !== 'string') return false;
+  const trimmed = token.trim();
+  return (
+    trimmed.length >= 10 &&
+    !trimmed.startsWith('web_push_') &&
+    !trimmed.startsWith('web-simulated-token-')
+  );
+}
+
+interface ResolvedFcmToken {
+  token: string;
+  tokenDocId?: string;
+}
+
+async function collectUserFcmTokens(
+  userId: string,
+  userData: Record<string, any>
+): Promise<ResolvedFcmToken[]> {
+  const byToken = new Map<string, ResolvedFcmToken>();
+
+  try {
+    const tokenSnap = await db.collection('users').doc(userId).collection('fcmTokens').get();
+    for (const d of tokenSnap.docs) {
+      const t = d.get('token');
+      if (isValidPushToken(t)) {
+        const trimmed = t.trim();
+        if (!byToken.has(trimmed)) {
+          byToken.set(trimmed, { token: trimmed, tokenDocId: d.id });
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn('Could not read fcmTokens subcollection', { userId, err });
+  }
+
+  const legacyToken = userData.pushNotificationToken;
+  if (isValidPushToken(legacyToken)) {
+    const trimmed = legacyToken.trim();
+    if (!byToken.has(trimmed)) {
+      byToken.set(trimmed, { token: trimmed });
+    }
+  }
+
+  return Array.from(byToken.values());
+}
+
+async function sendFcmMulticastWithCleanup(params: {
+  userId: string;
+  resolvedTokens: ResolvedFcmToken[];
+  legacyTokenOnUser?: unknown;
+  title: string;
+  body: string;
+  data: Record<string, string>;
+  channelId: string;
+  collapseKey?: string;
+}): Promise<void> {
+  const { userId, resolvedTokens, legacyTokenOnUser, title, body, data, channelId, collapseKey } = params;
+  if (resolvedTokens.length === 0) return;
+
+  const messaging = getMessaging(app);
+  const tokens = resolvedTokens.map((t) => t.token);
+
+  for (let i = 0; i < tokens.length; i += 500) {
+    const chunkEntries = resolvedTokens.slice(i, i + 500);
+    const chunkTokens = chunkEntries.map((e) => e.token);
+    const res = await messaging.sendEachForMulticast({
+      tokens: chunkTokens,
+      notification: { title, body },
+      data,
+      android: {
+        priority: 'high',
+        ...(collapseKey ? { collapseKey } : {}),
+        notification: {
+          channelId,
+          sound: 'default',
+        },
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: 'default',
+            badge: 1,
+          },
+        },
+      },
+    });
+
+    const cleanupOps: Promise<unknown>[] = [];
+    res.responses.forEach((resp, idx) => {
+      if (resp.success) return;
+      const errCode = resp.error?.code;
+      const entry = chunkEntries[idx];
+      if (
+        errCode === 'messaging/registration-token-not-registered' ||
+        errCode === 'messaging/invalid-registration-token'
+      ) {
+        if (entry?.tokenDocId) {
+          cleanupOps.push(
+            db.collection('users').doc(userId).collection('fcmTokens').doc(entry.tokenDocId).delete().catch(() => {})
+          );
+        }
+        if (typeof legacyTokenOnUser === 'string' && legacyTokenOnUser.trim() === entry?.token) {
+          cleanupOps.push(
+            db.collection('users').doc(userId).update({ pushNotificationToken: null }).catch(() => {})
+          );
+        }
+      }
+    });
+    if (cleanupOps.length > 0) {
+      await Promise.allSettled(cleanupOps);
+    }
+  }
+}
+
 /**
  * Firestore trigger: dispatches a real FCM push notification whenever a
  * notification document is written to `users/{userId}/notifications/{notificationId}`
@@ -314,6 +429,9 @@ export const sendPushOnNotificationCreated = onDocumentCreated(
 
     const userId = event.params.userId;
     const notif = snapshot.data() as Record<string, any>;
+    if (notif.skipPush === true) return;
+    if (notif.senderId && String(notif.senderId) === userId) return;
+
     const notifType = String(notif.type || 'system');
     const title = String(notif.title || 'Alpha Mate');
     const body = String(notif.message || '');
@@ -342,23 +460,17 @@ export const sendPushOnNotificationCreated = onDocumentCreated(
         return;
       }
 
-      const token = typeof userData.pushNotificationToken === 'string' ? userData.pushNotificationToken.trim() : '';
-      if (
-        !token ||
-        token.startsWith('web_push_') ||
-        token.startsWith('web-simulated-token-')
-      ) {
-        return;
-      }
+      const resolvedTokens = await collectUserFcmTokens(userId, userData);
+      if (resolvedTokens.length === 0) return;
 
       const channelId = mapNotificationTypeToAndroidChannel(notifType);
-
-      await getMessaging(app).send({
-        token,
-        notification: {
-          title,
-          body,
-        },
+      await sendFcmMulticastWithCleanup({
+        userId,
+        resolvedTokens,
+        legacyTokenOnUser: userData.pushNotificationToken,
+        title,
+        body,
+        channelId,
         data: {
           notificationId: event.params.notificationId,
           type: notifType,
@@ -371,26 +483,122 @@ export const sendPushOnNotificationCreated = onDocumentCreated(
           chatId: String(notif.chatId || ''),
           senderId: String(notif.senderId || ''),
         },
-        android: {
-          priority: 'high',
-          notification: {
-            channelId,
-            sound: 'default',
-          },
-        },
-        apns: {
-          payload: {
-            aps: {
-              sound: 'default',
-              badge: 1,
-            },
-          },
-        },
       });
     } catch (err: any) {
       logger.warn('FCM send failed for notification', {
         userId,
         notificationId: event.params.notificationId,
+        errorCode: err?.code,
+        errorMessage: err?.message,
+      });
+    }
+  }
+);
+
+/**
+ * Firestore trigger: dispatches a server-side FCM push notification to all eligible recipients
+ * whenever a persistent chat message is created in `chats/{chatId}/messages/{messageId}`.
+ * Excludes the sender, declined members, and users who blocked the sender.
+ */
+export const sendPushOnChatMessageCreated = onDocumentCreated(
+  {
+    document: 'chats/{chatId}/messages/{messageId}',
+    database: FIRESTORE_DATABASE_ID,
+  },
+  async (event) => {
+    const msgSnap = event.data;
+    if (!msgSnap) return;
+
+    const chatId = event.params.chatId;
+    const messageId = event.params.messageId;
+    const msg = msgSnap.data() as Record<string, any>;
+    const senderId = String(msg.senderId || '').trim();
+    if (!senderId) return;
+
+    try {
+      const chatSnap = await db.collection('chats').doc(chatId).get();
+      if (!chatSnap.exists) return;
+
+      const chatData = chatSnap.data() as Record<string, any>;
+      const participantIds: string[] = Array.isArray(chatData.participantIds)
+        ? chatData.participantIds.map((id) => String(id)).filter(Boolean)
+        : [];
+      const memberStatus = (chatData.memberStatus || {}) as Record<string, string>;
+      const participantProfiles = (chatData.participantProfiles || {}) as Record<string, any>;
+
+      const recipients = participantIds.filter(
+        (pid) => pid !== senderId && memberStatus[pid] !== 'declined'
+      );
+      if (recipients.length === 0) return;
+
+      let senderName = String(participantProfiles?.[senderId]?.displayName || '').trim();
+      if (!senderName) {
+        const senderSnap = await db.collection('users').doc(senderId).get().catch(() => null);
+        senderName = String(senderSnap?.get('displayName') || 'Alpha Mate User').trim();
+      }
+
+      const rawText = String(msg.text || '').trim();
+      const mediaType = String(msg.mediaType || '').trim();
+      const preview =
+        rawText ||
+        (mediaType === 'image'
+          ? '📷 Sent a photo'
+          : mediaType === 'video'
+          ? '🎥 Sent a video'
+          : mediaType === 'audio'
+          ? '🎙️ Sent a voice message'
+          : '📎 Sent an attachment');
+
+      const isGroup = chatData.type === 'group';
+      const title = isGroup
+        ? `💬 ${String(chatData.groupName || 'Group Chat')}`
+        : `💬 ${senderName}`;
+      const body = isGroup ? `${senderName}: ${preview}`.slice(0, 240) : preview.slice(0, 240);
+
+      await Promise.allSettled(
+        recipients.map(async (recipientId) => {
+          const [userSnap, blockedSnap] = await Promise.all([
+            db.collection('users').doc(recipientId).get(),
+            db.collection('users').doc(recipientId).collection('blockedUsers').doc(senderId).get(),
+          ]);
+          if (!userSnap.exists || blockedSnap.exists) return;
+
+          const userData = userSnap.data() as Record<string, any>;
+          const prefs = userData.notificationPreferences as
+            | { enabled?: boolean; categories?: Record<string, boolean> }
+            | undefined;
+
+          if (prefs?.enabled === false) return;
+          if (prefs?.categories && prefs.categories.messages === false) return;
+
+          const resolvedTokens = await collectUserFcmTokens(recipientId, userData);
+          if (resolvedTokens.length === 0) return;
+
+          await sendFcmMulticastWithCleanup({
+            userId: recipientId,
+            resolvedTokens,
+            legacyTokenOnUser: userData.pushNotificationToken,
+            title,
+            body,
+            channelId: 'alpha_social_alerts',
+            collapseKey: `chat_${chatId}`,
+            data: {
+              type: 'message',
+              category: 'messages',
+              screen: 'chat_conversation',
+              tab: 'chat',
+              chatId,
+              messageId,
+              senderId,
+              senderName,
+            },
+          });
+        })
+      );
+    } catch (err: any) {
+      logger.warn('FCM send failed for chat message', {
+        chatId,
+        messageId,
         errorCode: err?.code,
         errorMessage: err?.message,
       });

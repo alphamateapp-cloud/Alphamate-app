@@ -45,6 +45,7 @@ export const NotificationsScreen: React.FC = () => {
     openLiveStream,
     partyRooms,
     openPartyRoom,
+    openConversationByChatId,
     refreshScope,
   } = useApp();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -142,6 +143,14 @@ export const NotificationsScreen: React.FC = () => {
         openPartyRoom(matchedRoom);
         return;
       }
+    }
+    if (n.chatId) {
+      void openConversationByChatId(n.chatId, {
+        id: n.senderId,
+        displayName: n.senderName,
+        avatar: n.senderAvatar,
+      });
+      return;
     }
 
     if (n.screen && n.screen !== 'live_stream' && n.screen !== 'party_room') {

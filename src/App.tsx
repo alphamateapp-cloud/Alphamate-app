@@ -57,9 +57,14 @@ const AppContent: React.FC = () => {
     deviceMode,
     activePartyRoom,
     activeStream,
+    liveStreams,
+    partyRooms,
+    openLiveStream,
+    openPartyRoom,
     closePartyRoom,
     closeLiveStream,
     activeConversation,
+    openConversationByChatId,
     navigateBack,
     currentUser,
     isAuthenticated,
@@ -70,6 +75,7 @@ const AppContent: React.FC = () => {
   } = useApp();
   const mainTabScrollRef = useRef<HTMLDivElement>(null);
   const keepAwakeControllerRef = useRef<KeepScreenAwakeController | null>(null);
+  const pendingPushDataRef = useRef<Record<string, any> | null>(null);
   if (!keepAwakeControllerRef.current) keepAwakeControllerRef.current = new KeepScreenAwakeController();
 
   const isRestrictedLifecycleAccount = Boolean(
@@ -111,9 +117,64 @@ const AppContent: React.FC = () => {
     };
   }, [isActiveMediaSession]);
 
-  // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
+  const routeNotificationDeepLink = React.useCallback(
+    (data: Record<string, any> | undefined) => {
+      if (!data) return;
+      if (data.chatId) {
+        void openConversationByChatId(String(data.chatId), {
+          id: data.senderId,
+          displayName: data.senderName,
+          avatar: data.senderAvatar,
+        });
+        return;
+      }
+      if (data.streamId) {
+        const matchedStream = liveStreams.find((s) => s.id === data.streamId);
+        if (matchedStream) {
+          openLiveStream(matchedStream);
+          return;
+        }
+      }
+      if (data.roomId) {
+        const matchedRoom = partyRooms.find((r) => r.id === data.roomId);
+        if (matchedRoom) {
+          openPartyRoom(matchedRoom);
+          return;
+        }
+      }
+      const screen = data.screen;
+      const tab = data.tab;
+      if (screen && screen !== 'live_stream' && screen !== 'party_room') {
+        setCurrentScreen(screen as any);
+      } else if (tab) {
+        setActiveTab(tab as any);
+      }
+    },
+    [openConversationByChatId, liveStreams, openLiveStream, partyRooms, openPartyRoom, setCurrentScreen, setActiveTab]
+  );
+
+  // Register native push listeners immediately so cold-start notification taps are never lost before auth resolves
+  useEffect(() => {
+    pushService
+      .initialize({
+        onActionPerformed: (action) => {
+          const data = (action.notification?.data || {}) as Record<string, any>;
+          if (!isSessionReadyAndAuthed) {
+            pendingPushDataRef.current = data;
+            return;
+          }
+          routeNotificationDeepLink(data);
+        },
+      })
+      .catch(() => {});
+  }, [isSessionReadyAndAuthed, routeNotificationDeepLink]);
+
+  // Sync FCM token on authenticated launch and replay any queued cold-start deep link
   useEffect(() => {
     if (!isSessionReadyAndAuthed || !currentUser?.id) return;
+    if (pushService.getToken()) {
+      pushService.syncTokenToUserDoc(currentUser.id).catch(() => {});
+    }
     pushService
       .initialize({
         onToken: () => {
@@ -121,15 +182,15 @@ const AppContent: React.FC = () => {
             pushService.syncTokenToUserDoc(currentUser.id).catch(() => {});
           }
         },
-        onActionPerformed: (action) => {
-          const screen = action.notification?.data?.screen;
-          const tab = action.notification?.data?.tab;
-          if (screen) setCurrentScreen(screen as any);
-          else if (tab) setActiveTab(tab as any);
-        },
       })
       .catch(() => {});
-  }, [isSessionReadyAndAuthed, currentUser?.id, setCurrentScreen, setActiveTab]);
+
+    if (pendingPushDataRef.current) {
+      const queued = pendingPushDataRef.current;
+      pendingPushDataRef.current = null;
+      routeNotificationDeepLink(queued);
+    }
+  }, [isSessionReadyAndAuthed, currentUser?.id, routeNotificationDeepLink]);
 
   // Android Native Hardware Back Button & Status Bar Integration (Active on Native Android/iOS)
   useEffect(() => {
@@ -286,6 +347,7 @@ export default function App() {
     <AppProvider>
       <DeviceFrame>
         <PushNotificationBanner />
+        <GlobalChatErrorToast />
         <GlobalPushSettingsHost />
         <GlobalWeeklyLeaderboardModal />
         <UserBadgesModal />
@@ -295,6 +357,33 @@ export default function App() {
     </AppProvider>
   );
 }
+
+const GlobalChatErrorToast: React.FC = () => {
+  const { chatActionError, clearChatActionError } = useApp();
+
+  useEffect(() => {
+    if (!chatActionError) return;
+    const timer = window.setTimeout(() => clearChatActionError(), 5000);
+    return () => window.clearTimeout(timer);
+  }, [chatActionError, clearChatActionError]);
+
+  if (!chatActionError) return null;
+
+  return (
+    <div className="fixed top-4 inset-x-4 z-50 mx-auto max-w-md pointer-events-auto">
+      <div className="rounded-2xl border border-rose-400/40 bg-[#230D1B]/95 backdrop-blur-xl px-4 py-3 text-xs font-semibold text-rose-100 shadow-2xl flex items-center justify-between gap-3">
+        <span>{chatActionError}</span>
+        <button
+          type="button"
+          onClick={clearChatActionError}
+          className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  );
+};
 
 const GlobalPushSettingsHost: React.FC = () => {
   const { showPushSettingsModal, setShowPushSettingsModal } = useApp();
