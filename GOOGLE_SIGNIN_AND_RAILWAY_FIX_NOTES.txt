@@ -1,0 +1,22 @@
+ALPHA MATE - GOOGLE SIGN-IN / RAILWAY BUILD FIX
+
+1) Capacitor native Google provider
+   capacitor.config.ts now includes:
+   FirebaseAuthentication: {
+     providers: ['google.com'],
+     skipNativeAuth: false,
+   }
+   This addresses the on-screen Capacitor error saying Google sign-in provider is not enabled.
+
+2) Railway frozen-lockfile failure
+   The package.json dependency for @capacitor-firebase/authentication was already present, and package-lock.json contains the matching 8.6.0 package entry.
+   The stale bun.lock was removed so Railpack can use the synchronized npm package-lock.json rather than running bun install --frozen-lockfile against an out-of-date Bun lockfile.
+
+3) Android version retained
+   app versionName: 1.1.0
+   app versionCode: 2
+   package ID: com.alphamate.liveparty
+
+After pushing this source to the Railway-connected GitHub repository, verify that Railway detects npm and completes npm ci. For Android, run npm ci, npm run build, npx cap sync android, then build the release APK/AAB with the existing official signing key.
+
+Important: This source package has not been compiled, deployed to Railway, or tested on a physical Android device in this environment. Verify Google sign-in on the Play Store-installed build before release.
