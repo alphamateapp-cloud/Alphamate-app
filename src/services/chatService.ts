@@ -1,4 +1,10 @@
-import { auth, db } from './firebase';
+import {
+  auth,
+  db,
+  isFirestoreQuotaExceeded,
+  isFirestoreQuotaExceededError,
+  notifyFirestoreQuotaExceeded,
+} from './firebase';
 import {
   arrayUnion,
   collection,
@@ -71,16 +77,25 @@ export async function searchFirebaseUsers(
   maxResults = 30
 ): Promise<ChatProfile[]> {
   uid();
+  if (isFirestoreQuotaExceeded()) {
+    return [];
+  }
   const term = searchTerm.trim().toLowerCase().replace(/^@/, '');
   const usersRef = collection(db, 'users');
   const byId = new Map<string, ChatProfile>();
+  const handleSearchErr = (err: unknown) => {
+    if (isFirestoreQuotaExceededError(err)) {
+      notifyFirestoreQuotaExceeded();
+    }
+    return null;
+  };
 
   if (term.length >= 1) {
     const end = `${term}\uf8ff`;
     const fields = ['usernameLower', 'displayNameLower', 'uniqueIdLower'];
     const snapshots = await Promise.all(
       fields.map((field) =>
-        getDocs(query(usersRef, where(field, '>=', term), where(field, '<=', end), limit(maxResults))).catch(() => null)
+        getDocs(query(usersRef, where(field, '>=', term), where(field, '<=', end), limit(maxResults))).catch(handleSearchErr)
       )
     );
     snapshots.forEach((snap) =>
@@ -93,9 +108,9 @@ export async function searchFirebaseUsers(
     );
   }
 
-  // Fallback / broad directory scan so 1-letter queries, substring matches, and older accounts always appear
-  if (byId.size < maxResults) {
-    const broadSnap = await getDocs(query(usersRef, limit(180))).catch(() => null);
+  // Fallback scan only when prefix matches returned few results or empty query needs initial list
+  if (!isFirestoreQuotaExceeded() && ((term && byId.size < 10) || (!term && byId.size === 0))) {
+    const broadSnap = await getDocs(query(usersRef, limit(60))).catch(handleSearchErr);
     broadSnap?.docs.forEach((item) => {
       if (item.id === excludeUserId || byId.has(item.id)) return;
       const data = item.data() as any;
@@ -127,19 +142,40 @@ export type ChatPayload = {
 export function subscribeToMyChats(callback: (items: any[]) => void, onError?: (error: Error) => void) {
   const me = uid();
   const q = query(collection(db, 'chats'), where('participantIds', 'array-contains', me), orderBy('updatedAt', 'desc'), limit(100));
-  return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => onError?.(e));
+  return onSnapshot(
+    q,
+    (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (e) => {
+      if (isFirestoreQuotaExceededError(e)) notifyFirestoreQuotaExceeded();
+      onError?.(e);
+    }
+  );
 }
 
 export function subscribeToChatMessages(chatId: string, callback: (items: any[]) => void, onError?: (error: Error) => void) {
   uid();
   const q = query(collection(db, 'chats', chatId, 'messages'), orderBy('createdAt', 'asc'), limit(300));
-  return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => onError?.(e));
+  return onSnapshot(
+    q,
+    (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (e) => {
+      if (isFirestoreQuotaExceededError(e)) notifyFirestoreQuotaExceeded();
+      onError?.(e);
+    }
+  );
 }
 
 export function subscribeToMyChatRequests(callback: (items: any[]) => void, onError?: (error: Error) => void) {
   const me = uid();
   const q = query(collection(db, 'chatRequests'), where('recipientId', '==', me), where('status', '==', 'pending'), orderBy('createdAt', 'desc'), limit(100));
-  return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => onError?.(e));
+  return onSnapshot(
+    q,
+    (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (e) => {
+      if (isFirestoreQuotaExceededError(e)) notifyFirestoreQuotaExceeded();
+      onError?.(e);
+    }
+  );
 }
 
 /**
@@ -330,7 +366,14 @@ export async function createGroupChat(name: string, members: ChatProfile[]) {
 export function subscribeToMyGroupInvites(callback: (items: any[]) => void, onError?: (error: Error) => void) {
   const me = uid();
   const q = query(collection(db, 'groupInvites'), where('inviteeId', '==', me), where('status', '==', 'pending'), orderBy('createdAt', 'desc'), limit(100));
-  return onSnapshot(q, (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))), (e) => onError?.(e));
+  return onSnapshot(
+    q,
+    (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (e) => {
+      if (isFirestoreQuotaExceededError(e)) notifyFirestoreQuotaExceeded();
+      onError?.(e);
+    }
+  );
 }
 
 export async function respondToGroupInvite(chatId: string, accept: boolean) {
@@ -426,10 +469,25 @@ export async function deleteChatMessage(chatId: string, messageId: string, every
 }
 
 export async function setChatPresence(isOnline: boolean) {
+  if (isFirestoreQuotaExceeded()) return;
   const me = uid();
-  await setDoc(doc(db, 'presence', me), { userId: me, online: isOnline, lastSeen: serverTimestamp() }, { merge: true });
+  try {
+    await setDoc(doc(db, 'presence', me), { userId: me, online: isOnline, lastSeen: serverTimestamp() }, { merge: true });
+  } catch (err) {
+    if (isFirestoreQuotaExceededError(err)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
+    throw err;
+  }
 }
 
 export function subscribeToChatPresence(userId: string, callback: (online: boolean, lastSeen?: any) => void) {
-  return onSnapshot(doc(db, 'presence', userId), (snap) => callback(!!snap.data()?.online, snap.data()?.lastSeen));
+  return onSnapshot(
+    doc(db, 'presence', userId),
+    (snap) => callback(!!snap.data()?.online, snap.data()?.lastSeen),
+    (err) => {
+      if (isFirestoreQuotaExceededError(err)) notifyFirestoreQuotaExceeded();
+    }
+  );
 }

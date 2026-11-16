@@ -62,10 +62,13 @@ import { User } from '../types';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
+import { LiveGiftComboCounter, LiveGiftComboState } from '../components/live/LiveGiftComboCounter';
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
 import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } from '../services/liveHeartService';
 import { getHdImageUrl } from '../utils/imageHd';
+
+const GIFT_COMBO_WINDOW_MS = 4200;
 
 interface FloatingHeart {
   id: number;
@@ -160,12 +163,18 @@ export const LiveStreamScreen: React.FC = () => {
   const [showLuckyDrawModal, setShowLuckyDrawModal] = useState(false);
   const [selectedGift, setSelectedGift] = useState<Gift>(VIRTUAL_GIFTS[0]);
 
-  // Spectacular Visual Gift Animation & Combo states
+  // Spectacular Visual Gift Animation & Rapid-Combo states
   const [activeGiftAnimation, setActiveGiftAnimation] = useState<ActiveGiftEvent | null>(null);
-  const [giftComboCount, setGiftComboCount] = useState<number>(1);
-  const [lastSentGiftId, setLastSentGiftId] = useState<string | null>(null);
-  const [lastGiftSentTime, setLastGiftSentTime] = useState<number>(0);
+  const [activeGiftCombo, setActiveGiftCombo] = useState<LiveGiftComboState | null>(null);
+  const [comboRemainingMs, setComboRemainingMs] = useState<number>(0);
   const [giftQuantityMultiplier, setGiftQuantityMultiplier] = useState<number>(1);
+  const comboTrackingRef = useRef<{
+    giftId: string;
+    count: number;
+    totalCoins: number;
+    startedAt: number;
+    lastTapAt: number;
+  } | null>(null);
 
   // Top Givers Leaderboard State for Current Broadcast Session
   const [sessionGivers, setSessionGivers] = useState<SessionGiver[]>([]);
@@ -497,6 +506,25 @@ export const LiveStreamScreen: React.FC = () => {
         setWsViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
       } else if (ev.type === 'room:signal' && ev.signal?.type === 'stream_ended' && !isHost) {
         setIsBroadcastEnded(true);
+      } else if (
+        ev.type === 'room:signal' &&
+        ev.signal?.type === 'gift_combo' &&
+        ev.senderId !== (auth.currentUser?.uid || currentUser.id)
+      ) {
+        const sig = ev.signal;
+        if (sig.gift && typeof sig.comboCount === 'number') {
+          setActiveGiftAnimation({
+            id: `ws_gift_${sig.timestamp || Date.now()}_${Math.random()}`,
+            gift: sig.gift as Gift,
+            senderName: String(sig.senderName || 'Viewer'),
+            senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
+            senderVipTier: Number(sig.senderVipTier || 1),
+            recipientName: String(sig.recipientName || activeStream.host.displayName || 'Host'),
+            comboCount: Number(sig.comboCount),
+            quantity: Number(sig.quantity || 1),
+            timestamp: Number(sig.timestamp || Date.now()),
+          });
+        }
       }
     });
 
@@ -1008,6 +1036,42 @@ export const LiveStreamScreen: React.FC = () => {
     }).catch((err) => console.warn('Failed to send live comment:', err));
   };
 
+  // Reset active gift combo when switching streams
+  useEffect(() => {
+    comboTrackingRef.current = null;
+    setActiveGiftCombo(null);
+    setComboRemainingMs(0);
+  }, [activeStream?.id]);
+
+  // Smooth rapid-combo countdown timer that auto-resets when window expires
+  useEffect(() => {
+    if (!activeGiftCombo) {
+      setComboRemainingMs(0);
+      return;
+    }
+
+    const updateRemaining = () => {
+      const left = activeGiftCombo.expiresAt - Date.now();
+      if (left <= 0) {
+        comboTrackingRef.current = null;
+        setActiveGiftCombo(null);
+        setComboRemainingMs(0);
+        return false;
+      }
+      setComboRemainingMs(left);
+      return true;
+    };
+
+    if (!updateRemaining()) return;
+    const timer = setInterval(() => {
+      if (!updateRemaining()) {
+        clearInterval(timer);
+      }
+    }, 80);
+
+    return () => clearInterval(timer);
+  }, [activeGiftCombo]);
+
   // Sync incoming external gift banner to full visual animation
   useEffect(() => {
     if (activeGiftBanner && !activeGiftAnimation) {
@@ -1024,14 +1088,15 @@ export const LiveStreamScreen: React.FC = () => {
     }
   }, [activeGiftBanner, activeGiftAnimation, clearActiveGiftBanner]);
 
-  // Enhanced Virtual Gift Sending Handler with Combos & Visual Animations
-  const handleSendSelectedGift = (customMultiplier?: number) => {
+  // Enhanced Virtual Gift Sending Handler with Atomic Rapid Combos & Visual Animations
+  const handleSendSelectedGift = (customMultiplier?: number, overrideGift?: Gift) => {
+    const giftToSend = overrideGift || selectedGift;
     const qty = customMultiplier || giftQuantityMultiplier;
-    const requiredCoins = selectedGift.coins * qty;
+    const requiredCoins = giftToSend.coins * qty;
 
     if (coins < requiredCoins) {
       showToast(
-        `Insufficient coins! You need ${requiredCoins.toLocaleString()} coins for ${qty}x ${selectedGift.name}. Recharge in Wallet 💰`
+        `Insufficient coins! You need ${requiredCoins.toLocaleString()} coins for ${qty}x ${giftToSend.name}. Recharge in Wallet 💰`
       );
       return;
     }
@@ -1042,25 +1107,63 @@ export const LiveStreamScreen: React.FC = () => {
       : (activeStream?.host.displayName || 'Host');
 
     // Deduct coins & record 60% Host Diamonds / 40% App Share via AppContext
-    sendLiveGift(selectedGift, recipientId, qty, recipientName, {
+    sendLiveGift(giftToSend, recipientId, qty, recipientName, {
       context: 'live',
       streamId: activeStream?.id,
     });
 
-    // Calculate Combo Streaks (reset if > 4.2 seconds between sends)
+    // Atomically calculate rapid combo streaks (resets if > 4.2s elapsed or gift changed)
     const now = Date.now();
-    let nextCombo = 1;
-    if (lastSentGiftId === selectedGift.id && now - lastGiftSentTime < 4200) {
-      nextCombo = giftComboCount + 1;
+    const prevCombo = comboTrackingRef.current;
+    const isSameComboChain =
+      prevCombo !== null &&
+      prevCombo.giftId === giftToSend.id &&
+      now - prevCombo.lastTapAt < GIFT_COMBO_WINDOW_MS;
+
+    const nextCombo = isSameComboChain ? prevCombo.count + 1 : 1;
+    const nextTotalCoins = (isSameComboChain ? prevCombo.totalCoins : 0) + requiredCoins;
+    const startedAt = isSameComboChain ? prevCombo.startedAt : now;
+
+    comboTrackingRef.current = {
+      giftId: giftToSend.id,
+      count: nextCombo,
+      totalCoins: nextTotalCoins,
+      startedAt,
+      lastTapAt: now,
+    };
+
+    setActiveGiftCombo({
+      gift: giftToSend,
+      recipientId,
+      recipientName,
+      comboCount: nextCombo,
+      unitQuantity: qty,
+      totalCoins: nextTotalCoins,
+      startedAt,
+      lastSentAt: now,
+      expiresAt: now + GIFT_COMBO_WINDOW_MS,
+    });
+    setComboRemainingMs(GIFT_COMBO_WINDOW_MS);
+
+    // Broadcast live combo event over room WebSocket so Host & all Viewers see the rapid streak
+    if (activeStream?.id) {
+      realtimeSocket.sendRoomSignal('live', activeStream.id, {
+        type: 'gift_combo',
+        gift: giftToSend,
+        senderName: currentUser.displayName,
+        senderAvatar: currentUser.avatar,
+        senderVipTier: currentUser.vipTier || 1,
+        recipientName,
+        comboCount: nextCombo,
+        quantity: qty,
+        timestamp: now,
+      });
     }
-    setGiftComboCount(nextCombo);
-    setLastSentGiftId(selectedGift.id);
-    setLastGiftSentTime(now);
 
     // Trigger Spectacular Screen Takeover Animation
     setActiveGiftAnimation({
       id: `gift_anim_${now}_${Math.random()}`,
-      gift: selectedGift,
+      gift: giftToSend,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
       senderVipTier: currentUser.vipTier || 1,
@@ -1074,9 +1177,11 @@ export const LiveStreamScreen: React.FC = () => {
     setComments((prev) => [
       ...prev,
       {
-        id: `gift_msg_${now}`,
+        id: `gift_msg_${now}_${nextCombo}`,
         user: currentUser.displayName,
-        text: `sent ${selectedGift.name} ${qty > 1 ? `x${qty} ` : ''}to ${recipientName}! ${selectedGift.icon} (+${requiredCoins.toLocaleString()} 💰)`,
+        text: `sent ${giftToSend.name} ${qty > 1 ? `x${qty} ` : ''}to ${recipientName}! ${giftToSend.icon} (+${requiredCoins.toLocaleString()} 💰)${
+          nextCombo > 1 ? ` [Combo x${nextCombo} 🔥]` : ''
+        }`,
         vipLevel: currentUser.vipTier,
         isGiftHighlight: true,
       },
@@ -1097,8 +1202,8 @@ export const LiveStreamScreen: React.FC = () => {
                 ...g,
                 totalCoins: g.totalCoins + requiredCoins,
                 giftCount: g.giftCount + qty,
-                lastGiftName: selectedGift.name,
-                lastGiftIcon: selectedGift.icon,
+                lastGiftName: giftToSend.name,
+                lastGiftIcon: giftToSend.icon,
               }
             : g
         );
@@ -1109,8 +1214,8 @@ export const LiveStreamScreen: React.FC = () => {
             user: currentUser,
             totalCoins: requiredCoins,
             giftCount: qty,
-            lastGiftName: selectedGift.name,
-            lastGiftIcon: selectedGift.icon,
+            lastGiftName: giftToSend.name,
+            lastGiftIcon: giftToSend.icon,
           },
         ];
       }
@@ -1118,7 +1223,7 @@ export const LiveStreamScreen: React.FC = () => {
     });
 
     showToast(
-      `Sent ${qty > 1 ? `${qty}x ` : ''}${selectedGift.name} to ${recipientName}! ${selectedGift.icon} ${
+      `Sent ${qty > 1 ? `${qty}x ` : ''}${giftToSend.name} to ${recipientName}! ${giftToSend.icon} ${
         nextCombo > 1 ? `(Combo x${nextCombo} 🔥)` : ''
       }`
     );
@@ -1340,6 +1445,31 @@ export const LiveStreamScreen: React.FC = () => {
         currentEvent={activeGiftAnimation}
         onComplete={() => setActiveGiftAnimation(null)}
       />
+
+      {/* Interactive Rapid-Succession Gift Combo Counter HUD */}
+      {!showGiftDrawer && !isBroadcastEnded && (
+        <LiveGiftComboCounter
+          combo={activeGiftCombo}
+          remainingMs={comboRemainingMs}
+          windowMs={GIFT_COMBO_WINDOW_MS}
+          canAffordNext={
+            activeGiftCombo
+              ? coins >= activeGiftCombo.gift.coins * activeGiftCombo.unitQuantity
+              : false
+          }
+          isHostBarLayout={activeRole === 'host'}
+          onRapidSend={() => {
+            if (activeGiftCombo) {
+              handleSendSelectedGift(activeGiftCombo.unitQuantity, activeGiftCombo.gift);
+            }
+          }}
+          onDismiss={() => {
+            comboTrackingRef.current = null;
+            setActiveGiftCombo(null);
+            setComboRemainingMs(0);
+          }}
+        />
+      )}
 
       {/* Top Overlay Bar: Host Profile, Level, VIP, Follow, Viewer Count, Perspective Switcher, Close */}
       <div className="relative z-30 pt-[calc(env(safe-area-inset-top,0px)+10px)] px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
@@ -1859,17 +1989,38 @@ export const LiveStreamScreen: React.FC = () => {
               </div>
 
               <div className="flex items-center gap-2">
-                {giftComboCount > 1 && (
-                  <div className="flex items-center gap-1 px-2 py-1 rounded-xl bg-red-950/80 border border-red-500/50 text-red-300 text-[10px] font-black animate-pulse">
-                    <Flame className="w-3 h-3 text-red-400" />
-                    <span>Streak x{giftComboCount}</span>
-                  </div>
-                )}
+                {activeGiftCombo &&
+                  activeGiftCombo.gift.id === selectedGift.id &&
+                  comboRemainingMs > 0 && (
+                    <div
+                      key={`drawer-combo-${selectedGift.id}-${activeGiftCombo.comboCount}`}
+                      className="animate-combo-pop relative overflow-hidden flex flex-col px-2.5 py-1 rounded-xl bg-gradient-to-r from-red-600/90 via-amber-500/85 to-purple-600/90 border border-yellow-300/60 shadow-[0_0_16px_rgba(245,158,11,0.5)]"
+                    >
+                      <div className="flex items-center gap-1 text-white text-[11px] font-black italic tracking-tight">
+                        <Flame className="w-3.5 h-3.5 text-yellow-200 fill-current animate-pulse" />
+                        <span>COMBO x{activeGiftCombo.comboCount}</span>
+                      </div>
+                      <div className="mt-0.5 h-1 w-full rounded-full bg-black/40 overflow-hidden">
+                        <div
+                          className="h-full bg-yellow-200 transition-[width] duration-100 ease-linear"
+                          style={{
+                            width: `${Math.max(0, Math.min(100, (comboRemainingMs / GIFT_COMBO_WINDOW_MS) * 100))}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
                 <button
                   onClick={() => handleSendSelectedGift()}
                   className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-black text-xs shadow-lg shadow-[#7928CA]/50 hover:brightness-110 active:scale-90 transition-all cursor-pointer flex items-center gap-1.5 shrink-0"
                 >
-                  <span>Send</span>
+                  <span>
+                    {activeGiftCombo &&
+                    activeGiftCombo.gift.id === selectedGift.id &&
+                    comboRemainingMs > 0
+                      ? `Combo x${activeGiftCombo.comboCount + 1}`
+                      : 'Send'}
+                  </span>
                   <span className="text-[10px] opacity-90">
                     ({(selectedGift.coins * giftQuantityMultiplier).toLocaleString()} 💰)
                   </span>

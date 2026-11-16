@@ -41,6 +41,7 @@ import {
 } from 'lucide-react';
 import { auth } from '../services/firebase';
 import { incrementReelViews, addReelComment, subscribeToReelComments } from '../services/reelsService';
+import { audioManager } from '../services/audioManager';
 
 export const MomentsScreen: React.FC = () => {
   const {
@@ -1115,6 +1116,7 @@ export const MomentsScreen: React.FC = () => {
                       context: 'moments',
                       reelId: giftTargetPost.id,
                     });
+                    void audioManager.playGiftSfx(g);
                     setGiftTargetPost(null);
                     showToast(
                       `Sent ${g.name} ${g.icon} to @${giftTargetPost.user.username}! 🎁✨`

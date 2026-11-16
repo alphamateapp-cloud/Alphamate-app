@@ -6,6 +6,8 @@
 
 class GiftSoundEngine {
   private ctx: AudioContext | null = null;
+  private compressor: DynamicsCompressorNode | null = null;
+  private noiseBuffer: AudioBuffer | null = null;
   private isMuted: boolean = false;
 
   constructor() {
@@ -46,10 +48,67 @@ class GiftSoundEngine {
       if (this.ctx && this.ctx.state === 'suspended') {
         this.ctx.resume().catch(() => {});
       }
+      if (this.ctx && !this.compressor) {
+        const comp = this.ctx.createDynamicsCompressor();
+        comp.threshold.setValueAtTime(-16, this.ctx.currentTime);
+        comp.knee.setValueAtTime(18, this.ctx.currentTime);
+        comp.ratio.setValueAtTime(5, this.ctx.currentTime);
+        comp.connect(this.ctx.destination);
+        this.compressor = comp;
+      }
       return this.ctx;
     } catch {
       return null;
     }
+  }
+
+  private getOutputNode(ctx: AudioContext): AudioNode {
+    return this.compressor || ctx.destination;
+  }
+
+  private playFilteredNoise(
+    ctx: AudioContext,
+    opts: {
+      startTime: number;
+      duration: number;
+      filterType: BiquadFilterType;
+      startFreq: number;
+      endFreq: number;
+      peakGain: number;
+    }
+  ) {
+    if (!this.noiseBuffer) {
+      const length = Math.floor(ctx.sampleRate * 1.5);
+      const buffer = ctx.createBuffer(1, length, ctx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i = 0; i < length; i++) {
+        data[i] = Math.random() * 2 - 1;
+      }
+      this.noiseBuffer = buffer;
+    }
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.noiseBuffer;
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = opts.filterType;
+    filter.frequency.setValueAtTime(opts.startFreq, opts.startTime);
+    filter.frequency.exponentialRampToValueAtTime(
+      Math.max(40, opts.endFreq),
+      opts.startTime + opts.duration
+    );
+
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.001, opts.startTime);
+    gain.gain.linearRampToValueAtTime(opts.peakGain, opts.startTime + Math.min(0.12, opts.duration * 0.25));
+    gain.gain.exponentialRampToValueAtTime(0.001, opts.startTime + opts.duration);
+
+    src.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.getOutputNode(ctx));
+
+    src.start(opts.startTime);
+    src.stop(opts.startTime + opts.duration + 0.05);
   }
 
   public play(animationType: string) {
@@ -251,10 +310,19 @@ class GiftSoundEngine {
     turboGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
 
     turboOsc.connect(turboGain);
-    turboGain.connect(ctx.destination);
+    turboGain.connect(this.getOutputNode(ctx));
 
     turboOsc.start(now + 0.2);
     turboOsc.stop(now + 0.75);
+
+    this.playFilteredNoise(ctx, {
+      startTime: now,
+      duration: 1.15,
+      filterType: 'bandpass',
+      startFreq: 260,
+      endFreq: 950,
+      peakGain: 0.14,
+    });
   }
 
   // Royal Yacht Nautical Celebration & Fireworks
@@ -314,10 +382,19 @@ class GiftSoundEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
 
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(this.getOutputNode(ctx));
 
     osc.start(now);
     osc.stop(now + 1.55);
+
+    this.playFilteredNoise(ctx, {
+      startTime: now,
+      duration: 1.35,
+      filterType: 'lowpass',
+      startFreq: 240,
+      endFreq: 1600,
+      peakGain: 0.16,
+    });
   }
 
   // Mythic Dragon Roar & Flame Surge
@@ -335,10 +412,19 @@ class GiftSoundEngine {
     subGain.gain.exponentialRampToValueAtTime(0.001, now + 1.3);
 
     subOsc.connect(subGain);
-    subGain.connect(ctx.destination);
+    subGain.connect(this.getOutputNode(ctx));
 
     subOsc.start(now);
     subOsc.stop(now + 1.35);
+
+    this.playFilteredNoise(ctx, {
+      startTime: now + 0.08,
+      duration: 1.2,
+      filterType: 'bandpass',
+      startFreq: 700,
+      endFreq: 220,
+      peakGain: 0.16,
+    });
 
     // Fire sizzle arpeggio
     const sizzle = [440, 660, 880, 1320];
@@ -354,7 +440,7 @@ class GiftSoundEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, st + 0.6);
 
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
 
       osc.start(st);
       osc.stop(st + 0.65);

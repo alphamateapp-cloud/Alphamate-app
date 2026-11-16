@@ -55,6 +55,8 @@ export interface User {
   coins: number;
   diamonds: number;
   isVerified: boolean;
+  emailOtpVerified?: boolean;
+  emailOtpVerifiedAt?: string;
   familyCrew?: string;
   isHost?: boolean;
   coverImage?: string;

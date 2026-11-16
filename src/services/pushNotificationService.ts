@@ -7,7 +7,14 @@ import {
   PermissionStatus,
 } from '@capacitor/push-notifications';
 import { doc, setDoc } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from './firebase';
+import {
+  db,
+  handleFirestoreError,
+  OperationType,
+  isFirestoreQuotaExceeded,
+  isFirestoreQuotaExceededError,
+  notifyFirestoreQuotaExceeded,
+} from './firebase';
 import {
   NotificationCategoryKey,
   NotificationEventType,
@@ -228,7 +235,7 @@ class PushNotificationService {
     prefs: NotificationPreferences
   ): Promise<NotificationPreferences> {
     const normalized = this.setLocalPreferences(prefs);
-    if (!userId) return normalized;
+    if (!userId || isFirestoreQuotaExceeded()) return normalized;
     const path = `users/${userId}`;
     try {
       await setDoc(
@@ -240,6 +247,10 @@ class PushNotificationService {
         { merge: true }
       );
     } catch (error) {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+        return normalized;
+      }
       handleFirestoreError(error, OperationType.WRITE, path);
     }
     return normalized;
@@ -497,9 +508,23 @@ class PushNotificationService {
     }
   }
 
-  public async syncTokenToUserDoc(userId: string): Promise<boolean> {
-    if (!userId || !this.token) return false;
-    const path = `users/${userId}`;
+  public async syncTokenToUserDoc(userId: string, force = false): Promise<boolean> {
+    if (!userId || !this.token || isFirestoreQuotaExceeded()) return false;
+    const sig = `${userId}:${this.token}`;
+    try {
+      if (!force) {
+        const rawCached = localStorage.getItem('alphamate_push_token_synced');
+        if (rawCached) {
+          const parsed = JSON.parse(rawCached) as { sig?: string; ts?: number };
+          if (parsed?.sig === sig && typeof parsed.ts === 'number' && Date.now() - parsed.ts < 24 * 60 * 60 * 1000) {
+            return true;
+          }
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+
     try {
       await setDoc(
         doc(db, 'users', userId),
@@ -511,8 +536,16 @@ class PushNotificationService {
         },
         { merge: true }
       );
+      try {
+        localStorage.setItem('alphamate_push_token_synced', JSON.stringify({ sig, ts: Date.now() }));
+      } catch {
+        // ignore
+      }
       return true;
     } catch (error) {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+      }
       console.warn('[PushService] Could not sync push token to Firestore:', error);
       return false;
     }

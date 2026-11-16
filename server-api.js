@@ -1201,7 +1201,7 @@ export function createApiApp() {
     return res.json({ success: true, ...snap });
   });
 
-  // 11. Account Permanent Deletion Email OTP (Send & Cryptographic Verify)
+  // 11. Email OTP Delivery & Verification (Sign-Up Verification + Account Deletion)
   const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
   const SMTP_USER = (process.env.SMTP_USER || '').trim();
   const SMTP_PASS = (process.env.SMTP_PASS || '').trim();
@@ -1214,6 +1214,11 @@ export function createApiApp() {
   const SMTP_FROM = (
     process.env.SMTP_FROM ||
     (SMTP_USER ? `Alpha Mate <${SMTP_USER}>` : 'Alpha Mate <no-reply@alphamate.app>')
+  ).trim();
+  const RESEND_FROM = (
+    process.env.RESEND_FROM_EMAIL ||
+    process.env.RESEND_FROM ||
+    SMTP_FROM
   ).trim();
   const OTP_HMAC_SECRET = (
     process.env.OTP_HMAC_SECRET ||
@@ -1228,8 +1233,17 @@ export function createApiApp() {
   const OTP_TTL_MS = 10 * 60 * 1000;
   const OTP_COOLDOWN_MS = 30 * 1000;
   const OTP_MAX_ATTEMPTS = 5;
-  const otpCooldownMap = new Map(); // uid -> lastSentMs
+  const otpCooldownMap = new Map(); // scopeKey -> lastSentMs
   const otpAttemptMap = new Map(); // nonce -> { count, exp }
+
+  function escapeHtmlText(value) {
+    return String(value || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
 
   function maskEmailAddress(email) {
     const [local, domain] = String(email || '').split('@');
@@ -1276,6 +1290,100 @@ export function createApiApp() {
     }
   }
 
+  function hasEmailOtpProviderConfigured() {
+    return Boolean(RESEND_API_KEY || (SMTP_HOST && SMTP_USER && SMTP_PASS));
+  }
+
+  async function sendTransactionalOtpEmail({ toEmail, subject, text, html }) {
+    if (RESEND_API_KEY) {
+      const resendRes = await fetchWithTimeout(
+        'https://api.resend.com/emails',
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${RESEND_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: RESEND_FROM,
+            to: [toEmail],
+            subject,
+            text,
+            html,
+          }),
+        },
+        10000
+      );
+      if (!resendRes.ok) {
+        const errPayload = await resendRes.json().catch(() => null);
+        const errText = errPayload?.message || errPayload?.error || (await resendRes.text().catch(() => ''));
+        const err = new Error(`Resend email delivery failed (${resendRes.status}): ${String(errText).slice(0, 180)}`);
+        err.statusCode = resendRes.status >= 400 && resendRes.status < 500 ? 502 : 502;
+        throw err;
+      }
+      const resendData = await resendRes.json().catch(() => ({}));
+      return { provider: 'resend', messageId: resendData?.id || null };
+    }
+
+    if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
+      const transporter = nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: SMTP_SECURE,
+        auth: {
+          user: SMTP_USER,
+          pass: SMTP_PASS,
+        },
+      });
+      await transporter.sendMail({
+        from: SMTP_FROM,
+        to: toEmail,
+        subject,
+        text,
+        html,
+      });
+      return { provider: 'smtp', messageId: null };
+    }
+
+    const err = new Error(
+      'Email OTP delivery is not configured on the backend server. Set RESEND_API_KEY or SMTP_USER & SMTP_PASS.'
+    );
+    err.statusCode = 503;
+    err.code = 'EMAIL_OTP_NOT_CONFIGURED';
+    throw err;
+  }
+
+  async function sendSignupOtpEmail({ toEmail, otpCode, displayName }) {
+    const safeName = escapeHtmlText(displayName || 'Alpha Mate');
+    const subject = `Your Alpha Mate Sign-Up Verification Code: ${otpCode}`;
+    const text = [
+      `Welcome to Alpha Mate${displayName ? `, ${displayName}` : ''}!`,
+      '',
+      `Your 6-digit email verification code is: ${otpCode}`,
+      '',
+      'Enter this code in the Alpha Mate app to verify your email address and activate your account.',
+      'This code expires in 10 minutes. Never share this code with anyone.',
+      '',
+      'If you did not create an Alpha Mate account, you can safely ignore this email.',
+    ].join('\n');
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#09070F; color:#F4F4F5; padding:28px; border-radius:16px; max-width:520px; margin:0 auto; border:1px solid #2E1A47;">
+        <div style="font-size:11px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:#C084FC; margin-bottom:8px;">ALPHA MATE</div>
+        <h2 style="margin:0 0 8px; color:#FFFFFF; font-size:20px;">Verify Your Email Address</h2>
+        <p style="margin:0 0 18px; color:#A1A1AA; font-size:14px; line-height:1.5;">
+          Hi <strong style="color:#FFFFFF;">${safeName}</strong>, use the 6-digit verification code below to finish setting up your Alpha Mate account. This code expires in <strong>10 minutes</strong>.
+        </p>
+        <div style="background:#160D2B; border:1px solid #A855F7; border-radius:12px; padding:18px; text-align:center; margin-bottom:18px;">
+          <span style="font-family:monospace; font-size:32px; font-weight:800; letter-spacing:8px; color:#F9A8D4;">${otpCode}</span>
+        </div>
+        <p style="margin:0; color:#71717A; font-size:12px; line-height:1.5;">
+          Never share this verification code with anyone. If you did not sign up for Alpha Mate, you can safely ignore this email.
+        </p>
+      </div>
+    `;
+    return sendTransactionalOtpEmail({ toEmail, subject, text, html });
+  }
+
   async function sendDeletionOtpEmail({ toEmail, otpCode }) {
     const subject = `Alpha Mate Account Deletion Verification Code: ${otpCode}`;
     const text = [
@@ -1305,60 +1413,260 @@ export function createApiApp() {
         </p>
       </div>
     `;
+    return sendTransactionalOtpEmail({ toEmail, subject, text, html });
+  }
 
-    if (RESEND_API_KEY) {
-      const resendRes = await fetchWithTimeout(
-        'https://api.resend.com/emails',
+  let identityToolkitTokenCache = null;
+  let identityToolkitTokenExpiresAt = 0;
+
+  async function markFirebaseAuthEmailVerified(uid) {
+    if (!FIREBASE_SERVICE_ACCOUNT_JSON || !uid) return false;
+    try {
+      let accessToken =
+        identityToolkitTokenCache && Date.now() < identityToolkitTokenExpiresAt - 60_000
+          ? identityToolkitTokenCache
+          : null;
+      if (!accessToken) {
+        const account = readServiceAccount();
+        const now = Math.floor(Date.now() / 1000);
+        const unsigned = `${base64UrlJson({ alg: 'RS256', typ: 'JWT' })}.${base64UrlJson({
+          iss: account.client_email,
+          scope: 'https://www.googleapis.com/auth/identitytoolkit',
+          aud: 'https://oauth2.googleapis.com/token',
+          iat: now,
+          exp: now + 3600,
+        })}`;
+        const { createSign } = await import('node:crypto');
+        const signer = createSign('RSA-SHA256');
+        signer.update(unsigned);
+        signer.end();
+        const assertion = `${unsigned}.${signer.sign(account.private_key, 'base64url')}`;
+        const tokenResp = await fetchWithTimeout(
+          'https://oauth2.googleapis.com/token',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+              grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+              assertion,
+            }).toString(),
+          },
+          6000
+        );
+        const tokenPayload = await tokenResp.json().catch(() => ({}));
+        if (!tokenResp.ok || !tokenPayload.access_token) return false;
+        accessToken = tokenPayload.access_token;
+        identityToolkitTokenCache = accessToken;
+        identityToolkitTokenExpiresAt = Date.now() + Number(tokenPayload.expires_in || 3600) * 1000;
+      }
+
+      const updateResp = await fetchWithTimeout(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/accounts:update`,
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${RESEND_API_KEY}`,
+            Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            from: SMTP_FROM,
-            to: [toEmail],
-            subject,
-            text,
-            html,
+            localId: uid,
+            emailVerified: true,
           }),
         },
-        10000
+        6000
       );
-      if (!resendRes.ok) {
-        const errText = await resendRes.text().catch(() => '');
-        throw new Error(`Resend email delivery failed (${resendRes.status}): ${errText.slice(0, 180)}`);
-      }
-      return { provider: 'resend' };
+      return updateResp.ok;
+    } catch (err) {
+      console.warn('[Signup OTP] Optional Identity Toolkit emailVerified sync skipped:', err?.message || err);
+      return false;
     }
-
-    if (SMTP_HOST && SMTP_USER && SMTP_PASS) {
-      const transporter = nodemailer.createTransport({
-        host: SMTP_HOST,
-        port: SMTP_PORT,
-        secure: SMTP_SECURE,
-        auth: {
-          user: SMTP_USER,
-          pass: SMTP_PASS,
-        },
-      });
-      await transporter.sendMail({
-        from: SMTP_FROM,
-        to: toEmail,
-        subject,
-        text,
-        html,
-      });
-      return { provider: 'smtp' };
-    }
-
-    const err = new Error(
-      'Email OTP delivery is not configured on the backend server. Set RESEND_API_KEY or SMTP_USER & SMTP_PASS.'
-    );
-    err.statusCode = 503;
-    err.code = 'EMAIL_OTP_NOT_CONFIGURED';
-    throw err;
   }
+
+  app.post('/api/auth/signup-otp/send', requireFirebaseAuth, async (req, res) => {
+    try {
+      pruneOtpMaps();
+      const uid = req.firebaseUser.uid;
+      const registeredEmail = (req.firebaseUser.email || '').trim().toLowerCase();
+      if (!registeredEmail) {
+        return res.status(400).json({
+          success: false,
+          error: 'No email address was found on this Firebase account.',
+        });
+      }
+
+      const requestedEmail = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      if (requestedEmail && requestedEmail !== registeredEmail) {
+        return res.status(403).json({
+          success: false,
+          error: 'OTP can only be sent to your registered sign-up email address.',
+        });
+      }
+
+      if (req.firebaseUser.emailVerified === true) {
+        return res.json({
+          success: true,
+          alreadyVerified: true,
+          emailMasked: maskEmailAddress(registeredEmail),
+        });
+      }
+
+      if (!hasEmailOtpProviderConfigured()) {
+        return res.status(503).json({
+          success: false,
+          code: 'EMAIL_OTP_NOT_CONFIGURED',
+          error:
+            'Resend Email OTP delivery is not configured on the backend server. Set RESEND_API_KEY (or SMTP credentials) on your backend.',
+        });
+      }
+
+      const cooldownKey = `signup:${uid}`;
+      const now = Date.now();
+      const lastSent = otpCooldownMap.get(cooldownKey) || 0;
+      const remainingMs = OTP_COOLDOWN_MS - (now - lastSent);
+      if (remainingMs > 0) {
+        const waitSeconds = Math.ceil(remainingMs / 1000);
+        return res.status(429).json({
+          success: false,
+          code: 'OTP_COOLDOWN',
+          retryAfterSeconds: waitSeconds,
+          error: `Please wait ${waitSeconds}s before requesting a new verification code.`,
+        });
+      }
+
+      const displayName =
+        typeof req.body?.displayName === 'string' ? req.body.displayName.trim().slice(0, 80) : '';
+      const otpCode = String(crypto.randomInt(100000, 1000000));
+      const nonce = crypto.randomBytes(16).toString('hex');
+      const expiresAt = now + OTP_TTL_MS;
+      const otpHash = hashOtpCode(uid, nonce, otpCode);
+      const challengeToken = signOtpPayload({
+        purpose: 'signup_email_verification',
+        uid,
+        email: registeredEmail,
+        nonce,
+        otpHash,
+        exp: expiresAt,
+      });
+
+      const delivery = await sendSignupOtpEmail({
+        toEmail: registeredEmail,
+        otpCode,
+        displayName,
+      });
+      otpCooldownMap.set(cooldownKey, now);
+      otpAttemptMap.set(nonce, { count: 0, exp: expiresAt });
+
+      return res.json({
+        success: true,
+        emailMasked: maskEmailAddress(registeredEmail),
+        challengeToken,
+        expiresAt,
+        expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        cooldownSeconds: Math.floor(OTP_COOLDOWN_MS / 1000),
+        provider: delivery.provider,
+      });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      console.error('[Signup OTP] Send failed:', error.message);
+      return res.status(status).json({
+        success: false,
+        code: error.code || undefined,
+        error: error.message || 'Failed to send sign-up verification OTP email.',
+      });
+    }
+  });
+
+  app.post('/api/auth/signup-otp/verify', requireFirebaseAuth, async (req, res) => {
+    try {
+      pruneOtpMaps();
+      const uid = req.firebaseUser.uid;
+      const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken.trim() : '';
+      const otpInput = typeof req.body?.otp === 'string' ? req.body.otp.replace(/\s+/g, '') : String(req.body?.otp || '').trim();
+
+      if (!challengeToken || !/^\d{6}$/.test(otpInput)) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please enter the 6-digit OTP sent to your email.',
+        });
+      }
+
+      const payload = verifySignedOtpPayload(challengeToken);
+      if (!payload || payload.purpose !== 'signup_email_verification') {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid or expired OTP session. Please tap Resend OTP Code.',
+        });
+      }
+
+      if (payload.uid !== uid) {
+        return res.status(403).json({
+          success: false,
+          error: 'This OTP challenge does not belong to the signed-in account.',
+        });
+      }
+
+      if (!payload.exp || Date.now() > Number(payload.exp)) {
+        return res.status(400).json({
+          success: false,
+          code: 'OTP_EXPIRED',
+          error: 'Verification OTP has expired. Please request a new 6-digit code.',
+        });
+      }
+
+      const attempts = otpAttemptMap.get(payload.nonce) || { count: 0, exp: Number(payload.exp) };
+      if (attempts.count >= OTP_MAX_ATTEMPTS) {
+        return res.status(429).json({
+          success: false,
+          code: 'OTP_MAX_ATTEMPTS',
+          error: 'Too many incorrect OTP attempts. Please request a fresh verification code.',
+        });
+      }
+
+      const computedHash = hashOtpCode(uid, payload.nonce, otpInput);
+      const a = Buffer.from(computedHash, 'hex');
+      const b = Buffer.from(String(payload.otpHash || ''), 'hex');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        attempts.count += 1;
+        otpAttemptMap.set(payload.nonce, attempts);
+        const remainingAttempts = Math.max(0, OTP_MAX_ATTEMPTS - attempts.count);
+        return res.status(400).json({
+          success: false,
+          code: 'OTP_INVALID',
+          remainingAttempts,
+          error:
+            remainingAttempts > 0
+              ? `Incorrect OTP code. ${remainingAttempts} attempt${remainingAttempts === 1 ? '' : 's'} remaining.`
+              : 'Too many incorrect OTP attempts. Please request a fresh verification code.',
+        });
+      }
+
+      otpAttemptMap.delete(payload.nonce);
+      const firebaseAuthSynced = await markFirebaseAuthEmailVerified(uid);
+      const verifiedAtIso = new Date().toISOString();
+      const signupVerificationToken = signOtpPayload({
+        purpose: 'signup_email_verified',
+        uid,
+        email: payload.email,
+        verifiedAt: verifiedAtIso,
+        exp: Date.now() + OTP_TTL_MS,
+      });
+
+      return res.json({
+        success: true,
+        uid,
+        email: payload.email,
+        emailVerifiedAt: verifiedAtIso,
+        firebaseAuthSynced,
+        signupVerificationToken,
+      });
+    } catch (error) {
+      console.error('[Signup OTP] Verify failed:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to verify sign-up OTP code.',
+      });
+    }
+  });
 
   app.post('/api/account/deletion-otp/send', requireFirebaseAuth, async (req, res) => {
     try {
@@ -1380,8 +1688,7 @@ export function createApiApp() {
         });
       }
 
-      const hasDeliveryProvider = Boolean(RESEND_API_KEY || (SMTP_HOST && SMTP_USER && SMTP_PASS));
-      if (!hasDeliveryProvider) {
+      if (!hasEmailOtpProviderConfigured()) {
         return res.status(503).json({
           success: false,
           code: 'EMAIL_OTP_NOT_CONFIGURED',

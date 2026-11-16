@@ -17,7 +17,9 @@ import {
 import {
   auth,
   db,
-  handleFirestoreError,
+  handleBackgroundWriteError,
+  handleSnapshotListenerError,
+  isFirestoreQuotaExceeded,
   OperationType,
 } from './firebase';
 
@@ -583,17 +585,17 @@ export function subscribeToUserBadgeStats(
       });
     },
     (error) => {
-      handleFirestoreError(error, OperationType.GET, path);
+      handleSnapshotListenerError(error, OperationType.GET, path);
     }
   );
 }
 
 export async function syncUserBadgeStatsToFirestore(
   stats: UserHistoricalStats
-): Promise<void> {
+): Promise<boolean> {
   const authUid = auth.currentUser?.uid;
-  if (!authUid || !stats?.uid || stats.uid !== authUid || !VALID_ID_RE.test(authUid)) {
-    return;
+  if (!authUid || !stats?.uid || stats.uid !== authUid || !VALID_ID_RE.test(authUid) || isFirestoreQuotaExceeded()) {
+    return false;
   }
 
   const path = `users/${authUid}/badgeStats/summary`;
@@ -624,7 +626,9 @@ export async function syncUserBadgeStatsToFirestore(
     await setDoc(doc(db, 'users', authUid, 'badgeStats', 'summary'), payload, {
       merge: true,
     });
+    return true;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleBackgroundWriteError(error, OperationType.WRITE, path);
+    return false;
   }
 }

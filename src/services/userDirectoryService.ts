@@ -9,7 +9,17 @@ import {
   setDoc,
   where,
 } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType, sendFirestoreNotification } from './firebase';
+import {
+  auth,
+  clearFirestoreQuotaExceeded,
+  db,
+  handleFirestoreError,
+  isFirestoreQuotaExceeded,
+  isFirestoreQuotaExceededError,
+  notifyFirestoreQuotaExceeded,
+  OperationType,
+  sendFirestoreNotification,
+} from './firebase';
 import { User } from '../types';
 
 const DEFAULT_AVATAR =
@@ -60,31 +70,94 @@ export function mapFirestoreDocToUser(docId: string, data: Record<string, any>):
   };
 }
 
+const REAL_USERS_CACHE_KEY = 'alphamate_real_users_cache_v1';
+const REAL_USERS_CACHE_TTL_MS = 10 * 60 * 1000;
+let memoryUsersCache: { users: User[]; fetchedAt: number } | null = null;
+
+function readCachedRealUsers(): { users: User[]; fetchedAt: number } | null {
+  if (memoryUsersCache && memoryUsersCache.users.length > 0) {
+    return memoryUsersCache;
+  }
+  try {
+    const raw = localStorage.getItem(REAL_USERS_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed?.users) && typeof parsed?.fetchedAt === 'number') {
+      memoryUsersCache = { users: parsed.users, fetchedAt: parsed.fetchedAt };
+      return memoryUsersCache;
+    }
+  } catch {
+    // ignore cache parse errors
+  }
+  return null;
+}
+
+function writeCachedRealUsers(users: User[]): void {
+  const entry = { users, fetchedAt: Date.now() };
+  memoryUsersCache = entry;
+  try {
+    localStorage.setItem(REAL_USERS_CACHE_KEY, JSON.stringify(entry));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
 /**
- * Subscribe to real registered Firebase users in Firestore in real time.
+ * Load registered Firebase users using a 10-minute local/memory cache instead of
+ * holding an expensive 250-document real-time onSnapshot listener on every device.
  */
 export function subscribeToRealUsers(
   onUpdate: (users: User[]) => void,
   onError?: (err: Error) => void,
-  maxUsers = 250
+  maxUsersOrOptions: number | { maxUsers?: number; forceRefresh?: boolean } = 80
 ): () => void {
-  const path = 'users';
-  const q = query(collection(db, path), limit(maxUsers));
-  return onSnapshot(
-    q,
-    (snapshot) => {
+  const maxUsers =
+    typeof maxUsersOrOptions === 'number'
+      ? Math.min(maxUsersOrOptions, 100)
+      : Math.min(maxUsersOrOptions?.maxUsers ?? 80, 100);
+  const forceRefresh =
+    typeof maxUsersOrOptions === 'object' ? Boolean(maxUsersOrOptions?.forceRefresh) : false;
+
+  const cached = readCachedRealUsers();
+  if (cached && cached.users.length > 0) {
+    onUpdate(cached.users);
+  }
+
+  const isCacheFresh =
+    Boolean(cached && cached.users.length > 0 && Date.now() - cached.fetchedAt < REAL_USERS_CACHE_TTL_MS);
+
+  if (!forceRefresh && (isCacheFresh || isFirestoreQuotaExceeded())) {
+    return () => {};
+  }
+
+  let cancelled = false;
+  const q = query(collection(db, 'users'), limit(maxUsers));
+  getDocs(q)
+    .then((snapshot) => {
+      if (cancelled) return;
+      clearFirestoreQuotaExceeded();
       const parsed: User[] = [];
       snapshot.forEach((docSnap) => {
         const user = mapFirestoreDocToUser(docSnap.id, docSnap.data() as Record<string, any>);
         if (user) parsed.push(user);
       });
       parsed.sort((a, b) => a.displayName.localeCompare(b.displayName));
+      writeCachedRealUsers(parsed);
       onUpdate(parsed);
-    },
-    (err) => {
-      onError?.(err);
-    }
-  );
+    })
+    .catch((err) => {
+      if (cancelled) return;
+      if (isFirestoreQuotaExceededError(err)) {
+        notifyFirestoreQuotaExceeded();
+        console.warn('Firestore quota exceeded fetching user directory; keeping cached users.');
+        return;
+      }
+      onError?.(err as Error);
+    });
+
+  return () => {
+    cancelled = true;
+  };
 }
 
 /**
@@ -102,7 +175,7 @@ export async function searchAllRealUsers(
   const term = rawQuery.trim().toLowerCase().replace(/^@/, '');
   const excludeUid = options?.excludeUid || auth.currentUser?.uid || '';
   const maxResults = options?.maxResults || 100;
-  const cached = options?.cachedUsers || [];
+  const cached = options?.cachedUsers || readCachedRealUsers()?.users || [];
 
   const matchesTerm = (u: User) => {
     if (!term) return true;
@@ -121,15 +194,22 @@ export async function searchAllRealUsers(
     }
   });
 
-  if (auth.currentUser?.uid) {
+  if (auth.currentUser?.uid && !isFirestoreQuotaExceeded()) {
     try {
       const usersRef = collection(db, 'users');
+      const handleSearchErr = (err: unknown) => {
+        if (isFirestoreQuotaExceededError(err)) {
+          notifyFirestoreQuotaExceeded();
+        }
+        return null;
+      };
+
       if (term.length >= 1) {
         const end = `${term}\uf8ff`;
         const prefixSnaps = await Promise.all([
-          getDocs(query(usersRef, where('displayNameLower', '>=', term), where('displayNameLower', '<=', end), limit(50))).catch(() => null),
-          getDocs(query(usersRef, where('usernameLower', '>=', term), where('usernameLower', '<=', end), limit(50))).catch(() => null),
-          getDocs(query(usersRef, where('uniqueIdLower', '>=', term), where('uniqueIdLower', '<=', end), limit(50))).catch(() => null),
+          getDocs(query(usersRef, where('displayNameLower', '>=', term), where('displayNameLower', '<=', end), limit(30))).catch(handleSearchErr),
+          getDocs(query(usersRef, where('usernameLower', '>=', term), where('usernameLower', '<=', end), limit(30))).catch(handleSearchErr),
+          getDocs(query(usersRef, where('uniqueIdLower', '>=', term), where('uniqueIdLower', '<=', end), limit(30))).catch(handleSearchErr),
         ]);
         prefixSnaps.forEach((snap) => {
           snap?.forEach((d) => {
@@ -140,8 +220,8 @@ export async function searchAllRealUsers(
         });
       }
 
-      if (byId.size < maxResults) {
-        const broadSnap = await getDocs(query(usersRef, limit(250))).catch(() => null);
+      if (!isFirestoreQuotaExceeded() && ((term && byId.size < 10) || (!term && byId.size === 0))) {
+        const broadSnap = await getDocs(query(usersRef, limit(60))).catch(handleSearchErr);
         broadSnap?.forEach((d) => {
           if (d.id === excludeUid) return;
           const user = mapFirestoreDocToUser(d.id, d.data() as Record<string, any>);
@@ -151,6 +231,9 @@ export async function searchAllRealUsers(
         });
       }
     } catch (err) {
+      if (isFirestoreQuotaExceededError(err)) {
+        notifyFirestoreQuotaExceeded();
+      }
       console.warn('Firestore user directory search warning:', err);
     }
   }
@@ -214,7 +297,10 @@ export function subscribeToMyFollowEdges(
       followingIds = snap.docs.map((d) => String((d.data() as any).targetId || '')).filter(Boolean);
       emit();
     },
-    (err) => console.warn('Follow edges (following) listener error:', err)
+    (err) => {
+      if (isFirestoreQuotaExceededError(err)) notifyFirestoreQuotaExceeded();
+      console.warn('Follow edges (following) listener error:', err);
+    }
   );
 
   const unsub2 = onSnapshot(
@@ -223,7 +309,10 @@ export function subscribeToMyFollowEdges(
       followerIds = snap.docs.map((d) => String((d.data() as any).followerId || '')).filter(Boolean);
       emit();
     },
-    (err) => console.warn('Follow edges (followers) listener error:', err)
+    (err) => {
+      if (isFirestoreQuotaExceededError(err)) notifyFirestoreQuotaExceeded();
+      console.warn('Follow edges (followers) listener error:', err);
+    }
   );
 
   return () => {

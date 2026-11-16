@@ -18,7 +18,7 @@ import {
   increment,
   getDocs,
 } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import { auth, db, handleFirestoreError, handleSnapshotListenerError, OperationType } from './firebase';
 
 const ENV_WORKER_URL = ((import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || '').trim().replace(/\/$/, '');
 const ENV_RAILWAY_URL = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim().replace(/\/$/, '');
@@ -761,8 +761,8 @@ export function subscribeToActiveReels(
     },
     (error) => {
       console.warn('Reels real-time listener error:', error);
-      // If index is building or permissions error occurs
-      handleFirestoreError(error, OperationType.LIST, path);
+      // If index is building, quota exhausted, or permissions error occurs
+      handleSnapshotListenerError(error, OperationType.LIST, path);
     }
   );
 }

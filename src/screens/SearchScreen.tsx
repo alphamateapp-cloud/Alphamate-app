@@ -40,12 +40,19 @@ export const SearchScreen: React.FC = () => {
 
   useEffect(() => {
     let cancelled = false;
+    const trimmed = query.trim();
+    if (!trimmed && realUsers.length > 0 && userSyncRefreshEpoch === 0) {
+      setRemoteMatches([]);
+      setIsSearching(false);
+      return;
+    }
+
     setIsSearching(true);
     const timer = window.setTimeout(() => {
       searchAllRealUsers(query, {
         excludeUid: currentUser.id,
         cachedUsers: realUsers,
-        maxResults: 120,
+        maxResults: 80,
       })
         .then((results) => {
           if (!cancelled) {
@@ -58,7 +65,7 @@ export const SearchScreen: React.FC = () => {
         .finally(() => {
           if (!cancelled) setIsSearching(false);
         });
-    }, query.trim() ? 180 : 0);
+    }, trimmed ? 220 : 0);
 
     return () => {
       cancelled = true;

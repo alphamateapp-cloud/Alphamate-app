@@ -17,7 +17,9 @@ import {
 import {
   auth,
   db,
-  handleFirestoreError,
+  handleBackgroundWriteError,
+  handleSnapshotListenerError,
+  isFirestoreQuotaExceeded,
   OperationType,
 } from './firebase';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
@@ -477,7 +479,7 @@ export function subscribeToMonthlyLeaderboard(
       onUpdate(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      handleSnapshotListenerError(error, OperationType.LIST, path);
     }
   );
 }
@@ -538,7 +540,7 @@ export async function recordLeaderboardGiftReceived(params: {
   giftCoins: number;
   hostDiamonds: number;
 }): Promise<void> {
-  if (!auth.currentUser?.uid) return;
+  if (!auth.currentUser?.uid || isFirestoreQuotaExceeded()) return;
   const recipientId = String(params.recipientId || '').trim();
   if (!recipientId || !VALID_ID_RE.test(recipientId)) return;
 
@@ -611,7 +613,7 @@ export async function recordLeaderboardGiftReceived(params: {
       }
     });
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleBackgroundWriteError(error, OperationType.WRITE, path);
   }
 }
 
@@ -620,7 +622,7 @@ export async function syncUserTimeSpentToLeaderboard(
   deltaMinutes: number
 ): Promise<void> {
   const uid = auth.currentUser?.uid;
-  if (!uid || !VALID_ID_RE.test(uid)) return;
+  if (!uid || !VALID_ID_RE.test(uid) || isFirestoreQuotaExceeded()) return;
 
   const addMins = Math.max(0, Math.round(Number(deltaMinutes) || 0));
   const monthKey = getCurrentMonthKey();
@@ -711,7 +713,7 @@ export async function syncUserTimeSpentToLeaderboard(
       }
     });
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+    handleBackgroundWriteError(error, OperationType.WRITE, path);
   }
 }
 

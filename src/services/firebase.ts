@@ -47,6 +47,9 @@ import { sanitizeAvatarString } from '../utils/imageCompressor';
 // Initialize Firebase App
 const app = !getApps().length ? initializeApp(firebaseConfig) : getApp();
 
+export const FIRESTORE_PROJECT_ID = firebaseConfig.projectId;
+export const FIRESTORE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
+
 // CRITICAL: The app will break without passing firestoreDatabaseId
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 // Use durable IndexedDB persistence in Capacitor Android so the Firebase JS SDK
@@ -113,11 +116,72 @@ export interface FirestoreErrorInfo {
   };
 }
 
+export function isFirestoreQuotaExceededError(error: unknown): boolean {
+  if (!error) return false;
+  const code = String((error as any)?.code || '').toLowerCase();
+  const message = String(error instanceof Error ? error.message : error).toLowerCase();
+  return (
+    code === 'resource-exhausted' ||
+    code === 'firestore/resource-exhausted' ||
+    message.includes('quota exceeded') ||
+    message.includes('resource-exhausted') ||
+    message.includes('resource exhausted')
+  );
+}
+
+let firestoreQuotaExceededState = false;
+const firestoreQuotaListeners = new Set<(exceeded: boolean) => void>();
+
+export function isFirestoreQuotaExceeded(): boolean {
+  return firestoreQuotaExceededState;
+}
+
+export function notifyFirestoreQuotaExceeded(): void {
+  if (firestoreQuotaExceededState) return;
+  firestoreQuotaExceededState = true;
+  firestoreQuotaListeners.forEach((cb) => {
+    try {
+      cb(true);
+    } catch {
+      // ignore subscriber errors
+    }
+  });
+}
+
+export function clearFirestoreQuotaExceeded(): void {
+  if (!firestoreQuotaExceededState) return;
+  firestoreQuotaExceededState = false;
+  firestoreQuotaListeners.forEach((cb) => {
+    try {
+      cb(false);
+    } catch {
+      // ignore subscriber errors
+    }
+  });
+}
+
+export function subscribeToFirestoreQuotaExceeded(
+  callback: (exceeded: boolean) => void
+): () => void {
+  firestoreQuotaListeners.add(callback);
+  try {
+    callback(firestoreQuotaExceededState);
+  } catch {
+    // ignore
+  }
+  return () => {
+    firestoreQuotaListeners.delete(callback);
+  };
+}
+
 export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
 ): never {
+  if (isFirestoreQuotaExceededError(error)) {
+    notifyFirestoreQuotaExceeded();
+  }
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -139,15 +203,47 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+export function handleSnapshotListenerError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): void {
+  if (isFirestoreQuotaExceededError(error)) {
+    notifyFirestoreQuotaExceeded();
+    console.warn(`Firestore Quota Exceeded on listener (${path || 'unknown'}); keeping cached data active.`);
+    return;
+  }
+  handleFirestoreError(error, operationType, path);
+}
+
+export function handleBackgroundWriteError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): void {
+  if (isFirestoreQuotaExceededError(error)) {
+    notifyFirestoreQuotaExceeded();
+    console.warn(`Firestore Quota Exceeded on background write (${path || 'unknown'}); pausing non-essential syncs.`);
+    return;
+  }
+  handleFirestoreError(error, operationType, path);
+}
+
 // =========================================================================
 // CONNECTION TEST ON APP BOOT
 // =========================================================================
 export async function testConnection(): Promise<boolean> {
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
+    clearFirestoreQuotaExceeded();
     console.log('Firebase Firestore connection verified.');
     return true;
   } catch (error) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      console.warn('Firestore daily quota currently reached:', (error as Error)?.message || error);
+      return false;
+    }
     if (error instanceof Error && error.message.includes('the client is offline')) {
       console.error('Please check your Firebase configuration: client is offline.');
     } else {
@@ -246,12 +342,16 @@ export async function signInWithEmail(email: string, pass: string) {
 }
 
 /**
- * Register with Email & Password and send verification email
+ * Register with Email & Password (optionally skip Firebase verification link when using Resend Email OTP)
  */
-export async function registerWithEmail(email: string, pass: string) {
+export async function registerWithEmail(
+  email: string,
+  pass: string,
+  options?: { skipVerificationEmail?: boolean }
+) {
   try {
     const result = await createUserWithEmailAndPassword(auth, email, pass);
-    if (result.user && !result.user.emailVerified) {
+    if (!options?.skipVerificationEmail && result.user && !result.user.emailVerified) {
       await sendEmailVerification(result.user).catch((err) => {
         console.warn('Could not send verification email:', err);
       });
@@ -320,8 +420,12 @@ function stripUndefinedFields<T>(value: T): T {
 /**
  * Save / Update User Profile in Firestore
  */
-export async function syncUserProfileToFirestore(userData: any) {
+export async function syncUserProfileToFirestore(
+  userData: any,
+  options?: { background?: boolean }
+) {
   if (!userData?.id) return;
+  if (options?.background && isFirestoreQuotaExceeded()) return;
   const path = `users/${userData.id}`;
   try {
     const { password: _omitPassword, coverImage, ...restUser } = userData;
@@ -342,6 +446,10 @@ export async function syncUserProfileToFirestore(userData: any) {
     const sanitizedProfile = stripUndefinedFields(rawProfile);
     await setDoc(doc(db, 'users', userData.id), sanitizedProfile, { merge: true });
   } catch (error) {
+    if (options?.background) {
+      handleBackgroundWriteError(error, OperationType.WRITE, path);
+      return;
+    }
     handleFirestoreError(error, OperationType.WRITE, path);
   }
 }
@@ -355,6 +463,11 @@ export async function getUserProfileFromFirestore(userId: string) {
     const snap = await getDoc(doc(db, 'users', userId));
     return snap.exists() ? snap.data() : null;
   } catch (error) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      console.warn(`Firestore quota reached loading profile (${path}); falling back to local cache.`);
+      throw error;
+    }
     handleFirestoreError(error, OperationType.GET, path);
   }
 }
@@ -372,7 +485,7 @@ export function subscribeToUserProfile(userId: string, onUpdate: (data: any) => 
       }
     },
     (error) => {
-      handleFirestoreError(error, OperationType.GET, path);
+      handleSnapshotListenerError(error, OperationType.GET, path);
     }
   );
 }
@@ -500,7 +613,7 @@ export function subscribeToPartyRooms(onUpdate: (rooms: any[]) => void) {
       onUpdate(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      handleSnapshotListenerError(error, OperationType.LIST, path);
     }
   );
 }
@@ -735,7 +848,7 @@ export async function updateLiveStreamFields(streamId: string, fields: Record<st
  * Heartbeat update so stale/crashed streams do not leave ghost cards
  */
 export async function updateLiveStreamHeartbeat(streamId: string) {
-  if (!streamId) return;
+  if (!streamId || isFirestoreQuotaExceeded()) return;
   const path = `liveStreams/${streamId}`;
   try {
     const nowMs = Date.now();
@@ -748,6 +861,10 @@ export async function updateLiveStreamHeartbeat(streamId: string) {
     });
   } catch (error: any) {
     if (error?.code === 'not-found') return;
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
     if (error?.code === 'permission-denied') {
       handleFirestoreError(error, OperationType.UPDATE, path);
     }
@@ -811,7 +928,7 @@ export function subscribeToLiveStreams(onUpdate: (streams: any[]) => void) {
       onUpdate(activeStreams);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      handleSnapshotListenerError(error, OperationType.LIST, path);
     }
   );
 }
@@ -859,7 +976,7 @@ export async function sendLiveStreamMessage(streamId: string, message: any) {
 }
 
 export async function joinLiveStreamViewer(streamId: string, viewer: any) {
-  if (!streamId || !auth.currentUser?.uid) return;
+  if (!streamId || !auth.currentUser?.uid || isFirestoreQuotaExceeded()) return;
   const uid = auth.currentUser.uid;
   const path = `liveStreams/${streamId}/viewers/${uid}`;
   try {
@@ -884,6 +1001,10 @@ export async function joinLiveStreamViewer(streamId: string, viewer: any) {
       { merge: true }
     );
   } catch (error: any) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
     if (error?.code === 'permission-denied') {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
@@ -892,11 +1013,13 @@ export async function joinLiveStreamViewer(streamId: string, viewer: any) {
 
 export async function leaveLiveStreamViewer(streamId: string, userId?: string) {
   const uid = userId || auth.currentUser?.uid;
-  if (!streamId || !uid) return;
+  if (!streamId || !uid || isFirestoreQuotaExceeded()) return;
   try {
     await deleteDoc(doc(db, 'liveStreams', streamId, 'viewers', uid));
-  } catch {
-    // ignore cleanup errors
+  } catch (error) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+    }
   }
 }
 
@@ -1184,7 +1307,7 @@ export function subscribeToAccountDeletionRequests(onUpdate: (items: any[]) => v
       onUpdate(items);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      handleSnapshotListenerError(error, OperationType.LIST, path);
     }
   );
 }
@@ -1438,7 +1561,7 @@ export function subscribeToUserNotifications(
       onUpdate(list);
     },
     (error) => {
-      handleFirestoreError(error, OperationType.LIST, path);
+      handleSnapshotListenerError(error, OperationType.LIST, path);
     }
   );
 }
@@ -1695,7 +1818,7 @@ export function subscribeToGiftTransactions(
     return onSnapshot(
       q,
       (snap) => onUpdate(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-      (err) => handleFirestoreError(err, OperationType.LIST, path)
+      (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
     );
   }
   const uid = options.userId;
@@ -1729,7 +1852,7 @@ export function subscribeToGiftTransactions(
       sentDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       mergeAndEmit();
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, path)
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
   );
   const unsubReceived = onSnapshot(
     qReceived,
@@ -1737,7 +1860,7 @@ export function subscribeToGiftTransactions(
       receivedDocs = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       mergeAndEmit();
     },
-    (err) => handleFirestoreError(err, OperationType.LIST, path)
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
   );
 
   return () => {
@@ -1754,10 +1877,19 @@ export async function recoverFirestoreNetwork(): Promise<{ online: boolean; erro
     return { online: false, error: 'You appear to be offline. Please check your internet connection.' };
   }
   try {
-    await enableNetwork(db).catch(() => {});
+    // Do NOT call enableNetwork(db) when network was never disabled; redundant calls
+    // while PersistentWriteStream is active trigger Firestore JS SDK assertion c050.
     await withFirestoreTimeout(getDocFromServer(doc(db, 'test', 'connection')), 5500, 'Network connection check');
+    clearFirestoreQuotaExceeded();
     return { online: true };
   } catch (err: any) {
+    if (isFirestoreQuotaExceededError(err)) {
+      notifyFirestoreQuotaExceeded();
+      return {
+        online: true,
+        error: 'Firestore daily Spark quota has been reached. Cached data remains active until daily reset or plan upgrade.',
+      };
+    }
     const msg = String(err?.message || err || '').toLowerCase();
     // If Firestore responded with permission-denied, the network connection to Firestore is genuinely alive!
     if (msg.includes('permission') || msg.includes('missing or insufficient')) {

@@ -279,7 +279,7 @@ export const ChatScreen: React.FC = () => {
     }
 
     const term = query.trim().toLowerCase().replace(/^@/, '');
-    // Immediate local match from subscribed realUsers
+    // Immediate local match from cached/subscribed realUsers
     const localHits = directoryUsers.filter(
       (u) =>
         !term ||
@@ -288,6 +288,12 @@ export const ChatScreen: React.FC = () => {
         (u.uniqueId || '').toLowerCase().includes(term)
     );
     setFoundUsers(localHits.slice(0, 30));
+
+    // Skip remote Firestore directory read when search bar is empty and cached users are already loaded
+    if (!term && directoryUsers.length > 0 && userSyncRefreshEpoch === 0) {
+      setUserSearchLoading(false);
+      return;
+    }
 
     setUserSearchLoading(true);
     const timer = window.setTimeout(() => {
@@ -311,7 +317,7 @@ export const ChatScreen: React.FC = () => {
         .finally(() => {
           if (!cancelled) setUserSearchLoading(false);
         });
-    }, term ? 180 : 0);
+    }, term ? 220 : 0);
 
     return () => {
       cancelled = true;

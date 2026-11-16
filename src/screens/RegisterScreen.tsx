@@ -39,8 +39,8 @@ export const RegisterScreen: React.FC = () => {
     updateUserProfile,
     loginWithFirebaseGoogle,
     registerWithFirebaseEmail,
-    refreshFirebaseVerification,
-    resendEmailVerificationLink,
+    sendSignupEmailOtp,
+    verifySignupEmailOtp,
     legalConsent,
     setLegalConsent,
   } = useApp();
@@ -95,8 +95,21 @@ export const RegisterScreen: React.FC = () => {
   const [errorMessage, setErrorMessage] = useState('');
   const [statusMessage, setStatusMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [sendingOtp, setSendingOtp] = useState(false);
+  const [otpChallengeToken, setOtpChallengeToken] = useState('');
+  const [otpMaskedEmail, setOtpMaskedEmail] = useState('');
+  const [otpInput, setOtpInput] = useState('');
+  const [otpCooldownSec, setOtpCooldownSec] = useState(0);
   const [showAppleComingSoon, setShowAppleComingSoon] = useState(false);
   const [showPlatformRegistrationModal, setShowPlatformRegistrationModal] = useState(false);
+
+  React.useEffect(() => {
+    if (otpCooldownSec <= 0) return;
+    const timer = window.setInterval(() => {
+      setOtpCooldownSec((prev) => (prev > 1 ? prev - 1 : 0));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [otpCooldownSec]);
 
   const ensureLegalConsent = () => {
     if (!agreedToTerms || !agreedToPrivacy) {
@@ -221,15 +234,16 @@ export const RegisterScreen: React.FC = () => {
 
     setIsSubmitting(true);
 
+    const cleanEmail = email.trim().toLowerCase();
     const fbRes = await registerWithFirebaseEmail({
-      email: email.trim().toLowerCase(),
+      email: cleanEmail,
       pass: password,
       displayName: displayName.trim(),
       username: username.trim(),
     });
-    setIsSubmitting(false);
 
     if (!fbRes.success) {
+      setIsSubmitting(false);
       setErrorMessage(formatFirebaseAuthError(fbRes.error));
       return;
     }
@@ -237,38 +251,89 @@ export const RegisterScreen: React.FC = () => {
     updateUserProfile({ dob, avatar: selectedAvatar });
 
     if (fbRes.needsVerification) {
-      setStatusMessage(`Verification link sent to ${email.trim().toLowerCase()}. Please verify to enter.`);
+      const otpRes = await sendSignupEmailOtp(displayName.trim());
+      setIsSubmitting(false);
+      if (otpRes.alreadyVerified) {
+        return;
+      }
+      if (otpRes.success && otpRes.challengeToken) {
+        setOtpChallengeToken(otpRes.challengeToken);
+        setOtpMaskedEmail(otpRes.emailMasked || cleanEmail);
+        setOtpCooldownSec(otpRes.cooldownSeconds || 30);
+        setOtpInput('');
+        setStatusMessage(
+          `A 6-digit verification OTP has been sent to ${otpRes.emailMasked || cleanEmail}. Valid for 10 minutes.`
+        );
+      } else {
+        if (otpRes.retryAfterSeconds) {
+          setOtpCooldownSec(otpRes.retryAfterSeconds);
+        }
+        setErrorMessage(
+          otpRes.error || 'Could not send 6-digit verification OTP yet. Tap Send 6-Digit OTP below to retry.'
+        );
+      }
       setStep('verify_email');
+      return;
     }
+
+    setIsSubmitting(false);
   };
 
-  const handleCheckEmailVerified = async () => {
+  const handleVerifySignupOtp = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
     if (!ensureLegalConsent()) return;
+    if (!otpChallengeToken) {
+      setErrorMessage('Please tap Send 6-Digit Email OTP first to receive your verification code.');
+      return;
+    }
+    const cleanOtp = otpInput.replace(/\D/g, '').slice(0, 6);
+    if (cleanOtp.length !== 6) {
+      setErrorMessage('Please enter the exact 6-digit verification code sent to your email.');
+      return;
+    }
+
     setIsSubmitting(true);
     setErrorMessage('');
     setStatusMessage('');
     try {
-      const verified = await refreshFirebaseVerification();
+      const res = await verifySignupEmailOtp(otpChallengeToken, cleanOtp);
       setIsSubmitting(false);
-      if (!verified) {
-        setErrorMessage('Email is not verified yet. Please click the verification link in your inbox, then tap again.');
+      if (!res.success) {
+        setErrorMessage(res.error || 'Invalid or expired OTP code. Please check and try again.');
       }
     } catch (err: any) {
       setIsSubmitting(false);
-      setErrorMessage(err?.message || 'Unable to verify status right now.');
+      setErrorMessage(err?.message || 'Unable to verify OTP code right now.');
     }
   };
 
-  const handleResendVerification = async () => {
-    setIsSubmitting(true);
+  const handleSendOrResendSignupOtp = async () => {
+    setSendingOtp(true);
     setErrorMessage('');
+    setStatusMessage('');
     try {
-      await resendEmailVerificationLink();
-      setStatusMessage(`Verification email resent to ${email || firebaseUser?.email}. Check Inbox or Spam.`);
+      const otpRes = await sendSignupEmailOtp(displayName.trim());
+      if (otpRes.alreadyVerified) {
+        return;
+      }
+      if (!otpRes.success || !otpRes.challengeToken) {
+        if (otpRes.retryAfterSeconds) {
+          setOtpCooldownSec(otpRes.retryAfterSeconds);
+        }
+        setErrorMessage(otpRes.error || 'Could not send 6-digit OTP right now. Please try again shortly.');
+        return;
+      }
+      setOtpChallengeToken(otpRes.challengeToken);
+      setOtpMaskedEmail(otpRes.emailMasked || email || firebaseUser?.email || '');
+      setOtpCooldownSec(otpRes.cooldownSeconds || 30);
+      setOtpInput('');
+      setStatusMessage(
+        `A fresh 6-digit OTP has been sent to ${otpRes.emailMasked || email || firebaseUser?.email}. Check Inbox or Spam.`
+      );
     } catch (err: any) {
-      setErrorMessage(err?.message || 'Please wait a moment before resending.');
+      setErrorMessage(err?.message || 'Please wait a moment before requesting a new code.');
     } finally {
-      setIsSubmitting(false);
+      setSendingOtp(false);
     }
   };
 
@@ -393,7 +458,7 @@ export const RegisterScreen: React.FC = () => {
                 </div>
                 <div className="text-left">
                   <span className="text-xs sm:text-sm font-bold text-white block">Continue with Email</span>
-                  <span className="text-[10px] text-zinc-400">Create password & verify inbox</span>
+                  <span className="text-[10px] text-zinc-400">Create password &amp; verify 6-digit OTP</span>
                 </div>
               </div>
               <ChevronRight className="w-4 h-4 text-zinc-500" />
@@ -444,19 +509,29 @@ export const RegisterScreen: React.FC = () => {
         </div>
       )}
 
-      {/* VERIFY EMAIL STEP (for Email & Password registrations) */}
+      {/* VERIFY EMAIL OTP STEP (for Email & Password registrations) */}
       {step === 'verify_email' && (
         <div className="relative z-10 py-4 max-w-sm w-full mx-auto my-auto animate-scale-up text-center">
           <div className="w-14 h-14 mx-auto rounded-2xl bg-gradient-to-br from-[#7928CA] to-[#EC4899] flex items-center justify-center shadow-lg shadow-[#A855F7]/30 mb-4">
             <Mail className="w-7 h-7 text-white" />
           </div>
           <span className="px-3 py-1 rounded-full bg-[#7928CA]/30 border border-[#A855F7]/40 text-[10px] font-bold text-[#E9D5FF] tracking-widest uppercase">
-            VERIFY YOUR EMAIL
+            EMAIL OTP VERIFICATION
           </span>
-          <h2 className="text-xl font-black text-white mt-2">Check Your Inbox</h2>
+          <h2 className="text-xl font-black text-white mt-2">Enter 6-Digit Code</h2>
           <p className="text-xs text-zinc-400 mt-1.5 leading-relaxed">
-            We sent a verification link to{' '}
-            <span className="text-white font-semibold">{email || firebaseUser?.email}</span>. Open the email, click the link, then tap below to enter Alpha Mate.
+            {otpChallengeToken ? (
+              <>
+                Enter the 6-digit OTP code sent to{' '}
+                <span className="text-white font-semibold">{otpMaskedEmail || email || firebaseUser?.email}</span> to
+                activate your Alpha Mate account.
+              </>
+            ) : (
+              <>
+                Tap below to send a 6-digit verification OTP to{' '}
+                <span className="text-white font-semibold">{email || firebaseUser?.email}</span>.
+              </>
+            )}
           </p>
 
           {errorMessage && (
@@ -473,22 +548,57 @@ export const RegisterScreen: React.FC = () => {
             </div>
           )}
 
-          <div className="mt-5 space-y-2.5">
-            <button
-              onClick={handleCheckEmailVerified}
-              disabled={isSubmitting}
-              className="w-full h-12 rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] font-extrabold text-white text-xs sm:text-sm shadow-lg shadow-[#7928CA]/40 hover:opacity-95 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
-            >
-              <CheckCircle2 className="w-4 h-4" />
-              <span>{isSubmitting ? 'Checking...' : "I've Verified — Enter App"}</span>
-            </button>
+          <form onSubmit={handleVerifySignupOtp} className="mt-5 space-y-2.5">
+            {otpChallengeToken && (
+              <div className="text-left">
+                <label
+                  htmlFor="signup-email-otp-input"
+                  className="text-[10px] uppercase font-bold text-purple-300 tracking-wider block mb-1.5"
+                >
+                  6-Digit Email OTP
+                </label>
+                <input
+                  id="signup-email-otp-input"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={6}
+                  value={otpInput}
+                  onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                  placeholder="000000"
+                  className="w-full h-12 px-4 rounded-2xl bg-[#140D27] border border-[#A855F7]/50 text-center font-mono text-xl font-black tracking-[0.45em] text-white placeholder-zinc-600 focus:border-[#EC4899] focus:outline-none"
+                />
+              </div>
+            )}
+
+            {otpChallengeToken && (
+              <button
+                type="submit"
+                disabled={isSubmitting || otpInput.length !== 6}
+                className="w-full h-12 rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] font-extrabold text-white text-xs sm:text-sm shadow-lg shadow-[#7928CA]/40 hover:opacity-95 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>{isSubmitting ? 'Verifying OTP...' : 'Verify Code & Enter App'}</span>
+              </button>
+            )}
 
             <button
-              onClick={handleResendVerification}
-              disabled={isSubmitting}
-              className="w-full h-11 rounded-xl bg-[#17102B] hover:bg-[#21173D] border border-[#A855F7]/30 text-xs font-bold text-[#D8B4FE] cursor-pointer"
+              type="button"
+              onClick={handleSendOrResendSignupOtp}
+              disabled={sendingOtp || isSubmitting || otpCooldownSec > 0}
+              className={`w-full h-11 rounded-xl text-xs font-bold cursor-pointer disabled:opacity-50 transition ${
+                otpChallengeToken
+                  ? 'bg-[#17102B] hover:bg-[#21173D] border border-[#A855F7]/30 text-[#D8B4FE]'
+                  : 'bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white shadow-lg shadow-[#7928CA]/40'
+              }`}
             >
-              Resend Verification Link
+              {sendingOtp
+                ? 'Sending 6-Digit OTP...'
+                : otpCooldownSec > 0
+                ? `Resend OTP in ${otpCooldownSec}s`
+                : otpChallengeToken
+                ? 'Resend 6-Digit Email OTP'
+                : 'Send 6-Digit Email OTP'}
             </button>
 
             {(!agreedToTerms || !agreedToPrivacy) && (
@@ -504,13 +614,14 @@ export const RegisterScreen: React.FC = () => {
             )}
 
             <button
+              type="button"
               onClick={handleDirectGoogleSignIn}
-              disabled={isSubmitting}
+              disabled={isSubmitting || sendingOtp}
               className="w-full h-11 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-zinc-200 cursor-pointer"
             >
               Or Continue with Google (Gmail) Instead
             </button>
-          </div>
+          </form>
         </div>
       )}
 

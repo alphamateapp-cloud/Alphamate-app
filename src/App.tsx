@@ -36,6 +36,11 @@ import { PushNotificationSettingsModal } from './components/modals/PushNotificat
 import { GlobalWeeklyLeaderboardModal } from './components/leaderboard/GlobalWeeklyLeaderboard';
 import { UserBadgesModal } from './components/badges/UserBadgesModal';
 import { PublicUserProfileModal } from './components/modals/PublicUserProfileModal';
+import {
+  subscribeToFirestoreQuotaExceeded,
+  FIRESTORE_PROJECT_ID,
+  FIRESTORE_DATABASE_ID,
+} from './services/firebase';
 
 const PUBLIC_AUTH_SCREENS = new Set([
   'splash',
@@ -268,6 +273,7 @@ export default function App() {
     <AppProvider>
       <DeviceFrame>
         <PushNotificationBanner />
+        <GlobalFirestoreQuotaBanner />
         <GlobalPushSettingsHost />
         <GlobalWeeklyLeaderboardModal />
         <UserBadgesModal />
@@ -277,6 +283,71 @@ export default function App() {
     </AppProvider>
   );
 }
+
+const GlobalFirestoreQuotaBanner: React.FC = () => {
+  const { refreshScope } = useApp();
+  const [quotaExceeded, setQuotaExceeded] = React.useState(false);
+  const [dismissed, setDismissed] = React.useState(false);
+
+  useEffect(() => {
+    return subscribeToFirestoreQuotaExceeded((exceeded) => {
+      setQuotaExceeded(exceeded);
+      if (!exceeded) setDismissed(false);
+    });
+  }, []);
+
+  if (!quotaExceeded || dismissed) return null;
+
+  const pricingUrl = 'https://firebase.google.com/pricing#cloud-firestore';
+  const consoleDbUrl = `https://console.firebase.google.com/project/${FIRESTORE_PROJECT_ID}/firestore/databases/${FIRESTORE_DATABASE_ID}/data?openUpgradeDialog=true`;
+
+  return (
+    <div className="fixed top-4 inset-x-4 z-50 mx-auto max-w-md pointer-events-auto">
+      <div className="rounded-2xl border border-amber-400/40 bg-[#23190B]/95 backdrop-blur-xl px-4 py-3 text-xs text-amber-100 shadow-2xl space-y-2">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <p className="font-bold text-amber-300">Cloud Sync Quota Reached</p>
+            <p className="text-[11px] text-amber-100/85 mt-0.5 leading-snug">
+              Daily Firestore Spark free-tier write quota was reached and resets tomorrow. Background cloud writes are paused while cached data stays active.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setDismissed(true)}
+            className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/20 text-white text-[11px] font-bold shrink-0 cursor-pointer"
+          >
+            Dismiss
+          </button>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => refreshScope()}
+            className="px-3 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-400/30 text-amber-200 text-[11px] font-bold cursor-pointer"
+          >
+            Retry Sync
+          </button>
+          <a
+            href={consoleDbUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 text-white text-[11px] font-semibold"
+          >
+            Database Console
+          </a>
+          <a
+            href={pricingUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-2.5 py-1 rounded-lg text-amber-300 hover:text-amber-200 underline text-[11px] font-medium"
+          >
+            Spark Limits
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+};
 
 const GlobalPushSettingsHost: React.FC = () => {
   const { showPushSettingsModal, setShowPushSettingsModal } = useApp();

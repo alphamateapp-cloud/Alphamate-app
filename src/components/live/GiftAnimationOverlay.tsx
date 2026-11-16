@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { Gift } from '../../types';
 import { Sparkles, Flame, Volume2, VolumeX, Crown } from 'lucide-react';
-import { giftSoundEngine } from '../../utils/giftSoundEffects';
+import { audioManager } from '../../services/audioManager';
 
 export interface ActiveGiftEvent {
   id: string;
@@ -24,17 +24,21 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   currentEvent,
   onComplete,
 }) => {
-  const [isMuted, setIsMuted] = useState(() => giftSoundEngine.getIsMuted());
+  const [isMuted, setIsMuted] = useState(() => audioManager.getIsMuted());
   const [shakeScreen, setShakeScreen] = useState(false);
+
+  useEffect(() => {
+    void audioManager.preloadAll();
+    return audioManager.subscribeMute(setIsMuted);
+  }, []);
 
   useEffect(() => {
     if (!currentEvent) return;
 
-    // Trigger sound effect
-    giftSoundEngine.play(currentEvent.gift.animationType);
-    if (currentEvent.comboCount > 1) {
-      giftSoundEngine.playComboSound(currentEvent.comboCount);
-    }
+    // Trigger high-quality gift SFX (mapped /audio/*.mp3 asset with layered synth fallback)
+    void audioManager.playGiftSfx(currentEvent.gift, {
+      comboCount: currentEvent.comboCount,
+    });
 
     // Trigger screen shake for heavy/epic gifts
     if (['car', 'rocket', 'dragon', 'crown'].includes(currentEvent.gift.animationType)) {
@@ -58,7 +62,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
   const handleToggleMute = (e: React.MouseEvent) => {
     e.stopPropagation();
-    const muted = giftSoundEngine.toggleMute();
+    const muted = audioManager.toggleMute();
     setIsMuted(muted);
   };
 
@@ -103,7 +107,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
   return (
     <div
-      className={`fixed inset-0 z-50 pointer-events-none flex flex-col justify-between overflow-hidden ${
+      className={`fixed inset-0 z-[55] pointer-events-none flex flex-col justify-between overflow-hidden ${
         shakeScreen ? 'animate-gift-shake' : ''
       }`}
     >
@@ -193,21 +197,41 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       </div>
 
       {/* =========================================================================
-          2. COMBO MULTIPLIER COUNTER (PUNCHY SPRING BOUNCE)
+          2. COMBO MULTIPLIER COUNTER (PUNCHY SPRING BOUNCE ON EVERY INCREMENT)
           ========================================================================= */}
       {comboCount > 1 && (
-        <div className="absolute top-36 left-4 z-40 animate-combo-pop">
-          <div className="relative flex items-center gap-2 px-4 py-2 rounded-2xl bg-gradient-to-r from-red-600 via-amber-500 to-purple-600 shadow-[0_0_30px_rgba(239,68,68,0.8)] border border-yellow-300/60">
-            <Flame className="w-6 h-6 text-yellow-200 animate-pulse fill-current" />
+        <div
+          key={`overlay-combo-${gift.id}-${comboCount}`}
+          className="absolute top-36 left-4 z-40 animate-combo-pop"
+        >
+          <div
+            className={`relative flex items-center gap-2.5 px-4 py-2 rounded-2xl border shadow-[0_0_32px_rgba(239,68,68,0.8)] ${
+              comboCount >= 10
+                ? 'bg-gradient-to-r from-red-600 via-amber-500 to-purple-700 border-yellow-200/80'
+                : comboCount >= 5
+                ? 'bg-gradient-to-r from-[#7928CA] via-[#EC4899] to-amber-500 border-pink-300/75'
+                : 'bg-gradient-to-r from-orange-600 via-amber-500 to-rose-600 border-yellow-300/60'
+            }`}
+          >
+            <Flame className="w-6 h-6 text-yellow-200 animate-pulse fill-current shrink-0" />
             <div>
-              <div className="text-[10px] font-black uppercase tracking-widest text-yellow-200">
-                {comboCount >= 10 ? 'LEGENDARY STREAK' : 'COMBO'}
+              <div className="text-[10px] font-black uppercase tracking-widest text-yellow-100">
+                {comboCount >= 10
+                  ? 'LEGENDARY STREAK'
+                  : comboCount >= 5
+                  ? 'MEGA COMBO'
+                  : 'RAPID COMBO'}
               </div>
-              <div className="text-2xl font-black italic tracking-tighter text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)]">
-                x {comboCount}
+              <div className="flex items-center gap-1.5">
+                <span className="text-2xl font-black italic tracking-tighter text-white drop-shadow-[0_2px_4px_rgba(0,0,0,0.8)] tabular-nums">
+                  x {comboCount}
+                </span>
+                <span className="text-xs font-bold text-white/90 truncate max-w-[90px]">
+                  {gift.icon} {gift.name}
+                </span>
               </div>
             </div>
-            <span className="text-xl">🔥</span>
+            <span className="text-xl shrink-0">🔥</span>
           </div>
         </div>
       )}

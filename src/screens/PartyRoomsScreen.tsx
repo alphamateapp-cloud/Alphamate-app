@@ -16,6 +16,12 @@ import { uploadPartyRoomCover } from '../services/chatService';
 import { sendPartyRoomMessage, subscribeToPartyRoomMessages } from '../services/partyChatService';
 import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
 import { getHdImageUrl } from '../utils/imageHd';
+import { audioManager } from '../services/audioManager';
+import {
+  audioFilter,
+  VOICE_FILTER_PRESETS,
+  VoiceFilterPresetId,
+} from '../services/audioFilter';
 import {
   Radio,
   Mic,
@@ -57,6 +63,7 @@ import {
   Medal,
   TrendingUp,
   Swords,
+  Wand2,
 } from 'lucide-react';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
@@ -234,7 +241,15 @@ export const PartyRoomsScreen: React.FC = () => {
   const [roomBackground, setRoomBackground] = useState<'logo' | 'dp' | 'sunrise' | 'sunset' | 'mosque'>('logo');
   const [showBackgroundModal, setShowBackgroundModal] = useState(false);
   const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
+  const [showVoiceFilterModal, setShowVoiceFilterModal] = useState(false);
+  const [activeVoiceFilter, setActiveVoiceFilter] = useState<VoiceFilterPresetId>(() =>
+    audioFilter.getPreset()
+  );
   const [partyGivers, setPartyGivers] = useState<PartyLeaderboardEntry[]>([]);
+
+  useEffect(() => {
+    return audioFilter.subscribe(setActiveVoiceFilter);
+  }, []);
 
   // Daily Top Platform Contributors (real-time givers)
   const dailyTopGivers: PartyLeaderboardEntry[] = useMemo(() => {
@@ -1552,6 +1567,7 @@ export const PartyRoomsScreen: React.FC = () => {
       context: 'party',
       roomId: activePartyRoom?.id,
     });
+    void audioManager.playGiftSfx(selectedGift);
     spawnHeart();
 
     const giftMsg: ChatItem = {
@@ -2345,8 +2361,20 @@ export const PartyRoomsScreen: React.FC = () => {
               </button>
             </form>
 
-            {/* Bottom Row: 5 Action Buttons with Equal Sizing & Spacing */}
-            <div className="grid gap-1.5 w-full" style={{ gridTemplateColumns: `repeat(${isHost ? 5 : isModerator ? 4 : (userSeatIndex !== null ? 2 : 1)}, minmax(0, 1fr))` }}>
+            {/* Bottom Row: Action Buttons with Equal Sizing & Spacing */}
+            <div
+              className="grid gap-1.5 w-full"
+              style={{
+                gridTemplateColumns: `repeat(${
+                  (isHost ? 1 : 0) +
+                  (isHost || userSeatIndex !== null || isModerator ? 1 : 0) +
+                  (isHost || isModerator ? 1 : 0) +
+                  (isHost || userSeatIndex !== null ? 1 : 0) +
+                  1 +
+                  (isHost ? 1 : 0)
+                }, minmax(0, 1fr))`,
+              }}
+            >
               {/* Host-only room music management */}
               {isHost && <button
                 onClick={() => setShowMusicModal(true)}
@@ -2437,6 +2465,30 @@ export const PartyRoomsScreen: React.FC = () => {
                   {isSpeakerOn ? 'Audio On' : 'Muted'}
                 </span>
               </button>}
+
+              {/* Voice Modulation Filter Button (Host & Seated Speakers) */}
+              {(isHost || userSeatIndex !== null) && (
+                <button
+                  onClick={() => setShowVoiceFilterModal(true)}
+                  className={`h-9 sm:h-10 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer backdrop-blur-md ${
+                    activeVoiceFilter !== 'normal'
+                      ? 'bg-gradient-to-tr from-[#7928CA]/85 to-[#EC4899]/80 border-[#EC4899] text-white shadow-md shadow-[#EC4899]/30'
+                      : 'bg-black/50 border-white/10 text-zinc-300 hover:text-white'
+                  }`}
+                  title="Real-Time Voice Modulation (Robot, Chipmunk, Echo)"
+                >
+                  <Wand2
+                    className={`w-3.5 h-3.5 ${
+                      activeVoiceFilter !== 'normal' ? 'text-amber-300 animate-pulse' : 'text-[#C084FC]'
+                    }`}
+                  />
+                  <span className="text-[8px] font-black truncate max-w-full mt-0.5">
+                    {activeVoiceFilter === 'normal'
+                      ? 'Voice FX'
+                      : audioFilter.getPresetMeta(activeVoiceFilter).shortLabel}
+                  </span>
+                </button>
+              )}
 
               {/* 4. Gift Button */}
               <button
@@ -2907,6 +2959,90 @@ export const PartyRoomsScreen: React.FC = () => {
               setIsRoomPKActive(false);
             }}
           />
+        )}
+
+        {/* Real-Time Voice Filter Modal */}
+        {showVoiceFilterModal && (
+          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="w-full max-w-sm rounded-3xl bg-[#171030] border border-[#A855F7]/30 p-5 shadow-2xl">
+              <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/20">
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Wand2 className="w-4 h-4 text-[#EC4899]" />
+                  <span>Real-Time Voice Modulation</span>
+                </h3>
+                <button
+                  onClick={() => setShowVoiceFilterModal(false)}
+                  className="text-zinc-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-[11px] text-zinc-400 mt-3 mb-3">
+                Transform your live microphone voice in real time for everyone in the party room.
+              </p>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                {VOICE_FILTER_PRESETS.map((preset) => {
+                  const isActive = activeVoiceFilter === preset.id;
+                  return (
+                    <button
+                      key={preset.id}
+                      onClick={async () => {
+                        if (!activePartyRoom?.id) return;
+                        const applied = await p2pStreamingEngine.setPartyVoiceFilter(
+                          activePartyRoom.id,
+                          preset.id
+                        );
+                        setActiveVoiceFilter(applied);
+                        showToast(
+                          applied === 'normal'
+                            ? 'Voice Filter Off (Original Mic) 🎙️'
+                            : `Voice FX Active: ${preset.emoji} ${preset.label}`
+                        );
+                      }}
+                      className={`relative p-3 rounded-2xl border text-left transition-all cursor-pointer ${
+                        isActive
+                          ? `bg-gradient-to-br ${preset.accentGradient} border-white/50 text-white shadow-lg`
+                          : 'bg-[#120824] border-white/10 text-zinc-200 hover:border-[#A855F7]/50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-xl">{preset.emoji}</span>
+                        {isActive && (
+                          <span className="px-1.5 py-0.5 rounded-full bg-black/35 text-[8px] font-black uppercase tracking-wider text-white flex items-center gap-0.5">
+                            <Check className="w-2.5 h-2.5" />
+                            <span>Live</span>
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-xs font-extrabold">{preset.label}</div>
+                      <div
+                        className={`text-[10px] leading-tight mt-0.5 ${
+                          isActive ? 'text-white/90' : 'text-zinc-400'
+                        }`}
+                      >
+                        {preset.description}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {((isHost && isHostMicMuted) || (userSeatIndex !== null && isMicMuted)) && (
+                <div className="mt-3 px-3 py-2 rounded-xl bg-amber-500/15 border border-amber-400/30 text-[10.5px] text-amber-200">
+                  Your mic is currently muted — unmute to broadcast your modulated voice.
+                </div>
+              )}
+
+              <button
+                onClick={() => setShowVoiceFilterModal(false)}
+                className="w-full mt-4 h-10 rounded-xl bg-white/10 hover:bg-white/15 text-white text-xs font-bold cursor-pointer"
+              >
+                Done
+              </button>
+            </div>
+          </div>
         )}
 
         {/* More Options Modal */}

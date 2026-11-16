@@ -20,9 +20,16 @@ import {
   deleteDoc,
   serverTimestamp,
 } from 'firebase/firestore';
-import { db, auth } from './firebase';
+import {
+  db,
+  auth,
+  isFirestoreQuotaExceeded,
+  isFirestoreQuotaExceededError,
+  notifyFirestoreQuotaExceeded,
+} from './firebase';
 import { realtimeSocket } from './realtimeSocket';
 import { User, SfuPublishedTrack } from '../types';
+import { audioFilter, VoiceFilterPresetId } from './audioFilter';
 
 export interface PeerConnectionConfig {
   iceServers?: RTCIceServer[];
@@ -138,6 +145,7 @@ interface PartySfuRoomSession {
   subPc: RTCPeerConnection;
   pubSfuSessionId: string | null;
   pubPc: RTCPeerConnection | null;
+  rawLocalStream: MediaStream | null;
   localStream: MediaStream | null;
   localTrackName: string | null;
   localMid: string | null;
@@ -1209,6 +1217,7 @@ class RealtimeSfuStreamingEngine {
 
   public toggleMicrophone(enabled?: boolean): boolean {
     const partyAudioTracks = Array.from(this.partySfuSessions.values()).flatMap((s) => [
+      ...(s.rawLocalStream?.getAudioTracks() || []),
       ...(s.localStream?.getAudioTracks() || []),
       ...(s.pubPc
         ? s.pubPc
@@ -1224,6 +1233,7 @@ class RealtimeSfuStreamingEngine {
     const nextEnabled =
       enabled !== undefined ? enabled : allTracks.length > 0 ? !allTracks.some((t) => t.enabled) : !this.isMuted;
     this.isMuted = !nextEnabled;
+    audioFilter.setMuted(!nextEnabled);
     allTracks.forEach((t) => {
       t.enabled = nextEnabled;
     });
@@ -1233,13 +1243,17 @@ class RealtimeSfuStreamingEngine {
       if (!nextEnabled) {
         session.isSpeaking = false;
       }
-      if (session.isPublishing && auth.currentUser?.uid) {
+      if (session.isPublishing && auth.currentUser?.uid && !isFirestoreQuotaExceeded()) {
         updateDoc(doc(db, 'partyRooms', session.roomId, 'voiceParticipants', auth.currentUser.uid), {
           isMuted: !nextEnabled,
           ...(nextEnabled ? {} : { isSpeaking: false }),
           lastSeenAt: serverTimestamp(),
           lastSeenAtMs: Date.now(),
-        }).catch(() => {});
+        }).catch((err) => {
+          if (isFirestoreQuotaExceededError(err)) {
+            notifyFirestoreQuotaExceeded();
+          }
+        });
       }
     });
 
@@ -2160,7 +2174,7 @@ class RealtimeSfuStreamingEngine {
   }
 
   public async sendLiveStreamHeartbeat(streamId: string): Promise<void> {
-    if (!streamId || !auth.currentUser) return;
+    if (!streamId || !auth.currentUser || isFirestoreQuotaExceeded()) return;
     const session = this.hostSfuSessions.get(streamId);
     if (!session || session.isClosed) return;
 
@@ -2175,6 +2189,10 @@ class RealtimeSfuStreamingEngine {
       });
     } catch (err: any) {
       if (err?.code === 'not-found') return;
+      if (isFirestoreQuotaExceededError(err)) {
+        notifyFirestoreQuotaExceeded();
+        return;
+      }
       console.warn(`[WebRTC SFU] Live heartbeat update failed for ${streamId}:`, err);
     }
   }
@@ -2932,6 +2950,7 @@ class RealtimeSfuStreamingEngine {
       subPc,
       pubSfuSessionId: null,
       pubPc: null,
+      rawLocalStream: null,
       localStream: null,
       localTrackName: null,
       localMid: null,
@@ -2993,12 +3012,16 @@ class RealtimeSfuStreamingEngine {
     session.isSpeaking = effectiveSpeaking;
 
     const uid = auth.currentUser?.uid || session.userId;
-    if (!uid) return;
+    if (!uid || isFirestoreQuotaExceeded()) return;
     updateDoc(doc(db, 'partyRooms', roomId, 'voiceParticipants', uid), {
       isSpeaking: effectiveSpeaking,
       lastSeenAt: serverTimestamp(),
       lastSeenAtMs: Date.now(),
-    }).catch(() => {});
+    }).catch((err) => {
+      if (isFirestoreQuotaExceededError(err)) {
+        notifyFirestoreQuotaExceeded();
+      }
+    });
   }
 
   public setPartySpeakingMode(
@@ -3051,13 +3074,14 @@ class RealtimeSfuStreamingEngine {
     }
 
     if (canSpeak && session.isPublishing) {
+      const hardwareStream = session.rawLocalStream || session.localStream;
       const hasLiveTrack = Boolean(
-        session.localStream?.getAudioTracks().some((t) => t.readyState === 'live')
+        hardwareStream?.getAudioTracks().some((t) => t.readyState === 'live')
       );
       if (!hasLiveTrack && session.pubPc) {
         // Re-acquire hardware mic seamlessly if OS/Android reclaimed it
         try {
-          const newStream = await navigator.mediaDevices.getUserMedia({
+          const newRawStream = await navigator.mediaDevices.getUserMedia({
             audio: {
               echoCancellation: true,
               noiseSuppression: true,
@@ -3066,7 +3090,8 @@ class RealtimeSfuStreamingEngine {
             },
             video: false,
           });
-          const newTrack = newStream.getAudioTracks()[0];
+          const processedStream = await audioFilter.attachInputStream(newRawStream, { isMuted });
+          const newTrack = processedStream.getAudioTracks()[0] || newRawStream.getAudioTracks()[0];
           if (newTrack) {
             newTrack.enabled = !isMuted;
             const audioSender = session.pubPc
@@ -3075,15 +3100,27 @@ class RealtimeSfuStreamingEngine {
             if (audioSender) {
               await audioSender.replaceTrack(newTrack);
             }
-            session.localStream?.getTracks().forEach((t) => {
-              try {
-                t.stop();
-              } catch {
-                // ignore
-              }
-            });
-            session.localStream = newStream;
-            this.initAudioAnalyser(newStream);
+            if (session.rawLocalStream && session.rawLocalStream !== newRawStream) {
+              session.rawLocalStream.getTracks().forEach((t) => {
+                try {
+                  t.stop();
+                } catch {
+                  // ignore
+                }
+              });
+            }
+            if (session.localStream && session.localStream !== session.rawLocalStream && session.localStream !== processedStream) {
+              session.localStream.getTracks().forEach((t) => {
+                try {
+                  t.stop();
+                } catch {
+                  // ignore
+                }
+              });
+            }
+            session.rawLocalStream = newRawStream;
+            session.localStream = processedStream;
+            this.initAudioAnalyser(newRawStream);
           }
         } catch (err) {
           console.warn('[Party SFU] Failed to re-acquire ended mic track:', err);
@@ -3092,7 +3129,11 @@ class RealtimeSfuStreamingEngine {
 
       this.isMuted = isMuted;
       session.isMuted = isMuted;
+      audioFilter.setMuted(isMuted);
       if (isMuted) session.isSpeaking = false;
+      session.rawLocalStream?.getAudioTracks().forEach((t) => {
+        t.enabled = !isMuted;
+      });
       session.localStream?.getAudioTracks().forEach((t) => {
         t.enabled = !isMuted;
       });
@@ -3105,6 +3146,42 @@ class RealtimeSfuStreamingEngine {
     }
 
     return session.localStream;
+  }
+
+  public getPartyVoiceFilter(): VoiceFilterPresetId {
+    return audioFilter.getPreset();
+  }
+
+  public async setPartyVoiceFilter(
+    roomId: string,
+    presetId: VoiceFilterPresetId
+  ): Promise<VoiceFilterPresetId> {
+    const appliedPreset = audioFilter.setPreset(presetId);
+    const session = this.partySfuSessions.get(roomId);
+    if (!session || session.isClosed || !session.isPublishing || !session.rawLocalStream || !session.pubPc) {
+      return appliedPreset;
+    }
+
+    try {
+      const nextStream = await audioFilter.attachInputStream(session.rawLocalStream, {
+        preset: appliedPreset,
+        isMuted: session.isMuted,
+      });
+      const nextTrack = nextStream.getAudioTracks()[0] || session.rawLocalStream.getAudioTracks()[0];
+      if (nextTrack) {
+        nextTrack.enabled = !session.isMuted;
+        const audioSender = session.pubPc
+          .getSenders()
+          .find((s) => s.track?.kind === 'audio' || !s.track);
+        if (audioSender) {
+          await audioSender.replaceTrack(nextTrack);
+        }
+        session.localStream = nextStream;
+      }
+    } catch (err) {
+      console.warn('[Party SFU] Failed to switch real-time voice filter:', err);
+    }
+    return appliedPreset;
   }
 
   private async cleanupPartyPublisher(session: PartySfuRoomSession, keepalive: boolean = false): Promise<void> {
@@ -3131,7 +3208,7 @@ class RealtimeSfuStreamingEngine {
   private async publishPartyLocalMic(session: PartySfuRoomSession, isMuted: boolean): Promise<void> {
     await this.cleanupPartyPublisher(session);
 
-    const stream = await navigator.mediaDevices.getUserMedia({
+    const rawStream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
         noiseSuppression: true,
@@ -3140,12 +3217,14 @@ class RealtimeSfuStreamingEngine {
       },
       video: false,
     });
+    const stream = await audioFilter.attachInputStream(rawStream, { isMuted });
     stream.getAudioTracks().forEach((t) => {
       t.enabled = !isMuted;
     });
 
-    const audioTrack = stream.getAudioTracks()[0];
+    const audioTrack = stream.getAudioTracks()[0] || rawStream.getAudioTracks()[0];
     if (!audioTrack) {
+      rawStream.getTracks().forEach((t) => t.stop());
       stream.getTracks().forEach((t) => t.stop());
       throw new Error('Microphone track unavailable.');
     }
@@ -3169,6 +3248,7 @@ class RealtimeSfuStreamingEngine {
 
       session.pubSfuSessionId = pubSfuSessionId;
       session.pubPc = pubPc;
+      session.rawLocalStream = rawStream;
       session.localStream = stream;
       session.localTrackName = trackName;
       session.localMid = published[0]?.mid || null;
@@ -3176,7 +3256,7 @@ class RealtimeSfuStreamingEngine {
       session.isMuted = isMuted;
       session.isSpeaking = false;
       this.isMuted = isMuted;
-      this.initAudioAnalyser(stream);
+      this.initAudioAnalyser(rawStream);
 
       this.attachPartyPubMonitor(session, pubPc);
 
@@ -3197,17 +3277,30 @@ class RealtimeSfuStreamingEngine {
         trackName,
         mid: session.localMid,
         muted: isMuted,
+        voiceFilter: audioFilter.getPreset(),
         readyState: audioTrack.readyState,
         iceConnectionState: pubPc.iceConnectionState,
       });
     } catch (err) {
-      stream.getTracks().forEach((t) => {
+      rawStream.getTracks().forEach((t) => {
         try {
           t.stop();
         } catch {
           // ignore
         }
       });
+      if (stream !== rawStream) {
+        stream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      if (session.rawLocalStream === rawStream) {
+        session.rawLocalStream = null;
+      }
       if (session.localStream === stream) {
         session.localStream = null;
       }
@@ -3238,7 +3331,16 @@ class RealtimeSfuStreamingEngine {
   }
 
   private async unpublishPartyLocalMic(session: PartySfuRoomSession): Promise<void> {
-    if (session.localStream) {
+    if (session.rawLocalStream) {
+      session.rawLocalStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
+    }
+    if (session.localStream && session.localStream !== session.rawLocalStream) {
       session.localStream.getTracks().forEach((t) => {
         try {
           t.stop();
@@ -3247,6 +3349,7 @@ class RealtimeSfuStreamingEngine {
         }
       });
     }
+    session.rawLocalStream = null;
     session.localStream = null;
     session.localTrackName = null;
     session.localMid = null;
@@ -3254,12 +3357,13 @@ class RealtimeSfuStreamingEngine {
     session.isMuted = true;
     session.isSpeaking = false;
     this.stopAudioAnalyser();
+    audioFilter.dispose(false);
 
     await this.cleanupPartyPublisher(session);
   }
 
   private async writePartyParticipantPresence(session: PartySfuRoomSession): Promise<void> {
-    if (session.isClosed) return;
+    if (session.isClosed || isFirestoreQuotaExceeded()) return;
     const uid = auth.currentUser?.uid || session.userId;
     if (!uid) return;
     const profile = session.profile || {};
@@ -3287,9 +3391,17 @@ class RealtimeSfuStreamingEngine {
       lastSeenAt: serverTimestamp(),
       lastSeenAtMs: Date.now(),
     };
-    await setDoc(doc(db, 'partyRooms', session.roomId, 'voiceParticipants', uid), payload, {
-      merge: true,
-    });
+    try {
+      await setDoc(doc(db, 'partyRooms', session.roomId, 'voiceParticipants', uid), payload, {
+        merge: true,
+      });
+    } catch (err: any) {
+      if (isFirestoreQuotaExceededError(err)) {
+        notifyFirestoreQuotaExceeded();
+        return;
+      }
+      console.warn(`[WebRTC SFU] Party presence write failed for ${session.roomId}:`, err);
+    }
   }
 
   private reconcilePartySubscriptions(session: PartySfuRoomSession): Promise<void> {
@@ -3463,7 +3575,16 @@ class RealtimeSfuStreamingEngine {
         session.unsubscribeParticipants = null;
       }
       session.activeRemoteStreams.clear();
-      if (session.localStream) {
+      if (session.rawLocalStream) {
+        session.rawLocalStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      if (session.localStream && session.localStream !== session.rawLocalStream) {
         session.localStream.getTracks().forEach((t) => {
           try {
             t.stop();
@@ -3473,6 +3594,9 @@ class RealtimeSfuStreamingEngine {
         });
       }
       this.stopAudioAnalyser();
+      if (clearCallbacks) {
+        audioFilter.dispose(true);
+      }
       try {
         session.subPc.close();
       } catch {

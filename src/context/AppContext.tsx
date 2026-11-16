@@ -70,6 +70,7 @@ import {
   executeSixtyFortyGiftTransaction,
   subscribeToGiftTransactions,
   recoverFirestoreNetwork,
+  isFirestoreQuotaExceeded,
   fetchLiveStreamFromServer,
   fetchPartyRoomFromServer,
   SendNotificationParams,
@@ -187,6 +188,28 @@ interface AppContextType {
   }) => Promise<{ success: boolean; user?: User; error?: string; needsVerification?: boolean }>;
   refreshFirebaseVerification: () => Promise<boolean>;
   resendEmailVerificationLink: () => Promise<void>;
+  sendSignupEmailOtp: (displayName?: string) => Promise<{
+    success: boolean;
+    alreadyVerified?: boolean;
+    emailMasked?: string;
+    challengeToken?: string;
+    expiresAt?: number;
+    cooldownSeconds?: number;
+    retryAfterSeconds?: number;
+    provider?: string;
+    code?: string;
+    error?: string;
+  }>;
+  verifySignupEmailOtp: (
+    challengeToken: string,
+    otp: string
+  ) => Promise<{
+    success: boolean;
+    emailVerifiedAt?: string;
+    code?: string;
+    remainingAttempts?: number;
+    error?: string;
+  }>;
   logoutFirebase: () => Promise<void>;
   sendAccountDeletionOtp: () => Promise<{
     success: boolean;
@@ -625,12 +648,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setFirebaseUser(fbUser);
 
       if (fbUser) {
-        const verified = isFirebaseUserVerified(fbUser);
-        setIsEmailVerified(verified);
+        const providerVerified = isFirebaseUserVerified(fbUser);
+        setIsEmailVerified(providerVerified);
 
         try {
           const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
           if (!active) return;
+
+          const verified = providerVerified || Boolean(remoteProfile?.emailOtpVerified);
+          setIsEmailVerified(verified);
 
           const mergedUser: User = remoteProfile
             ? {
@@ -645,7 +671,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             : buildNewUserFromFirebase(fbUser);
 
           if (!remoteProfile) {
-            await syncUserProfileToFirestore(mergedUser).catch(() => {});
+            await syncUserProfileToFirestore(mergedUser, { background: true }).catch(() => {});
           }
           if (remoteProfile?.notificationPreferences) {
             const hydratedPrefs = pushService.setLocalPreferences({
@@ -683,7 +709,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         } catch (e) {
           console.warn('Firestore profile sync error:', e);
-          const fallbackUser = buildNewUserFromFirebase(fbUser);
+          const defaults = buildNewUserFromFirebase(fbUser);
+          let cachedForSameUid: Partial<User> | null = null;
+          try {
+            const raw = localStorage.getItem('alphamate_current_user');
+            if (raw) {
+              const parsed = JSON.parse(raw);
+              if (parsed?.id === fbUser.uid) cachedForSameUid = parsed;
+            }
+          } catch {
+            // ignore
+          }
+          const verified = providerVerified || Boolean(cachedForSameUid?.emailOtpVerified);
+          setIsEmailVerified(verified);
+          const fallbackUser = cachedForSameUid
+            ? { ...defaults, ...cachedForSameUid, id: fbUser.uid, isVerified: verified || Boolean(cachedForSameUid.isVerified) }
+            : defaults;
           saveUserSession(fallbackUser, verified);
           if (verified) {
             const activeLegal =
@@ -973,9 +1014,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       leaderboardWeekKey
     );
     setLocalLeaderboardOverrides(initLocal);
-    syncUserTimeSpentToLeaderboard(initialUser, 0).catch(() => {});
 
     const flushPendingTime = () => {
+      if (isFirestoreQuotaExceeded()) return;
       const pending = pendingTimeSyncMinsRef.current;
       if (pending <= 0) return;
       pendingTimeSyncMinsRef.current = 0;
@@ -1009,13 +1050,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setLocalLeaderboardOverrides(nextLocal);
       pendingTimeSyncMinsRef.current += 1;
 
-      if (pendingTimeSyncMinsRef.current >= 2) {
+      if (pendingTimeSyncMinsRef.current >= 10) {
         flushPendingTime();
       }
     }, 60_000);
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') {
+      if (document.visibilityState === 'hidden' && pendingTimeSyncMinsRef.current >= 3) {
         flushPendingTime();
       }
     };
@@ -1241,6 +1282,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
   const activePartySessionMinsRef = React.useRef<number>(0);
   const lastSyncedBadgeSigRef = React.useRef<string>('');
+  const hasHydratedRemoteBadgesRef = React.useRef<boolean>(false);
   const notifiedBadgeUnlocksRef = React.useRef<Set<string>>(new Set());
   const activePartyRoomRef = React.useRef<PartyRoom | null>(activePartyRoom);
   const activeStreamRef = React.useRef<LiveStream | null>(activeStream);
@@ -1259,12 +1301,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Reload local badge history and subscribe to Firestore badgeStats on account change
   useEffect(() => {
     notifiedBadgeUnlocksRef.current.clear();
-    lastSyncedBadgeSigRef.current = '';
+    hasHydratedRemoteBadgesRef.current = false;
+    try {
+      lastSyncedBadgeSigRef.current =
+        localStorage.getItem(`alphamate_badge_synced_sig_${activeBadgeUid}`) || '';
+    } catch {
+      lastSyncedBadgeSigRef.current = '';
+    }
     setRawBadgeStats(loadLocalUserBadgeStats(activeBadgeUid));
 
     if (!firebaseUser?.uid || !isEmailVerified) return;
 
     const unsubBadges = subscribeToUserBadgeStats(firebaseUser.uid, (remote) => {
+      hasHydratedRemoteBadgesRef.current = true;
       if (!remote) return;
       setRawBadgeStats((prev) => {
         const mergedEarned: UserHistoricalStats['earnedBadges'] = { ...prev.earnedBadges };
@@ -1425,16 +1474,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       .map(([k, v]) => `${k}:${v.tier}`)
       .sort()
       .join(',');
+    const minuteBucket = Math.floor((nextStats.totalActiveMinutes || 0) / 10);
     const sig = [
       nextStats.uid,
       nextStats.totalGiftCoinsSent,
       nextStats.totalGiftsSentCount,
       nextStats.totalGiftCoinsReceived,
       nextStats.totalDiamondsEarned,
-      nextStats.totalActiveMinutes,
-      nextStats.partyRoomMinutes,
-      nextStats.liveStreamMinutes,
-      nextStats.longestPartySessionMinutes,
+      minuteBucket,
       nextStats.bestLeaderboardRank || 0,
       nextStats.checkInDaysCount,
       nextStats.maxDailyStreak,
@@ -1457,18 +1504,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (
       isAuthenticated &&
+      hasHydratedRemoteBadgesRef.current &&
       firebaseUser?.uid === nextStats.uid &&
       isEmailVerified &&
+      !isFirestoreQuotaExceeded() &&
       sig !== lastSyncedBadgeSigRef.current
     ) {
       lastSyncedBadgeSigRef.current = sig;
-      syncUserBadgeStatsToFirestore(nextStats).catch(() => {});
+      syncUserBadgeStatsToFirestore(nextStats)
+        .then((synced) => {
+          if (synced) {
+            try {
+              localStorage.setItem(`alphamate_badge_synced_sig_${nextStats.uid}`, sig);
+            } catch {
+              // ignore storage errors
+            }
+          }
+        })
+        .catch(() => {});
       if (prevEquippedJoined !== nextEquippedJoined) {
-        syncUserProfileToFirestore({
-          ...currentUserRef.current,
-          id: firebaseUser.uid,
-          equippedBadgeIds: nextStats.equippedBadgeIds,
-        }).catch(() => {});
+        syncUserProfileToFirestore(
+          {
+            ...currentUserRef.current,
+            id: firebaseUser.uid,
+            equippedBadgeIds: nextStats.equippedBadgeIds,
+          },
+          { background: true }
+        ).catch(() => {});
         syncUserTimeSpentToLeaderboard(
           { ...currentUserRef.current, equippedBadgeIds: nextStats.equippedBadgeIds },
           0
@@ -1560,13 +1622,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return updated;
     });
 
-    if (firebaseUser?.uid && isEmailVerified) {
+    if (firebaseUser?.uid && isEmailVerified && !isFirestoreQuotaExceeded()) {
       syncUserBadgeStatsToFirestore(updatedStats).catch(() => {});
-      syncUserProfileToFirestore({
-        ...currentUserRef.current,
-        id: firebaseUser.uid,
-        equippedBadgeIds: updatedEquipped,
-      }).catch(() => {});
+      syncUserProfileToFirestore(
+        {
+          ...currentUserRef.current,
+          id: firebaseUser.uid,
+          equippedBadgeIds: updatedEquipped,
+        },
+        { background: true }
+      ).catch(() => {});
       syncUserTimeSpentToLeaderboard(
         { ...currentUserRef.current, equippedBadgeIds: updatedEquipped },
         0
@@ -1681,10 +1746,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     });
 
-    const unsubUsers = subscribeToRealUsers((usersList) => {
-      setRealUsers(usersList);
-      setRegisteredUsers(usersList);
-    });
+    const unsubUsers = subscribeToRealUsers(
+      (usersList) => {
+        setRealUsers(usersList);
+        setRegisteredUsers(usersList);
+      },
+      undefined,
+      { maxUsers: 80, forceRefresh: userSyncRefreshEpoch > 0 }
+    );
 
     const unsubFollows = subscribeToMyFollowEdges(uid, (edges) => {
       setFollowingUserIds(edges.followingIds);
@@ -2900,7 +2969,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         : buildNewUserFromFirebase(fbUser, { isVerified: true });
 
-      await syncUserProfileToFirestore(userObj);
+      await syncUserProfileToFirestore(userObj, { background: true });
       setFirebaseUser(fbUser);
       setIsEmailVerified(true);
       const restricted = isAccountRestrictedStatus(userObj.accountStatus);
@@ -2924,11 +2993,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const loginWithFirebaseEmail = async (email: string, pass: string) => {
     try {
       const fbUser = await signInWithEmail(email, pass);
-      const verified = isFirebaseUserVerified(fbUser);
+      const remoteProfile = await getUserProfileFromFirestore(fbUser.uid).catch(() => null);
+      const verified = isFirebaseUserVerified(fbUser) || Boolean(remoteProfile?.emailOtpVerified);
       setFirebaseUser(fbUser);
       setIsEmailVerified(verified);
 
-      const remoteProfile = await getUserProfileFromFirestore(fbUser.uid);
       const userObj: User = remoteProfile
         ? {
             ...buildNewUserFromFirebase(fbUser),
@@ -2944,12 +3013,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           success: false,
           needsVerification: true,
           user: userObj,
-          error: 'Please verify your email address using the link sent to your inbox.',
+          error: 'Please verify your email address using the 6-digit OTP code sent to your inbox.',
         };
       }
 
       const restricted = isAccountRestrictedStatus(userObj.accountStatus);
-      await syncUserProfileToFirestore(userObj).catch(() => {});
+      await syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
       saveUserSession(userObj, !restricted);
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
@@ -2972,7 +3041,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     username: string;
   }) => {
     try {
-      const fbUser = await registerWithEmail(data.email, data.pass);
+      const fbUser = await registerWithEmail(data.email, data.pass, { skipVerificationEmail: true });
       const verified = isFirebaseUserVerified(fbUser);
       setFirebaseUser(fbUser);
       setIsEmailVerified(verified);
@@ -3013,7 +3082,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ? { ...buildNewUserFromFirebase(refreshed), ...remoteProfile, id: refreshed.uid, isVerified: true }
         : buildNewUserFromFirebase(refreshed, { isVerified: true });
       const restricted = isAccountRestrictedStatus(userObj.accountStatus);
-      await syncUserProfileToFirestore(userObj).catch(() => {});
+      await syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
       saveUserSession(userObj, !restricted);
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
@@ -3112,6 +3181,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: false, status: 503, error: lastError };
   };
 
+  const sendSignupEmailOtp = async (displayName?: string) => {
+    const email = (auth.currentUser?.email || firebaseUser?.email || currentUser?.email || '').trim().toLowerCase();
+    const nameToSend = (displayName || currentUserRef.current?.displayName || '').trim();
+    const res = await callAccountOtpEndpoint('/api/auth/signup-otp/send', {
+      email,
+      displayName: nameToSend,
+    });
+    if (res?.alreadyVerified) {
+      await refreshFirebaseVerification().catch(() => false);
+    }
+    return {
+      success: Boolean(res?.success),
+      alreadyVerified: Boolean(res?.alreadyVerified),
+      emailMasked: res?.emailMasked,
+      challengeToken: res?.challengeToken,
+      expiresAt: res?.expiresAt,
+      cooldownSeconds: res?.cooldownSeconds,
+      retryAfterSeconds: res?.retryAfterSeconds,
+      provider: res?.provider,
+      code: res?.code,
+      error: res?.error,
+    };
+  };
+
+  const verifySignupEmailOtp = async (challengeToken: string, otp: string) => {
+    const res = await callAccountOtpEndpoint('/api/auth/signup-otp/verify', { challengeToken, otp });
+    if (!res?.success) {
+      return {
+        success: false,
+        code: res?.code,
+        remainingAttempts: res?.remainingAttempts,
+        error: res?.error || 'OTP verification failed.',
+      };
+    }
+
+    const verifiedAtIso = res.emailVerifiedAt || new Date().toISOString();
+    const refreshedFbUser = (await reloadCurrentFirebaseUser().catch(() => null)) || auth.currentUser || firebaseUser;
+    const remoteProfile = refreshedFbUser
+      ? await getUserProfileFromFirestore(refreshedFbUser.uid).catch(() => null)
+      : null;
+
+    const baseUser = refreshedFbUser ? buildNewUserFromFirebase(refreshedFbUser) : currentUserRef.current;
+    const existingLocal =
+      currentUserRef.current?.id === refreshedFbUser?.uid ? currentUserRef.current : null;
+    const mergedUser: User = {
+      ...baseUser,
+      ...(remoteProfile || {}),
+      ...(existingLocal || {}),
+      id: refreshedFbUser?.uid || baseUser.id,
+      email: (refreshedFbUser?.email || remoteProfile?.email || baseUser.email || '').toLowerCase(),
+      isVerified: true,
+      emailOtpVerified: true,
+      emailOtpVerifiedAt: verifiedAtIso,
+    };
+
+    await syncUserProfileToFirestore(mergedUser, { background: true }).catch(() => {});
+    if (refreshedFbUser) {
+      setFirebaseUser(refreshedFbUser);
+    }
+    setIsEmailVerified(true);
+    const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
+    saveUserSession(mergedUser, !restricted);
+    if (restricted) {
+      setScreenHistory(['welcome', 'account_recovery']);
+      setCurrentScreenState('account_recovery');
+    } else {
+      setScreenHistory(['home']);
+      setCurrentScreenState('home');
+    }
+
+    return {
+      success: true,
+      emailVerifiedAt: verifiedAtIso,
+    };
+  };
+
   const sendAccountDeletionOtp = async () => {
     const email = (auth.currentUser?.email || firebaseUser?.email || currentUser?.email || '').trim().toLowerCase();
     const res = await callAccountOtpEndpoint('/api/account/deletion-otp/send', { email });
@@ -3206,7 +3351,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser((prev) => {
       const updated = { ...prev, ...data };
       saveUserSession(updated, isAuthenticated);
-      syncUserProfileToFirestore(updated).catch(() => {});
+      syncUserProfileToFirestore(updated, { background: true }).catch(() => {});
 
       setRegisteredUsers((users) => {
         const newUsers = users.map((u) => (u.id === prev.id ? { ...u, ...data } : u));
@@ -4421,6 +4566,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         registerWithFirebaseEmail,
         refreshFirebaseVerification,
         resendEmailVerificationLink,
+        sendSignupEmailOtp,
+        verifySignupEmailOtp,
         logoutFirebase,
         sendAccountDeletionOtp,
         verifyAccountDeletionOtp,
