@@ -58,6 +58,18 @@ export function createApiApp() {
   const REALTIME_SFU_BEARER_TOKEN = (process.env.REALTIME_SFU_BEARER_TOKEN || '').trim();
   const CLOUDFLARE_SFU_BASE = 'https://rtc.live.cloudflare.com/v1';
 
+  const ALWAYS_ALLOWED_ORIGINS = new Set([
+    'https://localhost',
+    'http://localhost',
+    'capacitor://localhost',
+    'ionic://localhost',
+    'https://127.0.0.1',
+    'http://127.0.0.1',
+    'https://alphamate.app',
+    'https://www.alphamate.app',
+    'https://api.alphamate.app',
+  ]);
+
   const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*')
     .split(',')
     .map((v) => v.trim())
@@ -66,9 +78,19 @@ export function createApiApp() {
   app.use(express.json({ limit: '1mb' }));
 
   app.use((req, res, next) => {
-    const origin = req.headers.origin || '';
-    const allowed = ALLOWED_ORIGINS.includes('*') || ALLOWED_ORIGINS.includes(origin);
-    if (allowed) res.header('Access-Control-Allow-Origin', ALLOWED_ORIGINS.includes('*') ? '*' : origin);
+    const origin = (req.headers.origin || '').trim();
+    const isWildcard = ALLOWED_ORIGINS.includes('*');
+    const isExplicitlyAllowed =
+      isWildcard ||
+      ALLOWED_ORIGINS.includes(origin) ||
+      ALWAYS_ALLOWED_ORIGINS.has(origin) ||
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+
+    if (isWildcard && !origin) {
+      res.header('Access-Control-Allow-Origin', '*');
+    } else if (isExplicitlyAllowed) {
+      res.header('Access-Control-Allow-Origin', origin || '*');
+    }
     res.header('Vary', 'Origin');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Content-Length, Accept, Authorization, X-Upload-Id, X-Chunk-Index');

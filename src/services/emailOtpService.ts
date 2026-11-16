@@ -1,5 +1,5 @@
 import { httpsCallable } from 'firebase/functions';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { auth, functions } from './firebase';
 import { p2pStreamingEngine } from './webrtcService';
 
@@ -81,11 +81,67 @@ function formatCallableError(err: unknown, fallbackMessage: string): string {
   return fallbackMessage;
 }
 
+async function postJsonToEndpoint(
+  url: string,
+  headers: Record<string, string>,
+  body: Record<string, unknown>
+): Promise<{ status: number; data: Record<string, any> | null }> {
+  // On native Android/iOS, CapacitorHttp executes outside the WebView sandbox so WebView CORS
+  // restrictions (e.g. https://localhost -> https://api.alphamate.app) never block OTP requests.
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const nativeRes = await CapacitorHttp.post({
+        url,
+        headers,
+        data: body,
+        connectTimeout: 15000,
+        readTimeout: 15000,
+      });
+      let parsedData: Record<string, any> | null = null;
+      if (nativeRes.data && typeof nativeRes.data === 'object') {
+        parsedData = nativeRes.data as Record<string, any>;
+      } else if (typeof nativeRes.data === 'string' && nativeRes.data.trim().startsWith('{')) {
+        parsedData = JSON.parse(nativeRes.data);
+      }
+      return { status: Number(nativeRes.status || 0), data: parsedData };
+    } catch {
+      // Fall through to WebView fetch fallback below
+    }
+  }
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 15000) : null;
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      return { status: res.status, data: null };
+    }
+    const data = await res.json().catch(() => null);
+    return {
+      status: res.status,
+      data: data && typeof data === 'object' ? (data as Record<string, any>) : null,
+    };
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function callBackendOtpEndpoint(params: {
   subPath: string;
   body: Record<string, unknown>;
   requireAuth: boolean;
-}): Promise<{ handled: boolean; data: Record<string, any> | null; lastUnconfiguredError?: string }> {
+}): Promise<{
+  handled: boolean;
+  data: Record<string, any> | null;
+  lastUnconfiguredError?: string;
+  lastTransportError?: string;
+}> {
   let authHeader: string | undefined;
   if (params.requireAuth) {
     const activeFbUser = auth.currentUser;
@@ -115,6 +171,7 @@ async function callBackendOtpEndpoint(params: {
   }
 
   let lastUnconfiguredError: string | undefined;
+  let lastTransportError: string | undefined;
   const endpoints = getOrderedBackendEndpoints(params.subPath);
 
   for (const url of endpoints) {
@@ -127,36 +184,38 @@ async function callBackendOtpEndpoint(params: {
         headers.Authorization = authHeader;
       }
 
-      const res = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(params.body),
-      });
-
-      const contentType = res.headers.get('content-type') || '';
-      if (!contentType.includes('application/json')) {
+      const { status, data } = await postJsonToEndpoint(url, headers, params.body);
+      if (!data) {
+        if (status > 0) {
+          lastTransportError = `OTP server returned HTTP ${status}. Please try again.`;
+        }
         continue;
       }
 
-      const data = await res.json().catch(() => null);
-      if (!data || typeof data !== 'object') {
-        continue;
-      }
-
-      if (shouldTryNextBackendOrCloudFunction(res.status, data)) {
+      if (shouldTryNextBackendOrCloudFunction(status, data)) {
         if (typeof data.error === 'string' && data.error.trim()) {
-          lastUnconfiguredError = data.error;
+          if (data.code === 'EMAIL_OTP_NOT_CONFIGURED' || data.code === 'FIREBASE_SERVICE_ACCOUNT_REQUIRED') {
+            lastUnconfiguredError = data.error;
+          } else {
+            lastTransportError = data.error;
+          }
         }
         continue;
       }
 
       return { handled: true, data };
-    } catch {
-      // Try next configured endpoint
+    } catch (err: any) {
+      const msg = String(err?.message || '').trim();
+      lastTransportError =
+        err?.name === 'AbortError'
+          ? 'OTP server request timed out. Please check your internet connection and try again.'
+          : msg
+          ? `Unable to reach Email OTP server (${msg}).`
+          : 'Unable to reach Email OTP server. Please check your internet connection.';
     }
   }
 
-  return { handled: false, data: null, lastUnconfiguredError };
+  return { handled: false, data: null, lastUnconfiguredError, lastTransportError };
 }
 
 /**
@@ -201,10 +260,11 @@ export async function requestAuthenticatedEmailOtp(params: {
   } catch (err: unknown) {
     return {
       success: false,
-      code: 'EMAIL_OTP_NOT_CONFIGURED',
+      code: backendAttempt.lastTransportError ? 'OTP_NETWORK_ERROR' : 'EMAIL_OTP_NOT_CONFIGURED',
       error: formatCallableError(
         err,
         backendAttempt.lastUnconfiguredError ||
+          backendAttempt.lastTransportError ||
           'Email OTP backend is awaiting RESEND_API_KEY configuration on Railway (api.alphamate.app) or AI Studio Secrets.'
       ),
     };
@@ -283,10 +343,11 @@ export async function requestLoginEmailOtp(email: string): Promise<CloudSendOtpR
   } catch (err: unknown) {
     return {
       success: false,
-      code: 'EMAIL_OTP_NOT_CONFIGURED',
+      code: backendAttempt.lastTransportError ? 'OTP_NETWORK_ERROR' : 'EMAIL_OTP_NOT_CONFIGURED',
       error: formatCallableError(
         err,
         backendAttempt.lastUnconfiguredError ||
+          backendAttempt.lastTransportError ||
           'Login Email OTP backend is awaiting RESEND_API_KEY configuration on Railway (api.alphamate.app) or AI Studio Secrets.'
       ),
     };
@@ -367,10 +428,11 @@ export async function requestPreSignupEmailOtp(email: string): Promise<CloudSend
   } catch (err: unknown) {
     return {
       success: false,
-      code: 'EMAIL_OTP_NOT_CONFIGURED',
+      code: backendAttempt.lastTransportError ? 'OTP_NETWORK_ERROR' : 'EMAIL_OTP_NOT_CONFIGURED',
       error: formatCallableError(
         err,
         backendAttempt.lastUnconfiguredError ||
+          backendAttempt.lastTransportError ||
           'Sign-Up Email OTP backend is awaiting RESEND_API_KEY configuration on Railway (api.alphamate.app) or AI Studio Secrets.'
       ),
     };

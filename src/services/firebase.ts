@@ -286,16 +286,46 @@ export function hasFirebasePasswordProvider(fbUser: FirebaseUser | null | undefi
 export async function signInWithGoogle(options?: { forceAccountPicker?: boolean }) {
   try {
     if (Capacitor.isNativePlatform()) {
+      if (!Capacitor.isPluginAvailable('FirebaseAuthentication')) {
+        throw new Error(
+          'Native FirebaseAuthentication plugin is not loaded in this Android APK build. Rebuild and sync Android (npx cap sync android && ./gradlew assembleRelease) with rgcfaIncludeGoogle=true.'
+        );
+      }
+
       if (options?.forceAccountPicker !== false) {
         // Clear cached native Google account selection so Android shows the account chooser
         // when signing up or adding up to 5 accounts.
         await FirebaseAuthentication.signOut().catch(() => {});
       }
-      // Native Google account chooser -> Google ID token -> Firebase JS Auth session.
-      const nativeResult = await FirebaseAuthentication.signInWithGoogle();
+
+      // Try Credential Manager first; if the device lacks Credential Manager support or credentials,
+      // automatically fall back to the classic Google Play Services account chooser.
+      let nativeResult: Awaited<ReturnType<typeof FirebaseAuthentication.signInWithGoogle>>;
+      try {
+        nativeResult = await FirebaseAuthentication.signInWithGoogle({
+          useCredentialManager: true,
+        });
+      } catch (cmError: any) {
+        const cmMsg = String(cmError?.message || '').toLowerCase();
+        const cmCode = String(cmError?.code || '').toLowerCase();
+        const isUserCancel =
+          cmMsg.includes('cancel') ||
+          cmCode.includes('cancel') ||
+          cmCode === '16' ||
+          cmCode === '12501';
+        if (isUserCancel) {
+          throw cmError;
+        }
+        nativeResult = await FirebaseAuthentication.signInWithGoogle({
+          useCredentialManager: false,
+        });
+      }
+
       const idToken = nativeResult.credential?.idToken;
       if (!idToken) {
-        throw new Error('Google Sign-In did not return an ID token. Verify the Play App Signing SHA-1/SHA-256 and Firebase Google provider configuration.');
+        throw new Error(
+          'Google Sign-In did not return an ID token. Verify the Play App Signing SHA-1/SHA-256 and Firebase Google provider configuration.'
+        );
       }
       const credential = GoogleAuthProvider.credential(idToken);
       const webResult = await signInWithCredential(auth, credential);
@@ -570,6 +600,9 @@ export async function checkUsernameAvailabilityFirestore(
  */
 export async function logoutUser() {
   try {
+    if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('FirebaseAuthentication')) {
+      await FirebaseAuthentication.signOut().catch(() => {});
+    }
     await signOut(auth);
   } catch (error: any) {
     console.error('Sign-Out Error:', error);

@@ -27,6 +27,7 @@ import {
   isFirestoreQuotaExceededError,
   notifyFirestoreQuotaExceeded,
 } from './firebase';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { realtimeSocket } from './realtimeSocket';
 import { User, SfuPublishedTrack } from '../types';
 import { audioFilter, VoiceFilterPresetId } from './audioFilter';
@@ -357,44 +358,74 @@ class RealtimeSfuStreamingEngine {
         headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(body);
       }
-      let response: Response;
-      try {
-        response = await this.fetchWithTimeout(url, init, 14000);
-      } catch (networkErr) {
-        console.warn(`[WebRTC SFU] Network error calling ${method} ${url}:`, networkErr);
-        throw this.formatNetworkFetchError(base, networkErr);
-      }
-      const contentType = response.headers.get('content-type') || '';
-      const rawText = await response.text().catch(() => '');
+      let responseStatus = 0;
+      let contentType = '';
+      let rawText = '';
       let data: any = {};
-      if (rawText) {
+
+      try {
+        const response = await this.fetchWithTimeout(url, init, 14000);
+        responseStatus = response.status;
+        contentType = response.headers.get('content-type') || '';
+        rawText = await response.text().catch(() => '');
+      } catch (networkErr) {
+        if (Capacitor.isNativePlatform() && !keepalive) {
+          try {
+            const nativeRes = await CapacitorHttp.request({
+              url,
+              method,
+              headers,
+              ...(body !== undefined && method !== 'GET' ? { data: body } : {}),
+              connectTimeout: 14000,
+              readTimeout: 14000,
+            });
+            responseStatus = Number(nativeRes.status || 0);
+            const resData = nativeRes.data;
+            if (resData && typeof resData === 'object') {
+              data = resData;
+              contentType = 'application/json';
+              rawText = JSON.stringify(resData);
+            } else if (typeof resData === 'string') {
+              rawText = resData;
+              contentType = resData.trim().startsWith('{') ? 'application/json' : 'text/plain';
+            }
+          } catch (nativeErr) {
+            console.warn(`[WebRTC SFU] Native HTTP error calling ${method} ${url}:`, nativeErr);
+            throw this.formatNetworkFetchError(base, nativeErr);
+          }
+        } else {
+          console.warn(`[WebRTC SFU] Network error calling ${method} ${url}:`, networkErr);
+          throw this.formatNetworkFetchError(base, networkErr);
+        }
+      }
+
+      if (rawText && !Object.keys(data).length) {
         try {
           data = JSON.parse(rawText);
         } catch {
           if (!contentType.includes('application/json')) {
-            // Cloudflare proxy/gateway HTML error pages (e.g. 502/503/504/520-524) should be retried as transient errors
-            if (this.isRetryableGatewayStatus(response.status)) {
+            if (this.isRetryableGatewayStatus(responseStatus)) {
               const err: any = new Error(
-                `SFU backend gateway at ${base} temporarily unavailable (${response.status}).`
+                `SFU backend gateway at ${base} temporarily unavailable (${responseStatus}).`
               );
-              err.status = response.status;
+              err.status = responseStatus;
               err.code = 'SFU_BACKEND_UNREACHABLE';
               throw err;
             }
             const msg = this.hasConfiguredRailwayUrl()
-              ? `Backend API at ${base} returned non-JSON (${response.status}) for ${path}. Verify Railway is running the Express API (npm start).`
-              : `No Express/SFU API server on this host (${response.status} HTML). Set VITE_RAILWAY_API_URL to your deployed Railway backend.`;
+              ? `Backend API at ${base} returned non-JSON (${responseStatus}) for ${path}. Verify Railway is running the Express API (npm start).`
+              : `No Express/SFU API server on this host (${responseStatus} HTML). Set VITE_RAILWAY_API_URL to your deployed Railway backend.`;
             const err: any = new Error(msg);
-            err.status = response.status;
+            err.status = responseStatus;
             err.code = 'SFU_NOT_CONFIGURED';
             throw err;
           }
-          const err: any = new Error(`Invalid JSON response from SFU backend (${response.status}).`);
-          err.status = response.status;
+          const err: any = new Error(`Invalid JSON response from SFU backend (${responseStatus}).`);
+          err.status = responseStatus;
           throw err;
         }
       }
-      return { response, data };
+      return { response: { ok: responseStatus >= 200 && responseStatus < 300, status: responseStatus }, data };
     };
 
     const maxAttempts = keepalive ? 1 : 2;

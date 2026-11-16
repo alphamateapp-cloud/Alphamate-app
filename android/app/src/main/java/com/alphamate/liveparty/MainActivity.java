@@ -5,12 +5,21 @@ import android.os.Bundle;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
 import com.getcapacitor.BridgeActivity;
+import com.google.firebase.FirebaseApp;
 import io.capawesome.capacitorjs.plugins.firebase.authentication.FirebaseAuthenticationPlugin;
 
 public class MainActivity extends BridgeActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        try {
+            if (FirebaseApp.getApps(this).isEmpty()) {
+                FirebaseApp.initializeApp(this);
+            }
+        } catch (Exception ignored) {
+            // FirebaseInitProvider handles default initialization when google-services.json resources exist
+        }
         registerPlugin(FirebaseAuthenticationPlugin.class);
+        registerPlugin(KeepScreenOnPlugin.class);
         super.onCreate(savedInstanceState);
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
         try {
