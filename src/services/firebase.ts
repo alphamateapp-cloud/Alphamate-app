@@ -29,6 +29,7 @@ import {
 import { getFunctions } from 'firebase/functions';
 import {
   getFirestore,
+  initializeFirestore,
   enableNetwork,
   doc,
   getDoc,
@@ -75,7 +76,29 @@ export const FIRESTORE_PROJECT_ID = firebaseConfig.projectId;
 export const FIRESTORE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
 
 // CRITICAL: The app will break without passing firestoreDatabaseId
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+function createFirestoreInstance() {
+  const isIframeOrPreview =
+    typeof window !== 'undefined' &&
+    (() => {
+      try {
+        return window.self !== window.top || window.location.hostname.endsWith('.run.app');
+      } catch {
+        return true;
+      }
+    })();
+  const useForceLongPolling = Capacitor.isNativePlatform() || isIframeOrPreview;
+  const settings = useForceLongPolling
+    ? { experimentalForceLongPolling: true }
+    : { experimentalAutoDetectLongPolling: true };
+
+  try {
+    return initializeFirestore(app, settings, firebaseConfig.firestoreDatabaseId);
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+
+export const db = createFirestoreInstance();
 // Use durable IndexedDB persistence in Capacitor Android so the Firebase JS SDK
 // keeps the same session after native Google Sign-In returns an ID token.
 function createFirebaseAuth() {
@@ -258,24 +281,46 @@ export function handleBackgroundWriteError(
 // CONNECTION TEST ON APP BOOT
 // =========================================================================
 export async function testConnection(): Promise<boolean> {
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    clearFirestoreQuotaExceeded();
-    console.log('Firebase Firestore connection verified.');
-    return true;
-  } catch (error) {
-    if (isFirestoreQuotaExceededError(error)) {
-      notifyFirestoreQuotaExceeded();
-      console.warn('Firestore daily quota currently reached:', (error as Error)?.message || error);
-      return false;
-    }
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration: client is offline.');
-    } else {
-      console.log('Firestore initialized:', (error as Error)?.message || error);
-    }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return false;
   }
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await withFirestoreTimeout(
+        getDocFromServer(doc(db, 'test', 'connection')),
+        8000,
+        'Firestore connection check'
+      );
+      clearFirestoreQuotaExceeded();
+      console.log('Firebase Firestore connection verified.');
+      return true;
+    } catch (error) {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+        console.warn('Firestore daily quota currently reached:', (error as Error)?.message || error);
+        return false;
+      }
+      const message = error instanceof Error ? error.message : String(error || '');
+      const isOfflineOrTimeout =
+        message.includes('the client is offline') ||
+        message.includes('timed out') ||
+        message.includes('unavailable');
+
+      if (isOfflineOrTimeout && attempt === 1) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        continue;
+      }
+
+      if (message.includes('the client is offline')) {
+        console.error('Please check your Firebase configuration: client is offline.');
+      } else {
+        console.log('Firestore initialized:', message);
+      }
+      return false;
+    }
+  }
+  return false;
 }
 
 // Trigger initial verification

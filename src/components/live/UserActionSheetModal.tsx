@@ -45,6 +45,7 @@ export interface UserActionSheetModalProps {
   isSeatMuted?: boolean;
   isSeatHostMuted?: boolean;
   onToggleSeatMic?: (seatIndex: number) => void;
+  onRemoveFromSeat?: (seatIndex: number, targetUser: User) => void;
   // Interactions
   onSendGift: (targetUser: User) => void;
   onDirectMessage: (targetUser: User) => void;
@@ -71,6 +72,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
   isSeatMuted = false,
   isSeatHostMuted = false,
   onToggleSeatMic,
+  onRemoveFromSeat,
   onSendGift,
   onDirectMessage,
   onVisitProfile,
@@ -398,6 +400,23 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                       : 'Muting this user will lock their mic; they cannot turn it on themselves.'}
                   </p>
                 </div>
+              )}
+
+              {/* A2. Remove from Seat (step guest down to audience) */}
+              {isSeated && seatIndex !== null && onRemoveFromSeat && (
+                <button
+                  onClick={() => {
+                    onClose();
+                    onRemoveFromSeat(seatIndex, displayUser);
+                  }}
+                  className="w-full h-10 rounded-xl bg-orange-500/15 border border-orange-500/40 text-orange-200 hover:bg-orange-500/25 font-bold text-xs flex items-center justify-between px-3 cursor-pointer transition-all"
+                >
+                  <div className="flex items-center gap-2">
+                    <UserX className="w-4 h-4 text-orange-400" />
+                    <span>Remove Seat</span>
+                  </div>
+                  <span className="text-[9.5px] text-zinc-400">Seat #{seatIndex + 1} → Audience</span>
+                </button>
               )}
 
               {/* B. Host Only: Make / Remove Moderator (1 to 10 limit) */}

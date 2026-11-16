@@ -57,6 +57,7 @@ import {
   Info,
   Lock,
   Unlock,
+  LogOut,
   Zap,
   ArrowUpRight,
   Shield,
@@ -248,6 +249,7 @@ export const PartyRoomsScreen: React.FC = () => {
   const [showSeatActionModal, setShowSeatActionModal] = useState<number | null>(null);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showExitConfirmModal, setShowExitConfirmModal] = useState(false);
+  const [showGuestExitModal, setShowGuestExitModal] = useState(false);
   const [roomBackground, setRoomBackground] = useState<'logo' | 'dp' | 'sunrise' | 'sunset' | 'mosque'>('logo');
   const [showBackgroundModal, setShowBackgroundModal] = useState(false);
   const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
@@ -507,10 +509,9 @@ export const PartyRoomsScreen: React.FC = () => {
     const isRoomHost = activePartyRoom?.host?.id === effectiveUserId;
     if (isRoomHost) {
       setShowExitConfirmModal(true);
+    } else if (userSeatIndex !== null) {
+      setShowGuestExitModal(true);
     } else {
-      if (userSeatIndex !== null) {
-        await toggleSeat(userSeatIndex).catch(() => {});
-      }
       const remainingCount = Math.max(
         0,
         realViewersList.filter((u) => u.id !== effectiveUserId).length
@@ -641,6 +642,37 @@ export const PartyRoomsScreen: React.FC = () => {
         ? `Muted & locked ${seat.user.displayName}'s mic! 🔒🔇`
         : `Unmuted ${seat.user.displayName}'s mic! 🎙️`
     );
+  };
+
+  const handleRemoveGuestFromSeat = async (seatIndex: number, targetUser: User) => {
+    if (!canModerate || !activePartyRoom) return;
+    if (
+      targetUser.id === activePartyRoom.host.id ||
+      targetUser.displayName === activePartyRoom.host.displayName
+    ) {
+      showToast('Cannot remove the room Host! 👑');
+      return;
+    }
+    const updatedSeats = (activePartyRoom.seats || []).map((s) =>
+      Number(s.seatIndex) === seatIndex || s.user?.id === targetUser.id
+        ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
+        : s
+    );
+    await updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
+    await deleteDoc(
+      doc(db, 'partyRooms', activePartyRoom.id, 'voiceParticipants', targetUser.id)
+    ).catch(() => {});
+
+    showToast(`Removed ${targetUser.displayName} from Seat #${seatIndex + 1}!`);
+    setChatItems((prev) => [
+      ...prev,
+      {
+        id: `sys_remseat_${Date.now()}`,
+        sender: { displayName: 'System', avatar: '', isHost: false },
+        text: `🪑 ${targetUser.displayName} was removed from Seat #${seatIndex + 1} by ${isHost ? 'Host' : 'Moderator'}.`,
+        type: 'system',
+      },
+    ]);
   };
 
   const handleMuteAllGuests = async () => {
@@ -1345,8 +1377,12 @@ export const PartyRoomsScreen: React.FC = () => {
             /microphone|permission|device/i.test(msg);
 
           if (isMicHardwareError && !isUserHost && userSeatIndex !== null) {
-            showToast(msg);
-            toggleSeat(userSeatIndex).catch(() => {});
+            setIsMicMuted(true);
+            const mutedSeats = (activePartyRoom.seats || []).map((s) =>
+              Number(s.seatIndex) === userSeatIndex ? { ...s, isMuted: true, isSpeaking: false } : s
+            );
+            updatePartyRoomFields(roomId, { seats: mutedSeats }).catch(() => {});
+            showToast('Microphone unavailable — seated with mic muted 🔇');
           } else {
             setPartyVoiceError(msg);
             showToast(msg);
@@ -1872,7 +1908,7 @@ export const PartyRoomsScreen: React.FC = () => {
       return;
     }
 
-    if (seat.user.id === effectiveUserId) {
+    if (seat.user.id === effectiveUserId || seat.user.id === currentUser.id) {
       setShowSeatActionModal(seat.seatIndex);
       return;
     }
@@ -2920,6 +2956,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 : false
             }
             onToggleSeatMic={handleToggleSeatMicByHostOrMod}
+            onRemoveFromSeat={handleRemoveGuestFromSeat}
             onSendGift={(target) => {
               setGiftRecipientUser(target);
               setShowGiftDrawer(true);
@@ -2987,17 +3024,21 @@ export const PartyRoomsScreen: React.FC = () => {
                       </button>
 
                       <button
-                        onClick={async () => {
-                          const seatIdx = targetSeat.seatIndex;
+                        onClick={() => {
                           setShowSeatActionModal(null);
-                          await toggleSeat(seatIdx);
-                          showToast(`Left Seat ${seatIdx + 1}`);
+                          setSelectedUserForActionSheet(currentUser);
+                          setSelectedUserSeatIndex(targetSeat.seatIndex);
+                          setShowUserActionSheet(true);
                         }}
-                        className="w-full h-10 rounded-xl bg-rose-600/20 border border-rose-500/40 text-rose-200 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer hover:bg-rose-600/30"
+                        className="w-full h-10 rounded-xl bg-[#1F153B] border border-white/10 text-zinc-200 text-xs font-bold flex items-center justify-center gap-2 cursor-pointer hover:border-[#A855F7]"
                       >
-                        <UserX className="w-4 h-4" />
-                        <span>Leave Seat (Step Down)</span>
+                        <Users className="w-4 h-4 text-[#C084FC]" />
+                        <span>View My Profile</span>
                       </button>
+
+                      <p className="text-[10px] text-center text-zinc-400 pt-1">
+                        Use the top-right <span className="font-bold text-white">✕</span> button when you want to Leave Seat or Leave Broad.
+                      </p>
                     </>
                   )}
 
@@ -3681,6 +3722,96 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         )}
 
+        {/* Guest Exit Options Modal when seated user taps top X: Leave Seat vs Leave Broad */}
+        {showGuestExitModal && userSeatIndex !== null && (
+          <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-center justify-center p-4">
+            <div className="w-full max-w-sm rounded-3xl bg-[#140826] border border-[#A855F7]/30 p-6 shadow-2xl animate-scale-up text-white">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center shadow-md">
+                    <Mic className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold text-white">Seat #{userSeatIndex + 1}</h3>
+                    <p className="text-[10px] text-zinc-400">Choose how you want to exit</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowGuestExitModal(false)}
+                  className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-zinc-400 hover:text-white cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="space-y-3 mb-5">
+                {/* 1. Leave Seat (Stay in broadcast as viewer) */}
+                <button
+                  onClick={async () => {
+                    const seatToLeave = userSeatIndex;
+                    setShowGuestExitModal(false);
+                    if (seatToLeave !== null) {
+                      await toggleSeat(seatToLeave).catch(() => {});
+                      showToast(`Left Seat #${seatToLeave + 1} — staying in broadcast 🎧`);
+                    }
+                  }}
+                  className="w-full p-3.5 rounded-2xl bg-[#1C1033] border border-[#A855F7]/30 hover:border-[#A855F7] flex items-start gap-3 text-left transition-all cursor-pointer group hover:bg-[#231540]"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center shrink-0 mt-0.5 group-hover:scale-105 transition-transform">
+                    <UserX className="w-5 h-5 text-amber-300" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-white">Leave Seat</span>
+                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold uppercase tracking-wider">Stay in Broad</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
+                      Step down from Seat #{userSeatIndex + 1} and remain inside this Party Room as a viewer.
+                    </p>
+                  </div>
+                </button>
+
+                {/* 2. Leave Broad (Exit party room completely) */}
+                <button
+                  onClick={async () => {
+                    const seatToLeave = userSeatIndex;
+                    setShowGuestExitModal(false);
+                    if (seatToLeave !== null) {
+                      await toggleSeat(seatToLeave).catch(() => {});
+                    }
+                    const remainingCount = Math.max(
+                      0,
+                      realViewersList.filter((u) => u.id !== effectiveUserId).length
+                    );
+                    closePartyRoom(false, { remainingViewers: remainingCount });
+                  }}
+                  className="w-full p-3.5 rounded-2xl bg-rose-950/25 border border-rose-500/30 hover:border-rose-500 flex items-start gap-3 text-left transition-all cursor-pointer group hover:bg-rose-950/40"
+                >
+                  <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-500/30 flex items-center justify-center shrink-0 mt-0.5 group-hover:scale-105 transition-transform">
+                    <LogOut className="w-5 h-5 text-rose-400" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-rose-200">Leave Broad</span>
+                      <span className="text-[9px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 font-bold uppercase tracking-wider">Exit Party</span>
+                    </div>
+                    <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
+                      Step off your seat and leave this Party Room broadcast completely.
+                    </p>
+                  </div>
+                </button>
+              </div>
+
+              <button
+                onClick={() => setShowGuestExitModal(false)}
+                className="w-full h-11 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-bold hover:bg-zinc-700 cursor-pointer transition-colors"
+              >
+                Cancel (Stay Seated)
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Party Leaderboard Modal (Active Room) */}
         <PartyLeaderboardModal
           isOpen={showLeaderboardModal}
@@ -3692,7 +3823,9 @@ export const PartyRoomsScreen: React.FC = () => {
           activeRoomTitle={activePartyRoom.title || 'Party Room'}
           onSelectUser={(targetUser) => {
             setShowLeaderboardModal(false);
+            const seatIdx = activePartyRoom.seats.findIndex((s) => s.user?.id === targetUser.id);
             setSelectedUserForActionSheet(targetUser);
+            setSelectedUserSeatIndex(seatIdx !== -1 ? seatIdx : null);
             setShowUserActionSheet(true);
           }}
           onOpenGiftDrawer={() => {
