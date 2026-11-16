@@ -154,7 +154,12 @@ jobs:
 
             if (hasOfficialSecrets) {
               if (b64Match && ksPwMatch) {
-                const cleaned = b64Match.val.replace(/[\s"\x27]/g, "").replace(/-/g, "+").replace(/_/g, "/");
+                let cleaned = b64Match.val
+                  .replace(/^data:[^,]+,/i, "")
+                  .replace(/[\s"\x27]/g, "")
+                  .replace(/-/g, "+")
+                  .replace(/_/g, "/");
+                while (cleaned.length % 4 !== 0) cleaned += "=";
                 const buf = Buffer.from(cleaned, "base64");
                 if (!buf.length) {
                   console.error("::error::Decoded android/app/release-key.jks is empty. Verify your base64 keystore secret (" + b64Match.key + ").");
@@ -286,7 +291,32 @@ jobs:
               echo "::error::apksigner was not found; cannot verify release APK signature."
               exit 1
             fi
-            "$APKSIGNER_BIN" verify --verbose --print-certs android/app/build/outputs/apk/release/app-release.apk
+            CERT_OUT=$("$APKSIGNER_BIN" verify --verbose --print-certs android/app/build/outputs/apk/release/app-release.apk)
+            echo "$CERT_OUT"
+            RAW_SHA1=$(echo "$CERT_OUT" | grep -i "Signer #1 certificate SHA-1 digest:" | head -n 1 | awk -F': ' '{print $2}' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            RAW_SHA256=$(echo "$CERT_OUT" | grep -i "Signer #1 certificate SHA-256 digest:" | head -n 1 | awk -F': ' '{print $2}' | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+            FMT_SHA1=$(echo "$RAW_SHA1" | sed 's/../&:/g; s/:$//')
+            FMT_SHA256=$(echo "$RAW_SHA256" | sed 's/../&:/g; s/:$//')
+            EXPECTED_SHA1="cd:1a:d8:1d:eb:0b:d0:a3:15:6b:a5:f7:27:96:9c:19:3b:51:b4:da"
+            echo "Release APK Signer SHA-1:   ${FMT_SHA1:-unknown}"
+            echo "Release APK Signer SHA-256: ${FMT_SHA256:-unknown}"
+            if [ -n "$GITHUB_STEP_SUMMARY" ]; then
+              {
+                echo "### Signed Release Verification"
+                echo "- **Signing Mode**: $([ "${SIGNED_RELEASE}" = "true" ] && echo "Official Release Keystore (Play Store Ready)" || echo "Temporary Preview Keystore (Test APK Only)")"
+                echo "- **Release APK**: \`android/app/build/outputs/apk/release/app-release.apk\`"
+                if [ "${SIGNED_RELEASE}" = "true" ]; then
+                  echo "- **Play Store AAB**: \`android/app/build/outputs/bundle/release/app-release.aab\`"
+                fi
+                echo "- **APK SHA-1**: \`${FMT_SHA1:-unknown}\`"
+                echo "- **APK SHA-256**: \`${FMT_SHA256:-unknown}\`"
+                if [ "$FMT_SHA1" = "$EXPECTED_SHA1" ]; then
+                  echo "- **Firebase SHA Match**: Matched (\`$EXPECTED_SHA1\`) — Google Sign-In ready for this APK!"
+                else
+                  echo "- **Firebase SHA Match**: Different from \`$EXPECTED_SHA1\`! If testing this direct APK with Google Sign-In, also add \`${FMT_SHA1}\` & \`${FMT_SHA256}\` to Firebase Console (e.g. if using a separate Play Upload Key or Preview Key)."
+                fi
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
           fi
           if [ "${SIGNED_RELEASE}" = "true" ]; then
             if [ ! -f android/app/build/outputs/bundle/release/app-release.aab ]; then

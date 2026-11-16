@@ -11,7 +11,6 @@ const config: CapacitorConfig = {
   android: {
     allowMixedContent: true,
     captureInput: true,
-    webContentsDebuggingEnabled: true,
     backgroundColor: '#09070F',
     buildOptions: {
       keystorePath: 'release-key.jks',
