@@ -2,14 +2,6 @@ name: Sync Bun & npm lockfiles and verify build
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - "package.json"
-      - "bun.lock"
-      - "package-lock.json"
-      - ".github/workflows/repair-npm-lockfile.yml"
 
 permissions:
   contents: write
