@@ -321,34 +321,102 @@ function isPluginNotImplementedError(error: any): boolean {
   );
 }
 
+async function withAuthTimeout<T>(promise: Promise<T>, timeoutMs: number, errorMessage: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(errorMessage));
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function signInWithGoogle(options?: { forceAccountPicker?: boolean }) {
   try {
     if (Capacitor.isNativePlatform()) {
       let idToken: string | undefined;
       let lastNativeError: any = null;
+      const forceAccountPicker = options?.forceAccountPicker !== false;
 
-      if (Capacitor.isPluginAvailable('FirebaseAuthentication')) {
+      // 1. Prefer our Activity-bound NativeGoogleAuth plugin with classic GoogleSignInClient
+      // account picker first so it opens reliably on all Android devices without stalling
+      // inside @capacitor-firebase/authentication's CredentialManager context lookup.
+      if (Capacitor.isPluginAvailable('NativeGoogleAuth')) {
         try {
-          if (options?.forceAccountPicker !== false) {
-            // Clear cached native Google account selection so Android shows the account chooser
-            // when signing up or adding up to 5 accounts.
-            await FirebaseAuthentication.signOut().catch(() => {});
+          const builtInResult = await withAuthTimeout(
+            NativeGoogleAuth.signIn({
+              serverClientId: firebaseConfig.oAuthClientId,
+              forceAccountPicker,
+              useCredentialManager: false,
+            }),
+            65_000,
+            'Google account picker timed out. Please try again.'
+          );
+          idToken = builtInResult?.idToken;
+        } catch (nativeAuthErr: any) {
+          if (isGoogleSignInCancelledError(nativeAuthErr)) {
+            throw nativeAuthErr;
+          }
+          lastNativeError = nativeAuthErr;
+        }
+
+        // Optional Credential Manager attempt if classic chooser failed with non-cancellation error
+        if (!idToken) {
+          try {
+            const cmBuiltInResult = await withAuthTimeout(
+              NativeGoogleAuth.signIn({
+                serverClientId: firebaseConfig.oAuthClientId,
+                forceAccountPicker,
+                useCredentialManager: true,
+              }),
+              45_000,
+              'Google Sign-In timed out. Please try again.'
+            );
+            idToken = cmBuiltInResult?.idToken;
+          } catch (cmBuiltInErr: any) {
+            if (isGoogleSignInCancelledError(cmBuiltInErr)) {
+              throw cmBuiltInErr;
+            }
+            lastNativeError = cmBuiltInErr;
+          }
+        }
+      }
+
+      // 2. Fallback to @capacitor-firebase/authentication with bounded timeouts
+      if (!idToken && Capacitor.isPluginAvailable('FirebaseAuthentication')) {
+        try {
+          if (forceAccountPicker) {
+            await withAuthTimeout(
+              FirebaseAuthentication.signOut(),
+              2500,
+              'Native Google sign-out timed out'
+            ).catch(() => {});
           }
 
-          // Try Credential Manager first; if the device lacks Credential Manager support or credentials,
-          // automatically fall back to the classic Google Play Services account chooser.
           let nativeResult: Awaited<ReturnType<typeof FirebaseAuthentication.signInWithGoogle>>;
           try {
-            nativeResult = await FirebaseAuthentication.signInWithGoogle({
-              useCredentialManager: true,
-            });
-          } catch (cmError: any) {
-            if (isGoogleSignInCancelledError(cmError)) {
-              throw cmError;
+            nativeResult = await withAuthTimeout(
+              FirebaseAuthentication.signInWithGoogle({
+                useCredentialManager: false,
+              }),
+              45_000,
+              'Google Sign-In timed out. Please try again.'
+            );
+          } catch (legacyPluginErr: any) {
+            if (isGoogleSignInCancelledError(legacyPluginErr)) {
+              throw legacyPluginErr;
             }
-            nativeResult = await FirebaseAuthentication.signInWithGoogle({
-              useCredentialManager: false,
-            });
+            nativeResult = await withAuthTimeout(
+              FirebaseAuthentication.signInWithGoogle({
+                useCredentialManager: true,
+              }),
+              35_000,
+              'Google Sign-In timed out. Please try again.'
+            );
           }
           idToken = nativeResult.credential?.idToken;
         } catch (fbPluginErr: any) {
@@ -357,24 +425,6 @@ export async function signInWithGoogle(options?: { forceAccountPicker?: boolean 
           }
           lastNativeError = fbPluginErr;
         }
-      }
-
-      if (!idToken && Capacitor.isPluginAvailable('NativeGoogleAuth')) {
-        try {
-          const builtInResult = await NativeGoogleAuth.signIn({
-            serverClientId: firebaseConfig.oAuthClientId,
-            forceAccountPicker: options?.forceAccountPicker !== false,
-            useCredentialManager: true,
-          });
-          idToken = builtInResult?.idToken;
-        } catch (nativeAuthErr: any) {
-          if (isGoogleSignInCancelledError(nativeAuthErr)) {
-            throw nativeAuthErr;
-          }
-          lastNativeError = nativeAuthErr;
-        }
-      } else if (!idToken && lastNativeError && !isPluginNotImplementedError(lastNativeError)) {
-        throw lastNativeError;
       } else if (!idToken && !Capacitor.isPluginAvailable('NativeGoogleAuth')) {
         throw new Error(
           'Native Google Sign-In plugin is not loaded in this Android APK build. Rebuild and sync Android (npx cap sync android && ./gradlew assembleRelease).'
@@ -382,7 +432,7 @@ export async function signInWithGoogle(options?: { forceAccountPicker?: boolean 
       }
 
       if (!idToken) {
-        if (lastNativeError) {
+        if (lastNativeError && !isPluginNotImplementedError(lastNativeError)) {
           throw lastNativeError;
         }
         throw new Error(
@@ -390,7 +440,11 @@ export async function signInWithGoogle(options?: { forceAccountPicker?: boolean 
         );
       }
       const credential = GoogleAuthProvider.credential(idToken);
-      const webResult = await signInWithCredential(auth, credential);
+      const webResult = await withAuthTimeout(
+        signInWithCredential(auth, credential),
+        15_000,
+        'Firebase Google authentication timed out. Please check your internet connection and retry.'
+      );
       return webResult.user;
     }
 
@@ -664,10 +718,10 @@ export async function logoutUser() {
   try {
     if (Capacitor.isNativePlatform()) {
       if (Capacitor.isPluginAvailable('FirebaseAuthentication')) {
-        await FirebaseAuthentication.signOut().catch(() => {});
+        await withAuthTimeout(FirebaseAuthentication.signOut(), 2500, 'Sign out timeout').catch(() => {});
       }
       if (Capacitor.isPluginAvailable('NativeGoogleAuth')) {
-        await NativeGoogleAuth.signOut().catch(() => {});
+        await withAuthTimeout(NativeGoogleAuth.signOut(), 2500, 'Sign out timeout').catch(() => {});
       }
     }
     await signOut(auth);
@@ -729,7 +783,11 @@ export async function syncUserProfileToFirestore(
     }
 
     const sanitizedProfile = stripUndefinedFields(rawProfile);
-    await setDoc(doc(db, 'users', userData.id), sanitizedProfile, { merge: true });
+    await withFirestoreTimeout(
+      setDoc(doc(db, 'users', userData.id), sanitizedProfile, { merge: true }),
+      9000,
+      'User profile sync'
+    );
   } catch (error) {
     if (options?.background) {
       handleBackgroundWriteError(error, OperationType.WRITE, path);
@@ -745,7 +803,11 @@ export async function syncUserProfileToFirestore(
 export async function getUserProfileFromFirestore(userId: string) {
   const path = `users/${userId}`;
   try {
-    const snap = await getDoc(doc(db, 'users', userId));
+    const snap = await withFirestoreTimeout(
+      getDoc(doc(db, 'users', userId)),
+      9000,
+      'Loading user profile'
+    );
     return snap.exists() ? snap.data() : null;
   } catch (error) {
     if (isFirestoreQuotaExceededError(error)) {
@@ -771,6 +833,31 @@ export function subscribeToUserProfile(userId: string, onUpdate: (data: any) => 
     },
     (error) => {
       handleSnapshotListenerError(error, OperationType.GET, path);
+    }
+  );
+}
+
+/**
+ * Safe real-time Listener for viewing another user's public Firestore profile
+ */
+export function subscribeToPublicUserProfile(
+  userId: string,
+  onUpdate: (data: Record<string, any> | null) => void
+): () => void {
+  const cleanId = String(userId || '').trim();
+  if (!cleanId || !FIRESTORE_VALID_ID_RE.test(cleanId) || cleanId.startsWith('user_') || isFirestoreQuotaExceeded()) {
+    return () => {};
+  }
+  return onSnapshot(
+    doc(db, 'users', cleanId),
+    (snap) => {
+      onUpdate(snap.exists() ? ({ id: snap.id, ...snap.data() } as Record<string, any>) : null);
+    },
+    (error) => {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+      }
+      console.warn('Public user profile listener warning:', error);
     }
   );
 }
@@ -877,8 +964,8 @@ export async function syncPartyRoomToFirestore(room: any) {
         displayName: room.host?.displayName || 'Host',
         username: room.host?.username || '',
         avatar: sanitizeAvatarString(room.host?.avatar),
-        level: Number(room.host?.level) || 1,
-        vipTier: Number(room.host?.vipTier) || 0,
+        level: Number(room.host?.level ?? 0),
+        vipTier: Number(room.host?.vipTier ?? 0),
         isVerified: !!room.host?.isVerified,
       },
       seats: (Array.isArray(room.seats) ? room.seats : []).map((s: any) => ({
@@ -894,8 +981,8 @@ export async function syncPartyRoomToFirestore(room: any) {
               uniqueId: s.user.uniqueId || s.user.id,
               displayName: s.user.displayName,
               avatar: sanitizeAvatarString(s.user.avatar),
-              level: Number(s.user.level) || 1,
-              vipTier: Number(s.user.vipTier) || 0,
+              level: Number(s.user.level ?? 0),
+              vipTier: Number(s.user.vipTier ?? 0),
               isVerified: !!s.user.isVerified,
             }
           : null,
@@ -1127,8 +1214,8 @@ export async function updatePartyRoomSeat(
             uniqueId: user.uniqueId || user.id,
             displayName: user.displayName || user.username || 'User',
             avatar: sanitizeAvatarString(user.avatar),
-            level: Number(user.level) || 1,
-            vipTier: Number(user.vipTier) || 0,
+            level: Number(user.level ?? 0),
+            vipTier: Number(user.vipTier ?? 0),
             isVerified: !!user.isVerified,
           },
           isSpeaking: false,
@@ -1223,8 +1310,8 @@ export async function syncLiveStreamToFirestore(stream: any) {
         displayName: stream.host?.displayName || 'Host',
         username: stream.host?.username || '',
         avatar: sanitizeAvatarString(stream.host?.avatar),
-        level: Number(stream.host?.level) || 1,
-        vipTier: Number(stream.host?.vipTier) || 0,
+        level: Number(stream.host?.level ?? 0),
+        vipTier: Number(stream.host?.vipTier ?? 0),
         isVerified: !!stream.host?.isVerified,
       },
       lastHeartbeat: serverTimestamp(),
@@ -1474,8 +1561,8 @@ export async function joinLiveStreamViewer(streamId: string, viewer: any) {
         username: viewer?.username || viewer?.displayName || 'viewer',
         displayName: viewer?.displayName || 'Viewer',
         avatar: sanitizeAvatarString(viewer?.avatar),
-        level: Number(viewer?.level) || 1,
-        vipTier: Number(viewer?.vipTier) || 0,
+        level: Number(viewer?.level ?? 0),
+        vipTier: Number(viewer?.vipTier ?? 0),
         countryFlag: viewer?.countryFlag,
         isVerified: !!viewer?.isVerified,
         isHost: !!viewer?.isHost,

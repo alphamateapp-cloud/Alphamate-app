@@ -213,7 +213,7 @@ export const RoomViewersModal: React.FC<RoomViewersModalProps> = ({
                         <span className="text-[9.5px] font-mono text-zinc-400">
                           ID: {viewer.uniqueId || viewer.id}
                         </span>
-                        <LevelBadgeIcon level={viewer.level || 1} size="xs" />
+                        <LevelBadgeIcon level={viewer.level ?? 0} size="xs" />
                         {viewer.vipTier && viewer.vipTier > 0 ? (
                           <span className="text-[8.5px] px-1 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] font-bold">
                             VIP {viewer.vipTier}

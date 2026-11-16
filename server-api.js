@@ -2830,6 +2830,46 @@ export function createApiApp() {
     return trimmed.slice(0, 300);
   }
 
+  function normalizeWorkerUploadPayload(rawPayload) {
+    if (!rawPayload || typeof rawPayload !== 'object') return null;
+    const candidate =
+      rawPayload.result && typeof rawPayload.result === 'object'
+        ? rawPayload.result
+        : rawPayload.data && typeof rawPayload.data === 'object'
+        ? rawPayload.data
+        : rawPayload;
+
+    let videoUrl = String(candidate.videoUrl || candidate.url || rawPayload.videoUrl || rawPayload.url || '').trim();
+    let videoKey = String(
+      candidate.videoKey ||
+        candidate.key ||
+        candidate.objectKey ||
+        candidate.video_key ||
+        rawPayload.videoKey ||
+        rawPayload.key ||
+        rawPayload.objectKey ||
+        ''
+    ).trim();
+
+    if (!videoKey && videoUrl) {
+      try {
+        videoKey = new URL(videoUrl).pathname.replace(/^\/+/, '');
+      } catch {
+        // ignore
+      }
+    }
+    if (!videoKey) return null;
+    if (!videoUrl) {
+      videoUrl = `https://media.alphamate.app/${videoKey.replace(/^\/+/, '')}`;
+    }
+    return {
+      ...candidate,
+      success: true,
+      videoKey,
+      videoUrl,
+    };
+  }
+
   function forwardFilesToR2Worker({ filePaths, totalBytes, authHeader, contentType, timeoutMs = 300_000, onBytesSent }) {
     return new Promise((resolve, reject) => {
       const targetUrl = new URL(`${R2_WORKER_API_BASE}/upload`);
@@ -2973,12 +3013,22 @@ export function createApiApp() {
         timeoutMs: 300_000,
       });
 
+      if (upstream.ok) {
+        const normalized = normalizeWorkerUploadPayload(upstream.payload);
+        if (normalized) {
+          return res.status(upstream.status).json(normalized);
+        }
+        return res.status(502).json({
+          success: false,
+          error: 'Upstream Reels worker returned an incomplete upload payload.',
+        });
+      }
       if (upstream.payload && typeof upstream.payload === 'object') {
         return res.status(upstream.status).json(upstream.payload);
       }
       return res.status(upstream.status).json({
-        success: upstream.ok,
-        error: upstream.ok ? undefined : stripHtmlErrorText(upstream.rawText, upstream.status),
+        success: false,
+        error: stripHtmlErrorText(upstream.rawText, upstream.status),
       });
     } catch (error) {
       const status = error?.statusCode || (error?.name === 'AbortError' ? 504 : 502);
@@ -3143,16 +3193,20 @@ export function createApiApp() {
 
         job.statusCode = upstream.status;
         job.updatedAt = Date.now();
-        if (upstream.ok && upstream.payload && upstream.payload.success && upstream.payload.videoKey) {
+        const normalized = upstream.ok ? normalizeWorkerUploadPayload(upstream.payload) : null;
+        if (upstream.ok && normalized) {
           job.status = 'completed';
           job.bytesTransferred = totalBytes;
-          job.result = upstream.payload;
+          job.result = normalized;
         } else {
           job.status = 'failed';
+          job.statusCode = upstream.ok ? 502 : upstream.status;
           job.error =
             upstream.payload?.error ||
-            stripHtmlErrorText(upstream.rawText, upstream.status);
-          console.error('[Reels Proxy] R2 Worker rejected upload:', upstream.status, job.error);
+            (upstream.ok
+              ? 'Upstream Reels worker returned an incomplete upload payload.'
+              : stripHtmlErrorText(upstream.rawText, upstream.status));
+          console.error('[Reels Proxy] R2 Worker rejected upload:', job.statusCode, job.error);
         }
       } catch (error) {
         job.status = 'failed';

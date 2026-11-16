@@ -90,6 +90,7 @@ interface FloatingHeart {
 interface ChatItem {
   id: string;
   sender: {
+    id?: string;
     displayName: string;
     avatar: string;
     vipTier?: number;
@@ -189,6 +190,7 @@ export const PartyRoomsScreen: React.FC = () => {
     activeGiftBanner,
     clearActiveGiftBanner,
     startDirectMessage,
+    openPublicUserProfile,
     sendNotificationToUser,
     refreshScope,
     partyRefreshTick,
@@ -807,30 +809,55 @@ export const PartyRoomsScreen: React.FC = () => {
   };
 
   const handleCommentUserClick = (sender: ChatItem['sender']) => {
-    const isTargetHost = sender.isHost || (activePartyRoom && sender.displayName === activePartyRoom.host.displayName);
-    const targetUser: User = isTargetHost && activePartyRoom
-      ? activePartyRoom.host
-      : {
-          id: `user_${sender.displayName.replace(/[^a-zA-Z0-9]/g, '_')}`,
-          uniqueId: `AM_${Math.floor(100000 + Math.random() * 900000)}`,
-          username: sender.displayName.replace(/[^a-zA-Z0-9]/g, ''),
-          displayName: sender.displayName,
-          avatar: sender.avatar || 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
-          bio: 'Alpha Mate live party member 💜',
-          followersCount: 4200,
-          followingCount: 190,
-          likesCount: 32000,
-          level: sender.level || 20,
-          xp: 8000,
-          nextLevelXp: 12000,
-          vipTier: sender.vipTier || 0,
-          coins: 1200,
-          diamonds: 450,
-          isVerified: isTargetHost || false,
-          isHost: isTargetHost || false,
-        };
+    const isTargetHost =
+      sender.isHost ||
+      (activePartyRoom &&
+        ((sender.id && sender.id === activePartyRoom.host.id) ||
+          sender.displayName === activePartyRoom.host.displayName));
+    const matchedSeatUser = activePartyRoom?.seats.find(
+      (s) => s.user && ((sender.id && s.user.id === sender.id) || s.user.displayName === sender.displayName)
+    )?.user;
+    const matchedViewer = realViewersList.find(
+      (v) => (sender.id && v.id === sender.id) || v.displayName === sender.displayName
+    );
+    const resolvedBase = matchedSeatUser || matchedViewer;
 
-    const seatIdx = activePartyRoom?.seats.findIndex((s) => s.user?.displayName === sender.displayName) ?? -1;
+    const targetUser: User =
+      isTargetHost && activePartyRoom
+        ? activePartyRoom.host
+        : resolvedBase
+        ? {
+            ...resolvedBase,
+            avatar: resolvedBase.avatar || sender.avatar,
+            level: Number(sender.level ?? resolvedBase.level ?? 0),
+            vipTier: Number(sender.vipTier ?? resolvedBase.vipTier ?? 0),
+          }
+        : {
+            id: sender.id || `user_${sender.displayName.replace(/[^a-zA-Z0-9]/g, '_')}`,
+            uniqueId: sender.id || `user_${sender.displayName.replace(/[^a-zA-Z0-9]/g, '_')}`,
+            username: sender.displayName.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'user',
+            displayName: sender.displayName,
+            avatar:
+              sender.avatar ||
+              'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
+            bio: 'Alpha Mate Member',
+            followersCount: 0,
+            followingCount: 0,
+            likesCount: 0,
+            level: Number(sender.level ?? 0),
+            xp: 0,
+            nextLevelXp: 50000,
+            vipTier: Number(sender.vipTier ?? 0),
+            coins: 0,
+            diamonds: 0,
+            isVerified: false,
+            isHost: false,
+          };
+
+    const seatIdx =
+      activePartyRoom?.seats.findIndex(
+        (s) => s.user && (s.user.id === targetUser.id || s.user.displayName === sender.displayName)
+      ) ?? -1;
     setSelectedUserForActionSheet(targetUser);
     setSelectedUserSeatIndex(seatIdx !== -1 ? seatIdx : null);
     setShowUserActionSheet(true);
@@ -1475,9 +1502,9 @@ export const PartyRoomsScreen: React.FC = () => {
           followersCount: baseHost?.followersCount || 0,
           followingCount: baseHost?.followingCount || 0,
           likesCount: baseHost?.likesCount || 0,
-          level: p.level || baseHost?.level || 1,
+          level: Number(p.level ?? baseHost?.level ?? 0),
           xp: baseHost?.xp || 0,
-          nextLevelXp: baseHost?.nextLevelXp || 1000,
+          nextLevelXp: baseHost?.nextLevelXp || 50000,
           vipTier: p.vipTier ?? baseHost?.vipTier ?? 0,
           countryFlag: p.countryFlag || baseHost?.countryFlag,
           coins: baseHost?.coins || 0,
@@ -1500,9 +1527,9 @@ export const PartyRoomsScreen: React.FC = () => {
           followersCount: baseHost?.followersCount || 0,
           followingCount: baseHost?.followingCount || 0,
           likesCount: baseHost?.likesCount || 0,
-          level: v.level || baseHost?.level || 1,
+          level: Number(v.level ?? baseHost?.level ?? 0),
           xp: baseHost?.xp || 0,
-          nextLevelXp: baseHost?.nextLevelXp || 1000,
+          nextLevelXp: baseHost?.nextLevelXp || 50000,
           vipTier: v.vipTier ?? baseHost?.vipTier ?? 0,
           countryFlag: v.countryFlag || baseHost?.countryFlag,
           coins: baseHost?.coins || 0,
@@ -1528,8 +1555,8 @@ export const PartyRoomsScreen: React.FC = () => {
           uniqueId: v.uniqueId || v.id,
           displayName: v.displayName || 'Alpha User',
           avatar: v.avatar || '',
-          level: v.level || 1,
-          vipTier: v.vipTier || 0,
+          level: Number(v.level ?? 0),
+          vipTier: Number(v.vipTier ?? 0),
           isHost: isHostPeer,
         });
       });
@@ -1576,9 +1603,12 @@ export const PartyRoomsScreen: React.FC = () => {
     if (!activePartyRoom?.id) return;
     const unsubscribe = subscribeToPartyRoomMessages(
       activePartyRoom.id,
-      (messages) => setChatItems(messages.map((message) => ({
+      (messages) => setChatItems(messages.map((message: any) => ({
         id: message.id,
-        sender: { ...message.sender },
+        sender: {
+          ...message.sender,
+          id: message.sender?.id || message.senderId,
+        },
         text: message.text,
         type: message.type,
         giftName: message.giftName,
@@ -1652,10 +1682,11 @@ export const PartyRoomsScreen: React.FC = () => {
     const newMsg: ChatItem = {
       id: `chat_${Date.now()}`,
       sender: {
+        id: auth.currentUser?.uid || currentUser.id,
         displayName: currentUser.displayName,
         avatar: currentUser.avatar,
-        vipTier: currentUser.vipTier,
-        level: currentUser.level,
+        vipTier: currentUser.vipTier ?? 0,
+        level: currentUser.level ?? 0,
         isHost,
       },
       text: inputChat.trim(),
@@ -1707,7 +1738,7 @@ export const PartyRoomsScreen: React.FC = () => {
       gift: selectedGift,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
-      senderVipTier: currentUser.vipTier || 1,
+      senderVipTier: currentUser.vipTier ?? 0,
       recipientName: recipient,
       comboCount: 1,
       quantity: 1,
@@ -1720,7 +1751,7 @@ export const PartyRoomsScreen: React.FC = () => {
       gift: selectedGift,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
-      senderVipTier: currentUser.vipTier || 1,
+      senderVipTier: currentUser.vipTier ?? 0,
       recipientName: recipient,
       comboCount: 1,
       quantity: 1,
@@ -1731,9 +1762,11 @@ export const PartyRoomsScreen: React.FC = () => {
     const giftMsg: ChatItem = {
       id: `gift_${now}`,
       sender: {
+        id: auth.currentUser?.uid || currentUser.id,
         displayName: currentUser.displayName,
         avatar: currentUser.avatar,
-        vipTier: currentUser.vipTier,
+        vipTier: currentUser.vipTier ?? 0,
+        level: currentUser.level ?? 0,
       },
       text: `sent ${selectedGift.name} to ${recipient}`,
       type: 'gift',
@@ -1750,8 +1783,8 @@ export const PartyRoomsScreen: React.FC = () => {
         id: auth.currentUser?.uid || currentUser.id,
         displayName: currentUser.displayName,
         avatar: currentUser.avatar,
-        vipTier: currentUser.vipTier || 0,
-        level: currentUser.level || 1,
+        vipTier: currentUser.vipTier ?? 0,
+        level: currentUser.level ?? 0,
       },
       text: giftMsg.text,
       type: 'gift',
@@ -2052,7 +2085,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 const isActive = partyLevel === tier.level;
                 const isUnlocked = isHost
                   ? currentUser.level >= tier.requiredLevel
-                  : (activePartyRoom?.host.level ?? 45) >= tier.requiredLevel;
+                  : (activePartyRoom?.host.level ?? 0) >= tier.requiredLevel;
 
                 return (
                   <button
@@ -2281,7 +2314,7 @@ export const PartyRoomsScreen: React.FC = () => {
               {/* Glowing Host Profile Frame with Animated Breathing VIP Frame */}
               <VipAvatarFrame
                 avatarUrl={activePartyRoom.host.avatar}
-                vipTier={activePartyRoom.host.vipTier || 3}
+                vipTier={activePartyRoom.host.vipTier ?? 0}
                 size="md"
                 showCrownBadge={true}
               />
@@ -2314,10 +2347,12 @@ export const PartyRoomsScreen: React.FC = () => {
                 Host Seat Empty
               </span>
             )}
-            <LevelBadgeIcon level={activePartyRoom.host.level || 45} size="xs" />
-            <span className="px-1.5 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black border border-[#A855F7]/30">
-              VIP {activePartyRoom.host.vipTier || 6}
-            </span>
+            <LevelBadgeIcon level={activePartyRoom.host.level ?? 0} size="xs" />
+            {(activePartyRoom.host.vipTier ?? 0) > 0 && (
+              <span className="px-1.5 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black border border-[#A855F7]/30">
+                VIP {activePartyRoom.host.vipTier}
+              </span>
+            )}
             <button
               onClick={() => setShowLeaderboardModal(true)}
               className="px-2 py-0.2 rounded-full bg-gradient-to-r from-amber-500/20 to-yellow-500/10 text-amber-300 text-[8px] font-bold border border-amber-400/30 flex items-center gap-1 cursor-pointer hover:border-amber-400 transition-colors"
@@ -2487,7 +2522,7 @@ export const PartyRoomsScreen: React.FC = () => {
                     )}
 
                     {/* Level Badge */}
-                    <LevelBadgeIcon level={item.sender.level || 1} size="xs" />
+                    <LevelBadgeIcon level={item.sender.level ?? 0} size="xs" />
 
                     {/* User display name */}
                     <span className="font-bold text-[#C084FC] text-[10.5px] shrink-0">
@@ -2893,8 +2928,11 @@ export const PartyRoomsScreen: React.FC = () => {
               startDirectMessage(target);
             }}
             onVisitProfile={(target) => {
-              showToast(`Visiting ${target.displayName}'s profile... 🌟`);
-              setCurrentScreen('profile');
+              if (target.id === currentUser.id || target.id === effectiveUserId) {
+                setCurrentScreen('profile');
+              } else {
+                openPublicUserProfile(target);
+              }
             }}
             isFollowing={followingUserIds.has(selectedUserForActionSheet.id)}
             onToggleFollow={handleToggleFollowUser}
@@ -3261,7 +3299,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 <div className="flex items-center justify-between mb-2">
                   <label className="text-xs font-bold text-zinc-300">Convert Party Room Size</label>
                   <span className="text-[10px] text-zinc-400">
-                    Host: Lv.{isHost ? currentUser.level : (activePartyRoom?.host.level ?? 45)}
+                    Host: Lv.{isHost ? currentUser.level : (activePartyRoom?.host.level ?? 0)}
                   </span>
                 </div>
 
@@ -3269,7 +3307,7 @@ export const PartyRoomsScreen: React.FC = () => {
                   {PARTY_TIER_SETTINGS.map((item) => {
                     const isUnlocked = isHost
                       ? currentUser.level >= item.requiredLevel
-                      : (activePartyRoom?.host.level ?? 45) >= item.requiredLevel;
+                      : (activePartyRoom?.host.level ?? 0) >= item.requiredLevel;
                     const isCurrent = partyLevel === item.level;
 
                     return (
@@ -3704,37 +3742,69 @@ export const PartyRoomsScreen: React.FC = () => {
               showCrownBadge={false}
             />
           ) : seat.isLocked ? (
-            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[62px] h-[52px] sm:w-[68px] sm:h-[56px]' : sizeVariant === 'md' ? 'w-[54px] h-[46px]' : 'w-[44px] h-[38px]'}`}>
-              <div className="w-11 h-11 rounded-full bg-zinc-900/80 border border-amber-500/40 flex items-center justify-center shadow-inner">
-                <Lock className="w-4 h-4 text-amber-400" />
-              </div>
-            </div>
-          ) : (
-            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-[62px] h-[52px] sm:w-[68px] sm:h-[56px]' : sizeVariant === 'md' ? 'w-[54px] h-[46px]' : 'w-[44px] h-[38px]'}`}>
-              <svg viewBox="0 0 88 68" className="w-full h-full overflow-visible drop-shadow-[0_0_9px_rgba(251,191,36,0.55)]" aria-hidden="true">
+            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-14 h-12 sm:w-16 sm:h-14' : sizeVariant === 'md' ? 'w-12 h-11 sm:w-14 sm:h-12' : 'w-10 h-9'}`}>
+              <svg viewBox="0 0 68 62" className="w-full h-full overflow-visible drop-shadow-[0_2px_8px_rgba(0,0,0,0.65)]" aria-hidden="true">
                 <defs>
-                  <linearGradient id={`goldSofa-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#FFF2A6" />
-                    <stop offset="38%" stopColor="#F7C94B" />
-                    <stop offset="72%" stopColor="#C98519" />
-                    <stop offset="100%" stopColor="#8B4B0B" />
+                  <linearGradient id={`lockedChairBack-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#5B4D36" />
+                    <stop offset="55%" stopColor="#3B3123" />
+                    <stop offset="100%" stopColor="#261F17" />
                   </linearGradient>
-                  <linearGradient id={`goldSeat-${seat.seatIndex}`} x1="0" y1="0" x2="1" y2="1">
-                    <stop offset="0%" stopColor="#FFEFA0" />
-                    <stop offset="55%" stopColor="#E6A92E" />
-                    <stop offset="100%" stopColor="#A85C0C" />
+                  <linearGradient id={`lockedChairArm-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#7C6846" />
+                    <stop offset="100%" stopColor="#3B2E1E" />
                   </linearGradient>
                 </defs>
-                <path d="M17 31 Q10 25 8 34 L7 48 Q7 54 14 55 L74 55 Q81 54 81 48 L80 34 Q78 25 71 31 L68 40 L20 40 Z" fill={`url(#goldSofa-${seat.seatIndex})`} stroke="#FFE58A" strokeWidth="2" />
-                <rect x="15" y="35" width="58" height="19" rx="7" fill={`url(#goldSeat-${seat.seatIndex})`} stroke="#FFF0A0" strokeWidth="1.6" />
-                <path d="M19 37 Q44 30 69 37 L67 47 Q44 53 21 47 Z" fill="#F9D66B" stroke="#B87518" strokeWidth="1.2" />
-                <path d="M12 49 L17 62 L23 62 L22 54 M66 54 L65 62 L72 62 L77 49" fill="#B87518" stroke="#FFE28A" strokeWidth="1.8" strokeLinejoin="round" />
-                <path d="M22 28 Q44 17 66 28" fill="none" stroke="#FFF0A0" strokeWidth="2" strokeLinecap="round" />
-                <circle cx="44" cy="29" r="8" fill="#FFE58A" stroke="#B87518" strokeWidth="1.5" />
-                <path d="M44 24 L46 28 L51 29 L47 32 L48 36 L44 34 L40 36 L41 32 L37 29 L42 28 Z" fill="#9A570C" />
-                <text x="44" y="47" textAnchor="middle" fontSize="10" fontWeight="900" fill="#6E3908">{seat.seatIndex + 1}</text>
+                {/* Cushion Legs */}
+                <path d="M16 49 L14 57 Q14 59 18 59 L21 59 L22 51 Z" fill="#4B3B24" stroke="#9B7E47" strokeWidth="1.2" />
+                <path d="M52 49 L54 57 Q54 59 50 59 L47 59 L46 51 Z" fill="#4B3B24" stroke="#9B7E47" strokeWidth="1.2" />
+                {/* Plush Rounded Backrest */}
+                <rect x="14" y="6" width="40" height="32" rx="13" fill={`url(#lockedChairBack-${seat.seatIndex})`} stroke="#9E824D" strokeWidth="1.5" />
+                {/* Side Armrests */}
+                <rect x="7" y="23" width="12" height="24" rx="6" fill={`url(#lockedChairArm-${seat.seatIndex})`} stroke="#B09056" strokeWidth="1.3" />
+                <rect x="49" y="23" width="12" height="24" rx="6" fill={`url(#lockedChairArm-${seat.seatIndex})`} stroke="#B09056" strokeWidth="1.3" />
+                {/* Seat Base Cushion */}
+                <rect x="13" y="34" width="42" height="17" rx="7" fill={`url(#lockedChairArm-${seat.seatIndex})`} stroke="#A88951" strokeWidth="1.4" />
               </svg>
-              <span className="absolute inset-x-0 -bottom-0.5 text-center text-[7px] font-black text-amber-50 drop-shadow">+</span>
+              <Lock className="absolute top-[22%] w-3.5 h-3.5 text-amber-300 drop-shadow" />
+            </div>
+          ) : (
+            <div className={`relative flex items-center justify-center transition-transform group-hover:scale-105 ${sizeVariant === 'lg' ? 'w-14 h-12 sm:w-16 sm:h-14' : sizeVariant === 'md' ? 'w-12 h-11 sm:w-14 sm:h-12' : 'w-10 h-9'}`}>
+              <svg viewBox="0 0 68 62" className="w-full h-full overflow-visible drop-shadow-[0_0_10px_rgba(251,191,36,0.45)]" aria-hidden="true">
+                <defs>
+                  <linearGradient id={`goldChairBack-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#FFF8CC" />
+                    <stop offset="35%" stopColor="#FBE178" />
+                    <stop offset="78%" stopColor="#E1A225" />
+                    <stop offset="100%" stopColor="#A9640E" />
+                  </linearGradient>
+                  <linearGradient id={`goldChairArm-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#FFF0A6" />
+                    <stop offset="50%" stopColor="#E7A829" />
+                    <stop offset="100%" stopColor="#94500B" />
+                  </linearGradient>
+                  <linearGradient id={`goldChairCushion-${seat.seatIndex}`} x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#FFF3B8" />
+                    <stop offset="60%" stopColor="#F3BE47" />
+                    <stop offset="100%" stopColor="#B87012" />
+                  </linearGradient>
+                </defs>
+                {/* Golden Armchair Front Legs */}
+                <path d="M16 49 L14 57 Q14 59 18 59 L21 59 L22 51 Z" fill="#9A560C" stroke="#FFE99A" strokeWidth="1.3" strokeLinejoin="round" />
+                <path d="M52 49 L54 57 Q54 59 50 59 L47 59 L46 51 Z" fill="#9A560C" stroke="#FFE99A" strokeWidth="1.3" strokeLinejoin="round" />
+                {/* Plush Rounded Backrest */}
+                <rect x="14" y="6" width="40" height="32" rx="13" fill={`url(#goldChairBack-${seat.seatIndex})`} stroke="#FFF4B8" strokeWidth="1.6" />
+                <path d="M21 11 Q34 8 47 11" fill="none" stroke="#FFFFFF" strokeOpacity="0.65" strokeWidth="1.8" strokeLinecap="round" />
+                {/* Left & Right Rounded Armrests */}
+                <rect x="7" y="23" width="12" height="24" rx="6" fill={`url(#goldChairArm-${seat.seatIndex})`} stroke="#FFE996" strokeWidth="1.4" />
+                <rect x="49" y="23" width="12" height="24" rx="6" fill={`url(#goldChairArm-${seat.seatIndex})`} stroke="#FFE996" strokeWidth="1.4" />
+                {/* Plush Seat Cushion */}
+                <rect x="13" y="34" width="42" height="17" rx="7" fill={`url(#goldChairCushion-${seat.seatIndex})`} stroke="#FFF3B2" strokeWidth="1.5" />
+                <path d="M18 37 Q34 33 50 37" fill="none" stroke="#FFFBE0" strokeOpacity="0.55" strokeWidth="1.4" strokeLinecap="round" />
+                {/* Centered Plus (+) and Seat Number inside Cushion */}
+                <path d="M34 14 V24 M29 19 H39" stroke="#5A2B04" strokeWidth="2.8" strokeLinecap="round" />
+                <text x="34" y="45" textAnchor="middle" fontSize="13.5" fontWeight="900" fill="#4A2203">{seat.seatIndex + 1}</text>
+              </svg>
             </div>
           )}
 

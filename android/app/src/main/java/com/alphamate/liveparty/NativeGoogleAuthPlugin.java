@@ -3,6 +3,8 @@ package com.alphamate.liveparty;
 import android.app.Activity;
 import android.content.Intent;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import androidx.activity.result.ActivityResult;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -30,18 +32,27 @@ import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption;
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Built-in Android Google Sign-In Capacitor plugin compiled directly inside :app.
- * Uses AndroidX Credential Manager with automatic fallback to GoogleSignInClient.
+ * Uses AndroidX Credential Manager with bounded-timeout automatic fallback to GoogleSignInClient.
  */
 @CapacitorPlugin(name = "NativeGoogleAuth")
 public class NativeGoogleAuthPlugin extends Plugin {
 
+    private static final long PRE_LAUNCH_TIMEOUT_MS = 2500L;
     private final Executor executor = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     @PluginMethod
     public void signIn(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity == null) {
+            call.reject("Android Activity unavailable for Google Sign-In.", "NO_ACTIVITY");
+            return;
+        }
+
         String serverClientId = resolveServerClientId(call.getString("serverClientId"));
         if (serverClientId == null || serverClientId.isEmpty()) {
             call.reject("Missing Google OAuth Web Client ID configuration.", "MISSING_CLIENT_ID");
@@ -49,12 +60,20 @@ public class NativeGoogleAuthPlugin extends Plugin {
         }
 
         boolean forceAccountPicker = !Boolean.FALSE.equals(call.getBoolean("forceAccountPicker", true));
-        boolean useCredentialManager = !Boolean.FALSE.equals(call.getBoolean("useCredentialManager", true));
+        boolean useCredentialManager = Boolean.TRUE.equals(call.getBoolean("useCredentialManager", false));
 
         if (useCredentialManager) {
             if (forceAccountPicker) {
+                AtomicBoolean proceeded = new AtomicBoolean(false);
+                Runnable fallbackLaunch = () -> {
+                    if (proceeded.compareAndSet(false, true)) {
+                        launchCredentialManagerSignIn(call, serverClientId, forceAccountPicker);
+                    }
+                };
+                mainHandler.postDelayed(fallbackLaunch, PRE_LAUNCH_TIMEOUT_MS);
+
                 try {
-                    CredentialManager credentialManager = CredentialManager.create(getActivity());
+                    CredentialManager credentialManager = CredentialManager.create(activity);
                     credentialManager.clearCredentialStateAsync(
                         new ClearCredentialStateRequest(),
                         null,
@@ -62,17 +81,26 @@ public class NativeGoogleAuthPlugin extends Plugin {
                         new CredentialManagerCallback<Void, ClearCredentialException>() {
                             @Override
                             public void onResult(Void result) {
-                                launchCredentialManagerSignIn(call, serverClientId, forceAccountPicker);
+                                mainHandler.removeCallbacks(fallbackLaunch);
+                                if (proceeded.compareAndSet(false, true)) {
+                                    launchCredentialManagerSignIn(call, serverClientId, forceAccountPicker);
+                                }
                             }
 
                             @Override
                             public void onError(@NonNull ClearCredentialException exception) {
-                                launchCredentialManagerSignIn(call, serverClientId, forceAccountPicker);
+                                mainHandler.removeCallbacks(fallbackLaunch);
+                                if (proceeded.compareAndSet(false, true)) {
+                                    launchCredentialManagerSignIn(call, serverClientId, forceAccountPicker);
+                                }
                             }
                         }
                     );
                 } catch (Exception ex) {
-                    launchLegacyGoogleSignIn(call, serverClientId, forceAccountPicker);
+                    mainHandler.removeCallbacks(fallbackLaunch);
+                    if (proceeded.compareAndSet(false, true)) {
+                        launchLegacyGoogleSignIn(call, serverClientId, forceAccountPicker);
+                    }
                 }
             } else {
                 launchCredentialManagerSignIn(call, serverClientId, forceAccountPicker);
@@ -85,8 +113,14 @@ public class NativeGoogleAuthPlugin extends Plugin {
 
     @PluginMethod
     public void signOut(PluginCall call) {
+        Activity activity = getActivity();
+        if (activity == null) {
+            call.resolve();
+            return;
+        }
+
         try {
-            CredentialManager credentialManager = CredentialManager.create(getActivity());
+            CredentialManager credentialManager = CredentialManager.create(activity);
             credentialManager.clearCredentialStateAsync(
                 new ClearCredentialStateRequest(),
                 null,
@@ -107,16 +141,32 @@ public class NativeGoogleAuthPlugin extends Plugin {
             // Ignore if CredentialManager unavailable
         }
 
+        AtomicBoolean resolved = new AtomicBoolean(false);
+        Runnable timeoutResolve = () -> {
+            if (resolved.compareAndSet(false, true)) {
+                call.resolve();
+            }
+        };
+        mainHandler.postDelayed(timeoutResolve, PRE_LAUNCH_TIMEOUT_MS);
+
         try {
             String serverClientId = resolveServerClientId(null);
             GoogleSignInOptions.Builder builder = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN).requestEmail();
             if (serverClientId != null && !serverClientId.isEmpty()) {
                 builder.requestIdToken(serverClientId);
             }
-            GoogleSignInClient client = GoogleSignIn.getClient(getActivity(), builder.build());
-            client.signOut().addOnCompleteListener(getActivity(), task -> call.resolve());
+            GoogleSignInClient client = GoogleSignIn.getClient(activity, builder.build());
+            client.signOut().addOnCompleteListener(activity, task -> {
+                mainHandler.removeCallbacks(timeoutResolve);
+                if (resolved.compareAndSet(false, true)) {
+                    call.resolve();
+                }
+            });
         } catch (Exception ex) {
-            call.resolve();
+            mainHandler.removeCallbacks(timeoutResolve);
+            if (resolved.compareAndSet(false, true)) {
+                call.resolve();
+            }
         }
     }
 
@@ -125,12 +175,18 @@ public class NativeGoogleAuthPlugin extends Plugin {
         @NonNull String serverClientId,
         boolean forceAccountPicker
     ) {
+        Activity activity = getActivity();
+        if (activity == null) {
+            call.reject("Android Activity unavailable for Google Sign-In.", "NO_ACTIVITY");
+            return;
+        }
+
         try {
             GetSignInWithGoogleOption googleSignInOption = new GetSignInWithGoogleOption.Builder(serverClientId).build();
             GetCredentialRequest request = new GetCredentialRequest.Builder().addCredentialOption(googleSignInOption).build();
-            CredentialManager credentialManager = CredentialManager.create(getActivity());
+            CredentialManager credentialManager = CredentialManager.create(activity);
             credentialManager.getCredentialAsync(
-                getActivity(),
+                activity,
                 request,
                 null,
                 executor,
@@ -188,23 +244,48 @@ public class NativeGoogleAuthPlugin extends Plugin {
         @NonNull String serverClientId,
         boolean forceAccountPicker
     ) {
-        getActivity().runOnUiThread(() -> {
+        Activity activity = getActivity();
+        if (activity == null) {
+            call.reject("Android Activity unavailable for Google Sign-In.", "NO_ACTIVITY");
+            return;
+        }
+
+        activity.runOnUiThread(() -> {
             try {
                 GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
                     .requestIdToken(serverClientId)
                     .requestEmail()
                     .build();
-                GoogleSignInClient client = GoogleSignIn.getClient(getActivity(), gso);
+                GoogleSignInClient client = GoogleSignIn.getClient(activity, gso);
+
+                Runnable startPicker = () -> {
+                    try {
+                        Intent signInIntent = client.getSignInIntent();
+                        startActivityForResult(call, signInIntent, "handleGoogleSignInResult");
+                    } catch (Exception ex) {
+                        call.reject("Unable to open Google account chooser: " + ex.getMessage(), "LAUNCH_FAILED");
+                    }
+                };
+
                 if (forceAccountPicker) {
+                    AtomicBoolean launched = new AtomicBoolean(false);
+                    Runnable timeoutStart = () -> {
+                        if (launched.compareAndSet(false, true)) {
+                            startPicker.run();
+                        }
+                    };
+                    mainHandler.postDelayed(timeoutStart, PRE_LAUNCH_TIMEOUT_MS);
+
                     client
                         .signOut()
-                        .addOnCompleteListener(getActivity(), task -> {
-                            Intent signInIntent = client.getSignInIntent();
-                            startActivityForResult(call, signInIntent, "handleGoogleSignInResult");
+                        .addOnCompleteListener(activity, task -> {
+                            mainHandler.removeCallbacks(timeoutStart);
+                            if (launched.compareAndSet(false, true)) {
+                                startPicker.run();
+                            }
                         });
                 } else {
-                    Intent signInIntent = client.getSignInIntent();
-                    startActivityForResult(call, signInIntent, "handleGoogleSignInResult");
+                    startPicker.run();
                 }
             } catch (Exception ex) {
                 call.reject("Unable to launch Google Sign-In: " + ex.getMessage(), "LAUNCH_FAILED");

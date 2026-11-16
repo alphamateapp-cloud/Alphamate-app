@@ -211,7 +211,7 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
             >
               <VipAvatarFrame
                 avatarUrl={myRoom.host.avatar}
-                vipTier={myRoom.host.vipTier || 3}
+                vipTier={myRoom.host.vipTier ?? 0}
                 size="xs"
               />
               <div
@@ -231,7 +231,7 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
                 </span>
               </div>
               <div className="flex items-center gap-1 text-[8.5px] text-zinc-400">
-                <LevelBadgeIcon level={myRoom.host.level || 30} size="xs" />
+                <LevelBadgeIcon level={myRoom.host.level ?? 0} size="xs" />
                 <span className="text-pink-300 font-bold">Host</span>
               </div>
             </div>
@@ -311,7 +311,7 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
             <div className="relative shrink-0">
               <VipAvatarFrame
                 avatarUrl={opponentRoom.host.avatar}
-                vipTier={opponentRoom.host.vipTier || 4}
+                vipTier={opponentRoom.host.vipTier ?? 0}
                 size="xs"
               />
               <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-emerald-500 text-black flex items-center justify-center border border-black text-[6px]">
@@ -327,7 +327,7 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
                 </span>
               </div>
               <div className="flex items-center gap-1 text-[8.5px] text-zinc-400">
-                <LevelBadgeIcon level={opponentRoom.host.level || 35} size="xs" />
+                <LevelBadgeIcon level={opponentRoom.host.level ?? 0} size="xs" />
                 <span className="text-sky-300 font-bold">Host</span>
               </div>
             </div>

@@ -1,8 +1,10 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { User } from '../../types';
 import { VipAvatarFrame } from '../brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../brand/LevelBadgeIcon';
 import { copyToClipboard } from '../../utils/clipboard';
+import { subscribeToPublicUserProfile } from '../../services/firebase';
+import { fetchUserFollowCounts } from '../../services/userDirectoryService';
 import {
   X,
   Gift,
@@ -79,17 +81,76 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
   const [copiedId, setCopiedId] = useState(false);
   const [showConfirmKick, setShowConfirmKick] = useState(false);
   const [showConfirmBlock, setShowConfirmBlock] = useState(false);
+  const [liveProfile, setLiveProfile] = useState<Record<string, any> | null>(null);
+  const [followCounts, setFollowCounts] = useState<{ followersCount: number; followingCount: number } | null>(null);
+
+  useEffect(() => {
+    if (!isOpen || !user?.id) {
+      setLiveProfile(null);
+      setFollowCounts(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLiveProfile(null);
+    setFollowCounts(null);
+
+    const unsub = subscribeToPublicUserProfile(user.id, (data) => {
+      if (!cancelled && data) {
+        setLiveProfile(data);
+      }
+    });
+
+    fetchUserFollowCounts(user.id)
+      .then((res) => {
+        if (!cancelled) {
+          setFollowCounts(res);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      unsub();
+    };
+  }, [isOpen, user?.id, isFollowing]);
 
   if (!isOpen) return null;
 
-  const isMe = currentUserId === user.id;
-  const isTargetHost = hostUser ? hostUser.id === user.id || hostUser.displayName === user.displayName : user.isHost;
-  const isTargetModerator = moderatorIds.includes(user.id);
+  const displayUser: User = {
+    ...user,
+    displayName: String(liveProfile?.displayName || user.displayName || 'Alpha Mate'),
+    username: String(liveProfile?.username || user.username || 'user'),
+    uniqueId: String(liveProfile?.uniqueId || user.uniqueId || user.id),
+    avatar: String(liveProfile?.avatar || liveProfile?.photoURL || user.avatar || ''),
+    bio: liveProfile?.bio !== undefined ? String(liveProfile.bio || '') : (user.bio || ''),
+    level: Math.max(0, Number(liveProfile?.level ?? user.level ?? 0)),
+    vipTier: Math.max(0, Number(liveProfile?.vipTier ?? user.vipTier ?? 0)),
+    likesCount: Math.max(0, Number(liveProfile?.likesCount ?? user.likesCount ?? 0)),
+    followersCount: Math.max(
+      0,
+      Number(followCounts ? followCounts.followersCount : (liveProfile?.followersCount ?? user.followersCount ?? 0))
+    ),
+    followingCount: Math.max(
+      0,
+      Number(followCounts ? followCounts.followingCount : (liveProfile?.followingCount ?? user.followingCount ?? 0))
+    ),
+    isVerified: liveProfile?.isVerified !== undefined ? Boolean(liveProfile.isVerified) : Boolean(user.isVerified),
+    country: liveProfile?.country ?? user.country,
+    countryFlag: liveProfile?.countryFlag ?? user.countryFlag,
+    familyCrew: liveProfile?.familyCrew ?? user.familyCrew,
+  };
+
+  const isMe = currentUserId === displayUser.id;
+  const isTargetHost = hostUser
+    ? hostUser.id === displayUser.id || hostUser.displayName === displayUser.displayName
+    : displayUser.isHost;
+  const isTargetModerator = moderatorIds.includes(displayUser.id);
   const canModerate = (isViewerHost || isViewerModerator) && !isTargetHost && !isMe;
   const isModeratorLimitReached = moderatorIds.length >= 10 && !isTargetModerator;
 
   const handleCopyId = async () => {
-    const success = await copyToClipboard(user.uniqueId || user.id);
+    const success = await copyToClipboard(displayUser.uniqueId || displayUser.id);
     if (success) {
       setCopiedId(true);
       setTimeout(() => setCopiedId(false), 2000);
@@ -135,8 +196,8 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
             {/* VIP Avatar Frame */}
             <div className="relative shrink-0">
               <VipAvatarFrame
-                avatarUrl={user.avatar}
-                vipTier={user.vipTier || 0}
+                avatarUrl={displayUser.avatar}
+                vipTier={displayUser.vipTier || 0}
                 size="md"
                 showCrownBadge={isTargetHost}
               />
@@ -156,12 +217,12 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-1.5 flex-wrap">
                 <h3 className="text-sm font-black text-white truncate max-w-[150px]">
-                  {user.displayName}
+                  {displayUser.displayName}
                 </h3>
-                {user.countryFlag && (
-                  <span className="text-xs" title={user.country}>{user.countryFlag}</span>
+                {displayUser.countryFlag && (
+                  <span className="text-xs" title={displayUser.country}>{displayUser.countryFlag}</span>
                 )}
-                {user.isVerified && (
+                {displayUser.isVerified && (
                   <span className="w-3.5 h-3.5 rounded-full bg-[#EC4899] text-white text-[8px] font-black flex items-center justify-center">
                     ✓
                   </span>
@@ -175,7 +236,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                   className="flex items-center gap-1 text-[10px] font-mono text-zinc-400 hover:text-white px-1.5 py-0.5 rounded bg-black/40 border border-white/10 cursor-pointer transition-colors"
                   title="Click to copy ID"
                 >
-                  <span>ID: {user.uniqueId || user.id}</span>
+                  <span>ID: {displayUser.uniqueId || displayUser.id}</span>
                   {copiedId ? <Check className="w-2.5 h-2.5 text-emerald-400" /> : <Copy className="w-2.5 h-2.5 text-zinc-400" />}
                 </button>
                 {copiedId && (
@@ -185,15 +246,15 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
 
               {/* Level & VIP Badges */}
               <div className="flex items-center gap-2 mt-2 flex-wrap">
-                <LevelBadgeIcon level={user.level || 1} size="sm" />
-                {user.vipTier && user.vipTier > 0 ? (
+                <LevelBadgeIcon level={displayUser.level} size="sm" />
+                {displayUser.vipTier > 0 ? (
                   <span className="px-1.5 py-0.5 rounded bg-[#7928CA]/30 text-[#C084FC] text-[9px] font-black border border-[#A855F7]/30">
-                    VIP {user.vipTier}
+                    VIP {displayUser.vipTier}
                   </span>
                 ) : null}
-                {user.familyCrew && (
+                {displayUser.familyCrew && (
                   <span className="px-1.5 py-0.5 rounded bg-pink-500/20 text-pink-300 text-[8.5px] font-bold border border-pink-500/30 truncate max-w-[100px]">
-                    {user.familyCrew}
+                    {displayUser.familyCrew}
                   </span>
                 )}
               </div>
@@ -203,23 +264,23 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
           {/* Social Stats: Followers, Following, Likes */}
           <div className="grid grid-cols-3 gap-2 text-center py-2 px-3 rounded-2xl bg-black/40 border border-white/5">
             <div>
-              <p className="text-xs font-black text-white">{(user.followersCount || 1200).toLocaleString()}</p>
+              <p className="text-xs font-black text-white">{displayUser.followersCount.toLocaleString()}</p>
               <p className="text-[9px] text-zinc-400 font-medium">Followers</p>
             </div>
             <div>
-              <p className="text-xs font-black text-white">{(user.followingCount || 85).toLocaleString()}</p>
+              <p className="text-xs font-black text-white">{displayUser.followingCount.toLocaleString()}</p>
               <p className="text-[9px] text-zinc-400 font-medium">Following</p>
             </div>
             <div>
-              <p className="text-xs font-black text-white">{(user.likesCount || 15400).toLocaleString()}</p>
+              <p className="text-xs font-black text-white">{displayUser.likesCount.toLocaleString()}</p>
               <p className="text-[9px] text-zinc-400 font-medium">Likes</p>
             </div>
           </div>
 
           {/* Bio statement */}
-          {user.bio && (
+          {displayUser.bio && (
             <p className="text-xs text-zinc-300 italic px-1 line-clamp-2">
-              "{user.bio}"
+              "{displayUser.bio}"
             </p>
           )}
 
@@ -229,7 +290,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
             <button
               onClick={() => {
                 onClose();
-                onSendGift(user);
+                onSendGift(displayUser);
               }}
               className="h-11 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-bold text-xs flex items-center justify-center gap-1.5 shadow-lg shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
             >
@@ -240,7 +301,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
             {/* 2. Follow / Follow Back */}
             {!isMe ? (
               <button
-                onClick={() => onToggleFollow && onToggleFollow(user)}
+                onClick={() => onToggleFollow && onToggleFollow(displayUser)}
                 className={`h-11 rounded-xl font-bold text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
                   isFollowing
                     ? 'bg-zinc-800 text-zinc-300 border border-white/10 hover:bg-zinc-700'
@@ -270,7 +331,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
               <button
                 onClick={() => {
                   onClose();
-                  onDirectMessage(user);
+                  onDirectMessage(displayUser);
                 }}
                 className="h-10 rounded-xl bg-[#1E1138] border border-white/10 hover:border-[#A855F7] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all"
               >
@@ -283,7 +344,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
             <button
               onClick={() => {
                 onClose();
-                onVisitProfile(user);
+                onVisitProfile(displayUser);
               }}
               className={`h-10 rounded-xl bg-[#1E1138] border border-white/10 hover:border-[#A855F7] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-all ${
                 isMe ? 'col-span-2' : ''

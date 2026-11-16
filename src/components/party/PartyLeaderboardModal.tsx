@@ -178,7 +178,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                       </span>
                       <VipAvatarFrame
                         avatarUrl={top3[1].user.avatar}
-                        vipTier={top3[1].user.vipTier || 2}
+                        vipTier={top3[1].user.vipTier ?? 0}
                         size="md"
                         showCrownBadge={false}
                       />
@@ -187,7 +187,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                       <span className="text-[11px] font-black text-white truncate max-w-[70px] text-center">
                         {top3[1].user.displayName}
                       </span>
-                      <LevelBadgeIcon level={top3[1].user.level || 15} size="xs" />
+                      <LevelBadgeIcon level={top3[1].user.level ?? 0} size="xs" />
                     </div>
                     <span className="text-[10px] font-extrabold text-amber-400">
                       {top3[1].totalCoins.toLocaleString()} 💰
@@ -216,7 +216,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                       </div>
                       <VipAvatarFrame
                         avatarUrl={top3[0].user.avatar}
-                        vipTier={top3[0].user.vipTier || 4}
+                        vipTier={top3[0].user.vipTier ?? 0}
                         size="lg"
                         showCrownBadge={true}
                       />
@@ -225,7 +225,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                       <span className="text-xs font-black text-amber-300 truncate max-w-[85px] text-center">
                         {top3[0].user.displayName}
                       </span>
-                      <LevelBadgeIcon level={top3[0].user.level || 45} size="xs" />
+                      <LevelBadgeIcon level={top3[0].user.level ?? 0} size="xs" />
                     </div>
                     <span className="text-[11px] font-black text-yellow-300">
                       {top3[0].totalCoins.toLocaleString()} 💰
@@ -255,7 +255,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                       </span>
                       <VipAvatarFrame
                         avatarUrl={top3[2].user.avatar}
-                        vipTier={top3[2].user.vipTier || 1}
+                        vipTier={top3[2].user.vipTier ?? 0}
                         size="md"
                         showCrownBadge={false}
                       />
@@ -264,7 +264,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                       <span className="text-[11px] font-black text-white truncate max-w-[70px] text-center">
                         {top3[2].user.displayName}
                       </span>
-                      <LevelBadgeIcon level={top3[2].user.level || 8} size="xs" />
+                      <LevelBadgeIcon level={top3[2].user.level ?? 0} size="xs" />
                     </div>
                     <span className="text-[10px] font-extrabold text-amber-400">
                       {top3[2].totalCoins.toLocaleString()} 💰
@@ -335,7 +335,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                           <span className="text-xs font-black text-white truncate max-w-[120px]">
                             {entry.user.displayName}
                           </span>
-                          <LevelBadgeIcon level={entry.user.level || 12} size="xs" />
+                          <LevelBadgeIcon level={entry.user.level ?? 0} size="xs" />
                           {isCurrentUser && (
                             <span className="px-1.5 py-0.2 rounded bg-pink-500/30 text-pink-300 text-[7.5px] font-black uppercase">
                               You

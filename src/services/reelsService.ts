@@ -21,7 +21,9 @@ import {
 import { auth, db, handleFirestoreError, handleSnapshotListenerError, OperationType } from './firebase';
 
 const ENV_WORKER_URL = ((import.meta as any).env?.VITE_CLOUDFLARE_WORKER_URL || '').trim().replace(/\/$/, '');
-const ENV_RAILWAY_URL = ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim().replace(/\/$/, '');
+const ENV_RAILWAY_URL =
+  ((import.meta as any).env?.VITE_RAILWAY_API_URL || '').trim().replace(/\/$/, '') ||
+  'https://api.alphamate.app';
 export const WORKER_API_BASE = ENV_WORKER_URL || 'https://alpha-mate-reels-api.alphamateapp.workers.dev';
 export const MAX_VIDEO_SIZE_BYTES = 100 * 1024 * 1024; // 100 MB
 export const R2_MEDIA_DOMAIN =
@@ -48,7 +50,9 @@ function getReelUploadEndpoints(): string[] {
     ENV_RAILWAY_URL && /^https?:\/\//i.test(ENV_RAILWAY_URL) ? `${ENV_RAILWAY_URL}/api/reels/upload` : null;
 
   if (isNativeCapacitorRuntime()) {
-    return [directWorkerUrl, ...(railwayProxyUrl ? [railwayProxyUrl] : [])];
+    // On Android/iOS Capacitor WebView (origin https://localhost), prefer Railway proxy first
+    // because the external Cloudflare Worker can reject https://localhost CORS preflight/uploads.
+    return [...(railwayProxyUrl ? [railwayProxyUrl] : []), directWorkerUrl];
   }
 
   const host = typeof window !== 'undefined' ? window.location.hostname.toLowerCase() : '';
@@ -61,7 +65,11 @@ function getReelUploadEndpoints(): string[] {
 
   // On AI Studio preview, localhost, or Capacitor web hosts, prefer the same-origin
   // Express streaming proxy first so browser CORS preflight never blocks the upload.
-  return [sameOriginProxyUrl, directWorkerUrl, ...(railwayProxyUrl && railwayProxyUrl !== `${window?.location?.origin}/api/reels/upload` ? [railwayProxyUrl] : [])];
+  return [
+    sameOriginProxyUrl,
+    ...(railwayProxyUrl && railwayProxyUrl !== `${window?.location?.origin}/api/reels/upload` ? [railwayProxyUrl] : []),
+    directWorkerUrl,
+  ];
 }
 
 function getReelDeleteEndpoints(videoKey: string): string[] {
@@ -72,7 +80,7 @@ function getReelDeleteEndpoints(videoKey: string): string[] {
     ENV_RAILWAY_URL && /^https?:\/\//i.test(ENV_RAILWAY_URL) ? `${ENV_RAILWAY_URL}/api/reels/${encodedKey}` : null;
 
   if (isNativeCapacitorRuntime()) {
-    return [directWorkerUrl, ...(railwayProxyUrl ? [railwayProxyUrl] : [])];
+    return [...(railwayProxyUrl ? [railwayProxyUrl] : []), directWorkerUrl];
   }
 
   const host = typeof window !== 'undefined' ? window.location.hostname.toLowerCase() : '';
@@ -80,7 +88,7 @@ function getReelDeleteEndpoints(videoKey: string): string[] {
     return [directWorkerUrl, sameOriginProxyUrl];
   }
 
-  return [sameOriginProxyUrl, directWorkerUrl];
+  return [sameOriginProxyUrl, ...(railwayProxyUrl ? [railwayProxyUrl] : []), directWorkerUrl];
 }
 
 function normalizeVideoMimeType(file: Blob | File, mimeType: string): string {
@@ -94,7 +102,14 @@ function normalizeVideoMimeType(file: Blob | File, mimeType: string): string {
   if (fileName.endsWith('.mov')) return 'video/quicktime';
   if (fileName.endsWith('.m4v')) return 'video/x-m4v';
   if (fileName.endsWith('.mkv')) return 'video/x-matroska';
-  if (baseMime.startsWith('video/') || baseMime === '' || baseMime === 'application/octet-stream') {
+  if (
+    fileName.endsWith('.3gp') ||
+    baseMime === 'video/3gpp' ||
+    baseMime === 'video/3gpp2' ||
+    baseMime.startsWith('video/') ||
+    baseMime === '' ||
+    baseMime === 'application/octet-stream'
+  ) {
     return 'video/mp4';
   }
   return baseMime;
@@ -261,7 +276,61 @@ function sendSingleXhrRequest(
   });
 }
 
-function parseUploadResponse(status: number, responseText: string): R2UploadResult {
+function normalizeR2UploadPayload(
+  payload: any,
+  fallbackContentType = 'video/mp4'
+): R2UploadResult | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const candidate =
+    payload.result && typeof payload.result === 'object'
+      ? payload.result
+      : payload.data && typeof payload.data === 'object'
+      ? payload.data
+      : payload;
+
+  let videoUrl = String(candidate.videoUrl || candidate.url || payload.videoUrl || payload.url || '').trim();
+  let videoKey = String(
+    candidate.videoKey ||
+      candidate.key ||
+      candidate.objectKey ||
+      candidate.video_key ||
+      payload.videoKey ||
+      payload.key ||
+      payload.objectKey ||
+      ''
+  ).trim();
+
+  if (!videoKey && videoUrl) {
+    try {
+      const parsed = new URL(videoUrl);
+      videoKey = parsed.pathname.replace(/^\/+/, '');
+    } catch {
+      // ignore invalid URL
+    }
+  }
+
+  if (!videoKey) return null;
+
+  if (!videoUrl) {
+    videoUrl = `${R2_MEDIA_DOMAIN}/${videoKey.replace(/^\/+/, '')}`;
+  }
+
+  return {
+    success: true,
+    videoKey,
+    videoUrl,
+    size: Number(candidate.size ?? payload.size ?? 0),
+    contentType: String(candidate.contentType || payload.contentType || fallbackContentType),
+    uid: String(candidate.uid || payload.uid || auth.currentUser?.uid || ''),
+    createdAt: String(candidate.createdAt || payload.createdAt || new Date().toISOString()),
+  };
+}
+
+function parseUploadResponse(
+  status: number,
+  responseText: string,
+  fallbackContentType = 'video/mp4'
+): R2UploadResult {
   let responseJson: any = null;
   try {
     responseJson = JSON.parse(responseText);
@@ -270,13 +339,16 @@ function parseUploadResponse(status: number, responseText: string): R2UploadResu
   }
 
   if (status >= 200 && status < 300) {
-    if (responseJson && responseJson.success && responseJson.videoKey) {
-      return responseJson as R2UploadResult;
+    const normalized = normalizeR2UploadPayload(responseJson, fallbackContentType);
+    if (normalized) {
+      return normalized;
     }
-    throw new Error(responseJson?.error || 'Invalid upload response from Reels API');
+    throw new RetryableUploadEndpointError(
+      responseJson?.error || `Incomplete upload response from Reels API (HTTP ${status})`
+    );
   }
 
-  if (status === 404 || status === 405 || status === 502 || status === 503) {
+  if (status === 403 || status === 404 || status === 405 || status === 502 || status === 503) {
     throw new RetryableUploadEndpointError(
       responseJson?.error || `Upload endpoint unavailable (${status})`
     );
@@ -315,7 +387,7 @@ async function sendVideoViaXhr(
       onProgress?.(percent);
     }
   );
-  const result = parseUploadResponse(status, responseText);
+  const result = parseUploadResponse(status, responseText, contentType);
   onProgress?.(100);
   return result;
 }
@@ -337,7 +409,14 @@ async function uploadViaChunkedProxy(
   for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex += 1) {
     const start = chunkIndex * UPLOAD_CHUNK_SIZE_BYTES;
     const end = Math.min(file.size, start + UPLOAD_CHUNK_SIZE_BYTES);
-    const chunkBlob = file.slice(start, end);
+    const rawChunkSlice = file.slice(start, end);
+    let chunkPayload: Blob = rawChunkSlice;
+    try {
+      const chunkBuffer = await rawChunkSlice.arrayBuffer();
+      chunkPayload = new Blob([chunkBuffer], { type: 'application/octet-stream' });
+    } catch {
+      chunkPayload = rawChunkSlice;
+    }
 
     let attempt = 0;
     while (true) {
@@ -345,7 +424,7 @@ async function uploadViaChunkedProxy(
       try {
         const { status, responseText } = await sendSingleXhrRequest(
           chunkUrl,
-          chunkBlob,
+          chunkPayload,
           {
             'Content-Type': 'application/octet-stream',
             'X-Upload-Id': uploadId,
@@ -390,7 +469,7 @@ async function uploadViaChunkedProxy(
       }
     }
 
-    uploadedBaseBytes += chunkBlob.size;
+    uploadedBaseBytes += rawChunkSlice.size;
     onProgress?.(Math.min(89, Math.round((uploadedBaseBytes / file.size) * 88)));
   }
 
@@ -439,7 +518,7 @@ async function uploadViaChunkedProxy(
 
   // Synchronous 200/201 response (e.g., direct external server)
   if (completeRes.status !== 202 && !completeJson?.asyncJob) {
-    const result = parseUploadResponse(completeRes.status, completeText);
+    const result = parseUploadResponse(completeRes.status, completeText, contentType);
     onProgress?.(100);
     return result;
   }
@@ -481,15 +560,22 @@ async function uploadViaChunkedProxy(
       continue;
     }
 
-    if (statusJson?.status === 'completed' && statusJson?.result?.videoKey) {
-      onProgress?.(100);
-      return statusJson.result as R2UploadResult;
+    if (statusJson?.status === 'completed') {
+      const normalized = normalizeR2UploadPayload(statusJson?.result ?? statusJson, contentType);
+      if (normalized) {
+        onProgress?.(100);
+        return normalized;
+      }
+      throw new RetryableUploadEndpointError(
+        'Upload completed on server without returning a valid video key.'
+      );
     }
 
     if (statusJson?.status === 'failed') {
       return parseUploadResponse(
         Number(statusJson.statusCode) || 502,
-        JSON.stringify({ error: statusJson.error || 'Cloudflare R2 upload failed.' })
+        JSON.stringify({ error: statusJson.error || 'Cloudflare R2 upload failed.' }),
+        contentType
       );
     }
   }
@@ -644,8 +730,8 @@ export async function saveReelMetadataToFirestore(
       displayName: input.creator.displayName || currentUser.displayName || 'Alpha Creator',
       username: input.creator.username || 'creator',
       avatar: safeCreatorAvatar,
-      level: Number(input.creator.level) || 1,
-      vipTier: Number(input.creator.vipTier) || 0,
+      level: Number(input.creator.level ?? 0),
+      vipTier: Number(input.creator.vipTier ?? 0),
       isVerified: !!input.creator.isVerified,
     },
   };

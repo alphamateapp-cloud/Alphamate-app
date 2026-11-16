@@ -91,6 +91,7 @@ export const LiveStreamScreen: React.FC = () => {
     currentUser,
     setCurrentScreen,
     startDirectMessage,
+    openPublicUserProfile,
     sendNotificationToUser,
     refreshScope,
     liveRefreshTick,
@@ -151,7 +152,9 @@ export const LiveStreamScreen: React.FC = () => {
   const [comments, setComments] = useState<
     Array<{
       id: string;
+      senderId?: string;
       user: string;
+      avatar?: string;
       text: string;
       vipLevel?: number;
       level?: number;
@@ -362,29 +365,54 @@ export const LiveStreamScreen: React.FC = () => {
     showToast(isNowFollowing ? `Following ${targetUser.displayName}! 💜` : `Unfollowed ${targetUser.displayName}`);
   };
 
-  const handleCommentClick = (comment: { id: string; user: string; text: string; vipLevel?: number }) => {
-    const isTargetHost = activeStream && comment.user === activeStream.host.displayName;
-    const targetUser: User = isTargetHost && activeStream
-      ? activeStream.host
-      : {
-          id: `user_${comment.user.replace(/[^a-zA-Z0-9]/g, '_')}`,
-          uniqueId: `AM_${Math.floor(100000 + Math.random() * 900000)}`,
-          username: comment.user.replace(/[^a-zA-Z0-9]/g, ''),
-          displayName: comment.user,
-          avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
-          bio: 'Alpha Mate live stream viewer 💜',
-          followersCount: 3800,
-          followingCount: 140,
-          likesCount: 29000,
-          level: 22,
-          xp: 8500,
-          nextLevelXp: 12000,
-          vipTier: comment.vipLevel || 0,
-          coins: 1400,
-          diamonds: 500,
-          isVerified: isTargetHost || false,
-          isHost: isTargetHost || false,
-        };
+  const handleCommentClick = (comment: {
+    id: string;
+    senderId?: string;
+    user: string;
+    avatar?: string;
+    text: string;
+    vipLevel?: number;
+    level?: number;
+  }) => {
+    const isTargetHost =
+      Boolean(activeStream) &&
+      ((comment.senderId && comment.senderId === activeStream?.host?.id) ||
+        comment.user === activeStream?.host?.displayName);
+    const matchedViewer = realViewersList.find(
+      (v) => (comment.senderId && v.id === comment.senderId) || v.displayName === comment.user
+    );
+
+    const targetUser: User =
+      isTargetHost && activeStream
+        ? activeStream.host
+        : matchedViewer
+        ? {
+            ...matchedViewer,
+            avatar: matchedViewer.avatar || comment.avatar || '',
+            level: Number(comment.level ?? matchedViewer.level ?? 0),
+            vipTier: Number(comment.vipLevel ?? matchedViewer.vipTier ?? 0),
+          }
+        : {
+            id: comment.senderId || `user_${comment.user.replace(/[^a-zA-Z0-9]/g, '_')}`,
+            uniqueId: comment.senderId || `user_${comment.user.replace(/[^a-zA-Z0-9]/g, '_')}`,
+            username: comment.user.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'user',
+            displayName: comment.user,
+            avatar:
+              comment.avatar ||
+              'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
+            bio: 'Alpha Mate Member',
+            followersCount: 0,
+            followingCount: 0,
+            likesCount: 0,
+            level: Number(comment.level ?? 0),
+            xp: 0,
+            nextLevelXp: 50000,
+            vipTier: Number(comment.vipLevel ?? 0),
+            coins: 0,
+            diamonds: 0,
+            isVerified: false,
+            isHost: false,
+          };
 
     setSelectedUserForActionSheet(targetUser);
     setShowUserActionSheet(true);
@@ -594,10 +622,10 @@ export const LiveStreamScreen: React.FC = () => {
         followersCount: 0,
         followingCount: 0,
         likesCount: 0,
-        level: Number(raw.level) || 1,
+        level: Number(raw.level ?? 0),
         xp: 0,
-        nextLevelXp: 1000,
-        vipTier: Number(raw.vipTier) || 0,
+        nextLevelXp: 50000,
+        vipTier: Number(raw.vipTier ?? 0),
         countryFlag: raw.countryFlag,
         coins: 0,
         diamonds: 0,
@@ -1069,10 +1097,12 @@ export const LiveStreamScreen: React.FC = () => {
         setComments(
           remoteComments.map((rc: any) => ({
             id: rc.id,
+            senderId: rc.senderId,
             user: rc.user || 'Viewer',
+            avatar: rc.avatar,
             text: rc.text || '',
-            vipLevel: rc.vipLevel || 0,
-            level: rc.level || 1,
+            vipLevel: rc.vipLevel ?? 0,
+            level: rc.level ?? 0,
             isGiftHighlight: rc.isGiftHighlight,
             isEntryNotice: rc.isEntryNotice,
           }))
@@ -1088,12 +1118,15 @@ export const LiveStreamScreen: React.FC = () => {
     e.preventDefault();
     if (!inputComment.trim() || !activeStream?.id) return;
 
+    const uid = auth.currentUser?.uid || currentUser.id;
     const newComment = {
       id: String(Date.now()),
+      senderId: uid,
       user: currentUser.displayName,
+      avatar: currentUser.avatar,
       text: inputComment.trim(),
-      vipLevel: currentUser.vipTier,
-      level: currentUser.level,
+      vipLevel: currentUser.vipTier ?? 0,
+      level: currentUser.level ?? 0,
     };
 
     setComments((prev) => [...prev, newComment]);
@@ -1101,10 +1134,11 @@ export const LiveStreamScreen: React.FC = () => {
 
     sendLiveStreamMessage(activeStream.id, {
       user: currentUser.displayName,
+      avatar: currentUser.avatar,
       text: newComment.text,
-      vipLevel: currentUser.vipTier,
-      level: currentUser.level,
-      senderId: currentUser.id,
+      vipLevel: currentUser.vipTier ?? 0,
+      level: currentUser.level ?? 0,
+      senderId: uid,
     }).catch((err) => console.warn('Failed to send live comment:', err));
   };
 
@@ -1176,7 +1210,7 @@ export const LiveStreamScreen: React.FC = () => {
         gift: activeGiftBanner.gift,
         senderName: activeGiftBanner.sender,
         senderAvatar: activeGiftBanner.senderAvatar,
-        senderVipTier: activeGiftBanner.senderVipTier || 1,
+        senderVipTier: activeGiftBanner.senderVipTier ?? 0,
         recipientName: activeGiftBanner.recipient,
         comboCount: 1,
         quantity: activeGiftBanner.quantity || 1,
@@ -1256,7 +1290,7 @@ export const LiveStreamScreen: React.FC = () => {
       gift: giftToSend,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
-      senderVipTier: currentUser.vipTier || 1,
+      senderVipTier: currentUser.vipTier ?? 0,
       recipientName,
       comboCount: nextCombo,
       quantity: qty,
@@ -1269,7 +1303,7 @@ export const LiveStreamScreen: React.FC = () => {
       gift: giftToSend,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
-      senderVipTier: currentUser.vipTier || 1,
+      senderVipTier: currentUser.vipTier ?? 0,
       recipientName,
       comboCount: nextCombo,
       quantity: qty,
@@ -1282,23 +1316,28 @@ export const LiveStreamScreen: React.FC = () => {
     }`;
 
     // Add Highlighted Gift Notification into Live Chat Stream & sync to stream messages
+    const senderUid = auth.currentUser?.uid || currentUser.id;
     setComments((prev) => [
       ...prev,
       {
         id: `gift_msg_${now}_${nextCombo}`,
+        senderId: senderUid,
         user: currentUser.displayName,
+        avatar: currentUser.avatar,
         text: giftChatText,
-        vipLevel: currentUser.vipTier,
+        vipLevel: currentUser.vipTier ?? 0,
+        level: currentUser.level ?? 0,
         isGiftHighlight: true,
       },
     ]);
     sendLiveStreamMessage(activeStream.id, {
       user: currentUser.displayName,
+      avatar: currentUser.avatar,
       text: giftChatText,
-      vipLevel: currentUser.vipTier || 0,
-      level: currentUser.level || 1,
+      vipLevel: currentUser.vipTier ?? 0,
+      level: currentUser.level ?? 0,
       isGiftHighlight: true,
-      senderId: auth.currentUser?.uid || currentUser.id,
+      senderId: senderUid,
     }).catch(() => {});
 
     // Spawn floating celebration hearts
@@ -1356,8 +1395,8 @@ export const LiveStreamScreen: React.FC = () => {
   if (!activeStream) return null;
 
   // Host metadata
-  const hostVipTier = activeStream.host.vipTier || 6;
-  const hostLevel = activeStream.host.level || 42;
+  const hostVipTier = activeStream.host.vipTier ?? 0;
+  const hostLevel = activeStream.host.level ?? 0;
 
   return (
     <div
@@ -1617,9 +1656,11 @@ export const LiveStreamScreen: React.FC = () => {
                   {activeStream.host.displayName}
                 </span>
                 <LevelBadgeIcon level={hostLevel} size="xs" className="shrink-0" />
-                <span className="hidden xs:inline px-1 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black shrink-0">
-                  VIP {hostVipTier}
-                </span>
+                {hostVipTier > 0 && (
+                  <span className="hidden xs:inline px-1 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black shrink-0">
+                    VIP {hostVipTier}
+                  </span>
+                )}
               </div>
               <div className="flex items-center gap-1 text-[9px] text-zinc-300">
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
@@ -1766,7 +1807,7 @@ export const LiveStreamScreen: React.FC = () => {
             >
               {/* Level Badge Icon */}
               <LevelBadgeIcon
-                level={msg.level ?? (msg.vipLevel ? msg.vipLevel * 8 : 12)}
+                level={msg.level ?? 0}
                 size="xs"
                 className="shrink-0"
               />
@@ -2293,8 +2334,11 @@ export const LiveStreamScreen: React.FC = () => {
             startDirectMessage(target);
           }}
           onVisitProfile={(target) => {
-            showToast(`Visiting ${target.displayName}'s profile... 🌟`);
-            setCurrentScreen('profile');
+            if (target.id === currentUser.id || target.id === auth.currentUser?.uid) {
+              setCurrentScreen('profile');
+            } else {
+              openPublicUserProfile(target);
+            }
           }}
           isFollowing={followingUserIds.has(selectedUserForActionSheet.id)}
           onToggleFollow={handleToggleFollowUser}

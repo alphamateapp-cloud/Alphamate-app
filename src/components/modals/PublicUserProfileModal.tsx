@@ -14,6 +14,7 @@ import {
 import { useApp } from '../../context/AppContext';
 import { User, UserBadgeId } from '../../types';
 import { fetchUserFollowCounts } from '../../services/userDirectoryService';
+import { subscribeToPublicUserProfile } from '../../services/firebase';
 import { subscribeToUserBadgeStats } from '../../services/badgeService';
 import { UserBadgeStrip } from '../badges/UserBadgeIcon';
 import { copyToClipboard } from '../../utils/clipboard';
@@ -36,46 +37,78 @@ export const PublicUserProfileModal: React.FC = () => {
     followingCount: 0,
   });
   const [badgeIds, setBadgeIds] = useState<UserBadgeId[]>([]);
+  const [liveProfile, setLiveProfile] = useState<Record<string, any> | null>(null);
 
   useEffect(() => {
     if (!viewingPublicUser?.id) return;
+    let cancelled = false;
+    setLiveProfile(null);
     setBadgeIds(viewingPublicUser.equippedBadgeIds || []);
     setCounts({
-      followersCount: viewingPublicUser.followersCount || 0,
-      followingCount: viewingPublicUser.followingCount || 0,
+      followersCount: Number(viewingPublicUser.followersCount ?? 0),
+      followingCount: Number(viewingPublicUser.followingCount ?? 0),
     });
 
     fetchUserFollowCounts(viewingPublicUser.id)
       .then((res) => {
-        setCounts({
-          followersCount: Math.max(res.followersCount, viewingPublicUser.followersCount || 0),
-          followingCount: Math.max(res.followingCount, viewingPublicUser.followingCount || 0),
-        });
+        if (!cancelled) {
+          setCounts({
+            followersCount: res.followersCount,
+            followingCount: res.followingCount,
+          });
+        }
       })
       .catch(() => {});
 
-    const unsub = subscribeToUserBadgeStats(viewingPublicUser.id, (stats) => {
-      if (stats?.equippedBadgeIds?.length) {
+    const unsubProfile = subscribeToPublicUserProfile(viewingPublicUser.id, (data) => {
+      if (!cancelled && data) {
+        setLiveProfile(data);
+        if (Array.isArray(data.equippedBadgeIds)) {
+          setBadgeIds(data.equippedBadgeIds);
+        }
+      }
+    });
+
+    const unsubBadges = subscribeToUserBadgeStats(viewingPublicUser.id, (stats) => {
+      if (!cancelled && stats?.equippedBadgeIds?.length) {
         setBadgeIds(stats.equippedBadgeIds);
       }
     });
 
     return () => {
-      unsub();
+      cancelled = true;
+      unsubProfile();
+      unsubBadges();
     };
   }, [viewingPublicUser]);
 
   if (!viewingPublicUser) return null;
 
-  const isMe = viewingPublicUser.id === currentUser.id;
-  const isFollowing = followingUserIds.includes(viewingPublicUser.id);
-  const followsMe = followerUserIds.includes(viewingPublicUser.id);
+  const profileUser: User = {
+    ...viewingPublicUser,
+    displayName: String(liveProfile?.displayName || viewingPublicUser.displayName || 'Alpha Mate'),
+    username: String(liveProfile?.username || viewingPublicUser.username || 'user'),
+    uniqueId: String(liveProfile?.uniqueId || viewingPublicUser.uniqueId || viewingPublicUser.id),
+    avatar: String(liveProfile?.avatar || liveProfile?.photoURL || viewingPublicUser.avatar || ''),
+    bio: liveProfile?.bio !== undefined ? String(liveProfile.bio || '') : (viewingPublicUser.bio || ''),
+    level: Math.max(0, Number(liveProfile?.level ?? viewingPublicUser.level ?? 0)),
+    vipTier: Math.max(0, Number(liveProfile?.vipTier ?? viewingPublicUser.vipTier ?? 0)),
+    isVerified:
+      liveProfile?.isVerified !== undefined
+        ? Boolean(liveProfile.isVerified)
+        : Boolean(viewingPublicUser.isVerified),
+    countryFlag: liveProfile?.countryFlag ?? viewingPublicUser.countryFlag,
+  };
+
+  const isMe = profileUser.id === currentUser.id;
+  const isFollowing = followingUserIds.includes(profileUser.id);
+  const followsMe = followerUserIds.includes(profileUser.id);
 
   const handleToggleFollow = async () => {
     if (isMe || followBusy) return;
     setFollowBusy(true);
     try {
-      const next = await toggleFollowUser(viewingPublicUser);
+      const next = await toggleFollowUser(profileUser);
       setCounts((prev) => ({
         ...prev,
         followersCount: Math.max(0, prev.followersCount + (next ? 1 : -1)),
@@ -86,13 +119,13 @@ export const PublicUserProfileModal: React.FC = () => {
   };
 
   const handleCopyId = async () => {
-    await copyToClipboard(viewingPublicUser.uniqueId);
+    await copyToClipboard(profileUser.uniqueId);
     setCopiedId(true);
     setTimeout(() => setCopiedId(false), 1800);
   };
 
   const handleMessage = async () => {
-    const target: User = viewingPublicUser;
+    const target: User = profileUser;
     closePublicUserProfile();
     await startDirectMessage(target);
   };
@@ -101,7 +134,7 @@ export const PublicUserProfileModal: React.FC = () => {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={`${viewingPublicUser.displayName} profile`}
+      aria-label={`${profileUser.displayName} profile`}
       className="fixed inset-0 z-50 bg-black/85 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4"
       onClick={closePublicUserProfile}
     >
@@ -126,14 +159,14 @@ export const PublicUserProfileModal: React.FC = () => {
           <div className="flex items-end justify-between gap-3">
             <div className="relative">
               <img
-                src={viewingPublicUser.avatar}
-                alt={viewingPublicUser.displayName}
+                src={profileUser.avatar}
+                alt={profileUser.displayName}
                 referrerPolicy="no-referrer"
                 className="w-20 h-20 rounded-full object-cover border-4 border-[#110A22] shadow-xl bg-[#1A1033]"
               />
-              {viewingPublicUser.countryFlag && (
+              {profileUser.countryFlag && (
                 <span className="absolute bottom-0 right-0 text-base bg-[#110A22] rounded-full px-1">
-                  {viewingPublicUser.countryFlag}
+                  {profileUser.countryFlag}
                 </span>
               )}
             </div>
@@ -180,22 +213,22 @@ export const PublicUserProfileModal: React.FC = () => {
           {/* Identity */}
           <div className="mt-3 space-y-1">
             <div className="flex items-center gap-1.5 flex-wrap">
-              <h2 className="text-lg font-black text-white">{viewingPublicUser.displayName}</h2>
-              {viewingPublicUser.isVerified && (
+              <h2 className="text-lg font-black text-white">{profileUser.displayName}</h2>
+              {profileUser.isVerified && (
                 <ShieldCheck className="w-4 h-4 text-[#A855F7]" />
               )}
               {badgeIds.length > 0 && <UserBadgeStrip badgeIds={badgeIds} size="sm" />}
             </div>
 
             <div className="flex items-center gap-2 flex-wrap text-xs text-zinc-400">
-              <span>@{viewingPublicUser.username}</span>
+              <span>@{profileUser.username}</span>
               <span>•</span>
               <button
                 type="button"
                 onClick={handleCopyId}
                 className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-white/5 hover:bg-white/10 text-zinc-300 font-mono text-[11px] cursor-pointer"
               >
-                <span>ID: {viewingPublicUser.uniqueId}</span>
+                <span>ID: {profileUser.uniqueId}</span>
                 {copiedId ? (
                   <Check className="w-3 h-3 text-emerald-400" />
                 ) : (
@@ -212,7 +245,7 @@ export const PublicUserProfileModal: React.FC = () => {
             )}
 
             <p className="text-xs text-zinc-300 pt-1 leading-relaxed">
-              {viewingPublicUser.bio || 'Alpha Mate Member'}
+              {profileUser.bio || 'Alpha Mate Member'}
             </p>
           </div>
 
@@ -235,17 +268,17 @@ export const PublicUserProfileModal: React.FC = () => {
             </div>
             <div className="p-3 rounded-2xl bg-[#180E30] border border-white/10 text-center">
               <div className="text-sm font-black text-amber-300 flex items-center justify-center gap-1">
-                {viewingPublicUser.vipTier > 0 ? (
+                {profileUser.vipTier > 0 ? (
                   <>
                     <Crown className="w-3.5 h-3.5" />
-                    <span>VIP {viewingPublicUser.vipTier}</span>
+                    <span>VIP {profileUser.vipTier}</span>
                   </>
                 ) : (
-                  <span>Lv.{viewingPublicUser.level}</span>
+                  <span>Lv.{profileUser.level}</span>
                 )}
               </div>
               <div className="text-[10px] text-zinc-400 mt-0.5">
-                {viewingPublicUser.vipTier > 0 ? `Lv.${viewingPublicUser.level}` : 'Tier Rank'}
+                {profileUser.vipTier > 0 ? `Lv.${profileUser.level}` : 'Tier Rank'}
               </div>
             </div>
           </div>
