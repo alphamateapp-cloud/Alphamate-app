@@ -5,6 +5,7 @@ import { getMessaging } from 'firebase-admin/messaging';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import * as logger from 'firebase-functions/logger';
+import { createEmailOtpCloudFunctions } from './emailOtp';
 
 const FIRESTORE_DATABASE_ID =
   process.env.FIREBASE_DATABASE_ID ||
@@ -22,6 +23,18 @@ const MAX_BATCH_SIZE = 450;
 
 const app = getApps().length > 0 ? getApps()[0] : initializeApp();
 const db = getFirestore(app, FIRESTORE_DATABASE_ID);
+
+const emailOtpCloudFunctions = createEmailOtpCloudFunctions(app, db);
+export const sendPreSignupEmailOtp = emailOtpCloudFunctions.sendPreSignupEmailOtp;
+export const verifyPreSignupEmailOtp = emailOtpCloudFunctions.verifyPreSignupEmailOtp;
+export const completePreSignupWithPassword = emailOtpCloudFunctions.completePreSignupWithPassword;
+export const setAuthenticatedUserPassword = emailOtpCloudFunctions.setAuthenticatedUserPassword;
+export const registerDeviceSwitchSession = emailOtpCloudFunctions.registerDeviceSwitchSession;
+export const switchDeviceAccount = emailOtpCloudFunctions.switchDeviceAccount;
+export const sendEmailOtp = emailOtpCloudFunctions.sendEmailOtp;
+export const verifyEmailOtp = emailOtpCloudFunctions.verifyEmailOtp;
+export const sendLoginEmailOtp = emailOtpCloudFunctions.sendLoginEmailOtp;
+export const verifyLoginEmailOtp = emailOtpCloudFunctions.verifyLoginEmailOtp;
 
 function extractTimestampMs(data: Record<string, unknown>, ...keys: string[]): number | null {
   for (const key of keys) {
@@ -243,6 +256,11 @@ export const processExpiredAccountDeletions = onSchedule(
 
     if (processedCount > 0) {
       logger.info('Processed expired 15-day permanent account deletions', { processedCount });
+    }
+
+    const purgedOtps = await emailOtpCloudFunctions.purgeExpiredOtpChallenges().catch(() => 0);
+    if (purgedOtps > 0) {
+      logger.info('Purged expired Email OTP challenge documents', { purgedOtps });
     }
   }
 );

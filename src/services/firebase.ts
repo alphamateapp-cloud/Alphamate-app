@@ -1,12 +1,18 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
+import { initializeApp, getApps, getApp, deleteApp } from 'firebase/app';
 import { Capacitor } from '@capacitor/core';
 import { FirebaseAuthentication } from '@capacitor-firebase/authentication';
 import {
   getAuth,
   initializeAuth,
   indexedDBLocalPersistence,
+  browserLocalPersistence,
   signInWithCredential,
+  signInWithCustomToken,
   GoogleAuthProvider,
+  EmailAuthProvider,
+  linkWithCredential,
+  updatePassword,
+  updateCurrentUser,
   signInWithPopup,
   signInWithRedirect,
   getRedirectResult,
@@ -17,8 +23,10 @@ import {
   reload,
   signOut,
   onAuthStateChanged,
+  onIdTokenChanged,
   User as FirebaseUser,
 } from 'firebase/auth';
+import { getFunctions } from 'firebase/functions';
 import {
   getFirestore,
   enableNetwork,
@@ -67,6 +75,7 @@ function createFirebaseAuth() {
   return getAuth(app);
 }
 export const auth = createFirebaseAuth();
+export const functions = getFunctions(app, 'us-central1');
 
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({
@@ -266,12 +275,22 @@ export function isFirebaseUserVerified(fbUser: FirebaseUser | null | undefined):
   return Boolean(fbUser.emailVerified || isGoogle);
 }
 
+export function hasFirebasePasswordProvider(fbUser: FirebaseUser | null | undefined): boolean {
+  if (!fbUser) return false;
+  return Boolean(fbUser.providerData?.some((p) => p.providerId === 'password'));
+}
+
 /**
  * Sign In with Google Popup (with automatic Redirect fallback if popups are blocked)
  */
-export async function signInWithGoogle() {
+export async function signInWithGoogle(options?: { forceAccountPicker?: boolean }) {
   try {
     if (Capacitor.isNativePlatform()) {
+      if (options?.forceAccountPicker !== false) {
+        // Clear cached native Google account selection so Android shows the account chooser
+        // when signing up or adding up to 5 accounts.
+        await FirebaseAuthentication.signOut().catch(() => {});
+      }
       // Native Google account chooser -> Google ID token -> Firebase JS Auth session.
       const nativeResult = await FirebaseAuthentication.signInWithGoogle();
       const idToken = nativeResult.credential?.idToken;
@@ -381,6 +400,172 @@ export async function sendPasswordReset(email: string) {
 }
 
 /**
+ * Sign in with a server-minted Firebase Custom Token (used after server-side Email OTP login validation)
+ */
+export async function signInWithFirebaseCustomToken(customToken: string): Promise<FirebaseUser> {
+  const result = await signInWithCustomToken(auth, customToken);
+  return result.user;
+}
+
+/**
+ * Attach or update an Email/Password credential on the currently signed-in Firebase user
+ * (e.g., when a Google user sets their password during in-app registration so both Google and
+ * Email+Password open the exact same UID).
+ */
+export async function linkOrSetUserPassword(email: string, password: string): Promise<FirebaseUser> {
+  const activeUser = auth.currentUser;
+  if (!activeUser) {
+    throw new Error('No active authenticated session found to attach password.');
+  }
+  const cleanEmail = (email || activeUser.email || '').trim().toLowerCase();
+  if (!cleanEmail) {
+    throw new Error('No email address is associated with this account.');
+  }
+
+  const alreadyHasPassword = hasFirebasePasswordProvider(activeUser);
+  if (alreadyHasPassword) {
+    await updatePassword(activeUser, password);
+    await reload(activeUser).catch(() => {});
+    return auth.currentUser || activeUser;
+  }
+
+  try {
+    const cred = EmailAuthProvider.credential(cleanEmail, password);
+    const linked = await linkWithCredential(activeUser, cred);
+    return linked.user;
+  } catch (err: any) {
+    if (err?.code === 'auth/provider-already-linked') {
+      await updatePassword(activeUser, password);
+      await reload(activeUser).catch(() => {});
+      return auth.currentUser || activeUser;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Serialize a FirebaseUser (including stsTokenManager refresh token) for instant multi-account switching on this device.
+ */
+export function serializeFirebaseUserBlob(
+  fbUser: FirebaseUser | null | undefined
+): Record<string, any> | null {
+  if (!fbUser || typeof (fbUser as any).toJSON !== 'function') return null;
+  try {
+    const raw = (fbUser as any).toJSON();
+    if (!raw || typeof raw !== 'object' || !raw.uid || !raw.stsTokenManager?.refreshToken) {
+      return null;
+    }
+    return JSON.parse(JSON.stringify(raw));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reconstruct and activate a previously authenticated FirebaseUser on the default Auth instance
+ * without prompting for password or OTP.
+ */
+export async function hydrateFirebaseUserOnDefaultAuth(
+  persistedBlob: Record<string, any> | null | undefined
+): Promise<FirebaseUser | null> {
+  if (!persistedBlob?.uid || !persistedBlob?.stsTokenManager?.refreshToken) {
+    return null;
+  }
+
+  const existingUser = auth.currentUser;
+  if (existingUser && existingUser.uid === persistedBlob.uid) {
+    await existingUser.getIdToken().catch(() => {});
+    return existingUser;
+  }
+
+  const normalizedBlob = {
+    ...persistedBlob,
+    apiKey: firebaseConfig.apiKey,
+    appName: auth.name,
+  };
+
+  let userCtor: any = (auth.currentUser as any)?.constructor;
+  let tempApp: ReturnType<typeof initializeApp> | null = null;
+  const tempName = `alphamate_hydrator_${Date.now()}`;
+  const storageKey = `firebase:authUser:${firebaseConfig.apiKey}:${tempName}`;
+
+  try {
+    if (!userCtor || typeof userCtor._fromJSON !== 'function') {
+      localStorage.setItem(storageKey, JSON.stringify({ ...normalizedBlob, appName: tempName }));
+      tempApp = initializeApp(firebaseConfig, tempName);
+      const tempAuth = initializeAuth(tempApp, { persistence: browserLocalPersistence });
+      if (typeof (tempAuth as any).authStateReady === 'function') {
+        await (tempAuth as any).authStateReady();
+      }
+      userCtor = (tempAuth.currentUser as any)?.constructor;
+    }
+
+    if (!userCtor || typeof userCtor._fromJSON !== 'function') {
+      return null;
+    }
+
+    const hydratedUser: FirebaseUser = userCtor._fromJSON(auth as any, normalizedBlob);
+    await updateCurrentUser(auth, hydratedUser);
+    await hydratedUser.getIdToken(true);
+    return auth.currentUser || hydratedUser;
+  } catch (err) {
+    console.warn('Multi-account local token hydration warning:', err);
+    return null;
+  } finally {
+    try {
+      localStorage.removeItem(storageKey);
+    } catch {}
+    if (tempApp) {
+      await deleteApp(tempApp).catch(() => {});
+    }
+  }
+}
+
+/**
+ * Detach the active user from default Auth without revoking saved refresh tokens on other slots
+ * (used when starting the "Add New Account" flow).
+ */
+export async function clearDefaultAuthCurrentUser(): Promise<void> {
+  try {
+    await updateCurrentUser(auth, null);
+  } catch {
+    await signOut(auth).catch(() => {});
+  }
+}
+
+/**
+ * Check if a username is available across Firestore users (excluding the caller's own UID).
+ */
+export async function checkUsernameAvailabilityFirestore(
+  username: string,
+  excludeUid?: string
+): Promise<boolean> {
+  const clean = String(username || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '');
+  if (clean.length < 3) return false;
+  if (isFirestoreQuotaExceeded()) return true;
+
+  try {
+    const snap = await getDocs(
+      query(collection(db, 'users'), where('usernameLower', '==', clean), limit(5))
+    );
+    for (const d of snap.docs) {
+      if (!excludeUid || d.id !== excludeUid) {
+        return false;
+      }
+    }
+    return true;
+  } catch (err) {
+    if (isFirestoreQuotaExceededError(err)) {
+      notifyFirestoreQuotaExceeded();
+    }
+    return true;
+  }
+}
+
+/**
  * Log Out
  */
 export async function logoutUser() {
@@ -392,7 +577,7 @@ export async function logoutUser() {
   }
 }
 
-export { onAuthStateChanged };
+export { onAuthStateChanged, onIdTokenChanged };
 export type { FirebaseUser };
 
 // =========================================================================
@@ -490,20 +675,92 @@ export function subscribeToUserProfile(userId: string, onUpdate: (data: any) => 
   );
 }
 
+export function getCanonicalPartyRoomId(hostUid: string): string {
+  return `party_host_${String(hostUid || '').trim()}`;
+}
+
+export function getCanonicalLiveStreamId(hostUid: string): string {
+  return `live_host_${String(hostUid || '').trim()}`;
+}
+
+export function isLegacyErrorCardId(id: string): boolean {
+  return /^party_\d+$/.test(id) || /^live_my_\d+$/.test(id);
+}
+
+/**
+ * Purge legacy, duplicate, or stuck Party Room & Solo Live cards owned by the signed-in host.
+ */
+export async function purgeStaleHostCardsInFirestore(
+  hostUid: string,
+  options?: { keepPartyId?: string | null; keepLiveId?: string | null }
+): Promise<void> {
+  if (!hostUid || auth.currentUser?.uid !== hostUid || isFirestoreQuotaExceeded()) return;
+
+  try {
+    const myRoomsSnap = await getDocs(
+      query(collection(db, 'partyRooms'), where('host.id', '==', hostUid), limit(25))
+    );
+    const canonicalPartyId = getCanonicalPartyRoomId(hostUid);
+    const keepPartyId = options?.keepPartyId ?? canonicalPartyId;
+    await Promise.all(
+      myRoomsSnap.docs.map(async (d) => {
+        const data = d.data() as any;
+        const shouldRemove =
+          isLegacyErrorCardId(d.id) ||
+          data?.isActive === false ||
+          data?.roomStatus === 'ended' ||
+          !Array.isArray(data?.seats) ||
+          (keepPartyId ? d.id !== keepPartyId : true);
+        if (shouldRemove) {
+          await deleteDoc(doc(db, 'partyRooms', d.id)).catch(() => {});
+        }
+      })
+    );
+  } catch (err) {
+    if (isFirestoreQuotaExceededError(err)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
+  }
+
+  try {
+    const myStreamsSnap = await getDocs(
+      query(collection(db, 'liveStreams'), where('host.id', '==', hostUid), limit(25))
+    );
+    const keepLiveId = options?.keepLiveId || null;
+    await Promise.all(
+      myStreamsSnap.docs.map(async (d) => {
+        if (!keepLiveId || d.id !== keepLiveId || isLegacyErrorCardId(d.id)) {
+          await deleteDoc(doc(db, 'liveStreams', d.id)).catch(() => {});
+        }
+      })
+    );
+  } catch (err) {
+    if (isFirestoreQuotaExceededError(err)) {
+      notifyFirestoreQuotaExceeded();
+    }
+  }
+}
+
 /**
  * Save Party Room to Firestore with Payload Sanitization
  * Strips unbounded sub-objects, large base64 photos, and cover images to stay well below 1MB.
  */
 export async function syncPartyRoomToFirestore(room: any) {
-  if (!room?.id) return;
+  if (!room?.id || isLegacyErrorCardId(room.id) || isFirestoreQuotaExceeded()) return;
   const path = `partyRooms/${room.id}`;
   try {
+    const parsedViewers =
+      typeof room.activeViewers === 'number' && Number.isFinite(room.activeViewers)
+        ? Math.max(0, Math.floor(room.activeViewers))
+        : 0;
     const sanitizedRoom = {
       id: room.id,
       title: (room.title || '').slice(0, 100),
       category: room.category || 'Chat',
       announcement: (room.announcement || '').slice(0, 200),
-      activeViewers: Number(room.activeViewers) || 1,
+      activeViewers: parsedViewers,
+      isHostPresent: room.isHostPresent !== false,
       level: Number(room.level) || 1,
       totalGiftCoins: Number(room.totalGiftCoins) || 0,
       isActive: room.isActive !== false,
@@ -524,7 +781,7 @@ export async function syncPartyRoomToFirestore(room: any) {
         vipTier: Number(room.host?.vipTier) || 0,
         isVerified: !!room.host?.isVerified,
       },
-      seats: (room.seats || []).map((s: any) => ({
+      seats: (Array.isArray(room.seats) ? room.seats : []).map((s: any) => ({
         seatIndex: Number(s.seatIndex),
         isMuted: !!s.isMuted,
         isHostMuted: !!s.isHostMuted,
@@ -553,9 +810,11 @@ export async function syncPartyRoomToFirestore(room: any) {
       'Party Room sync'
     );
   } catch (error) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
     handleFirestoreError(error, OperationType.WRITE, path);
-    // Do not swallow persistence failures: callers must not open a room locally
-    // when the room was never committed for discovery by other devices.
     throw error;
   }
 }
@@ -564,15 +823,16 @@ export async function syncPartyRoomToFirestore(room: any) {
  * Update specific Party Room fields (moderation, seat mute/lock, metadata)
  */
 export async function updatePartyRoomFields(roomId: string, fields: Record<string, any>) {
-  if (!roomId) return;
+  if (!roomId || isFirestoreQuotaExceeded()) return;
   const path = `partyRooms/${roomId}`;
   try {
     await updateDoc(doc(db, 'partyRooms', roomId), stripUndefinedFields({
       ...fields,
       updatedAt: new Date().toISOString(),
     }));
-  } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
+  } catch (error: any) {
+    if (error?.code === 'not-found') return;
+    handleBackgroundWriteError(error, OperationType.WRITE, path);
   }
 }
 
@@ -582,18 +842,27 @@ export async function updatePartyRoomFields(roomId: string, fields: Record<strin
 export async function deletePartyRoomFromFirestore(roomId: string) {
   if (!roomId) return;
   try {
-    await updateDoc(doc(db, 'partyRooms', roomId), {
-      isActive: false,
-      endedAt: new Date().toISOString(),
-    }).catch(() => {});
+    if (!isFirestoreQuotaExceeded()) {
+      await updateDoc(doc(db, 'partyRooms', roomId), {
+        isActive: false,
+        roomStatus: 'ended',
+        activeViewers: 0,
+        isHostPresent: false,
+        endedAt: new Date().toISOString(),
+      }).catch(() => {});
+    }
     await deleteDoc(doc(db, 'partyRooms', roomId));
   } catch (error) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
     console.warn('Error deleting party room from Firestore:', error);
   }
 }
 
 /**
- * Real-time Listener for Party Rooms
+ * Real-time Listener for Party Rooms (strictly 1 valid active card per host, error cards excluded)
  */
 export function subscribeToPartyRooms(onUpdate: (rooms: any[]) => void) {
   const path = 'partyRooms';
@@ -604,13 +873,62 @@ export function subscribeToPartyRooms(onUpdate: (rooms: any[]) => void) {
   return onSnapshot(
     activeRoomsQuery,
     (snapshot) => {
-      const list = snapshot.docs
-        .map((docSnap) => ({
-          id: docSnap.id,
-          ...docSnap.data(),
-        }))
-        .filter((r: any) => r.isActive === true);
-      onUpdate(list);
+      const byHostId = new Map<string, any>();
+      const myUid = auth.currentUser?.uid || '';
+
+      snapshot.docs.forEach((docSnap) => {
+        const raw = docSnap.data() as any;
+        const id = docSnap.id;
+        const hostId = String(raw?.host?.id || '').trim();
+
+        // Filter out legacy stuck/error cards or malformed documents
+        if (
+          !id ||
+          isLegacyErrorCardId(id) ||
+          !hostId ||
+          raw?.isActive !== true ||
+          raw?.roomStatus === 'ended'
+        ) {
+          if (myUid && hostId === myUid && !isFirestoreQuotaExceeded()) {
+            deleteDoc(doc(db, 'partyRooms', id)).catch(() => {});
+          }
+          return;
+        }
+
+        const normalized = {
+          ...raw,
+          id,
+          seats: Array.isArray(raw.seats) ? raw.seats : [],
+          activeViewers:
+            typeof raw.activeViewers === 'number' && Number.isFinite(raw.activeViewers)
+              ? Math.max(0, Math.floor(raw.activeViewers))
+              : 0,
+          isHostPresent: raw.isHostPresent !== false,
+        };
+
+        const existing = byHostId.get(hostId);
+        if (!existing) {
+          byHostId.set(hostId, normalized);
+          return;
+        }
+
+        const canonicalId = getCanonicalPartyRoomId(hostId);
+        const preferIncoming =
+          id === canonicalId ||
+          (existing.id !== canonicalId &&
+            Number(normalized.lastSeenAtMs || 0) >= Number(existing.lastSeenAtMs || 0));
+
+        if (preferIncoming) {
+          if (myUid && hostId === myUid && existing.id !== id && !isFirestoreQuotaExceeded()) {
+            deleteDoc(doc(db, 'partyRooms', existing.id)).catch(() => {});
+          }
+          byHostId.set(hostId, normalized);
+        } else if (myUid && hostId === myUid && !isFirestoreQuotaExceeded()) {
+          deleteDoc(doc(db, 'partyRooms', id)).catch(() => {});
+        }
+      });
+
+      onUpdate(Array.from(byHostId.values()));
     },
     (error) => {
       handleSnapshotListenerError(error, OperationType.LIST, path);
@@ -765,13 +1083,13 @@ export async function togglePartySeatLockInFirestore(
 // REAL-TIME LIVE STREAMS (SOLO & PK BROADCASTS)
 // =========================================================================
 
-export const LIVE_STREAM_STALE_MS = 65_000;
+export const LIVE_STREAM_STALE_MS = 180_000;
 
 /**
  * Sync active Live Stream to Firestore ONLY with verified SFU session metadata
  */
 export async function syncLiveStreamToFirestore(stream: any) {
-  if (!stream?.id) return;
+  if (!stream?.id || isLegacyErrorCardId(stream.id) || isFirestoreQuotaExceeded()) return;
   const path = `liveStreams/${stream.id}`;
   try {
     const nowMs = Date.now();
@@ -780,7 +1098,7 @@ export async function syncLiveStreamToFirestore(stream: any) {
       title: (stream.title || 'Live Stream').slice(0, 100),
       category: stream.category || 'Live',
       tag: stream.tag || 'Live',
-      viewerCount: Number(stream.viewerCount) || 1,
+      viewerCount: Math.max(1, Number(stream.viewerCount) || 1),
       thumbnail: sanitizeAvatarString(stream.thumbnail || stream.host?.avatar),
       coverImageUrl: typeof stream.coverImageUrl === 'string' && stream.coverImageUrl.startsWith('https://') ? stream.coverImageUrl : '',
       isPK: !!stream.isPK,
@@ -823,9 +1141,11 @@ export async function syncLiveStreamToFirestore(stream: any) {
       'Live Stream sync'
     );
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, path);
-    // A Live card is discoverable only after its Firestore record is committed.
-    throw error;
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
+    handleBackgroundWriteError(error, OperationType.WRITE, path);
   }
 }
 
@@ -833,14 +1153,16 @@ export async function syncLiveStreamToFirestore(stream: any) {
  * Update Live Stream fields (camera/mic state, moderation, viewerCount)
  */
 export async function updateLiveStreamFields(streamId: string, fields: Record<string, any>) {
-  if (!streamId) return;
+  if (!streamId || isFirestoreQuotaExceeded()) return;
+  const path = `liveStreams/${streamId}`;
   try {
     await updateDoc(doc(db, 'liveStreams', streamId), stripUndefinedFields({
       ...fields,
       updatedAt: new Date().toISOString(),
     }));
-  } catch (error) {
-    console.warn('Failed to update live stream fields:', error);
+  } catch (error: any) {
+    if (error?.code === 'not-found') return;
+    handleBackgroundWriteError(error, OperationType.UPDATE, path);
   }
 }
 
@@ -878,21 +1200,26 @@ export async function updateLiveStreamHeartbeat(streamId: string) {
 export async function deleteLiveStreamFromFirestore(streamId: string) {
   if (!streamId) return;
   try {
-    // Notify all active viewers immediately
-    await updateDoc(doc(db, 'liveStreams', streamId), {
-      isActive: false,
-      endedAt: new Date().toISOString(),
-    }).catch(() => {});
-    // Delete document from active collection
+    if (!isFirestoreQuotaExceeded()) {
+      await updateDoc(doc(db, 'liveStreams', streamId), {
+        isActive: false,
+        endedAt: new Date().toISOString(),
+      }).catch(() => {});
+    }
     await deleteDoc(doc(db, 'liveStreams', streamId));
   } catch (error) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      return;
+    }
     console.warn('Error deleting live stream from Firestore:', error);
   }
 }
 
 /**
  * Subscribe to real-time Live Streams list across all users/devices.
- * Strictly exposes only active broadcasts that have a published SFU session and fresh heartbeat.
+ * Strictly exposes 1 active broadcast card per host with a published SFU session,
+ * using Firestore server timestamps so client clock skew never hides a fresh card.
  */
 export function subscribeToLiveStreams(onUpdate: (streams: any[]) => void) {
   const path = 'liveStreams';
@@ -904,28 +1231,67 @@ export function subscribeToLiveStreams(onUpdate: (streams: any[]) => void) {
     activeStreamsQuery,
     (snapshot) => {
       const now = Date.now();
-      const activeStreams = snapshot.docs
-        .map((docSnap) => ({
+      const myUid = auth.currentUser?.uid || '';
+      const byHostId = new Map<string, any>();
+
+      snapshot.docs.forEach((docSnap) => {
+        const s: any = {
           id: docSnap.id,
           ...docSnap.data(),
-        }))
-        .filter((s: any) => {
-          if (s.isActive !== true) return false;
-          if (!s.sfuSessionId || typeof s.sfuSessionId !== 'string') return false;
-          const heartbeatMs =
-            typeof s.lastHeartbeat?.toMillis === 'function'
-              ? s.lastHeartbeat.toMillis()
-              : typeof s.lastHeartbeatMs === 'number'
-                ? s.lastHeartbeatMs
-                : typeof s.lastSeenAt?.toMillis === 'function'
-                  ? s.lastSeenAt.toMillis()
-                  : s.lastSeenAtMs;
-          if (typeof heartbeatMs === 'number' && now - heartbeatMs > LIVE_STREAM_STALE_MS) {
-            return false;
+        };
+        const hostId = String(s.host?.id || '').trim();
+
+        if (
+          !s.id ||
+          isLegacyErrorCardId(s.id) ||
+          !hostId ||
+          s.isActive !== true ||
+          !s.sfuSessionId ||
+          typeof s.sfuSessionId !== 'string'
+        ) {
+          if (myUid && hostId === myUid && !isFirestoreQuotaExceeded()) {
+            deleteDoc(doc(db, 'liveStreams', s.id)).catch(() => {});
           }
-          return true;
-        });
-      onUpdate(activeStreams);
+          return;
+        }
+
+        // Only compare server-assigned timestamp to avoid multi-device phone clock skew
+        const serverHeartbeatMs =
+          typeof s.lastHeartbeat?.toMillis === 'function'
+            ? s.lastHeartbeat.toMillis()
+            : typeof s.lastSeenAt?.toMillis === 'function'
+              ? s.lastSeenAt.toMillis()
+              : null;
+        if (typeof serverHeartbeatMs === 'number' && now - serverHeartbeatMs > LIVE_STREAM_STALE_MS) {
+          if (myUid && hostId === myUid && !isFirestoreQuotaExceeded()) {
+            deleteDoc(doc(db, 'liveStreams', s.id)).catch(() => {});
+          }
+          return;
+        }
+
+        const existing = byHostId.get(hostId);
+        if (!existing) {
+          byHostId.set(hostId, s);
+          return;
+        }
+
+        const canonicalId = getCanonicalLiveStreamId(hostId);
+        const preferIncoming =
+          s.id === canonicalId ||
+          (existing.id !== canonicalId &&
+            Number(s.lastSeenAtMs || 0) >= Number(existing.lastSeenAtMs || 0));
+
+        if (preferIncoming) {
+          if (myUid && hostId === myUid && existing.id !== s.id && !isFirestoreQuotaExceeded()) {
+            deleteDoc(doc(db, 'liveStreams', existing.id)).catch(() => {});
+          }
+          byHostId.set(hostId, s);
+        } else if (myUid && hostId === myUid && !isFirestoreQuotaExceeded()) {
+          deleteDoc(doc(db, 'liveStreams', s.id)).catch(() => {});
+        }
+      });
+
+      onUpdate(Array.from(byHostId.values()));
     },
     (error) => {
       handleSnapshotListenerError(error, OperationType.LIST, path);
@@ -940,6 +1306,11 @@ export function subscribeToLiveStreamMessages(
   streamId: string,
   onUpdate: (msgs: any[]) => void
 ) {
+  if (!streamId) {
+    onUpdate([]);
+    return () => {};
+  }
+  const path = `liveStreams/${streamId}/messages`;
   const messagesQuery = query(
     collection(db, 'liveStreams', streamId, 'messages'),
     orderBy('createdAt', 'asc'),
@@ -955,6 +1326,14 @@ export function subscribeToLiveStreamMessages(
       onUpdate(list);
     },
     (error) => {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+        return;
+      }
+      if ((error as any)?.code === 'permission-denied') {
+        handleSnapshotListenerError(error, OperationType.LIST, path);
+        return;
+      }
       console.warn('Live stream comments listener error:', error);
     }
   );
@@ -964,14 +1343,20 @@ export function subscribeToLiveStreamMessages(
  * Send comment to real-time Live Stream
  */
 export async function sendLiveStreamMessage(streamId: string, message: any) {
-  if (!streamId) return;
+  const uid = auth.currentUser?.uid;
+  if (!streamId || !uid || isFirestoreQuotaExceeded()) return;
+  const path = `liveStreams/${streamId}/messages`;
   try {
-    await addDoc(collection(db, 'liveStreams', streamId, 'messages'), {
-      ...message,
-      createdAt: serverTimestamp(),
-    });
+    await addDoc(
+      collection(db, 'liveStreams', streamId, 'messages'),
+      stripUndefinedFields({
+        ...message,
+        senderId: uid,
+        createdAt: serverTimestamp(),
+      })
+    );
   } catch (error) {
-    console.warn('Failed to send live stream message:', error);
+    handleBackgroundWriteError(error, OperationType.CREATE, path);
   }
 }
 
@@ -1476,6 +1861,7 @@ export interface SendNotificationParams {
 export async function sendFirestoreNotification(
   params: SendNotificationParams
 ): Promise<string | null> {
+  if (isFirestoreQuotaExceeded()) return null;
   const senderUid = auth.currentUser?.uid;
   const recipientId = String(params.recipientId || '').trim();
   if (!senderUid || !recipientId || !FIRESTORE_VALID_ID_RE.test(recipientId)) {
@@ -1511,7 +1897,8 @@ export async function sendFirestoreNotification(
     await setDoc(doc(db, 'users', recipientId, 'notifications', notifId), payload);
     return notifId;
   } catch (error) {
-    handleFirestoreError(error, OperationType.CREATE, path);
+    handleBackgroundWriteError(error, OperationType.CREATE, path);
+    return null;
   }
 }
 
@@ -1570,15 +1957,16 @@ export async function markFirestoreNotificationRead(
   userId: string,
   notificationId: string
 ): Promise<void> {
-  if (!userId || !notificationId) return;
+  if (!userId || !notificationId || isFirestoreQuotaExceeded()) return;
   const path = `users/${userId}/notifications/${notificationId}`;
   try {
     await updateDoc(doc(db, 'users', userId, 'notifications', notificationId), {
       isRead: true,
       readAt: new Date().toISOString(),
     });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, path);
+  } catch (error: any) {
+    if (error?.code === 'not-found') return;
+    handleBackgroundWriteError(error, OperationType.UPDATE, path);
   }
 }
 
@@ -1586,7 +1974,7 @@ export async function markAllFirestoreNotificationsRead(
   userId: string,
   notificationIds: string[]
 ): Promise<void> {
-  if (!userId || notificationIds.length === 0) return;
+  if (!userId || notificationIds.length === 0 || isFirestoreQuotaExceeded()) return;
   const readAt = new Date().toISOString();
   const batch = writeBatch(db);
   notificationIds.slice(0, 100).forEach((id) => {
@@ -1600,7 +1988,7 @@ export async function markAllFirestoreNotificationsRead(
   try {
     await batch.commit();
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `users/${userId}/notifications`);
+    handleBackgroundWriteError(error, OperationType.WRITE, `users/${userId}/notifications`);
   }
 }
 
@@ -1666,7 +2054,7 @@ export async function executeSixtyFortyGiftTransaction(
   const txId = `gift_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
 
   const authUid = auth.currentUser?.uid;
-  if (!authUid) {
+  if (!authUid || isFirestoreQuotaExceeded()) {
     return {
       txId,
       totalCoins,
@@ -1751,46 +2139,62 @@ export async function executeSixtyFortyGiftTransaction(
       transaction.set(doc(db, 'giftTransactions', txId), ledgerPayload);
     });
   } catch (error) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      return {
+        txId,
+        totalCoins,
+        hostDiamonds,
+        appShareCoins,
+        creditedHostFirestore: false,
+      };
+    }
     handleFirestoreError(error, OperationType.WRITE, `giftTransactions/${txId}`);
   }
 
-  if (input.context === 'live' && input.streamId) {
-    updateDoc(doc(db, 'liveStreams', input.streamId), {
-      totalGiftCoins: increment(totalCoins),
-      updatedAt: nowIso,
-    }).catch(() => {});
-  } else if (input.context === 'party' && input.roomId) {
-    updateDoc(doc(db, 'partyRooms', input.roomId), {
-      totalGiftCoins: increment(totalCoins),
-      updatedAt: nowIso,
-    }).catch(() => {});
-  }
+  if (!isFirestoreQuotaExceeded()) {
+    if (input.context === 'live' && input.streamId) {
+      updateDoc(doc(db, 'liveStreams', input.streamId), {
+        totalGiftCoins: increment(totalCoins),
+        updatedAt: nowIso,
+      }).catch((err) => {
+        if (isFirestoreQuotaExceededError(err)) notifyFirestoreQuotaExceeded();
+      });
+    } else if (input.context === 'party' && input.roomId) {
+      updateDoc(doc(db, 'partyRooms', input.roomId), {
+        totalGiftCoins: increment(totalCoins),
+        updatedAt: nowIso,
+      }).catch((err) => {
+        if (isFirestoreQuotaExceededError(err)) notifyFirestoreQuotaExceeded();
+      });
+    }
 
-  if (canQueryRecipientDoc) {
-    sendFirestoreNotification({
-      recipientId,
-      type: 'gift',
-      category: 'gifts',
-      title: `${input.giftIcon} Gift Received (+${hostDiamonds.toLocaleString()} 💎)`,
-      message: `${input.senderName} sent ${qty > 1 ? `${qty}x ` : ''}${input.giftName} (${totalCoins.toLocaleString()} Coins). Your 60% host share (+${hostDiamonds.toLocaleString()} Diamonds) is in your wallet!`,
-      senderName: input.senderName,
-      senderAvatar: input.senderAvatar,
-      screen: 'wallet',
-      roomId: input.roomId,
-      streamId: input.streamId,
-      reelId: input.reelId,
-    }).catch((err) => console.warn('Gift notification dispatch warning:', err));
+    if (canQueryRecipientDoc) {
+      sendFirestoreNotification({
+        recipientId,
+        type: 'gift',
+        category: 'gifts',
+        title: `${input.giftIcon} Gift Received (+${hostDiamonds.toLocaleString()} 💎)`,
+        message: `${input.senderName} sent ${qty > 1 ? `${qty}x ` : ''}${input.giftName} (${totalCoins.toLocaleString()} Coins). Your 60% host share (+${hostDiamonds.toLocaleString()} Diamonds) is in your wallet!`,
+        senderName: input.senderName,
+        senderAvatar: input.senderAvatar,
+        screen: 'wallet',
+        roomId: input.roomId,
+        streamId: input.streamId,
+        reelId: input.reelId,
+      }).catch((err) => console.warn('Gift notification dispatch warning:', err));
 
-    import('./leaderboardService')
-      .then((m) =>
-        m.recordLeaderboardGiftReceived({
-          recipientId,
-          recipientName: input.recipientName,
-          giftCoins: totalCoins,
-          hostDiamonds,
-        })
-      )
-      .catch((err) => console.warn('Leaderboard gift update warning:', err));
+      import('./leaderboardService')
+        .then((m) =>
+          m.recordLeaderboardGiftReceived({
+            recipientId,
+            recipientName: input.recipientName,
+            giftCoins: totalCoins,
+            hostDiamonds,
+          })
+        )
+        .catch((err) => console.warn('Leaderboard gift update warning:', err));
+    }
   }
 
   return {

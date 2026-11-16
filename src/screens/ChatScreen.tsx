@@ -5,19 +5,24 @@ import {
   acceptChatRequest,
   rejectOrBlockChatRequest,
   subscribeToMyChatRequests,
+  subscribeToMySentChatRequests,
   subscribeToMyChats,
   subscribeToChatMessages,
   createGroupChat,
   sendChatMessage,
+  sendChatRequest,
   setChatPresence,
   uploadChatMedia,
   markChatMessageRead,
   markChatAsRead,
   deleteChatMessage,
+  editChatMessage,
   subscribeToMyGroupInvites,
   respondToGroupInvite,
   searchFirebaseUsers,
-  getOrCreateDirectChat,
+  buildDirectChatId,
+  getFriendlyChatErrorMessage,
+  PendingRequestMessage,
 } from '../services/chatService';
 import { auth } from '../services/firebase';
 import { Conversation, User, ChatMessage } from '../types';
@@ -30,6 +35,7 @@ import {
   Mic,
   Smile,
   CheckCheck,
+  Clock,
   Phone,
   Video,
   MoreVertical,
@@ -51,14 +57,71 @@ import {
   Eye,
 } from 'lucide-react';
 
-type RequestItem = { id: string; user: User; message: string; time: string };
 type LocalMessage = ChatMessage & {
   replyTo?: string;
   deletedForEveryone?: boolean;
   edited?: boolean;
+  pendingApproval?: boolean;
   kind?: 'text' | 'image' | 'video' | 'audio' | 'link';
 };
+
+type RequestItem = {
+  id: string;
+  senderId: string;
+  recipientId: string;
+  user: User;
+  message: string;
+  time: string;
+  messages: LocalMessage[];
+};
+
 const EMOJIS = ['💜', '❤️', '😂', '😍', '🔥', '👑', '🎉', '🥰', '👏', '✨', '🌹', '👍'];
+
+const FALLBACK_AVATAR =
+  'data:image/svg+xml;utf8,' +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7928CA"/><stop offset="100%" stop-color="#EC4899"/></linearGradient></defs><rect width="96" height="96" rx="48" fill="url(#g)"/><circle cx="48" cy="36" r="16" fill="rgba(255,255,255,0.9)"/><path d="M20 82c4-15 16-24 28-24s24 9 28 24" fill="rgba(255,255,255,0.9)"/></svg>`
+  );
+
+function mapPendingMessagesToLocal(
+  rawPending: PendingRequestMessage[] | undefined,
+  fallbackText: string,
+  senderId: string,
+  senderName: string,
+  senderAvatar: string,
+  isMe: boolean
+): LocalMessage[] {
+  if (Array.isArray(rawPending) && rawPending.length > 0) {
+    return rawPending.map((pm, idx) => ({
+      id: pm.id || `pending_${idx}`,
+      senderId: pm.senderId || senderId,
+      senderName,
+      senderAvatar: senderAvatar || FALLBACK_AVATAR,
+      text: pm.text || '',
+      imageUrl: pm.mediaUrl || undefined,
+      timestamp: pm.createdAtMs
+        ? new Date(pm.createdAtMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : 'Just now',
+      isRead: false,
+      isMe,
+      pendingApproval: true,
+    }));
+  }
+  if (!fallbackText) return [];
+  return [
+    {
+      id: `pending_first_${senderId}`,
+      senderId,
+      senderName,
+      senderAvatar: senderAvatar || FALLBACK_AVATAR,
+      text: fallbackText,
+      timestamp: 'Just now',
+      isRead: false,
+      isMe,
+      pendingApproval: true,
+    },
+  ];
+}
 
 export const ChatScreen: React.FC = () => {
   const {
@@ -88,8 +151,13 @@ export const ChatScreen: React.FC = () => {
   const [tab, setTab] = useState<'chats' | 'requests'>('chats');
   const [filter, setFilter] = useState<'all' | 'direct' | 'groups'>('all');
   const [query, setQuery] = useState('');
+  const [newModalQuery, setNewModalQuery] = useState('');
   const [showSearch, setShowSearch] = useState(false);
   const [requests, setRequests] = useState<RequestItem[]>([]);
+  const [sentRequests, setSentRequests] = useState<RequestItem[]>([]);
+  const [optimisticSentByPartner, setOptimisticSentByPartner] = useState<Record<string, LocalMessage[]>>({});
+  const [sendingRequest, setSendingRequest] = useState(false);
+  const [approvingRequestId, setApprovingRequestId] = useState<string | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showGroup, setShowGroup] = useState(false);
   const [groupName, setGroupName] = useState('');
@@ -113,50 +181,135 @@ export const ChatScreen: React.FC = () => {
   const videoRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLElement>(null);
+  const messageInputRef = useRef<HTMLInputElement>(null);
 
   const directoryUsers = useMemo(
-    () => (realUsers.length > 0 ? realUsers : registeredUsers).filter((u) => u.id !== currentUser.id),
+    () => (realUsers.length > 0 ? realUsers : registeredUsers).filter((u) => u.id && u.id !== currentUser.id),
     [realUsers, registeredUsers, currentUser.id]
   );
 
-  // Real-time Firestore Chat Requests, Conversations, Group Invites & Presence
+  // Real-time Firestore Chat Requests (incoming & outgoing), Conversations, Group Invites & Presence
   useEffect(() => {
     if (!auth.currentUser?.uid || auth.currentUser.uid !== currentUser.id) return;
     let unsubscribeRequests: (() => void) | undefined;
+    let unsubscribeSentRequests: (() => void) | undefined;
     let unsubscribeChats: (() => void) | undefined;
     let unsubscribeGroupInvites: (() => void) | undefined;
     try {
       unsubscribeRequests = subscribeToMyChatRequests((items) =>
         setRequests(
-          items.map((item: any) => ({
-            id: item.id,
-            user: {
-              id: item.sender?.id || item.senderId,
-              uniqueId: item.sender?.uniqueId || 'AM_USER',
-              displayName: item.sender?.displayName || 'Alpha Mate User',
-              username: item.sender?.username || '',
-              avatar: item.sender?.avatar || '',
-            } as User,
-            message: item.firstMessage || '',
-            time: item.createdAt?.toDate?.()?.toLocaleString?.() || 'Just now',
-          }))
+          items.map((item: any) => {
+            const senderId = item.sender?.id || item.senderId || '';
+            const senderName = item.sender?.displayName || 'Alpha Mate User';
+            const senderAvatar = item.sender?.avatar || FALLBACK_AVATAR;
+            const latestMsg = item.lastMessage || item.firstMessage || '';
+            return {
+              id: item.id,
+              senderId,
+              recipientId: item.recipientId || currentUser.id,
+              user: {
+                id: senderId,
+                uniqueId: item.sender?.uniqueId || '',
+                displayName: senderName,
+                username: item.sender?.username || '',
+                avatar: senderAvatar,
+                followersCount: 0,
+                followingCount: 0,
+                likesCount: 0,
+                level: 1,
+                xp: 0,
+                nextLevelXp: 1000,
+                vipTier: 0,
+                coins: 0,
+                diamonds: 0,
+              } as User,
+              message: latestMsg,
+              time: item.updatedAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
+                item.createdAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
+                'Just now',
+              messages: mapPendingMessagesToLocal(
+                item.pendingMessages,
+                item.firstMessage || '',
+                senderId,
+                senderName,
+                senderAvatar,
+                false
+              ),
+            };
+          })
         )
       );
+
+      unsubscribeSentRequests = subscribeToMySentChatRequests((items) =>
+        setSentRequests(
+          items.map((item: any) => {
+            const recipientId = item.recipient?.id || item.recipientId || '';
+            const recipientName = item.recipient?.displayName || 'Alpha Mate User';
+            const recipientAvatar = item.recipient?.avatar || FALLBACK_AVATAR;
+            const latestMsg = item.lastMessage || item.firstMessage || '';
+            return {
+              id: item.id,
+              senderId: currentUser.id,
+              recipientId,
+              user: {
+                id: recipientId,
+                uniqueId: item.recipient?.uniqueId || '',
+                displayName: recipientName,
+                username: item.recipient?.username || '',
+                avatar: recipientAvatar,
+                followersCount: 0,
+                followingCount: 0,
+                likesCount: 0,
+                level: 1,
+                xp: 0,
+                nextLevelXp: 1000,
+                vipTier: 0,
+                coins: 0,
+                diamonds: 0,
+              } as User,
+              message: latestMsg,
+              time: item.updatedAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
+                item.createdAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
+                'Just now',
+              messages: mapPendingMessagesToLocal(
+                item.pendingMessages,
+                item.firstMessage || '',
+                currentUser.id,
+                currentUser.displayName,
+                currentUser.avatar,
+                true
+              ),
+            };
+          })
+        )
+      );
+
       unsubscribeChats = subscribeToMyChats((items) =>
         setFirebaseChats(
           items.map((item: any) => {
             const otherId = (item.participantIds || []).find((id: string) => id !== currentUser.id);
             const profile = item.participantProfiles?.[otherId] || {};
+            const directoryFallback = directoryUsers.find((u) => u.id === otherId);
             const isGroup = item.type === 'group';
             return {
               id: item.id,
               inviteStatus: item.memberStatus?.[currentUser.id],
+              requestStatus: 'connected',
               user: {
                 id: otherId || currentUser.id,
-                uniqueId: profile.uniqueId || '',
-                displayName: profile.displayName || 'Alpha Mate User',
-                username: profile.username || '',
-                avatar: profile.avatar || '',
+                uniqueId: profile.uniqueId || directoryFallback?.uniqueId || '',
+                displayName: profile.displayName || directoryFallback?.displayName || 'Alpha Mate User',
+                username: profile.username || directoryFallback?.username || '',
+                avatar: profile.avatar || directoryFallback?.avatar || FALLBACK_AVATAR,
+                followersCount: directoryFallback?.followersCount || 0,
+                followingCount: directoryFallback?.followingCount || 0,
+                likesCount: directoryFallback?.likesCount || 0,
+                level: directoryFallback?.level || 1,
+                xp: 0,
+                nextLevelXp: 1000,
+                vipTier: directoryFallback?.vipTier || 0,
+                coins: 0,
+                diamonds: 0,
               } as User,
               groupName: item.groupName,
               isGroup,
@@ -164,7 +317,9 @@ export const ChatScreen: React.FC = () => {
                 ([id, value]: any) => ({ id, ...value } as User)
               ),
               lastMessage: item.lastMessage || '',
-              lastTimestamp: item.updatedAt?.toDate?.()?.toLocaleString?.() || 'Just now',
+              lastTimestamp:
+                item.updatedAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
+                'Just now',
               unreadCount: Number(item.unreadBy?.[currentUser.id] || 0),
               messages: [],
             } as Conversation;
@@ -181,6 +336,7 @@ export const ChatScreen: React.FC = () => {
     window.addEventListener('pagehide', handleOffline);
     return () => {
       unsubscribeRequests?.();
+      unsubscribeSentRequests?.();
       unsubscribeChats?.();
       unsubscribeGroupInvites?.();
       window.removeEventListener('pagehide', handleOffline);
@@ -188,75 +344,167 @@ export const ChatScreen: React.FC = () => {
     };
   }, [currentUser.id, chatRefreshEpoch]);
 
-  // Real-time Firestore messages listener for active conversation
+  // Clear optimistic pending request bubbles once real-time Firestore chat or sentRequest catches up
   useEffect(() => {
-    if (!activeConversation?.id || !auth.currentUser || auth.currentUser.uid !== currentUser.id) {
-      setFirebaseMessages([]);
-      return;
+    setOptimisticSentByPartner((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      Object.keys(next).forEach((partnerId) => {
+        const isNowConnected = firebaseChats.some((c) => !c.isGroup && c.user?.id === partnerId);
+        const remotePending = sentRequests.find((r) => r.recipientId === partnerId);
+        if (isNowConnected || (remotePending && remotePending.messages.length >= next[partnerId].length)) {
+          delete next[partnerId];
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [firebaseChats, sentRequests]);
+
+  // Resolve whether activeConversation is an approved Firestore chat, an incoming pending request, or a new/outgoing request
+  const approvedActiveChat = useMemo(() => {
+    if (!activeConversation) return undefined;
+    if (activeConversation.isGroup) {
+      return firebaseChats.find((c) => c.id === activeConversation.id);
     }
-    const isFsChat =
-      firebaseChats.some((c) => c.id === activeConversation.id) ||
-      activeConversation.id.startsWith('dm_');
-    if (!isFsChat) {
+    const partnerId = activeConversation.user?.id;
+    return firebaseChats.find(
+      (c) => c.id === activeConversation.id || (!c.isGroup && partnerId && c.user?.id === partnerId)
+    );
+  }, [activeConversation, firebaseChats]);
+
+  const effectiveApprovedChatId = approvedActiveChat?.id || null;
+  const isApprovedFirestoreChat = Boolean(effectiveApprovedChatId);
+
+  const activeIncomingRequest = useMemo(() => {
+    if (!activeConversation || activeConversation.isGroup || isApprovedFirestoreChat) return undefined;
+    const partnerId = activeConversation.user?.id;
+    if (!partnerId) return undefined;
+    return requests.find((r) => r.user.id === partnerId || r.senderId === partnerId);
+  }, [activeConversation, isApprovedFirestoreChat, requests]);
+
+  const activeOutgoingRequest = useMemo(() => {
+    if (!activeConversation || activeConversation.isGroup || isApprovedFirestoreChat) return undefined;
+    const partnerId = activeConversation.user?.id;
+    if (!partnerId) return undefined;
+    return sentRequests.find((r) => r.recipientId === partnerId || r.user.id === partnerId);
+  }, [activeConversation, isApprovedFirestoreChat, sentRequests]);
+
+  // Real-time Firestore messages listener ONLY when the chat is actually approved/created in `chats`
+  useEffect(() => {
+    if (!effectiveApprovedChatId || !auth.currentUser || auth.currentUser.uid !== currentUser.id) {
       setFirebaseMessages([]);
       return;
     }
 
-    markChatAsRead(activeConversation.id).catch(() => {});
+    markChatAsRead(effectiveApprovedChatId).catch(() => {});
 
-    return subscribeToChatMessages(activeConversation.id, (items) => {
+    return subscribeToChatMessages(effectiveApprovedChatId, (items) => {
       items.forEach((m: any) => {
         if (m.senderId !== currentUser.id && !(m.readBy || []).includes(currentUser.id)) {
-          markChatMessageRead(activeConversation.id, m.id).catch(() => {});
+          markChatMessageRead(effectiveApprovedChatId, m.id).catch(() => {});
         }
       });
       setFirebaseMessages(
-        items.map(
-          (m: any) =>
-            ({
-              id: m.id,
-              senderId: m.senderId,
-              senderName:
-                m.senderId === currentUser.id
-                  ? currentUser.displayName
-                  : activeConversation.user?.displayName || 'Member',
-              senderAvatar:
-                m.senderId === currentUser.id
-                  ? currentUser.avatar
-                  : activeConversation.user?.avatar || '',
-              text: m.deletedForEveryone ? 'This message was deleted' : m.text || '',
-              imageUrl: m.mediaUrl || undefined,
-              timestamp:
-                m.createdAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
-                'Just now',
-              isRead: (m.readBy || []).length > 1,
-              isMe: m.senderId === currentUser.id,
-              edited: !!m.edited,
-              replyTo: m.replyTo,
-            } as LocalMessage)
-        )
+        items
+          .filter((m: any) => !(m.deletedFor || []).includes(currentUser.id))
+          .map(
+            (m: any) =>
+              ({
+                id: m.id,
+                senderId: m.senderId,
+                senderName:
+                  m.senderId === currentUser.id
+                    ? currentUser.displayName
+                    : activeConversation?.user?.displayName || 'Member',
+                senderAvatar:
+                  m.senderId === currentUser.id
+                    ? currentUser.avatar || FALLBACK_AVATAR
+                    : activeConversation?.user?.avatar || FALLBACK_AVATAR,
+                text: m.deletedForEveryone ? 'This message was deleted' : m.text || '',
+                imageUrl: m.mediaUrl || undefined,
+                timestamp:
+                  m.createdAt?.toDate?.()?.toLocaleTimeString?.([], { hour: '2-digit', minute: '2-digit' }) ||
+                  'Just now',
+                isRead: (m.readBy || []).length > 1,
+                isMe: m.senderId === currentUser.id,
+                edited: !!m.edited,
+                replyTo: m.replyTo,
+              } as LocalMessage)
+          )
       );
     });
-  }, [activeConversation?.id, firebaseChats.length, currentUser.id, chatRefreshEpoch]);
+  }, [effectiveApprovedChatId, activeConversation?.user?.displayName, activeConversation?.user?.avatar, currentUser.id, chatRefreshEpoch]);
 
-  // Scroll to bottom when active messages update (real-time or local)
-  const activeMessagesCount = activeConversation
-    ? firebaseChats.some((c) => c.id === activeConversation.id) || activeConversation.id.startsWith('dm_')
-      ? firebaseMessages.length
-      : activeConversation.messages.length
-    : 0;
+  // Auto-focus typing input when a conversation opens so mobile keypad / cursor is ready immediately
+  useEffect(() => {
+    if (!activeConversation?.id) return;
+    const focusTimer = window.setTimeout(() => {
+      messageInputRef.current?.focus();
+    }, 80);
+    return () => window.clearTimeout(focusTimer);
+  }, [activeConversation?.id]);
+
+  // Compute displayed messages for active conversation
+  const activeDisplayedMessages = useMemo<LocalMessage[]>(() => {
+    if (!activeConversation) return [];
+    if (isApprovedFirestoreChat) {
+      return firebaseMessages;
+    }
+    const partnerId = activeConversation.user?.id || '';
+    if (activeIncomingRequest) {
+      return activeIncomingRequest.messages;
+    }
+    const remoteOutgoing = activeOutgoingRequest?.messages || [];
+    const localOptimistic = partnerId ? optimisticSentByPartner[partnerId] || [] : [];
+    if (remoteOutgoing.length > 0 || localOptimistic.length > 0) {
+      const seenTexts = new Set(remoteOutgoing.map((m) => `${m.text}_${m.imageUrl || ''}`));
+      const unsyncedOptimistic = localOptimistic.filter((m) => !seenTexts.has(`${m.text}_${m.imageUrl || ''}`));
+      return [...remoteOutgoing, ...unsyncedOptimistic];
+    }
+    return (activeConversation.messages || []) as LocalMessage[];
+  }, [
+    activeConversation,
+    isApprovedFirestoreChat,
+    firebaseMessages,
+    activeIncomingRequest,
+    activeOutgoingRequest,
+    optimisticSentByPartner,
+  ]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeMessagesCount, activeConversation?.id]);
+  }, [activeDisplayedMessages.length, activeConversation?.id]);
+
+  // Outgoing pending requests converted to Conversation items for the sender's Chats tab
+  const outgoingPendingConversations = useMemo<Conversation[]>(() => {
+    return sentRequests
+      .filter((req) => !firebaseChats.some((c) => !c.isGroup && c.user?.id === req.recipientId))
+      .map((req) => ({
+        id: buildDirectChatId(currentUser.id, req.recipientId),
+        user: req.user,
+        lastMessage: `⏳ Request sent: ${req.message}`,
+        lastTimestamp: req.time,
+        unreadCount: 0,
+        isGroup: false,
+        requestStatus: 'outgoing_pending',
+        requestId: req.id,
+        messages: req.messages,
+      }));
+  }, [sentRequests, firebaseChats, currentUser.id]);
 
   const allConversations = useMemo(
     () => [
       ...firebaseChats,
+      ...outgoingPendingConversations,
       ...localGroups.filter((g) => !firebaseChats.some((f) => f.id === g.id)),
-      ...conversations.filter((c) => !firebaseChats.some((f) => f.id === c.id)),
+      ...conversations.filter(
+        (c) =>
+          !firebaseChats.some((f) => f.id === c.id || (!f.isGroup && !c.isGroup && f.user?.id === c.user?.id)) &&
+          !outgoingPendingConversations.some((p) => p.user?.id === c.user?.id)
+      ),
     ],
-    [firebaseChats, localGroups, conversations]
+    [firebaseChats, outgoingPendingConversations, localGroups, conversations]
   );
 
   const filtered = allConversations.filter((c) => {
@@ -266,30 +514,37 @@ export const ChatScreen: React.FC = () => {
     const uname = c.user?.username || '';
     const uid = c.user?.uniqueId || '';
     const q = query.trim().toLowerCase();
-    return !q || (name || '').toLowerCase().includes(q) || uname.toLowerCase().includes(q) || uid.toLowerCase().includes(q);
+    return (
+      !q ||
+      (name || '').toLowerCase().includes(q) ||
+      uname.toLowerCase().includes(q) ||
+      uid.toLowerCase().includes(q)
+    );
   });
 
-  // Real-time Firebase user search in Chat (works from 1+ characters & shows real directory when search opens)
+  const activeUserSearchTerm = showNew ? newModalQuery : query;
+  const shouldRunUserSearch = showSearch || showNew;
+
+  // Real-time Firebase user search in Chat (works in both Search bar & "+" New Chat modal)
   useEffect(() => {
     let cancelled = false;
-    if (!showSearch || !auth.currentUser?.uid || auth.currentUser.uid !== currentUser.id) {
+    if (!shouldRunUserSearch || !auth.currentUser?.uid || auth.currentUser.uid !== currentUser.id) {
       setFoundUsers([]);
       setUserSearchLoading(false);
       return;
     }
 
-    const term = query.trim().toLowerCase().replace(/^@/, '');
-    // Immediate local match from cached/subscribed realUsers
+    const term = activeUserSearchTerm.trim().toLowerCase().replace(/^@/, '');
     const localHits = directoryUsers.filter(
       (u) =>
         !term ||
         u.displayName.toLowerCase().includes(term) ||
         (u.username || '').toLowerCase().includes(term) ||
-        (u.uniqueId || '').toLowerCase().includes(term)
+        (u.uniqueId || '').toLowerCase().includes(term) ||
+        u.id.toLowerCase().includes(term)
     );
     setFoundUsers(localHits.slice(0, 30));
 
-    // Skip remote Firestore directory read when search bar is empty and cached users are already loaded
     if (!term && directoryUsers.length > 0 && userSyncRefreshEpoch === 0) {
       setUserSearchLoading(false);
       return;
@@ -297,14 +552,14 @@ export const ChatScreen: React.FC = () => {
 
     setUserSearchLoading(true);
     const timer = window.setTimeout(() => {
-      searchFirebaseUsers(query, currentUser.id, 30)
+      searchFirebaseUsers(activeUserSearchTerm, currentUser.id, 30)
         .then((items) => {
           if (!cancelled) {
             const mapped = items.map((item) => ({
               ...item,
               uniqueId: item.uniqueId || '',
               username: item.username || '',
-              avatar: item.avatar || '',
+              avatar: item.avatar || FALLBACK_AVATAR,
               level: item.level || 1,
               vipTier: item.vipTier || 0,
             })) as User[];
@@ -317,57 +572,66 @@ export const ChatScreen: React.FC = () => {
         .finally(() => {
           if (!cancelled) setUserSearchLoading(false);
         });
-    }, term ? 220 : 0);
+    }, term ? 200 : 0);
 
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [query, showSearch, currentUser.id, directoryUsers, userSyncRefreshEpoch]);
+  }, [activeUserSearchTerm, shouldRunUserSearch, currentUser.id, directoryUsers, userSyncRefreshEpoch]);
 
-  // Open or create a real-time Firestore chat with any registered user
-  const openUser = async (user: User) => {
-    const existing = allConversations.find((c) => !c.isGroup && c.user?.id === user.id);
-    if (existing) {
-      openConversation(existing);
-    } else if (auth.currentUser?.uid === currentUser.id) {
-      try {
-        const chatId = await getOrCreateDirectChat(
-          {
-            id: currentUser.id,
-            displayName: currentUser.displayName,
-            username: currentUser.username,
-            uniqueId: currentUser.uniqueId,
-            avatar: currentUser.avatar,
-          },
-          {
-            id: user.id,
-            displayName: user.displayName,
-            username: user.username,
-            uniqueId: user.uniqueId,
-            avatar: user.avatar,
-          }
-        );
-        const conv: Conversation = {
-          id: chatId,
-          user,
-          lastMessage: 'Connected on Alpha Mate',
-          lastTimestamp: 'Just now',
-          unreadCount: 0,
-          isGroup: false,
-          messages: [],
-        };
-        openConversation(conv);
-      } catch (error) {
-        showToast(error instanceof Error ? error.message : 'Unable to open chat.');
-      }
+  // Immediately select any user's ID and open the message composer — never blocks or fails with permission errors
+  const openUser = (user: User) => {
+    if (!user?.id || user.id === currentUser.id) return;
+    const normalizedUser: User = {
+      ...user,
+      displayName: user.displayName || 'Alpha Mate User',
+      username: user.username || '',
+      uniqueId: user.uniqueId || '',
+      avatar: user.avatar || FALLBACK_AVATAR,
+    };
+
+    const existingApprovedOrPending = allConversations.find((c) => !c.isGroup && c.user?.id === normalizedUser.id);
+    if (existingApprovedOrPending) {
+      openConversation({
+        ...existingApprovedOrPending,
+        user: {
+          ...existingApprovedOrPending.user,
+          displayName: normalizedUser.displayName || existingApprovedOrPending.user.displayName,
+          username: normalizedUser.username || existingApprovedOrPending.user.username,
+          uniqueId: normalizedUser.uniqueId || existingApprovedOrPending.user.uniqueId,
+          avatar: normalizedUser.avatar || existingApprovedOrPending.user.avatar,
+        },
+      });
+    } else {
+      const incoming = requests.find((r) => r.user.id === normalizedUser.id || r.senderId === normalizedUser.id);
+      const dmId =
+        auth.currentUser?.uid === currentUser.id
+          ? buildDirectChatId(currentUser.id, normalizedUser.id)
+          : `conv_${normalizedUser.id}`;
+      const conv: Conversation = {
+        id: dmId,
+        user: normalizedUser,
+        lastMessage: incoming ? incoming.message : 'Selected for chat',
+        lastTimestamp: incoming ? incoming.time : 'Just now',
+        unreadCount: 0,
+        isGroup: false,
+        requestStatus: incoming ? 'incoming_pending' : 'new_request',
+        requestId: incoming?.id,
+        messages: incoming ? incoming.messages : [],
+      };
+      openConversation(conv);
     }
+
     setShowNew(false);
     setShowSearch(false);
     setQuery('');
+    setNewModalQuery('');
   };
 
   const acceptRequest = async (r: RequestItem) => {
+    if (approvingRequestId === r.id) return;
+    setApprovingRequestId(r.id);
     try {
       if (auth.currentUser?.uid === currentUser.id) {
         const chatId = await acceptChatRequest(r.id);
@@ -375,8 +639,8 @@ export const ChatScreen: React.FC = () => {
           recipientId: r.user.id,
           type: 'friend_request',
           category: 'friendRequests',
-          title: `✅ ${currentUser.displayName} accepted your request`,
-          message: `You are now connected! Tap to start chatting.`,
+          title: `✅ ${currentUser.displayName} approved your chat request`,
+          message: `You are now connected! Tap to chat in real time.`,
           screen: 'chat',
           chatId,
         }).catch(() => {});
@@ -384,21 +648,39 @@ export const ChatScreen: React.FC = () => {
           id: chatId,
           user: r.user,
           lastMessage: r.message,
-          lastTimestamp: r.time,
+          lastTimestamp: 'Just now',
           unreadCount: 0,
           isGroup: false,
+          requestStatus: 'connected',
           messages: [],
         };
         setRequests((prev) => prev.filter((x) => x.id !== r.id));
         openConversation(conv);
-        return;
+        showToast(`Chat approved with ${r.user.displayName}!`);
       }
     } catch (error) {
-      console.error('Accept chat request failed:', error);
+      showToast(getFriendlyChatErrorMessage(error, 'Could not approve request.'));
+    } finally {
+      setApprovingRequestId(null);
     }
   };
 
-  const dispatchMessageNotifications = (messagePreview: string) => {
+  const handleDeclineOrBlockRequest = async (r: RequestItem, block: boolean) => {
+    try {
+      if (auth.currentUser?.uid === currentUser.id) {
+        await rejectOrBlockChatRequest(r.id, block);
+      }
+      setRequests((prev) => prev.filter((x) => x.id !== r.id));
+      if (activeConversation?.user?.id === r.user.id) {
+        openConversation(null);
+      }
+      showToast(block ? 'User blocked.' : 'Chat request declined.');
+    } catch (error) {
+      showToast(getFriendlyChatErrorMessage(error, 'Unable to update request.'));
+    }
+  };
+
+  const dispatchMessageNotifications = (messagePreview: string, targetChatId?: string, isRequest = false) => {
     if (!activeConversation) return;
     if (activeConversation.isGroup && activeConversation.groupMembers?.length) {
       activeConversation.groupMembers.forEach((member) => {
@@ -410,36 +692,33 @@ export const ChatScreen: React.FC = () => {
             title: `💬 ${activeConversation.groupName || 'Group Chat'}: ${currentUser.displayName}`,
             message: messagePreview.slice(0, 140),
             screen: 'chat',
-            chatId: activeConversation.id,
+            chatId: targetChatId || activeConversation.id,
           }).catch(() => {});
         }
       });
     } else if (activeConversation.user?.id && activeConversation.user.id !== currentUser.id) {
       sendNotificationToUser({
         recipientId: activeConversation.user.id,
-        type: 'message',
-        category: 'messages',
-        title: `💬 New message from ${currentUser.displayName}`,
+        type: isRequest ? 'friend_request' : 'message',
+        category: isRequest ? 'friendRequests' : 'messages',
+        title: isRequest
+          ? `💌 New message request from ${currentUser.displayName}`
+          : `💬 New message from ${currentUser.displayName}`,
         message: messagePreview.slice(0, 140),
         screen: 'chat',
-        chatId: activeConversation.id,
+        chatId: targetChatId || activeConversation.id,
       }).catch(() => {});
     }
   };
 
-  const isFirestoreActiveChat = Boolean(
-    activeConversation &&
-      (firebaseChats.some((c) => c.id === activeConversation.id) ||
-        activeConversation.id.startsWith('dm_'))
-  );
+  const send = async (text = draft, mediaUrl?: string, kind: LocalMessage['kind'] = 'text') => {
+    if (!activeConversation || (!text.trim() && !mediaUrl) || sendingRequest) return;
 
-  const send = (text = draft, mediaUrl?: string, kind: LocalMessage['kind'] = 'text') => {
-    if (!activeConversation || (!text.trim() && !mediaUrl)) return;
     if (editMessage) {
-      if (auth.currentUser?.uid === currentUser.id && isFirestoreActiveChat) {
-        import('../services/chatService')
-          .then((m) => m.editChatMessage(activeConversation.id, editMessage.id, text))
-          .catch((e) => console.error(e));
+      if (auth.currentUser?.uid === currentUser.id && effectiveApprovedChatId) {
+        editChatMessage(effectiveApprovedChatId, editMessage.id, text).catch((e) =>
+          showToast(getFriendlyChatErrorMessage(e, 'Could not edit message.'))
+        );
       }
       setEditMessage(null);
       setDraft('');
@@ -450,12 +729,20 @@ export const ChatScreen: React.FC = () => {
       text.trim() ||
       (kind === 'image' ? 'Photo' : kind === 'video' ? 'Video' : kind === 'audio' ? 'Voice message' : 'Shared link');
 
-    if (auth.currentUser?.uid === currentUser.id && isFirestoreActiveChat) {
+    setDraft('');
+    setReplyTo(null);
+    setShowEmoji(false);
+
+    const isFirebaseSignedIn = auth.currentUser?.uid === currentUser.id;
+    const partner = activeConversation.user;
+
+    // 1. Approved Firestore chat (1:1 or Group) -> real-time two-way message
+    if (isFirebaseSignedIn && effectiveApprovedChatId) {
       const otherIds = activeConversation.isGroup
         ? (activeConversation.groupMembers || []).map((m) => m.id).filter((id) => id !== currentUser.id)
-        : [activeConversation.user?.id].filter(Boolean);
+        : [partner?.id].filter(Boolean);
       sendChatMessage(
-        activeConversation.id,
+        effectiveApprovedChatId,
         {
           text: messageText,
           mediaUrl,
@@ -463,13 +750,112 @@ export const ChatScreen: React.FC = () => {
           replyTo: replyTo?.id,
         },
         otherIds
-      ).catch((error) => console.error('Firebase chat send failed:', error));
-    } else if (localGroups.some((group) => group.id === activeConversation.id)) {
+      )
+        .then(() => {
+          dispatchMessageNotifications(messageText, effectiveApprovedChatId, false);
+        })
+        .catch((error) => {
+          showToast(getFriendlyChatErrorMessage(error));
+        });
+      return;
+    }
+
+    // 2. Recipient is replying directly to an incoming pending request -> auto-approve & send reply!
+    if (isFirebaseSignedIn && !activeConversation.isGroup && activeIncomingRequest && partner?.id) {
+      setSendingRequest(true);
+      try {
+        const chatId = await acceptChatRequest(activeIncomingRequest.id);
+        setRequests((prev) => prev.filter((x) => x.id !== activeIncomingRequest.id));
+        await sendChatMessage(
+          chatId,
+          {
+            text: messageText,
+            mediaUrl,
+            mediaType: kind === 'text' || kind === 'link' ? undefined : kind,
+          },
+          [partner.id]
+        );
+        openConversation({
+          ...activeConversation,
+          id: chatId,
+          requestStatus: 'connected',
+          lastMessage: messageText,
+          lastTimestamp: 'Just now',
+        });
+        dispatchMessageNotifications(messageText, chatId, false);
+      } catch (error) {
+        showToast(getFriendlyChatErrorMessage(error));
+      } finally {
+        setSendingRequest(false);
+      }
+      return;
+    }
+
+    // 3. New or Outgoing Pending 1:1 Chat Request -> store in `chatRequests` (stays in recipient's Requests until approved!)
+    if (isFirebaseSignedIn && !activeConversation.isGroup && partner?.id && partner.id !== currentUser.id) {
+      const optimisticBubble: LocalMessage = {
+        id: `opt_req_${Date.now()}`,
+        senderId: currentUser.id,
+        senderName: currentUser.displayName,
+        senderAvatar: currentUser.avatar || FALLBACK_AVATAR,
+        text: messageText,
+        imageUrl: mediaUrl,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        isRead: false,
+        isMe: true,
+        pendingApproval: true,
+        kind,
+      };
+      setOptimisticSentByPartner((prev) => ({
+        ...prev,
+        [partner.id]: [...(prev[partner.id] || []), optimisticBubble],
+      }));
+
+      setSendingRequest(true);
+      try {
+        const wasFirstRequestMessage = !activeOutgoingRequest;
+        const { requestId } = await sendChatRequest(
+          {
+            id: partner.id,
+            displayName: partner.displayName || 'Alpha Mate User',
+            username: partner.username || '',
+            uniqueId: partner.uniqueId || '',
+            avatar: partner.avatar || '',
+          },
+          messageText,
+          {
+            id: currentUser.id,
+            displayName: currentUser.displayName,
+            username: currentUser.username,
+            uniqueId: currentUser.uniqueId,
+            avatar: currentUser.avatar,
+          },
+          mediaUrl,
+          kind === 'text' || kind === 'link' ? undefined : kind
+        );
+        dispatchMessageNotifications(messageText, requestId, true);
+        if (wasFirstRequestMessage) {
+          showToast(`Message sent to ${partner.displayName}'s Requests!`);
+        }
+      } catch (error) {
+        setOptimisticSentByPartner((prev) => ({
+          ...prev,
+          [partner.id]: (prev[partner.id] || []).filter((m) => m.id !== optimisticBubble.id),
+        }));
+        showToast(getFriendlyChatErrorMessage(error));
+      } finally {
+        setSendingRequest(false);
+      }
+      return;
+    }
+
+    // 4. Local group or offline fallback
+    if (localGroups.some((group) => group.id === activeConversation.id)) {
       const newMessage: LocalMessage = {
         id: `group_msg_${Date.now()}`,
         senderId: currentUser.id,
         senderName: currentUser.displayName,
-        senderAvatar: currentUser.avatar,
+        senderAvatar: currentUser.avatar || FALLBACK_AVATAR,
         text: messageText,
         imageUrl: mediaUrl,
         timestamp: 'Just now',
@@ -488,35 +874,28 @@ export const ChatScreen: React.FC = () => {
     } else {
       sendMessage(activeConversation.id, messageText, mediaUrl);
     }
-
-    dispatchMessageNotifications(messageText);
-    setDraft('');
-    setReplyTo(null);
-    setShowEmoji(false);
   };
 
   const handleFile = async (file?: File) => {
     if (!file || !activeConversation) return;
     const kind = file.type.startsWith('video/') ? 'video' : file.type.startsWith('audio/') ? 'audio' : 'image';
     try {
-      if (auth.currentUser?.uid === currentUser.id && isFirestoreActiveChat) {
-        const url = await uploadChatMedia(activeConversation.id, file);
-        const otherIds = activeConversation.isGroup
-          ? (activeConversation.groupMembers || []).map((m) => m.id).filter((id) => id !== currentUser.id)
-          : [activeConversation.user?.id].filter(Boolean);
-        await sendChatMessage(
-          activeConversation.id,
-          { text: file.name, mediaUrl: url, mediaType: kind },
-          otherIds
-        );
-        dispatchMessageNotifications(`Sent a ${kind}: ${file.name}`);
+      if (auth.currentUser?.uid === currentUser.id && !activeConversation.isGroup) {
+        const uploadBucketId = effectiveApprovedChatId || buildDirectChatId(currentUser.id, activeConversation.user.id);
+        const url = await uploadChatMedia(uploadBucketId, file);
+        await send(file.name, url, kind);
+      } else if (auth.currentUser?.uid === currentUser.id && effectiveApprovedChatId) {
+        const url = await uploadChatMedia(effectiveApprovedChatId, file);
+        await send(file.name, url, kind);
       } else {
         const reader = new FileReader();
-        reader.onload = () => send(file.name, String(reader.result), kind);
+        reader.onload = () => {
+          void send(file.name, String(reader.result), kind);
+        };
         reader.readAsDataURL(file);
       }
     } catch (error) {
-      showToast(error instanceof Error ? error.message : 'Upload failed.');
+      showToast(getFriendlyChatErrorMessage(error, 'Upload failed.'));
     }
     setShowAttach(false);
   };
@@ -576,15 +955,22 @@ export const ChatScreen: React.FC = () => {
   };
 
   if (activeConversation) {
-    const partner = activeConversation.user;
-    const messages = (isFirestoreActiveChat ? firebaseMessages : activeConversation.messages) as LocalMessage[];
+    const partner = approvedActiveChat?.user || activeConversation.user;
+    const messages = activeDisplayedMessages;
+    const partnerHandle = partner?.username ? `@${partner.username.replace(/^@/, '')}` : '';
+    const partnerPublicId = partner?.uniqueId || (partner?.id ? partner.id.slice(0, 10) : '');
+    const isDirectFirebase =
+      !activeConversation.isGroup && auth.currentUser?.uid === currentUser.id && Boolean(partner?.id);
+
     return (
-      <div className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-[#090510] text-white">
-        <header className="shrink-0 border-b border-purple-500/20 bg-[#130922]/95 px-3 pb-3 pt-[max(14px,env(safe-area-inset-top))]">
-          <div className="flex items-center gap-3">
+      <div className="relative flex h-full flex-1 min-h-0 w-full flex-col overflow-hidden bg-[#090510] text-white">
+        <header className="shrink-0 border-b border-purple-500/20 bg-[#130922]/95 px-3 pb-2.5 pt-[max(12px,env(safe-area-inset-top))]">
+          <div className="flex items-center gap-2.5">
             <button
-              onClick={() => openConversation(null as any)}
-              className="rounded-full p-2 text-zinc-300 hover:bg-white/10 cursor-pointer"
+              type="button"
+              onClick={() => openConversation(null)}
+              aria-label="Back to chats"
+              className="rounded-full p-2 text-zinc-300 hover:bg-white/10 cursor-pointer shrink-0"
             >
               <ArrowLeft size={21} />
             </button>
@@ -594,19 +980,24 @@ export const ChatScreen: React.FC = () => {
                   openPublicUserProfile(partner);
                 }
               }}
-              className="relative cursor-pointer"
+              className="relative cursor-pointer shrink-0"
             >
               <img
                 src={
-                  activeConversation.isGroup
+                  (activeConversation.isGroup
                     ? activeConversation.groupMembers?.[0]?.avatar || partner?.avatar
-                    : partner?.avatar
+                    : partner?.avatar) || FALLBACK_AVATAR
                 }
                 alt={activeConversation.isGroup ? activeConversation.groupName : partner?.displayName}
-                className="h-11 w-11 rounded-full border border-fuchsia-400/60 object-cover"
+                referrerPolicy="no-referrer"
+                className="h-10 w-10 rounded-full border border-fuchsia-400/60 object-cover bg-[#1F1235]"
               />
               {!activeConversation.isGroup && (
-                <i className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-[#130922] bg-emerald-400" />
+                <i
+                  className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-[#130922] ${
+                    isApprovedFirestoreChat ? 'bg-emerald-400' : 'bg-amber-400'
+                  }`}
+                />
               )}
             </div>
             <div
@@ -617,43 +1008,62 @@ export const ChatScreen: React.FC = () => {
               }}
               className="min-w-0 flex-1 cursor-pointer"
             >
-              <div className="truncate text-[15px] font-bold">
-                {activeConversation.isGroup ? activeConversation.groupName : partner?.displayName}
+              <div className="flex items-center gap-1.5">
+                <span className="truncate text-[15px] font-bold">
+                  {activeConversation.isGroup ? activeConversation.groupName : partner?.displayName || 'Alpha Mate User'}
+                </span>
               </div>
-              <div className="text-[11px] text-emerald-400">
-                {activeConversation.isGroup
-                  ? `${activeConversation.groupMembers?.length || 1} members`
-                  : partner?.username
-                  ? `@${partner.username}`
-                  : 'Real-Time Chat'}
+              <div className="truncate text-[11px] text-zinc-300">
+                {activeConversation.isGroup ? (
+                  <span className="text-emerald-400">{`${activeConversation.groupMembers?.length || 1} members`}</span>
+                ) : (
+                  <>
+                    {partnerHandle && <span className="text-purple-300">{partnerHandle}</span>}
+                    {partnerHandle && partnerPublicId && <span className="mx-1 text-zinc-500">·</span>}
+                    {partnerPublicId && <span className="font-mono text-[10px] text-zinc-400">ID: {partnerPublicId}</span>}
+                    <span className="mx-1 text-zinc-500">·</span>
+                    {isApprovedFirestoreChat ? (
+                      <span className="text-emerald-400 font-semibold">Connected</span>
+                    ) : activeIncomingRequest ? (
+                      <span className="text-pink-400 font-semibold">Needs Approval</span>
+                    ) : activeOutgoingRequest ? (
+                      <span className="text-amber-300 font-semibold">In Requests</span>
+                    ) : (
+                      <span className="text-cyan-300 font-semibold">Selected</span>
+                    )}
+                  </>
+                )}
               </div>
             </div>
             <button
+              type="button"
               onClick={() => setCallState('voice')}
-              className="rounded-full p-2.5 text-emerald-300 hover:bg-emerald-400/10 cursor-pointer"
+              className="rounded-full p-2 text-emerald-300 hover:bg-emerald-400/10 cursor-pointer shrink-0"
               title="Voice call"
             >
-              <Phone size={19} />
+              <Phone size={18} />
             </button>
             <button
+              type="button"
               onClick={() => setCallState('video')}
-              className="rounded-full p-2.5 text-fuchsia-300 hover:bg-fuchsia-400/10 cursor-pointer"
+              className="rounded-full p-2 text-fuchsia-300 hover:bg-fuchsia-400/10 cursor-pointer shrink-0"
               title="Video call"
             >
-              <Video size={20} />
+              <Video size={19} />
             </button>
-            <RefreshScopeButton scope="chat" compact className="w-9 h-9" title="Refresh chat messages" />
+            <RefreshScopeButton scope="chat" compact className="w-8 h-8 shrink-0" title="Refresh chat messages" />
             <button
+              type="button"
               onClick={() => setShowAttach((v) => !v)}
-              className="rounded-full p-2 text-zinc-300 cursor-pointer"
+              className="rounded-full p-1.5 text-zinc-300 cursor-pointer shrink-0"
             >
-              <MoreVertical size={20} />
+              <MoreVertical size={19} />
             </button>
           </div>
         </header>
 
         {callState !== 'idle' && (
-          <div className="mx-3 mt-3 flex items-center justify-between rounded-2xl border border-purple-400/30 bg-purple-950/70 p-3">
+          <div className="mx-3 mt-2 shrink-0 flex items-center justify-between rounded-2xl border border-purple-400/30 bg-purple-950/70 p-3">
             <div className="flex items-center gap-2">
               <PhoneCall size={17} className="text-emerald-300" />
               <div>
@@ -662,6 +1072,7 @@ export const ChatScreen: React.FC = () => {
               </div>
             </div>
             <button
+              type="button"
               onClick={() => setCallState('idle')}
               className="rounded-full bg-rose-500/20 p-2 text-rose-300 cursor-pointer"
             >
@@ -672,21 +1083,49 @@ export const ChatScreen: React.FC = () => {
 
         <main
           ref={messagesScrollRef}
-          className="flex-1 space-y-3 overflow-y-auto bg-[radial-gradient(ellipse_at_top,_#291044_0%,_#10091c_42%,_#090510_100%)] px-3 py-4"
+          className="flex-1 min-h-0 space-y-3 overflow-y-auto bg-[radial-gradient(ellipse_at_top,_#291044_0%,_#10091c_42%,_#090510_100%)] px-3 py-4"
         >
           <PullToRefresh
             scrollContainerRef={messagesScrollRef}
             label="Refreshing messages..."
             onRefresh={() => refreshScope('chat')}
           />
-          <div className="mx-auto w-fit rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[10px] text-zinc-400">
-            Today · Alpha Mate Real-Time Chat
+
+          <div className="mx-auto w-fit rounded-full border border-white/10 bg-black/25 px-3 py-1 text-[10px] text-zinc-300">
+            {isApprovedFirestoreChat
+              ? 'Connected · Real-Time Chat Active'
+              : activeIncomingRequest
+              ? 'Chat Request · Approve to connect'
+              : activeOutgoingRequest
+              ? 'Request Pending · Stored in Recipient Requests'
+              : 'Direct Message · Send a message request'}
           </div>
-          {messages.length === 0 && (
-            <div className="text-center py-10 text-xs text-zinc-400">
-              Say hello to start chatting in real time! 👋
+
+          {/* Status Banner for Unapproved Direct Chats */}
+          {isDirectFirebase && !isApprovedFirestoreChat && !activeIncomingRequest && (
+            <div className="mx-auto max-w-sm rounded-2xl border border-purple-400/25 bg-[#180d2c]/90 px-3.5 py-2.5 text-center text-[11px] leading-relaxed text-purple-100">
+              {activeOutgoingRequest || messages.length > 0 ? (
+                <>
+                  <ShieldCheck size={14} className="mr-1.5 inline text-amber-300" />
+                  Your message is in <b>{partner?.displayName}</b>&apos;s <b>Requests</b> inbox. As soon as they approve,
+                  live two-way chat will start automatically.
+                </>
+              ) : (
+                <>
+                  Selected <b>{partner?.displayName}</b>{' '}
+                  {partnerPublicId ? <span className="text-purple-300">({partnerPublicId})</span> : null}. Write a
+                  message below — it will stay in their <b>Requests</b> until they approve.
+                </>
+              )}
             </div>
           )}
+
+          {messages.length === 0 && (
+            <div className="text-center py-8 text-xs text-zinc-400">
+              Type your message below and tap Send to start chatting!
+            </div>
+          )}
+
           {messages.map((msg) => (
             <div key={msg.id} className={`flex ${msg.isMe ? 'justify-end' : 'justify-start'}`}>
               <div className={`max-w-[82%] ${msg.isMe ? 'items-end' : 'items-start'} flex flex-col`}>
@@ -696,11 +1135,14 @@ export const ChatScreen: React.FC = () => {
                   </div>
                 )}
                 <button
+                  type="button"
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    setMenuMessage(msg);
+                    if (!msg.pendingApproval) setMenuMessage(msg);
                   }}
-                  onClick={() => setMenuMessage(msg)}
+                  onClick={() => {
+                    if (!msg.pendingApproval) setMenuMessage(msg);
+                  }}
                   className={`rounded-2xl px-3.5 py-2.5 text-left text-[13px] leading-relaxed shadow-lg ${
                     msg.isMe
                       ? 'rounded-br-sm bg-gradient-to-br from-[#8B27D8] to-[#D52DAB]'
@@ -711,20 +1153,59 @@ export const ChatScreen: React.FC = () => {
                     (msg.imageUrl.startsWith('data:video') ? (
                       <video src={msg.imageUrl} controls className="mb-2 max-h-48 rounded-xl" />
                     ) : (
-                      <img src={msg.imageUrl} className="mb-2 max-h-52 rounded-xl object-cover" />
+                      <img
+                        src={msg.imageUrl}
+                        alt="Attachment"
+                        referrerPolicy="no-referrer"
+                        className="mb-2 max-h-52 rounded-xl object-cover"
+                      />
                     ))}
-                  {msg.text && <span>{msg.text}</span>}
+                  {msg.text && <span className="break-words">{msg.text}</span>}
                   {msg.edited && <span className="ml-2 text-[9px] opacity-70">edited</span>}
                 </button>
                 <div className="mt-1 flex items-center gap-1 px-1 text-[10px] text-zinc-500">
                   <span>{msg.timestamp}</span>
-                  {msg.isMe && <CheckCheck size={13} className="text-cyan-300" />}
+                  {msg.isMe &&
+                    (msg.pendingApproval ? (
+                      <span className="inline-flex items-center gap-1 text-amber-300">
+                        <Clock size={11} /> Request sent
+                      </span>
+                    ) : (
+                      <CheckCheck size={13} className={msg.isRead ? 'text-cyan-300' : 'text-zinc-400'} />
+                    ))}
                 </div>
               </div>
             </div>
           ))}
           <div ref={chatEndRef} />
         </main>
+
+        {/* Inline Approval Banner when viewing an Incoming Pending Chat Request */}
+        {activeIncomingRequest && (
+          <div className="shrink-0 border-t border-pink-500/30 bg-[#1B0E2E] px-3 py-2.5">
+            <p className="mb-2 text-[11px] text-purple-100">
+              <b>{partner?.displayName}</b> sent you a chat request. Approve to start chatting, or reply below to approve
+              automatically.
+            </p>
+            <div className="grid grid-cols-3 gap-2">
+              <button
+                type="button"
+                disabled={approvingRequestId === activeIncomingRequest.id}
+                onClick={() => void acceptRequest(activeIncomingRequest)}
+                className="col-span-2 rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 py-2 text-xs font-bold text-white cursor-pointer disabled:opacity-50"
+              >
+                {approvingRequestId === activeIncomingRequest.id ? 'Approving…' : 'Approve & Start Chat'}
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeclineOrBlockRequest(activeIncomingRequest, true)}
+                className="rounded-xl border border-rose-400/35 bg-rose-500/10 py-2 text-xs font-bold text-rose-300 cursor-pointer"
+              >
+                Block
+              </button>
+            </div>
+          </div>
+        )}
 
         {menuMessage && (
           <div
@@ -737,52 +1218,58 @@ export const ChatScreen: React.FC = () => {
             >
               <div className="mb-2 flex justify-around border-b border-white/10 pb-3">
                 {['👍', '❤️', '😂', '😮', '😢', '🔥'].map((e) => (
-                  <button key={e} onClick={() => setMenuMessage(null)} className="text-2xl">
+                  <button key={e} type="button" onClick={() => setMenuMessage(null)} className="text-2xl cursor-pointer">
                     {e}
                   </button>
                 ))}
               </div>
               <button
+                type="button"
                 onClick={() => {
                   setReplyTo(menuMessage);
                   setMenuMessage(null);
+                  messageInputRef.current?.focus();
                 }}
-                className="flex w-full items-center gap-3 rounded-xl p-3 text-sm hover:bg-white/5"
+                className="flex w-full items-center gap-3 rounded-xl p-3 text-sm hover:bg-white/5 cursor-pointer"
               >
                 <Reply size={17} /> Reply
               </button>
               {menuMessage.isMe && (
                 <button
+                  type="button"
                   onClick={() => {
                     setEditMessage(menuMessage);
                     setDraft(menuMessage.text || '');
                     setMenuMessage(null);
+                    messageInputRef.current?.focus();
                   }}
-                  className="flex w-full items-center gap-3 rounded-xl p-3 text-sm hover:bg-white/5"
+                  className="flex w-full items-center gap-3 rounded-xl p-3 text-sm hover:bg-white/5 cursor-pointer"
                 >
                   <Pencil size={17} /> Edit message
                 </button>
               )}
               <button
+                type="button"
                 onClick={() => {
-                  if (auth.currentUser?.uid === currentUser.id && isFirestoreActiveChat) {
-                    deleteChatMessage(activeConversation.id, menuMessage.id, false).catch((e) => console.error(e));
+                  if (auth.currentUser?.uid === currentUser.id && effectiveApprovedChatId) {
+                    deleteChatMessage(effectiveApprovedChatId, menuMessage.id, false).catch((e) => console.error(e));
                   }
                   setMenuMessage(null);
                 }}
-                className="flex w-full items-center gap-3 rounded-xl p-3 text-sm hover:bg-white/5"
+                className="flex w-full items-center gap-3 rounded-xl p-3 text-sm hover:bg-white/5 cursor-pointer"
               >
                 <Trash2 size={17} /> Delete for me
               </button>
               {menuMessage.isMe && (
                 <button
+                  type="button"
                   onClick={() => {
-                    if (auth.currentUser?.uid === currentUser.id && isFirestoreActiveChat) {
-                      deleteChatMessage(activeConversation.id, menuMessage.id, true).catch((e) => console.error(e));
+                    if (auth.currentUser?.uid === currentUser.id && effectiveApprovedChatId) {
+                      deleteChatMessage(effectiveApprovedChatId, menuMessage.id, true).catch((e) => console.error(e));
                     }
                     setMenuMessage(null);
                   }}
-                  className="flex w-full items-center gap-3 rounded-xl p-3 text-sm text-rose-300 hover:bg-white/5"
+                  className="flex w-full items-center gap-3 rounded-xl p-3 text-sm text-rose-300 hover:bg-white/5 cursor-pointer"
                 >
                   <Trash2 size={17} /> Delete for everyone
                 </button>
@@ -792,103 +1279,162 @@ export const ChatScreen: React.FC = () => {
         )}
 
         {showEmoji && (
-          <div className="grid grid-cols-6 gap-2 border-t border-purple-400/20 bg-[#160d25] p-3">
+          <div className="shrink-0 grid grid-cols-6 gap-2 border-t border-purple-400/20 bg-[#160d25] p-3">
             {EMOJIS.map((e) => (
-              <button key={e} onClick={() => setDraft((v) => v + e)} className="text-2xl">
+              <button
+                key={e}
+                type="button"
+                onClick={() => {
+                  setDraft((v) => v + e);
+                  messageInputRef.current?.focus();
+                }}
+                className="text-2xl cursor-pointer"
+              >
                 {e}
               </button>
             ))}
           </div>
         )}
+
         {showAttach && (
-          <div className="grid grid-cols-4 gap-2 border-t border-purple-400/20 bg-[#160d25] p-3">
-            <button onClick={() => cameraRef.current?.click()} className="flex flex-col items-center gap-1 text-xs text-purple-200">
+          <div className="shrink-0 grid grid-cols-4 gap-2 border-t border-purple-400/20 bg-[#160d25] p-3">
+            <button
+              type="button"
+              onClick={() => cameraRef.current?.click()}
+              className="flex flex-col items-center gap-1 text-xs text-purple-200 cursor-pointer"
+            >
               <Camera className="text-fuchsia-300" />
               Camera
             </button>
-            <button onClick={() => fileRef.current?.click()} className="flex flex-col items-center gap-1 text-xs text-purple-200">
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              className="flex flex-col items-center gap-1 text-xs text-purple-200 cursor-pointer"
+            >
               <ImageIcon className="text-cyan-300" />
               Gallery
             </button>
-            <button onClick={() => videoRef.current?.click()} className="flex flex-col items-center gap-1 text-xs text-purple-200">
+            <button
+              type="button"
+              onClick={() => videoRef.current?.click()}
+              className="flex flex-col items-center gap-1 text-xs text-purple-200 cursor-pointer"
+            >
               <FileVideo className="text-pink-300" />
               Video
             </button>
             <button
+              type="button"
               onClick={() => {
                 setDraft((v) => v + ' https://');
                 setShowAttach(false);
+                messageInputRef.current?.focus();
               }}
-              className="flex flex-col items-center gap-1 text-xs text-purple-200"
+              className="flex flex-col items-center gap-1 text-xs text-purple-200 cursor-pointer"
             >
               <LinkIcon className="text-amber-300" />
               Link
             </button>
           </div>
         )}
+
         {replyTo && (
-          <div className="flex items-center justify-between border-t border-purple-400/20 bg-[#190f2b] px-4 py-2 text-xs">
-            <span className="text-purple-200">Replying to: {replyTo.text?.slice(0, 50) || 'attachment'}</span>
-            <button onClick={() => setReplyTo(null)}>
+          <div className="shrink-0 flex items-center justify-between border-t border-purple-400/20 bg-[#190f2b] px-4 py-2 text-xs">
+            <span className="truncate text-purple-200">
+              Replying to: {replyTo.text?.slice(0, 50) || 'attachment'}
+            </span>
+            <button type="button" onClick={() => setReplyTo(null)} className="cursor-pointer">
               <X size={15} />
             </button>
           </div>
         )}
+
         {editMessage && (
-          <div className="flex items-center justify-between border-t border-purple-400/20 bg-[#190f2b] px-4 py-2 text-xs text-amber-200">
+          <div className="shrink-0 flex items-center justify-between border-t border-purple-400/20 bg-[#190f2b] px-4 py-2 text-xs text-amber-200">
             <span>Editing message</span>
             <button
+              type="button"
               onClick={() => {
                 setEditMessage(null);
                 setDraft('');
               }}
+              className="cursor-pointer"
             >
               <X size={15} />
             </button>
           </div>
         )}
 
+        {/* Bottom Message Input Bar & Mobile Keypad Trigger */}
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            send();
+            void send();
           }}
-          className="flex shrink-0 items-center gap-2 border-t border-purple-400/20 bg-[#10091d] px-3 py-3 pb-[max(12px,env(safe-area-inset-bottom))]"
+          onClick={() => messageInputRef.current?.focus()}
+          className="flex shrink-0 items-center gap-2 border-t border-purple-400/25 bg-[#10091d] px-3 py-2.5 pb-[max(12px,env(safe-area-inset-bottom))]"
         >
           <button
             type="button"
-            onClick={() => setShowAttach((v) => !v)}
-            className="rounded-full bg-purple-500/15 p-2.5 text-purple-200 cursor-pointer"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowAttach((v) => !v);
+            }}
+            className="rounded-full bg-purple-500/15 p-2.5 text-purple-200 cursor-pointer shrink-0"
+            title="Attach media"
           >
-            <Plus size={21} />
+            <Plus size={19} />
           </button>
           <button
             type="button"
-            onClick={() => setShowEmoji((v) => !v)}
-            className="text-zinc-400 cursor-pointer"
+            onClick={(e) => {
+              e.stopPropagation();
+              setShowEmoji((v) => !v);
+            }}
+            className="text-zinc-400 hover:text-purple-200 cursor-pointer shrink-0"
+            title="Emoji"
           >
-            <Smile size={21} />
+            <Smile size={20} />
           </button>
           <input
+            ref={messageInputRef}
+            type="text"
+            inputMode="text"
+            enterKeyHint="send"
+            autoComplete="off"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            placeholder="Message..."
-            className="h-11 min-w-0 flex-1 rounded-full border border-purple-400/25 bg-[#21152f] px-4 text-sm text-white outline-none placeholder:text-zinc-500 focus:border-fuchsia-400"
+            placeholder={
+              isApprovedFirestoreChat
+                ? `Message ${activeConversation.isGroup ? activeConversation.groupName : partner?.displayName || ''}...`
+                : activeIncomingRequest
+                ? 'Write a reply to approve & chat...'
+                : `Send message to ${partner?.displayName || 'user'}...`
+            }
+            className="h-11 min-w-0 flex-1 rounded-full border border-purple-400/30 bg-[#21152f] px-4 text-sm text-white outline-none placeholder:text-zinc-400 focus:border-fuchsia-400"
           />
-          {draft.trim() ? (
-            <button className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white cursor-pointer">
-              <Send size={17} />
-            </button>
-          ) : (
+          {!draft.trim() && isApprovedFirestoreChat && (
             <button
               type="button"
-              onClick={() => send('🎙️ Voice message (0:08)')}
-              className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white cursor-pointer"
+              onClick={(e) => {
+                e.stopPropagation();
+                void send('🎙️ Voice message (0:08)');
+              }}
+              className="rounded-full bg-white/10 p-2.5 text-purple-200 hover:bg-white/15 cursor-pointer shrink-0"
+              title="Send voice note"
             >
               <Mic size={18} />
             </button>
           )}
+          <button
+            type="submit"
+            disabled={!draft.trim() || sendingRequest}
+            aria-label="Send message"
+            className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white shadow-md cursor-pointer disabled:opacity-45 shrink-0"
+          >
+            <Send size={17} />
+          </button>
         </form>
+
         {toastMsg && (
           <div className="fixed bottom-20 inset-x-4 z-50 mx-auto max-w-sm rounded-2xl border border-purple-400/40 bg-[#1c1033]/95 px-4 py-2.5 text-center text-xs font-bold text-white shadow-2xl">
             {toastMsg}
@@ -904,37 +1450,42 @@ export const ChatScreen: React.FC = () => {
   return (
     <div className="min-h-full bg-[#090510] pb-28 text-white">
       <header className="sticky top-0 z-10 border-b border-purple-500/15 bg-[#10091d]/95 px-4 pb-3 pt-[max(16px,env(safe-area-inset-top))] backdrop-blur-xl">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <h1 className="text-2xl font-black tracking-tight">Chats</h1>
-              <p className="mt-0.5 text-[11px] text-zinc-500">Real-time conversations &amp; user search</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <RefreshScopeButton
-                scope="chat"
-                compact
-                className="h-11 w-11 border-purple-400/20 bg-purple-500/10 text-purple-200"
-                title="Refresh chats"
-              />
-              <button
-                onClick={() => {
-                  setShowSearch((prev) => !prev);
-                  setQuery('');
-                }}
-                className="rounded-full border border-purple-400/20 bg-purple-500/10 p-3 text-purple-200 cursor-pointer"
-                title="Search users and chats"
-              >
-                <Search size={19} />
-              </button>
-              <button
-                onClick={() => setShowNew(true)}
-                className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white shadow-lg shadow-purple-900/30 cursor-pointer"
-                title="New conversation"
-              >
-                <Plus size={19} />
-              </button>
-            </div>
+        <div className="mb-4 flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-black tracking-tight">Chats</h1>
+            <p className="mt-0.5 text-[11px] text-zinc-500">Select any user ID to message · Requests &amp; Live Chat</p>
           </div>
+          <div className="flex items-center gap-2">
+            <RefreshScopeButton
+              scope="chat"
+              compact
+              className="h-11 w-11 border-purple-400/20 bg-purple-500/10 text-purple-200"
+              title="Refresh chats"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setShowSearch((prev) => !prev);
+                setQuery('');
+              }}
+              className="rounded-full border border-purple-400/20 bg-purple-500/10 p-3 text-purple-200 cursor-pointer"
+              title="Search users and chats"
+            >
+              <Search size={19} />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setNewModalQuery('');
+                setShowNew(true);
+              }}
+              className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white shadow-lg shadow-purple-900/30 cursor-pointer"
+              title="New conversation"
+            >
+              <Plus size={19} />
+            </button>
+          </div>
+        </div>
 
         {showSearch && (
           <div className="mb-3 flex items-center gap-2 rounded-2xl border border-purple-400/30 bg-[#21152f] px-3">
@@ -947,6 +1498,7 @@ export const ChatScreen: React.FC = () => {
               className="h-11 min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-zinc-500"
             />
             <button
+              type="button"
               onClick={() => {
                 setShowSearch(false);
                 setQuery('');
@@ -960,6 +1512,7 @@ export const ChatScreen: React.FC = () => {
 
         <div className="grid grid-cols-2 rounded-2xl border border-purple-400/20 bg-[#1a1028] p-1">
           <button
+            type="button"
             onClick={() => setTab('chats')}
             className={`rounded-xl py-2.5 text-sm font-bold cursor-pointer ${
               tab === 'chats' ? 'bg-gradient-to-r from-purple-600 to-fuchsia-500 text-white' : 'text-zinc-400'
@@ -968,6 +1521,7 @@ export const ChatScreen: React.FC = () => {
             Chats <span className="ml-1 text-[10px]">{allConversations.length}</span>
           </button>
           <button
+            type="button"
             onClick={() => setTab('requests')}
             className={`rounded-xl py-2.5 text-sm font-bold cursor-pointer ${
               tab === 'requests' ? 'bg-gradient-to-r from-purple-600 to-fuchsia-500 text-white' : 'text-zinc-400'
@@ -975,7 +1529,7 @@ export const ChatScreen: React.FC = () => {
           >
             Requests{' '}
             {requests.length + groupInvites.length > 0 && (
-              <span className="ml-1 rounded-full bg-pink-500 px-1.5 py-0.5 text-[10px]">
+              <span className="ml-1 rounded-full bg-pink-500 px-1.5 py-0.5 text-[10px] text-white">
                 {requests.length + groupInvites.length}
               </span>
             )}
@@ -987,6 +1541,7 @@ export const ChatScreen: React.FC = () => {
             {(['all', 'direct', 'groups'] as const).map((f) => (
               <button
                 key={f}
+                type="button"
                 onClick={() => setFilter(f)}
                 className={`rounded-full px-4 py-1.5 text-xs font-semibold capitalize cursor-pointer ${
                   filter === f
@@ -1005,28 +1560,32 @@ export const ChatScreen: React.FC = () => {
         <section className="space-y-3 p-4">
           <div className="mb-4 rounded-2xl border border-amber-400/20 bg-amber-500/5 p-3 text-xs leading-relaxed text-amber-100">
             <ShieldCheck size={16} className="mr-2 inline" />
-            Messages or group invites from new users appear here. Accept to connect in real time.
+            Messages from users you haven&apos;t approved yet stay here in Requests. Approve to start chatting in real
+            time.
           </div>
+
           {groupInvites.map((invite) => (
             <div key={invite.id} className="rounded-2xl border border-fuchsia-400/25 bg-[#1b102b] p-3">
               <p className="text-sm font-bold">{invite.groupName || 'Group invitation'}</p>
               <p className="mt-1 text-xs text-zinc-400">You have been invited to join this group.</p>
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <button
+                  type="button"
                   onClick={() =>
                     respondToGroupInvite(invite.chatId, true)
                       .then(() => setGroupInvites((v) => v.filter((x) => x.id !== invite.id)))
-                      .catch((e) => showToast(e.message))
+                      .catch((e) => showToast(getFriendlyChatErrorMessage(e)))
                   }
                   className="rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 py-2 text-xs font-bold cursor-pointer"
                 >
                   Accept Group
                 </button>
                 <button
+                  type="button"
                   onClick={() =>
                     respondToGroupInvite(invite.chatId, false)
                       .then(() => setGroupInvites((v) => v.filter((x) => x.id !== invite.id)))
-                      .catch((e) => showToast(e.message))
+                      .catch((e) => showToast(getFriendlyChatErrorMessage(e)))
                   }
                   className="rounded-xl border border-rose-400/30 py-2 text-xs font-bold text-rose-300 cursor-pointer"
                 >
@@ -1037,34 +1596,50 @@ export const ChatScreen: React.FC = () => {
           ))}
 
           {requests.length === 0 && groupInvites.length === 0 ? (
-            <EmptyState title="No message requests" subtitle="New requests from users will appear here." />
+            <EmptyState
+              title="No message requests"
+              subtitle="When someone sends you a message before connecting, it stays here until you approve."
+            />
           ) : (
             requests.map((r) => (
-              <div key={r.id} className="rounded-2xl border border-purple-400/20 bg-[#160d25] p-3">
-                <div className="flex items-center gap-3">
-                  <img src={r.user.avatar} className="h-12 w-12 rounded-full object-cover" />
+              <div key={r.id} className="rounded-2xl border border-purple-400/25 bg-[#160d25] p-3.5">
+                <button
+                  type="button"
+                  onClick={() => openUser(r.user)}
+                  className="flex w-full items-center gap-3 text-left cursor-pointer"
+                >
+                  <img
+                    src={r.user.avatar || FALLBACK_AVATAR}
+                    alt={r.user.displayName}
+                    referrerPolicy="no-referrer"
+                    className="h-12 w-12 rounded-full object-cover border border-purple-400/30 bg-[#1F1235] shrink-0"
+                  />
                   <div className="min-w-0 flex-1">
-                    <p className="font-bold">{r.user.displayName}</p>
-                    <p className="text-[11px] text-zinc-500">
-                      @{r.user.username} · {r.time}
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="truncate font-bold text-sm text-white">{r.user.displayName}</p>
+                      <span className="shrink-0 text-[10px] text-zinc-500">{r.time}</span>
+                    </div>
+                    <p className="text-[11px] text-purple-300 truncate">
+                      {r.user.username ? `@${r.user.username.replace(/^@/, '')}` : 'Alpha Mate User'}
+                      {r.user.uniqueId ? ` · ID: ${r.user.uniqueId}` : ''}
                     </p>
-                    <p className="mt-1 truncate text-xs text-zinc-300">{r.message}</p>
+                    <p className="mt-1.5 rounded-xl bg-black/25 px-2.5 py-1.5 text-xs text-zinc-200 line-clamp-2">
+                      {r.message}
+                    </p>
                   </div>
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-2">
+                </button>
+                <div className="mt-3 grid grid-cols-3 gap-2">
                   <button
-                    onClick={() => acceptRequest(r)}
-                    className="rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 py-2 text-xs font-bold cursor-pointer"
+                    type="button"
+                    disabled={approvingRequestId === r.id}
+                    onClick={() => void acceptRequest(r)}
+                    className="col-span-2 rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 py-2 text-xs font-bold text-white cursor-pointer disabled:opacity-50"
                   >
-                    Accept
+                    {approvingRequestId === r.id ? 'Approving…' : 'Approve & Chat'}
                   </button>
                   <button
-                    onClick={() => {
-                      if (auth.currentUser?.uid === currentUser.id) {
-                        rejectOrBlockChatRequest(r.id, true).catch((e) => console.error(e));
-                      }
-                      setRequests((prev) => prev.filter((x) => x.id !== r.id));
-                    }}
+                    type="button"
+                    onClick={() => void handleDeclineOrBlockRequest(r, true)}
                     className="rounded-xl border border-rose-400/30 py-2 text-xs font-bold text-rose-300 cursor-pointer"
                   >
                     <Ban size={13} className="mr-1 inline" />
@@ -1079,10 +1654,10 @@ export const ChatScreen: React.FC = () => {
         <section className="p-3">
           {/* Real-Time Registered Users Search Results inside Chat */}
           {showSearch && (
-            <div className="mb-4 rounded-2xl border border-purple-400/20 bg-[#130B23] p-2">
+            <div className="mb-4 rounded-2xl border border-purple-400/25 bg-[#130B23] p-2.5">
               <div className="flex items-center justify-between px-2 pb-2">
                 <p className="text-xs font-bold text-purple-200">
-                  Real-Time Alpha Mate Users ({foundUsers.length})
+                  Tap a user to select ID &amp; message ({foundUsers.length})
                 </p>
                 {userSearchLoading && <span className="text-[10px] text-fuchsia-300">Searching…</span>}
               </div>
@@ -1097,22 +1672,24 @@ export const ChatScreen: React.FC = () => {
                     return (
                       <div
                         key={u.id}
-                        className="flex w-full items-center gap-2.5 rounded-xl p-2 hover:bg-white/5 transition-colors"
+                        className="flex w-full items-center gap-2 rounded-xl p-2 hover:bg-white/5 transition-colors"
                       >
                         <button
                           type="button"
-                          onClick={() => openPublicUserProfile(u)}
+                          onClick={() => openUser(u)}
                           className="flex items-center gap-2.5 min-w-0 flex-1 text-left cursor-pointer"
                         >
                           <img
-                            src={u.avatar || currentUser.avatar}
+                            src={u.avatar || FALLBACK_AVATAR}
+                            alt={u.displayName}
                             referrerPolicy="no-referrer"
-                            className="h-10 w-10 rounded-full object-cover border border-purple-400/30 shrink-0"
+                            className="h-10 w-10 rounded-full object-cover border border-purple-400/30 bg-[#1F1235] shrink-0"
                           />
                           <div className="min-w-0 flex-1">
                             <b className="block text-xs sm:text-sm text-white truncate">{u.displayName}</b>
                             <small className="text-[10.5px] text-zinc-400 block truncate">
-                              @{u.username} {u.uniqueId ? `· ${u.uniqueId}` : ''}
+                              {u.username ? `@${u.username.replace(/^@/, '')}` : 'User'}{' '}
+                              {u.uniqueId ? `· ID: ${u.uniqueId}` : ''}
                             </small>
                           </div>
                         </button>
@@ -1120,7 +1697,7 @@ export const ChatScreen: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => toggleFollowUser(u)}
-                          className={`px-2.5 py-1.5 rounded-xl text-[10.5px] font-bold flex items-center gap-1 cursor-pointer shrink-0 ${
+                          className={`px-2.5 py-1.5 rounded-xl text-[10px] font-bold flex items-center gap-1 cursor-pointer shrink-0 ${
                             isFollowing
                               ? 'bg-white/10 text-zinc-300'
                               : followsMe
@@ -1135,19 +1712,20 @@ export const ChatScreen: React.FC = () => {
                         <button
                           type="button"
                           onClick={() => openUser(u)}
-                          title="Start real-time chat"
-                          className="w-8 h-8 rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 flex items-center justify-center text-white cursor-pointer shrink-0"
+                          title="Select ID & send message"
+                          className="px-2.5 h-8 rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 flex items-center gap-1 text-[11px] font-bold text-white cursor-pointer shrink-0"
                         >
-                          <MessageCircle size={15} />
+                          <MessageCircle size={13} />
+                          <span>Chat</span>
                         </button>
 
                         <button
                           type="button"
                           onClick={() => openPublicUserProfile(u)}
                           title="Visit Profile"
-                          className="w-8 h-8 rounded-xl bg-white/5 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer shrink-0 hidden sm:flex"
+                          className="w-8 h-8 rounded-xl bg-white/5 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer shrink-0"
                         >
-                          <Eye size={15} />
+                          <Eye size={14} />
                         </button>
                       </div>
                     );
@@ -1160,22 +1738,29 @@ export const ChatScreen: React.FC = () => {
           {filtered.length === 0 ? (
             <EmptyState
               title="No chats yet"
-              subtitle="Tap the search icon above to find any registered user and start chatting in real time."
+              subtitle="Tap + or the search icon above to select any user ID and send a message."
             />
           ) : (
             filtered.map((c) => (
               <button
                 key={c.id}
+                type="button"
                 onClick={() => openConversation(c)}
                 className="flex w-full items-center gap-3 border-b border-purple-400/10 px-2 py-3.5 text-left hover:bg-white/[0.03] cursor-pointer"
               >
                 <div className="relative shrink-0">
                   <img
-                    src={c.isGroup ? c.groupMembers?.[0]?.avatar || c.user.avatar : c.user.avatar}
-                    className="h-14 w-14 rounded-full border border-purple-400/30 object-cover"
+                    src={(c.isGroup ? c.groupMembers?.[0]?.avatar || c.user.avatar : c.user.avatar) || FALLBACK_AVATAR}
+                    alt={c.isGroup ? c.groupName : c.user.displayName}
+                    referrerPolicy="no-referrer"
+                    className="h-13 w-13 rounded-full border border-purple-400/30 object-cover bg-[#1F1235]"
                   />
                   {!c.isGroup && (
-                    <i className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-[#090510] bg-emerald-400" />
+                    <i
+                      className={`absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-[#090510] ${
+                        c.requestStatus === 'outgoing_pending' ? 'bg-amber-400' : 'bg-emerald-400'
+                      }`}
+                    />
                   )}
                   {c.isGroup && (
                     <span className="absolute -bottom-1 -right-1 rounded-full bg-purple-600 p-1">
@@ -1185,10 +1770,24 @@ export const ChatScreen: React.FC = () => {
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center justify-between gap-2">
-                    <b className="truncate text-sm">{c.isGroup ? c.groupName : c.user.displayName}</b>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <b className="truncate text-sm">{c.isGroup ? c.groupName : c.user.displayName}</b>
+                      {c.requestStatus === 'outgoing_pending' && (
+                        <span className="shrink-0 rounded-md border border-amber-400/30 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold text-amber-300">
+                          Pending
+                        </span>
+                      )}
+                    </div>
                     <span className="shrink-0 text-[10px] text-zinc-500">{c.lastTimestamp}</span>
                   </div>
-                  <div className="mt-1 flex items-center justify-between gap-2">
+                  {!c.isGroup && (c.user.username || c.user.uniqueId) && (
+                    <p className="truncate text-[10.5px] text-purple-300/80">
+                      {c.user.username ? `@${c.user.username.replace(/^@/, '')}` : ''}
+                      {c.user.username && c.user.uniqueId ? ' · ' : ''}
+                      {c.user.uniqueId ? `ID: ${c.user.uniqueId}` : ''}
+                    </p>
+                  )}
+                  <div className="mt-0.5 flex items-center justify-between gap-2">
                     <p className="truncate text-xs text-zinc-400">{c.lastMessage}</p>
                     {c.unreadCount > 0 && (
                       <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-fuchsia-500 px-1 text-[10px] font-bold">
@@ -1209,43 +1808,85 @@ export const ChatScreen: React.FC = () => {
         </div>
       )}
 
+      {/* "+" Start a Conversation Modal — Direct User Picker + Search + Group Option */}
       {showNew && (
-        <div className="fixed inset-0 z-30 flex items-end bg-black/65" onClick={() => setShowNew(false)}>
+        <div className="fixed inset-0 z-30 flex items-end bg-black/70" onClick={() => setShowNew(false)}>
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full rounded-t-3xl border border-purple-400/30 bg-[#170d26] p-5 pb-[max(24px,env(safe-area-inset-bottom))]"
+            className="flex max-h-[82dvh] w-full flex-col rounded-t-3xl border border-purple-400/30 bg-[#170d26] p-5 pb-[max(24px,env(safe-area-inset-bottom))]"
           >
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-black">Start a conversation</h2>
-              <button onClick={() => setShowNew(false)} className="cursor-pointer">
-                <X />
+            <div className="mb-3 flex items-center justify-between shrink-0">
+              <div>
+                <h2 className="text-lg font-black">Select User to Chat</h2>
+                <p className="text-[11px] text-zinc-400">Tap any user ID to open chat &amp; send a message</p>
+              </div>
+              <button type="button" onClick={() => setShowNew(false)} className="rounded-full p-1.5 hover:bg-white/10 cursor-pointer">
+                <X size={20} />
               </button>
             </div>
+
+            <div className="mb-3 flex items-center gap-2 rounded-2xl border border-purple-400/30 bg-[#241436] px-3 shrink-0">
+              <Search size={16} className="text-fuchsia-300 shrink-0" />
+              <input
+                autoFocus
+                value={newModalQuery}
+                onChange={(e) => setNewModalQuery(e.target.value)}
+                placeholder="Search name, @username or AM ID..."
+                className="h-11 min-w-0 flex-1 bg-transparent text-sm text-white outline-none placeholder:text-zinc-400"
+              />
+              {newModalQuery && (
+                <button type="button" onClick={() => setNewModalQuery('')} className="cursor-pointer text-zinc-400">
+                  <X size={15} />
+                </button>
+              )}
+            </div>
+
+            <div className="mb-3 flex-1 min-h-0 overflow-y-auto rounded-2xl border border-purple-400/15 bg-[#120920] p-2 space-y-1">
+              {userSearchLoading && foundUsers.length === 0 ? (
+                <p className="py-6 text-center text-xs text-purple-300">Loading users…</p>
+              ) : foundUsers.length === 0 ? (
+                <p className="py-6 text-center text-xs text-zinc-500">No users found for this search.</p>
+              ) : (
+                foundUsers.map((u) => (
+                  <button
+                    key={u.id}
+                    type="button"
+                    onClick={() => openUser(u)}
+                    className="flex w-full items-center gap-3 rounded-xl p-2.5 text-left hover:bg-white/5 transition-colors cursor-pointer"
+                  >
+                    <img
+                      src={u.avatar || FALLBACK_AVATAR}
+                      alt={u.displayName}
+                      referrerPolicy="no-referrer"
+                      className="h-10 w-10 rounded-full object-cover border border-purple-400/30 bg-[#1F1235] shrink-0"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <b className="block truncate text-sm text-white">{u.displayName}</b>
+                      <small className="block truncate text-[11px] text-zinc-400">
+                        {u.username ? `@${u.username.replace(/^@/, '')}` : 'User'}{' '}
+                        {u.uniqueId ? `· ID: ${u.uniqueId}` : ''}
+                      </small>
+                    </div>
+                    <span className="rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 px-3 py-1.5 text-xs font-bold text-white shrink-0">
+                      Select
+                    </span>
+                  </button>
+                ))
+              )}
+            </div>
+
             <button
-              onClick={() => {
-                setShowNew(false);
-                setShowSearch(true);
-                setTab('chats');
-              }}
-              className="mb-3 flex w-full items-center gap-3 rounded-2xl border border-purple-400/20 bg-[#241436] p-4 text-left cursor-pointer"
-            >
-              <Search className="text-fuchsia-300" />
-              <span>
-                <b className="block text-sm">Find a user</b>
-                <small className="text-zinc-400">Search real users by name, @username or AM ID</small>
-              </span>
-            </button>
-            <button
+              type="button"
               onClick={() => {
                 setShowGroup(true);
                 setShowNew(false);
               }}
-              className="flex w-full items-center gap-3 rounded-2xl border border-purple-400/20 bg-[#241436] p-4 text-left cursor-pointer"
+              className="flex shrink-0 w-full items-center gap-3 rounded-2xl border border-purple-400/20 bg-[#241436] p-3.5 text-left cursor-pointer"
             >
-              <Users className="text-purple-300" />
+              <Users className="text-purple-300 shrink-0" />
               <span>
-                <b className="block text-sm">Create a group</b>
-                <small className="text-zinc-400">Add real members and chat together</small>
+                <b className="block text-sm">Create a group chat</b>
+                <small className="text-zinc-400">Invite multiple members and chat together</small>
               </span>
             </button>
           </div>
@@ -1260,7 +1901,7 @@ export const ChatScreen: React.FC = () => {
           >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-black">Create group</h2>
-              <button onClick={() => setShowGroup(false)} className="cursor-pointer">
+              <button type="button" onClick={() => setShowGroup(false)} className="cursor-pointer">
                 <X />
               </button>
             </div>
@@ -1279,6 +1920,7 @@ export const ChatScreen: React.FC = () => {
               directoryUsers.map((u) => (
                 <button
                   key={u.id}
+                  type="button"
                   onClick={() =>
                     setSelectedMembers((prev) =>
                       prev.includes(u.id) ? prev.filter((x) => x !== u.id) : [...prev, u.id]
@@ -1286,7 +1928,12 @@ export const ChatScreen: React.FC = () => {
                   }
                   className="flex w-full items-center gap-3 rounded-xl p-2 text-left cursor-pointer hover:bg-white/5"
                 >
-                  <img src={u.avatar} className="h-10 w-10 rounded-full object-cover" />
+                  <img
+                    src={u.avatar || FALLBACK_AVATAR}
+                    alt={u.displayName}
+                    referrerPolicy="no-referrer"
+                    className="h-10 w-10 rounded-full object-cover bg-[#1F1235]"
+                  />
                   <span className="flex-1 text-sm">
                     {u.displayName}
                     <small className="block text-zinc-500">
@@ -1306,6 +1953,7 @@ export const ChatScreen: React.FC = () => {
               ))
             )}
             <button
+              type="button"
               onClick={createGroup}
               disabled={!groupName.trim() || selectedMembers.length === 0}
               className="mt-4 w-full rounded-xl bg-gradient-to-r from-purple-600 to-pink-500 py-3 text-sm font-bold disabled:opacity-40 cursor-pointer"

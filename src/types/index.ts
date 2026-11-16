@@ -55,6 +55,8 @@ export interface User {
   coins: number;
   diamonds: number;
   isVerified: boolean;
+  profileCompleted?: boolean;
+  hasPassword?: boolean;
   emailOtpVerified?: boolean;
   emailOtpVerifiedAt?: string;
   familyCrew?: string;
@@ -84,6 +86,26 @@ export interface User {
   pushPlatform?: 'android' | 'ios' | 'web';
   notificationPreferences?: NotificationPreferences;
   equippedBadgeIds?: UserBadgeId[];
+}
+
+export interface SavedDeviceAccount {
+  uid: string;
+  uniqueId: string;
+  email: string;
+  displayName: string;
+  username: string;
+  avatar: string;
+  level: number;
+  vipTier: number;
+  authProvider: 'google' | 'email' | 'apple';
+  profileCompleted?: boolean;
+  hasPassword?: boolean;
+  lastActiveAt: string;
+  lastActiveAtMs: number;
+  firebaseUserBlob?: Record<string, any> | null;
+  switchSessionId?: string;
+  switchTicket?: string;
+  switchToken?: string;
 }
 
 export interface AccountDeletionRequest {
@@ -170,6 +192,7 @@ export interface PartyRoom {
   nowPlaying?: string;
   level?: 1 | 2 | 3;
   isActive?: boolean;
+  isHostPresent?: boolean;
   lastSeenAtMs?: number;
   createdAt?: string;
   updatedAt?: string;
@@ -200,12 +223,45 @@ export interface RoomPKSession {
   winner?: 'left' | 'right' | 'draw';
 }
 
+export type GiftAnimationType =
+  | 'sparkle'
+  | 'heart'
+  | 'car'
+  | 'rocket'
+  | 'crown'
+  | 'dragon'
+  | 'yacht'
+  | 'ring';
+
+export type GiftCssAnimationClass =
+  | 'animate-supercar'
+  | 'animate-rocket-launch'
+  | 'animate-dragon-fly'
+  | 'animate-yacht'
+  | 'animate-crown-drop'
+  | 'animate-ring-levitate'
+  | 'animate-shockwave'
+  | 'animate-petal'
+  | 'animate-float-heart'
+  | 'animate-combo-pop'
+  | 'animate-gift-shake';
+
+export type GiftRarityTier = 'common' | 'rare' | 'epic' | 'legendary' | 'mythic';
+
 export interface Gift {
   id: string;
   name: string;
   icon: string;
   coins: number;
-  animationType: 'sparkle' | 'heart' | 'car' | 'rocket' | 'crown' | 'dragon' | 'yacht' | 'ring';
+  costInCoins?: number;
+  animationType: GiftAnimationType;
+  animationClassName?: GiftCssAnimationClass;
+  secondaryAnimationClassNames?: GiftCssAnimationClass[];
+  thumbnailUrl?: string;
+  audioAssetPath?: string;
+  tier?: GiftRarityTier;
+  durationMs?: number;
+  triggersScreenShake?: boolean;
   description: string;
 }
 
@@ -232,6 +288,9 @@ export interface Conversation {
   isGroup: boolean;
   groupName?: string;
   groupMembers?: User[];
+  inviteStatus?: string;
+  requestStatus?: 'connected' | 'new_request' | 'outgoing_pending' | 'incoming_pending' | 'rejected' | 'blocked';
+  requestId?: string;
   messages: ChatMessage[];
 }
 

@@ -2,6 +2,7 @@
   "name": "alpha-mate-functions",
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "serve": "npm run build && firebase emulators:start --only functions",
     "shell": "npm run build && firebase functions:shell",
     "start": "npm run shell",
@@ -17,6 +18,7 @@
     "firebase-functions": "^6.3.2"
   },
   "devDependencies": {
+    "@types/node": "^22.14.0",
     "typescript": "^5.8.2"
   },
   "private": true

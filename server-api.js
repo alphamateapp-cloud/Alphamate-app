@@ -250,6 +250,16 @@ export function createApiApp() {
       // failures must not be misreported to the client as missing Railway vars.
       sfuConfigured: Boolean(sfuEnvPresent),
       sfuValid: Boolean(firebaseCheck.valid && sfuCheck.valid),
+      emailOtpConfigured: Boolean(
+        (process.env.RESEND_API_KEY || '').trim() &&
+          (process.env.RESEND_API_KEY || '').trim() !== 'YOUR_RESEND_API_KEY' &&
+          (process.env.RESEND_API_KEY || '').trim() !== 'MY_RESEND_API_KEY'
+      ),
+      emailOtpSender: (
+        process.env.RESEND_FROM_EMAIL ||
+        process.env.RESEND_FROM ||
+        'Alpha Mate <no-reply@alphamate.app>'
+      ).trim(),
       checks: {
         firebase: firebaseCheck,
         sfu: sfuCheck,
@@ -414,7 +424,10 @@ export function createApiApp() {
     const idToken = req.firebaseIdToken;
 
     if (contextType === 'live') {
-      const streamDoc = await fetchFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken);
+      const streamDoc =
+        (await fetchFirestoreDocument(`liveStreams/${encodeURIComponent(contextId)}`, idToken).catch(() => null)) ||
+        app.locals.realtimeRegistry?.getLiveStream?.(contextId) ||
+        null;
       if (!streamDoc || streamDoc.isActive === false) {
         return { ok: false, status: 404, error: 'Live stream is not active or no longer exists.' };
       }
@@ -1201,8 +1214,12 @@ export function createApiApp() {
     return res.json({ success: true, ...snap });
   });
 
-  // 11. Email OTP Delivery & Verification (Sign-Up Verification + Account Deletion)
-  const RESEND_API_KEY = (process.env.RESEND_API_KEY || '').trim();
+  // 11. Email OTP Delivery & Verification (Registration + Login + Account Deletion)
+  function getResendApiKey() {
+    const raw = (process.env.RESEND_API_KEY || '').trim();
+    if (!raw || raw === 'YOUR_RESEND_API_KEY' || raw === 'MY_RESEND_API_KEY') return '';
+    return raw;
+  }
   const SMTP_USER = (process.env.SMTP_USER || '').trim();
   const SMTP_PASS = (process.env.SMTP_PASS || '').trim();
   const SMTP_HOST = (process.env.SMTP_HOST || (SMTP_USER ? 'smtp.gmail.com' : '')).trim();
@@ -1218,7 +1235,7 @@ export function createApiApp() {
   const RESEND_FROM = (
     process.env.RESEND_FROM_EMAIL ||
     process.env.RESEND_FROM ||
-    SMTP_FROM
+    'Alpha Mate <no-reply@alphamate.app>'
   ).trim();
   const OTP_HMAC_SECRET = (
     process.env.OTP_HMAC_SECRET ||
@@ -1230,11 +1247,14 @@ export function createApiApp() {
       .digest('hex')
   ).trim();
 
-  const OTP_TTL_MS = 10 * 60 * 1000;
-  const OTP_COOLDOWN_MS = 30 * 1000;
-  const OTP_MAX_ATTEMPTS = 5;
+  const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+  const OTP_COOLDOWN_MS = 60 * 1000; // 60 seconds
+  const OTP_MAX_ATTEMPTS = 5; // Maximum 5 verification attempts
+  const DEVICE_SWITCH_TTL_MS = 90 * 24 * 60 * 60 * 1000;
   const otpCooldownMap = new Map(); // scopeKey -> lastSentMs
   const otpAttemptMap = new Map(); // nonce -> { count, exp }
+  const otpActiveNonceMap = new Map(); // scopeKey -> { nonce, exp }
+  const otpConsumedNonceMap = new Map(); // nonce -> exp
 
   function escapeHtmlText(value) {
     return String(value || '')
@@ -1273,10 +1293,10 @@ export function createApiApp() {
     }
   }
 
-  function hashOtpCode(uid, nonce, otp) {
+  function hashOtpCode(scopeId, nonce, otp) {
     return crypto
       .createHmac('sha256', OTP_HMAC_SECRET)
-      .update(`${uid}:${nonce}:${String(otp).trim()}`)
+      .update(`${scopeId}:${nonce}:${String(otp).trim()}`)
       .digest('hex');
   }
 
@@ -1288,20 +1308,271 @@ export function createApiApp() {
     for (const [nonce, rec] of otpAttemptMap.entries()) {
       if (now > rec.exp) otpAttemptMap.delete(nonce);
     }
+    for (const [scopeKey, rec] of otpActiveNonceMap.entries()) {
+      if (now > rec.exp) otpActiveNonceMap.delete(scopeKey);
+    }
+    for (const [nonce, exp] of otpConsumedNonceMap.entries()) {
+      if (now > exp) otpConsumedNonceMap.delete(nonce);
+    }
   }
 
   function hasEmailOtpProviderConfigured() {
-    return Boolean(RESEND_API_KEY || (SMTP_HOST && SMTP_USER && SMTP_PASS));
+    return Boolean(getResendApiKey() || (SMTP_HOST && SMTP_USER && SMTP_PASS));
+  }
+
+  function toFirestoreFieldValue(val) {
+    if (val === null || val === undefined) return { nullValue: null };
+    if (typeof val === 'boolean') return { booleanValue: val };
+    if (typeof val === 'number') {
+      return Number.isInteger(val) ? { integerValue: String(val) } : { doubleValue: val };
+    }
+    if (typeof val === 'string') return { stringValue: val };
+    if (Array.isArray(val)) {
+      return { arrayValue: { values: val.map((item) => toFirestoreFieldValue(item)) } };
+    }
+    if (typeof val === 'object') {
+      const fields = {};
+      for (const [k, v] of Object.entries(val)) {
+        if (v !== undefined) fields[k] = toFirestoreFieldValue(v);
+      }
+      return { mapValue: { fields } };
+    }
+    return { stringValue: String(val) };
+  }
+
+  async function patchFirestoreAdminDoc(collectionName, docId, dataObj) {
+    if (!FIREBASE_SERVICE_ACCOUNT_JSON || !docId) return false;
+    try {
+      const keys = Object.keys(dataObj).filter((k) => dataObj[k] !== undefined);
+      if (keys.length === 0) return true;
+      const maskParams = keys.map((k) => `updateMask.fieldPaths=${encodeURIComponent(k)}`).join('&');
+      const fields = {};
+      for (const k of keys) {
+        fields[k] = toFirestoreFieldValue(dataObj[k]);
+      }
+      await firestoreAdminRequest(
+        `${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}?${maskParams}`,
+        {
+          method: 'PATCH',
+          body: JSON.stringify({ fields }),
+        }
+      );
+      return true;
+    } catch (err) {
+      console.warn(`[Firestore Admin] Patch skipped (${collectionName}/${docId}):`, err?.message || err);
+      return false;
+    }
+  }
+
+  async function getFirestoreAdminDoc(collectionName, docId) {
+    if (!FIREBASE_SERVICE_ACCOUNT_JSON || !docId) return null;
+    try {
+      const doc = await firestoreAdminRequest(
+        `${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}`,
+        { method: 'GET' }
+      );
+      return decodeFirestoreDocument(doc);
+    } catch (err) {
+      if (err?.statusCode === 404) return null;
+      return null;
+    }
+  }
+
+  async function deleteFirestoreAdminDoc(collectionName, docId) {
+    if (!FIREBASE_SERVICE_ACCOUNT_JSON || !docId) return false;
+    try {
+      await firestoreAdminRequest(
+        `${encodeURIComponent(collectionName)}/${encodeURIComponent(docId)}`,
+        { method: 'DELETE' }
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function scopeKeyToDocId(scopeKey) {
+    return `otp_${crypto.createHash('sha256').update(String(scopeKey)).digest('hex').slice(0, 40)}`;
+  }
+
+  async function issueServerOtpChallenge({ scopeKey, purpose, email, uid }) {
+    pruneOtpMaps();
+    const now = Date.now();
+    const docId = scopeKeyToDocId(scopeKey);
+    const persisted = await getFirestoreAdminDoc('emailOtpChallenges', docId);
+    const lastSentMs = Math.max(otpCooldownMap.get(scopeKey) || 0, Number(persisted?.lastSentAtMs || 0));
+    const remainingMs = OTP_COOLDOWN_MS - (now - lastSentMs);
+    if (remainingMs > 0) {
+      const waitSeconds = Math.ceil(remainingMs / 1000);
+      return {
+        cooldownBlocked: true,
+        retryAfterSeconds: waitSeconds,
+      };
+    }
+
+    const otpCode = String(crypto.randomInt(100000, 1000000));
+    const nonce = crypto.randomBytes(16).toString('hex');
+    const expiresAt = now + OTP_TTL_MS;
+    const otpHash = hashOtpCode(scopeKey, nonce, otpCode);
+    const challengeToken = signOtpPayload({
+      purpose,
+      scopeKey,
+      uid: uid || undefined,
+      email,
+      nonce,
+      otpHash,
+      exp: expiresAt,
+    });
+
+    return {
+      cooldownBlocked: false,
+      otpCode,
+      nonce,
+      expiresAt,
+      otpHash,
+      challengeToken,
+      async commitAfterSend() {
+        otpCooldownMap.set(scopeKey, now);
+        otpAttemptMap.set(nonce, { count: 0, exp: expiresAt });
+        otpActiveNonceMap.set(scopeKey, { nonce, exp: expiresAt });
+        await patchFirestoreAdminDoc('emailOtpChallenges', docId, {
+          scopeKey,
+          purpose,
+          email,
+          uid: uid || null,
+          nonce,
+          otpHash,
+          attempts: 0,
+          consumed: false,
+          lastSentAtMs: now,
+          expiresAtMs: expiresAt,
+          updatedAt: new Date(now).toISOString(),
+        });
+      },
+    };
+  }
+
+  async function validateServerOtpChallenge({ challengeToken, expectedPurpose, expectedScopeKey, otpInput }) {
+    pruneOtpMaps();
+    const cleanOtp = String(otpInput || '').replace(/\s+/g, '');
+    if (!challengeToken || !/^\d{6}$/.test(cleanOtp)) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'OTP_MALFORMED',
+        error: 'Please enter the exact 6-digit OTP sent to your email.',
+      };
+    }
+
+    const payload = verifySignedOtpPayload(challengeToken);
+    if (!payload || payload.purpose !== expectedPurpose || payload.scopeKey !== expectedScopeKey) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'OTP_SESSION_INVALID',
+        error: 'Invalid or expired OTP session. Please request a new code.',
+      };
+    }
+
+    const now = Date.now();
+    const docId = scopeKeyToDocId(expectedScopeKey);
+    const persisted = await getFirestoreAdminDoc('emailOtpChallenges', docId);
+
+    const activeMem = otpActiveNonceMap.get(expectedScopeKey);
+    const activeNonce = persisted?.nonce || activeMem?.nonce || payload.nonce;
+    if (activeNonce && activeNonce !== payload.nonce) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'OTP_SUPERSEDED',
+        error: 'This code was replaced by a newer OTP. Please enter the latest 6-digit code sent to your email.',
+      };
+    }
+
+    if (otpConsumedNonceMap.has(payload.nonce) || (persisted && persisted.nonce === payload.nonce && persisted.consumed === true)) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'OTP_ALREADY_USED',
+        error: 'This verification code has already been used. Please request a new code if needed.',
+      };
+    }
+
+    const expMs = Number(persisted?.nonce === payload.nonce ? persisted.expiresAtMs : payload.exp);
+    if (!expMs || now > expMs) {
+      return {
+        ok: false,
+        status: 400,
+        code: 'OTP_EXPIRED',
+        error: 'Verification OTP has expired (10-minute limit). Please request a new 6-digit code.',
+      };
+    }
+
+    const memAttempts = otpAttemptMap.get(payload.nonce) || { count: 0, exp: expMs };
+    const currentAttempts = Math.max(
+      memAttempts.count,
+      persisted?.nonce === payload.nonce ? Number(persisted.attempts || 0) : 0
+    );
+    if (currentAttempts >= OTP_MAX_ATTEMPTS) {
+      return {
+        ok: false,
+        status: 429,
+        code: 'OTP_MAX_ATTEMPTS',
+        remainingAttempts: 0,
+        error: 'Too many incorrect OTP attempts (maximum 5). Please request a fresh verification code.',
+      };
+    }
+
+    const computedHash = hashOtpCode(expectedScopeKey, payload.nonce, cleanOtp);
+    const targetHash = String(
+      persisted?.nonce === payload.nonce && persisted?.otpHash ? persisted.otpHash : payload.otpHash || ''
+    );
+    const a = Buffer.from(computedHash, 'hex');
+    const b = Buffer.from(targetHash, 'hex');
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      const nextAttempts = currentAttempts + 1;
+      otpAttemptMap.set(payload.nonce, { count: nextAttempts, exp: expMs });
+      if (persisted?.nonce === payload.nonce) {
+        await patchFirestoreAdminDoc('emailOtpChallenges', docId, {
+          attempts: nextAttempts,
+          updatedAt: new Date(now).toISOString(),
+        });
+      }
+      const remainingAttempts = Math.max(0, OTP_MAX_ATTEMPTS - nextAttempts);
+      return {
+        ok: false,
+        status: nextAttempts >= OTP_MAX_ATTEMPTS ? 429 : 400,
+        code: nextAttempts >= OTP_MAX_ATTEMPTS ? 'OTP_MAX_ATTEMPTS' : 'OTP_INVALID',
+        remainingAttempts,
+        error:
+          remainingAttempts > 0
+            ? `Incorrect OTP code. ${remainingAttempts} attempt${remainingAttempts === 1 ? '' : 's'} remaining.`
+            : 'Too many incorrect OTP attempts (maximum 5). Please request a fresh verification code.',
+      };
+    }
+
+    otpAttemptMap.delete(payload.nonce);
+    otpConsumedNonceMap.set(payload.nonce, expMs);
+    if (persisted?.nonce === payload.nonce) {
+      await patchFirestoreAdminDoc('emailOtpChallenges', docId, {
+        consumed: true,
+        consumedAt: new Date(now).toISOString(),
+        updatedAt: new Date(now).toISOString(),
+      });
+    }
+
+    return { ok: true, payload };
   }
 
   async function sendTransactionalOtpEmail({ toEmail, subject, text, html }) {
-    if (RESEND_API_KEY) {
+    const activeResendKey = getResendApiKey();
+    if (activeResendKey) {
       const resendRes = await fetchWithTimeout(
         'https://api.resend.com/emails',
         {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${RESEND_API_KEY}`,
+            Authorization: `Bearer ${activeResendKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -1318,7 +1589,7 @@ export function createApiApp() {
         const errPayload = await resendRes.json().catch(() => null);
         const errText = errPayload?.message || errPayload?.error || (await resendRes.text().catch(() => ''));
         const err = new Error(`Resend email delivery failed (${resendRes.status}): ${String(errText).slice(0, 180)}`);
-        err.statusCode = resendRes.status >= 400 && resendRes.status < 500 ? 502 : 502;
+        err.statusCode = 502;
         throw err;
       }
       const resendData = await resendRes.json().catch(() => ({}));
@@ -1346,7 +1617,7 @@ export function createApiApp() {
     }
 
     const err = new Error(
-      'Email OTP delivery is not configured on the backend server. Set RESEND_API_KEY or SMTP_USER & SMTP_PASS.'
+      'Resend Email OTP is not configured yet. Please provide RESEND_API_KEY in your backend secret configuration.'
     );
     err.statusCode = 503;
     err.code = 'EMAIL_OTP_NOT_CONFIGURED';
@@ -1378,6 +1649,35 @@ export function createApiApp() {
         </div>
         <p style="margin:0; color:#71717A; font-size:12px; line-height:1.5;">
           Never share this verification code with anyone. If you did not sign up for Alpha Mate, you can safely ignore this email.
+        </p>
+      </div>
+    `;
+    return sendTransactionalOtpEmail({ toEmail, subject, text, html });
+  }
+
+  async function sendLoginOtpEmail({ toEmail, otpCode, displayName }) {
+    const safeName = escapeHtmlText(displayName || 'Alpha Mate Member');
+    const subject = `Your Alpha Mate Sign-In Code: ${otpCode}`;
+    const text = [
+      `Hi ${displayName || 'Alpha Mate Member'},`,
+      '',
+      `Your 6-digit Alpha Mate sign-in OTP code is: ${otpCode}`,
+      '',
+      'This code expires in 10 minutes. Never share this code with anyone.',
+      'If you did not try to sign in, you can safely ignore this email.',
+    ].join('\n');
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background:#09070F; color:#F4F4F5; padding:28px; border-radius:16px; max-width:520px; margin:0 auto; border:1px solid #2E1A47;">
+        <div style="font-size:11px; font-weight:800; letter-spacing:2px; text-transform:uppercase; color:#C084FC; margin-bottom:8px;">ALPHA MATE</div>
+        <h2 style="margin:0 0 8px; color:#FFFFFF; font-size:20px;">Sign-In Verification Code</h2>
+        <p style="margin:0 0 18px; color:#A1A1AA; font-size:14px; line-height:1.5;">
+          Hi <strong style="color:#FFFFFF;">${safeName}</strong>, enter the 6-digit code below to sign in to your Alpha Mate account. Valid for <strong>10 minutes</strong>.
+        </p>
+        <div style="background:#160D2B; border:1px solid #EC4899; border-radius:12px; padding:18px; text-align:center; margin-bottom:18px;">
+          <span style="font-family:monospace; font-size:32px; font-weight:800; letter-spacing:8px; color:#F9A8D4;">${otpCode}</span>
+        </div>
+        <p style="margin:0; color:#71717A; font-size:12px; line-height:1.5;">
+          Never share this code with anyone. If you did not request a sign-in code, ignore this email.
         </p>
       </div>
     `;
@@ -1419,47 +1719,124 @@ export function createApiApp() {
   let identityToolkitTokenCache = null;
   let identityToolkitTokenExpiresAt = 0;
 
-  async function markFirebaseAuthEmailVerified(uid) {
+  async function getIdentityToolkitAdminAccessToken() {
+    if (!FIREBASE_SERVICE_ACCOUNT_JSON) return null;
+    if (identityToolkitTokenCache && Date.now() < identityToolkitTokenExpiresAt - 60_000) {
+      return identityToolkitTokenCache;
+    }
+    const account = readServiceAccount();
+    const now = Math.floor(Date.now() / 1000);
+    const unsigned = `${base64UrlJson({ alg: 'RS256', typ: 'JWT' })}.${base64UrlJson({
+      iss: account.client_email,
+      scope: 'https://www.googleapis.com/auth/identitytoolkit',
+      aud: 'https://oauth2.googleapis.com/token',
+      iat: now,
+      exp: now + 3600,
+    })}`;
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(unsigned);
+    signer.end();
+    const assertion = `${unsigned}.${signer.sign(account.private_key, 'base64url')}`;
+    const tokenResp = await fetchWithTimeout(
+      'https://oauth2.googleapis.com/token',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+          assertion,
+        }).toString(),
+      },
+      6000
+    );
+    const tokenPayload = await tokenResp.json().catch(() => ({}));
+    if (!tokenResp.ok || !tokenPayload.access_token) return null;
+    identityToolkitTokenCache = tokenPayload.access_token;
+    identityToolkitTokenExpiresAt = Date.now() + Number(tokenPayload.expires_in || 3600) * 1000;
+    return identityToolkitTokenCache;
+  }
+
+  function mintFirebaseCustomToken(uid, claims = { emailOtpVerified: true }) {
+    const account = readServiceAccount();
+    const now = Math.floor(Date.now() / 1000);
+    const header = { alg: 'RS256', typ: 'JWT' };
+    const payload = {
+      iss: account.client_email,
+      sub: account.client_email,
+      aud: 'https://identitytoolkit.googleapis.com/google.identity.identitytoolkit.v1.IdentityToolkit',
+      iat: now,
+      exp: now + 3600,
+      uid,
+      claims,
+    };
+    const unsigned = `${base64UrlJson(header)}.${base64UrlJson(payload)}`;
+    const signer = crypto.createSign('RSA-SHA256');
+    signer.update(unsigned);
+    signer.end();
+    return `${unsigned}.${signer.sign(account.private_key, 'base64url')}`;
+  }
+
+  async function lookupFirebaseUserByEmailAdmin(email) {
+    const cleanEmail = String(email || '').trim().toLowerCase();
+    if (!cleanEmail) return null;
+    const accessToken = await getIdentityToolkitAdminAccessToken().catch(() => null);
+    if (accessToken) {
+      const resp = await fetchWithTimeout(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/accounts:lookup`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ email: [cleanEmail] }),
+        },
+        6000
+      );
+      const data = await resp.json().catch(() => ({}));
+      const user = data?.users?.[0];
+      if (!user?.localId) return null;
+      return {
+        uid: user.localId,
+        email: (user.email || cleanEmail).toLowerCase(),
+        displayName: user.displayName || '',
+        emailVerified: Boolean(user.emailVerified),
+        disabled: Boolean(user.disabled),
+      };
+    }
+
+    if (FIREBASE_API_KEY) {
+      const resp = await fetchWithTimeout(
+        `https://identitytoolkit.googleapis.com/v1/accounts:createAuthUri?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            identifier: cleanEmail,
+            continueUri: 'https://alphamate.app',
+          }),
+        },
+        6000
+      );
+      const data = await resp.json().catch(() => ({}));
+      if (data?.registered || (Array.isArray(data?.signinMethods) && data.signinMethods.length > 0)) {
+        return {
+          uid: null,
+          email: cleanEmail,
+          displayName: '',
+          emailVerified: false,
+          disabled: false,
+        };
+      }
+    }
+    return null;
+  }
+
+  async function markFirebaseAuthEmailVerified(uid, email, verifiedAtIso = new Date().toISOString()) {
     if (!FIREBASE_SERVICE_ACCOUNT_JSON || !uid) return false;
     try {
-      let accessToken =
-        identityToolkitTokenCache && Date.now() < identityToolkitTokenExpiresAt - 60_000
-          ? identityToolkitTokenCache
-          : null;
-      if (!accessToken) {
-        const account = readServiceAccount();
-        const now = Math.floor(Date.now() / 1000);
-        const unsigned = `${base64UrlJson({ alg: 'RS256', typ: 'JWT' })}.${base64UrlJson({
-          iss: account.client_email,
-          scope: 'https://www.googleapis.com/auth/identitytoolkit',
-          aud: 'https://oauth2.googleapis.com/token',
-          iat: now,
-          exp: now + 3600,
-        })}`;
-        const { createSign } = await import('node:crypto');
-        const signer = createSign('RSA-SHA256');
-        signer.update(unsigned);
-        signer.end();
-        const assertion = `${unsigned}.${signer.sign(account.private_key, 'base64url')}`;
-        const tokenResp = await fetchWithTimeout(
-          'https://oauth2.googleapis.com/token',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: new URLSearchParams({
-              grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-              assertion,
-            }).toString(),
-          },
-          6000
-        );
-        const tokenPayload = await tokenResp.json().catch(() => ({}));
-        if (!tokenResp.ok || !tokenPayload.access_token) return false;
-        accessToken = tokenPayload.access_token;
-        identityToolkitTokenCache = accessToken;
-        identityToolkitTokenExpiresAt = Date.now() + Number(tokenPayload.expires_in || 3600) * 1000;
-      }
-
+      const accessToken = await getIdentityToolkitAdminAccessToken();
+      if (!accessToken) return false;
       const updateResp = await fetchWithTimeout(
         `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/accounts:update`,
         {
@@ -1475,16 +1852,113 @@ export function createApiApp() {
         },
         6000
       );
+      await patchFirestoreAdminDoc('users', uid, {
+        id: uid,
+        ...(email ? { email: email.toLowerCase() } : {}),
+        isVerified: true,
+        emailOtpVerified: true,
+        emailOtpVerifiedAt: verifiedAtIso,
+        updatedAt: verifiedAtIso,
+      });
       return updateResp.ok;
     } catch (err) {
-      console.warn('[Signup OTP] Optional Identity Toolkit emailVerified sync skipped:', err?.message || err);
+      console.warn('[Email OTP] Identity Toolkit emailVerified sync warning:', err?.message || err);
       return false;
     }
   }
 
+  async function upsertVerifiedPasswordUserOnBackend(email, password, verifiedAtIso) {
+    if (!FIREBASE_SERVICE_ACCOUNT_JSON) return null;
+    const accessToken = await getIdentityToolkitAdminAccessToken();
+    if (!accessToken) return null;
+
+    const cleanEmail = email.trim().toLowerCase();
+    const existing = await lookupFirebaseUserByEmailAdmin(cleanEmail);
+    let uid = existing?.uid || '';
+
+    if (uid) {
+      const updateResp = await fetchWithTimeout(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/accounts:update`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            localId: uid,
+            password,
+            emailVerified: true,
+          }),
+        },
+        6000
+      );
+      if (!updateResp.ok) {
+        const errPayload = await updateResp.json().catch(() => ({}));
+        throw new Error(errPayload?.error?.message || 'Failed updating password on existing Firebase user.');
+      }
+    } else {
+      const createResp = await fetchWithTimeout(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/accounts`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            email: cleanEmail,
+            password,
+            emailVerified: true,
+          }),
+        },
+        6000
+      );
+      const createPayload = await createResp.json().catch(() => ({}));
+      if (!createResp.ok || !createPayload?.localId) {
+        throw new Error(createPayload?.error?.message || 'Failed creating verified Firebase user.');
+      }
+      uid = createPayload.localId;
+    }
+
+    const existingProfile = await getFirestoreAdminDoc('users', uid);
+    const alreadyCompleted = Boolean(existingProfile?.profileCompleted);
+    await patchFirestoreAdminDoc('users', uid, {
+      id: uid,
+      email: cleanEmail,
+      isVerified: true,
+      hasPassword: true,
+      profileCompleted: alreadyCompleted,
+      emailOtpVerified: true,
+      emailOtpVerifiedAt: verifiedAtIso,
+      updatedAt: verifiedAtIso,
+    });
+
+    const customToken = mintFirebaseCustomToken(uid, { emailOtpVerified: true });
+    return { uid, email: cleanEmail, customToken };
+  }
+
+  // Safe OTP readiness probe (never returns secret values)
+  app.get('/api/auth/otp/status', (_req, res) => {
+    const resendConfigured = Boolean(getResendApiKey());
+    const smtpConfigured = Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS);
+    return res.json({
+      success: true,
+      configured: resendConfigured || smtpConfigured,
+      provider: resendConfigured ? 'resend' : smtpConfigured ? 'smtp' : 'unconfigured',
+      sender: RESEND_FROM,
+      firebaseAdminConfigured: Boolean(FIREBASE_SERVICE_ACCOUNT_JSON),
+      otpPolicy: {
+        digits: 6,
+        expirySeconds: Math.floor(OTP_TTL_MS / 1000),
+        resendCooldownSeconds: Math.floor(OTP_COOLDOWN_MS / 1000),
+        maxAttempts: OTP_MAX_ATTEMPTS,
+      },
+    });
+  });
+
   app.post('/api/auth/signup-otp/send', requireFirebaseAuth, async (req, res) => {
     try {
-      pruneOtpMaps();
       const uid = req.firebaseUser.uid;
       const registeredEmail = (req.firebaseUser.email || '').trim().toLowerCase();
       if (!registeredEmail) {
@@ -1515,52 +1989,41 @@ export function createApiApp() {
           success: false,
           code: 'EMAIL_OTP_NOT_CONFIGURED',
           error:
-            'Resend Email OTP delivery is not configured on the backend server. Set RESEND_API_KEY (or SMTP credentials) on your backend.',
+            'Resend Email OTP delivery is not configured on the backend server yet. Set RESEND_API_KEY securely in your backend secrets.',
         });
       }
 
-      const cooldownKey = `signup:${uid}`;
-      const now = Date.now();
-      const lastSent = otpCooldownMap.get(cooldownKey) || 0;
-      const remainingMs = OTP_COOLDOWN_MS - (now - lastSent);
-      if (remainingMs > 0) {
-        const waitSeconds = Math.ceil(remainingMs / 1000);
+      const scopeKey = `signup:${uid}`;
+      const issued = await issueServerOtpChallenge({
+        scopeKey,
+        purpose: 'signup_email_verification',
+        email: registeredEmail,
+        uid,
+      });
+
+      if (issued.cooldownBlocked) {
         return res.status(429).json({
           success: false,
           code: 'OTP_COOLDOWN',
-          retryAfterSeconds: waitSeconds,
-          error: `Please wait ${waitSeconds}s before requesting a new verification code.`,
+          retryAfterSeconds: issued.retryAfterSeconds,
+          error: `Please wait ${issued.retryAfterSeconds}s before requesting a new verification code.`,
         });
       }
 
       const displayName =
         typeof req.body?.displayName === 'string' ? req.body.displayName.trim().slice(0, 80) : '';
-      const otpCode = String(crypto.randomInt(100000, 1000000));
-      const nonce = crypto.randomBytes(16).toString('hex');
-      const expiresAt = now + OTP_TTL_MS;
-      const otpHash = hashOtpCode(uid, nonce, otpCode);
-      const challengeToken = signOtpPayload({
-        purpose: 'signup_email_verification',
-        uid,
-        email: registeredEmail,
-        nonce,
-        otpHash,
-        exp: expiresAt,
-      });
-
       const delivery = await sendSignupOtpEmail({
         toEmail: registeredEmail,
-        otpCode,
+        otpCode: issued.otpCode,
         displayName,
       });
-      otpCooldownMap.set(cooldownKey, now);
-      otpAttemptMap.set(nonce, { count: 0, exp: expiresAt });
+      await issued.commitAfterSend();
 
       return res.json({
         success: true,
         emailMasked: maskEmailAddress(registeredEmail),
-        challengeToken,
-        expiresAt,
+        challengeToken: issued.challengeToken,
+        expiresAt: issued.expiresAt,
         expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
         cooldownSeconds: Math.floor(OTP_COOLDOWN_MS / 1000),
         provider: delivery.provider,
@@ -1578,75 +2041,31 @@ export function createApiApp() {
 
   app.post('/api/auth/signup-otp/verify', requireFirebaseAuth, async (req, res) => {
     try {
-      pruneOtpMaps();
       const uid = req.firebaseUser.uid;
       const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken.trim() : '';
-      const otpInput = typeof req.body?.otp === 'string' ? req.body.otp.replace(/\s+/g, '') : String(req.body?.otp || '').trim();
+      const otpInput = req.body?.otp;
 
-      if (!challengeToken || !/^\d{6}$/.test(otpInput)) {
-        return res.status(400).json({
+      const check = await validateServerOtpChallenge({
+        challengeToken,
+        expectedPurpose: 'signup_email_verification',
+        expectedScopeKey: `signup:${uid}`,
+        otpInput,
+      });
+      if (!check.ok) {
+        return res.status(check.status).json({
           success: false,
-          error: 'Please enter the 6-digit OTP sent to your email.',
+          code: check.code,
+          remainingAttempts: check.remainingAttempts,
+          error: check.error,
         });
       }
 
-      const payload = verifySignedOtpPayload(challengeToken);
-      if (!payload || payload.purpose !== 'signup_email_verification') {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid or expired OTP session. Please tap Resend OTP Code.',
-        });
-      }
-
-      if (payload.uid !== uid) {
-        return res.status(403).json({
-          success: false,
-          error: 'This OTP challenge does not belong to the signed-in account.',
-        });
-      }
-
-      if (!payload.exp || Date.now() > Number(payload.exp)) {
-        return res.status(400).json({
-          success: false,
-          code: 'OTP_EXPIRED',
-          error: 'Verification OTP has expired. Please request a new 6-digit code.',
-        });
-      }
-
-      const attempts = otpAttemptMap.get(payload.nonce) || { count: 0, exp: Number(payload.exp) };
-      if (attempts.count >= OTP_MAX_ATTEMPTS) {
-        return res.status(429).json({
-          success: false,
-          code: 'OTP_MAX_ATTEMPTS',
-          error: 'Too many incorrect OTP attempts. Please request a fresh verification code.',
-        });
-      }
-
-      const computedHash = hashOtpCode(uid, payload.nonce, otpInput);
-      const a = Buffer.from(computedHash, 'hex');
-      const b = Buffer.from(String(payload.otpHash || ''), 'hex');
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-        attempts.count += 1;
-        otpAttemptMap.set(payload.nonce, attempts);
-        const remainingAttempts = Math.max(0, OTP_MAX_ATTEMPTS - attempts.count);
-        return res.status(400).json({
-          success: false,
-          code: 'OTP_INVALID',
-          remainingAttempts,
-          error:
-            remainingAttempts > 0
-              ? `Incorrect OTP code. ${remainingAttempts} attempt${remainingAttempts === 1 ? '' : 's'} remaining.`
-              : 'Too many incorrect OTP attempts. Please request a fresh verification code.',
-        });
-      }
-
-      otpAttemptMap.delete(payload.nonce);
-      const firebaseAuthSynced = await markFirebaseAuthEmailVerified(uid);
       const verifiedAtIso = new Date().toISOString();
+      const firebaseAuthSynced = await markFirebaseAuthEmailVerified(uid, check.payload.email, verifiedAtIso);
       const signupVerificationToken = signOtpPayload({
         purpose: 'signup_email_verified',
         uid,
-        email: payload.email,
+        email: check.payload.email,
         verifiedAt: verifiedAtIso,
         exp: Date.now() + OTP_TTL_MS,
       });
@@ -1654,7 +2073,7 @@ export function createApiApp() {
       return res.json({
         success: true,
         uid,
-        email: payload.email,
+        email: check.payload.email,
         emailVerifiedAt: verifiedAtIso,
         firebaseAuthSynced,
         signupVerificationToken,
@@ -1668,9 +2087,503 @@ export function createApiApp() {
     }
   });
 
+  // Pre-Signup Email OTP Flow (Step 1: Email -> Step 2: Verify 6-Digit OTP -> Step 3: Set Password)
+  const consumedPreSignupTickets = new Set();
+
+  app.post('/api/auth/pre-signup-otp/send', async (req, res) => {
+    try {
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_EMAIL',
+          error: 'Please enter a valid email address.',
+        });
+      }
+
+      if (!hasEmailOtpProviderConfigured()) {
+        return res.status(503).json({
+          success: false,
+          code: 'EMAIL_OTP_NOT_CONFIGURED',
+          error:
+            'Resend Email OTP delivery is not configured on the backend server yet. Set RESEND_API_KEY securely in your backend secrets.',
+        });
+      }
+
+      const scopeKey = `pre_signup:${email}`;
+      const issued = await issueServerOtpChallenge({
+        scopeKey,
+        purpose: 'pre_signup_email_verification',
+        email,
+      });
+
+      if (issued.cooldownBlocked) {
+        return res.status(429).json({
+          success: false,
+          code: 'OTP_COOLDOWN',
+          retryAfterSeconds: issued.retryAfterSeconds,
+          error: `Please wait ${issued.retryAfterSeconds}s before requesting a new verification code.`,
+        });
+      }
+
+      const delivery = await sendSignupOtpEmail({
+        toEmail: email,
+        otpCode: issued.otpCode,
+        displayName: email.split('@')[0],
+      });
+      await issued.commitAfterSend();
+
+      return res.json({
+        success: true,
+        emailMasked: maskEmailAddress(email),
+        challengeToken: issued.challengeToken,
+        expiresAt: issued.expiresAt,
+        expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        cooldownSeconds: Math.floor(OTP_COOLDOWN_MS / 1000),
+        provider: delivery.provider,
+      });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      console.error('[Pre-Signup OTP] Send failed:', error.message);
+      return res.status(status).json({
+        success: false,
+        code: error.code || undefined,
+        error: error.message || 'Failed to send sign-up verification OTP email.',
+      });
+    }
+  });
+
+  app.post('/api/auth/pre-signup-otp/verify', async (req, res) => {
+    try {
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken.trim() : '';
+      const otpInput = req.body?.otp;
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_EMAIL',
+          error: 'Please enter a valid email address.',
+        });
+      }
+
+      const check = await validateServerOtpChallenge({
+        challengeToken,
+        expectedPurpose: 'pre_signup_email_verification',
+        expectedScopeKey: `pre_signup:${email}`,
+        otpInput,
+      });
+      if (!check.ok) {
+        return res.status(check.status).json({
+          success: false,
+          code: check.code,
+          remainingAttempts: check.remainingAttempts,
+          error: check.error,
+        });
+      }
+
+      const verifiedAtIso = new Date().toISOString();
+      const ticketNonce = crypto.randomBytes(16).toString('hex');
+      const registrationTicket = signOtpPayload({
+        purpose: 'pre_signup_email_verified_ticket',
+        email,
+        ticketNonce,
+        verifiedAt: verifiedAtIso,
+        exp: Date.now() + 15 * 60 * 1000,
+      });
+
+      return res.json({
+        success: true,
+        email,
+        emailVerifiedAt: verifiedAtIso,
+        registrationTicket,
+      });
+    } catch (error) {
+      console.error('[Pre-Signup OTP] Verify failed:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to verify sign-up OTP code.',
+      });
+    }
+  });
+
+  app.post('/api/auth/pre-signup-otp/complete', async (req, res) => {
+    try {
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      const registrationTicket =
+        typeof req.body?.registrationTicket === 'string' ? req.body.registrationTicket.trim() : '';
+
+      if (!email || password.length < 6) {
+        return res.status(400).json({
+          success: false,
+          code: 'WEAK_PASSWORD',
+          error: 'Valid email and password (minimum 6 characters) are required.',
+        });
+      }
+
+      const payload = verifySignedOtpPayload(registrationTicket);
+      if (
+        !payload ||
+        payload.purpose !== 'pre_signup_email_verified_ticket' ||
+        payload.email !== email ||
+        !payload.exp ||
+        Date.now() > Number(payload.exp)
+      ) {
+        return res.status(400).json({
+          success: false,
+          code: 'TICKET_EXPIRED',
+          error: 'Your email verification session expired. Please verify your 6-digit OTP again.',
+        });
+      }
+
+      if (consumedPreSignupTickets.has(payload.ticketNonce)) {
+        return res.status(400).json({
+          success: false,
+          code: 'TICKET_CONSUMED',
+          error: 'This email verification ticket has already been used.',
+        });
+      }
+      consumedPreSignupTickets.add(payload.ticketNonce);
+
+      const verifiedAtIso = payload.verifiedAt || new Date().toISOString();
+      if (FIREBASE_SERVICE_ACCOUNT_JSON) {
+        const provisioned = await upsertVerifiedPasswordUserOnBackend(email, password, verifiedAtIso);
+        if (provisioned?.uid) {
+          return res.json({
+            success: true,
+            uid: provisioned.uid,
+            email: provisioned.email,
+            emailVerifiedAt: verifiedAtIso,
+            customToken: provisioned.customToken,
+          });
+        }
+      }
+
+      return res.json({
+        success: true,
+        email,
+        emailVerifiedAt: verifiedAtIso,
+        clientCompleteFallback: true,
+      });
+    } catch (error) {
+      console.error('[Pre-Signup OTP] Complete failed:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to complete password setup.',
+      });
+    }
+  });
+
+  // Login Email OTP Flow (6-digit passwordless login -> Firebase Auth customToken + Firestore user sync)
+  app.post('/api/auth/login-otp/send', async (req, res) => {
+    try {
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_EMAIL',
+          error: 'Please enter your registered email address.',
+        });
+      }
+
+      if (!hasEmailOtpProviderConfigured()) {
+        return res.status(503).json({
+          success: false,
+          code: 'EMAIL_OTP_NOT_CONFIGURED',
+          error:
+            'Resend Email OTP delivery is not configured on the backend server yet. Set RESEND_API_KEY securely in your backend secrets.',
+        });
+      }
+
+      const existingUser = await lookupFirebaseUserByEmailAdmin(email);
+      if (!existingUser) {
+        return res.status(404).json({
+          success: false,
+          code: 'ACCOUNT_NOT_FOUND',
+          error: 'No Alpha Mate account was found with this email. Please tap Create Account to sign up first.',
+        });
+      }
+      if (existingUser.disabled) {
+        return res.status(403).json({
+          success: false,
+          code: 'ACCOUNT_DISABLED',
+          error: 'This account has been disabled. Please contact support@alphamate.app.',
+        });
+      }
+
+      const scopeKey = `login:${email}`;
+      const issued = await issueServerOtpChallenge({
+        scopeKey,
+        purpose: 'login_email_otp',
+        email,
+        uid: existingUser.uid || undefined,
+      });
+
+      if (issued.cooldownBlocked) {
+        return res.status(429).json({
+          success: false,
+          code: 'OTP_COOLDOWN',
+          retryAfterSeconds: issued.retryAfterSeconds,
+          error: `Please wait ${issued.retryAfterSeconds}s before requesting a new sign-in code.`,
+        });
+      }
+
+      const delivery = await sendLoginOtpEmail({
+        toEmail: email,
+        otpCode: issued.otpCode,
+        displayName: existingUser.displayName || email.split('@')[0],
+      });
+      await issued.commitAfterSend();
+
+      return res.json({
+        success: true,
+        emailMasked: maskEmailAddress(email),
+        challengeToken: issued.challengeToken,
+        expiresAt: issued.expiresAt,
+        expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
+        cooldownSeconds: Math.floor(OTP_COOLDOWN_MS / 1000),
+        provider: delivery.provider,
+      });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      console.error('[Login OTP] Send failed:', error.message);
+      return res.status(status).json({
+        success: false,
+        code: error.code || undefined,
+        error: error.message || 'Failed to send sign-in OTP email.',
+      });
+    }
+  });
+
+  app.post('/api/auth/login-otp/verify', async (req, res) => {
+    try {
+      const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : '';
+      const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken.trim() : '';
+      const otpInput = req.body?.otp;
+
+      if (!email) {
+        return res.status(400).json({
+          success: false,
+          code: 'INVALID_EMAIL',
+          error: 'Please enter your registered email address.',
+        });
+      }
+
+      const check = await validateServerOtpChallenge({
+        challengeToken,
+        expectedPurpose: 'login_email_otp',
+        expectedScopeKey: `login:${email}`,
+        otpInput,
+      });
+      if (!check.ok) {
+        return res.status(check.status).json({
+          success: false,
+          code: check.code,
+          remainingAttempts: check.remainingAttempts,
+          error: check.error,
+        });
+      }
+
+      if (!FIREBASE_SERVICE_ACCOUNT_JSON) {
+        return res.status(503).json({
+          success: false,
+          code: 'FIREBASE_SERVICE_ACCOUNT_REQUIRED',
+          error:
+            'OTP code matched, but FIREBASE_SERVICE_ACCOUNT_JSON is required on the backend to mint a passwordless custom token. Please sign in with Password or Continue with Google.',
+        });
+      }
+
+      let uid = check.payload.uid || '';
+      if (!uid) {
+        const lookedUp = await lookupFirebaseUserByEmailAdmin(email);
+        uid = lookedUp?.uid || '';
+      }
+      if (!uid) {
+        return res.status(404).json({
+          success: false,
+          code: 'ACCOUNT_NOT_FOUND',
+          error: 'Account record could not be located in Firebase Authentication.',
+        });
+      }
+
+      const verifiedAtIso = new Date().toISOString();
+      await markFirebaseAuthEmailVerified(uid, email, verifiedAtIso);
+      const customToken = mintFirebaseCustomToken(uid, { emailOtpVerified: true });
+
+      return res.json({
+        success: true,
+        uid,
+        email,
+        emailVerifiedAt: verifiedAtIso,
+        customToken,
+      });
+    } catch (error) {
+      console.error('[Login OTP] Verify failed:', error.message);
+      return res.status(500).json({
+        success: false,
+        error: error.message || 'Failed to verify sign-in OTP code.',
+      });
+    }
+  });
+
+  // Server-side password attach for Google-authenticated accounts (same UID)
+  app.post('/api/auth/set-password', requireFirebaseAuth, async (req, res) => {
+    try {
+      const uid = req.firebaseUser.uid;
+      const password = typeof req.body?.password === 'string' ? req.body.password : '';
+      if (password.length < 6 || password.length > 128) {
+        return res.status(400).json({
+          success: false,
+          code: 'WEAK_PASSWORD',
+          error: 'Password must be between 6 and 128 characters.',
+        });
+      }
+      if (!FIREBASE_SERVICE_ACCOUNT_JSON) {
+        return res.status(503).json({
+          success: false,
+          code: 'FIREBASE_SERVICE_ACCOUNT_REQUIRED',
+          error: 'FIREBASE_SERVICE_ACCOUNT_JSON is not configured on this backend.',
+        });
+      }
+      const accessToken = await getIdentityToolkitAdminAccessToken();
+      if (!accessToken) {
+        return res.status(502).json({ success: false, error: 'Could not authenticate with Firebase Identity Toolkit.' });
+      }
+      const updateResp = await fetchWithTimeout(
+        `https://identitytoolkit.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/accounts:update`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            localId: uid,
+            password,
+            emailVerified: true,
+          }),
+        },
+        6000
+      );
+      if (!updateResp.ok) {
+        const errData = await updateResp.json().catch(() => ({}));
+        return res.status(400).json({
+          success: false,
+          error: errData?.error?.message || 'Unable to set password on Firebase account.',
+        });
+      }
+      const nowIso = new Date().toISOString();
+      await patchFirestoreAdminDoc('users', uid, {
+        id: uid,
+        hasPassword: true,
+        isVerified: true,
+        updatedAt: nowIso,
+      });
+      return res.json({ success: true, uid });
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message || 'Failed to set account password.' });
+    }
+  });
+
+  // Server-side 90-day multi-account device switch endpoints on Railway
+  app.post('/api/auth/device-switch/register', requireFirebaseAuth, async (req, res) => {
+    try {
+      if (!FIREBASE_SERVICE_ACCOUNT_JSON) {
+        return res.status(503).json({ success: false, code: 'FIREBASE_SERVICE_ACCOUNT_REQUIRED' });
+      }
+      const uid = req.firebaseUser.uid;
+      const deviceFingerprint = typeof req.body?.deviceFingerprint === 'string' ? req.body.deviceFingerprint.trim() : '';
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const sessionId = `dsw_${crypto.randomBytes(16).toString('hex')}`;
+      const switchTicket = crypto.randomBytes(24).toString('hex');
+      const salt = crypto.randomBytes(16).toString('hex');
+      const tokenHash = crypto
+        .createHmac('sha256', salt)
+        .update(`${sessionId}:${uid}:${deviceFingerprint}:${switchTicket}`)
+        .digest('hex');
+
+      const saved = await patchFirestoreAdminDoc('deviceSwitchSessions', sessionId, {
+        sessionId,
+        uid,
+        salt,
+        tokenHash,
+        deviceFingerprintHash: crypto.createHash('sha256').update(deviceFingerprint || 'default').digest('hex'),
+        createdAtMs: nowMs,
+        expiresAtMs: nowMs + DEVICE_SWITCH_TTL_MS,
+        lastUsedAtMs: nowMs,
+        updatedAt: nowIso,
+      });
+      if (!saved) {
+        return res.status(502).json({ success: false, error: 'Unable to persist device switch session.' });
+      }
+      return res.json({
+        success: true,
+        uid,
+        sessionId,
+        switchTicket,
+        switchToken: switchTicket,
+      });
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message || 'Failed registering device switch session.' });
+    }
+  });
+
+  app.post('/api/auth/device-switch/redeem', async (req, res) => {
+    try {
+      if (!FIREBASE_SERVICE_ACCOUNT_JSON) {
+        return res.status(503).json({ success: false, code: 'FIREBASE_SERVICE_ACCOUNT_REQUIRED' });
+      }
+      const sessionId = typeof req.body?.sessionId === 'string' ? req.body.sessionId.trim() : '';
+      const switchTicket =
+        typeof req.body?.switchTicket === 'string'
+          ? req.body.switchTicket.trim()
+          : typeof req.body?.switchToken === 'string'
+          ? req.body.switchToken.trim()
+          : '';
+      const deviceFingerprint = typeof req.body?.deviceFingerprint === 'string' ? req.body.deviceFingerprint.trim() : '';
+
+      if (!sessionId || !switchTicket || !/^dsw_[a-f0-9]{32}$/.test(sessionId)) {
+        return res.status(400).json({ success: false, error: 'Invalid account switch session.' });
+      }
+
+      const record = await getFirestoreAdminDoc('deviceSwitchSessions', sessionId);
+      if (!record || !record.uid || !record.salt || !record.tokenHash) {
+        return res.status(404).json({ success: false, error: 'Saved session expired. Please sign in once again.' });
+      }
+
+      const nowMs = Date.now();
+      if (nowMs > Number(record.expiresAtMs || 0)) {
+        await deleteFirestoreAdminDoc('deviceSwitchSessions', sessionId);
+        return res.status(401).json({ success: false, error: 'Saved session expired. Please sign in once again.' });
+      }
+
+      const candidateHash = crypto
+        .createHmac('sha256', record.salt)
+        .update(`${sessionId}:${record.uid}:${deviceFingerprint}:${switchTicket}`)
+        .digest('hex');
+      const a = Buffer.from(candidateHash, 'hex');
+      const b = Buffer.from(String(record.tokenHash), 'hex');
+      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+        return res.status(401).json({ success: false, error: 'Invalid switch credentials.' });
+      }
+
+      await patchFirestoreAdminDoc('deviceSwitchSessions', sessionId, {
+        lastUsedAtMs: nowMs,
+        expiresAtMs: nowMs + DEVICE_SWITCH_TTL_MS,
+        updatedAt: new Date(nowMs).toISOString(),
+      });
+
+      const customToken = mintFirebaseCustomToken(record.uid, { emailOtpVerified: true });
+      return res.json({ success: true, uid: record.uid, customToken });
+    } catch (error) {
+      return res.status(500).json({ success: false, error: error.message || 'Could not switch account.' });
+    }
+  });
+
   app.post('/api/account/deletion-otp/send', requireFirebaseAuth, async (req, res) => {
     try {
-      pruneOtpMaps();
       const uid = req.firebaseUser.uid;
       const registeredEmail = (req.firebaseUser.email || '').trim().toLowerCase();
       if (!registeredEmail) {
@@ -1693,45 +2606,35 @@ export function createApiApp() {
           success: false,
           code: 'EMAIL_OTP_NOT_CONFIGURED',
           error:
-            'Email OTP delivery is not configured on the backend server. Configure RESEND_API_KEY or SMTP_USER & SMTP_PASS on Railway.',
+            'Resend Email OTP delivery is not configured on the backend server yet. Set RESEND_API_KEY securely in your backend secrets.',
         });
       }
 
-      const now = Date.now();
-      const lastSent = otpCooldownMap.get(uid) || 0;
-      const remainingMs = OTP_COOLDOWN_MS - (now - lastSent);
-      if (remainingMs > 0) {
-        const waitSeconds = Math.ceil(remainingMs / 1000);
+      const scopeKey = `deletion:${uid}`;
+      const issued = await issueServerOtpChallenge({
+        scopeKey,
+        purpose: 'account_permanent_deletion',
+        email: registeredEmail,
+        uid,
+      });
+
+      if (issued.cooldownBlocked) {
         return res.status(429).json({
           success: false,
           code: 'OTP_COOLDOWN',
-          retryAfterSeconds: waitSeconds,
-          error: `Please wait ${waitSeconds}s before requesting a new verification code.`,
+          retryAfterSeconds: issued.retryAfterSeconds,
+          error: `Please wait ${issued.retryAfterSeconds}s before requesting a new verification code.`,
         });
       }
 
-      const otpCode = String(crypto.randomInt(100000, 1000000));
-      const nonce = crypto.randomBytes(16).toString('hex');
-      const expiresAt = now + OTP_TTL_MS;
-      const otpHash = hashOtpCode(uid, nonce, otpCode);
-      const challengeToken = signOtpPayload({
-        purpose: 'account_permanent_deletion',
-        uid,
-        email: registeredEmail,
-        nonce,
-        otpHash,
-        exp: expiresAt,
-      });
-
-      const delivery = await sendDeletionOtpEmail({ toEmail: registeredEmail, otpCode });
-      otpCooldownMap.set(uid, now);
-      otpAttemptMap.set(nonce, { count: 0, exp: expiresAt });
+      const delivery = await sendDeletionOtpEmail({ toEmail: registeredEmail, otpCode: issued.otpCode });
+      await issued.commitAfterSend();
 
       return res.json({
         success: true,
         emailMasked: maskEmailAddress(registeredEmail),
-        challengeToken,
-        expiresAt,
+        challengeToken: issued.challengeToken,
+        expiresAt: issued.expiresAt,
         expiresInSeconds: Math.floor(OTP_TTL_MS / 1000),
         cooldownSeconds: Math.floor(OTP_COOLDOWN_MS / 1000),
         provider: delivery.provider,
@@ -1749,74 +2652,30 @@ export function createApiApp() {
 
   app.post('/api/account/deletion-otp/verify', requireFirebaseAuth, async (req, res) => {
     try {
-      pruneOtpMaps();
       const uid = req.firebaseUser.uid;
       const challengeToken = typeof req.body?.challengeToken === 'string' ? req.body.challengeToken.trim() : '';
-      const otpInput = typeof req.body?.otp === 'string' ? req.body.otp.replace(/\s+/g, '') : String(req.body?.otp || '').trim();
+      const otpInput = req.body?.otp;
 
-      if (!challengeToken || !/^\d{6}$/.test(otpInput)) {
-        return res.status(400).json({
+      const check = await validateServerOtpChallenge({
+        challengeToken,
+        expectedPurpose: 'account_permanent_deletion',
+        expectedScopeKey: `deletion:${uid}`,
+        otpInput,
+      });
+      if (!check.ok) {
+        return res.status(check.status).json({
           success: false,
-          error: 'Please enter the 6-digit OTP sent to your email.',
+          code: check.code,
+          remainingAttempts: check.remainingAttempts,
+          error: check.error,
         });
       }
 
-      const payload = verifySignedOtpPayload(challengeToken);
-      if (!payload || payload.purpose !== 'account_permanent_deletion') {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid or tampered OTP session. Please request a new code.',
-        });
-      }
-
-      if (payload.uid !== uid) {
-        return res.status(403).json({
-          success: false,
-          error: 'This OTP challenge does not belong to the signed-in account.',
-        });
-      }
-
-      if (!payload.exp || Date.now() > Number(payload.exp)) {
-        return res.status(400).json({
-          success: false,
-          code: 'OTP_EXPIRED',
-          error: 'Verification OTP has expired. Please request a new code.',
-        });
-      }
-
-      const attempts = otpAttemptMap.get(payload.nonce) || { count: 0, exp: Number(payload.exp) };
-      if (attempts.count >= OTP_MAX_ATTEMPTS) {
-        return res.status(429).json({
-          success: false,
-          code: 'OTP_MAX_ATTEMPTS',
-          error: 'Too many incorrect OTP attempts. Please request a fresh verification code.',
-        });
-      }
-
-      const computedHash = hashOtpCode(uid, payload.nonce, otpInput);
-      const a = Buffer.from(computedHash, 'hex');
-      const b = Buffer.from(String(payload.otpHash || ''), 'hex');
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-        attempts.count += 1;
-        otpAttemptMap.set(payload.nonce, attempts);
-        const remainingAttempts = Math.max(0, OTP_MAX_ATTEMPTS - attempts.count);
-        return res.status(400).json({
-          success: false,
-          code: 'OTP_INVALID',
-          remainingAttempts,
-          error:
-            remainingAttempts > 0
-              ? `Incorrect OTP code. ${remainingAttempts} attempt${remainingAttempts === 1 ? '' : 's'} remaining.`
-              : 'Too many incorrect OTP attempts. Please request a fresh verification code.',
-        });
-      }
-
-      otpAttemptMap.delete(payload.nonce);
       const verifiedAtIso = new Date().toISOString();
       const deletionVerificationToken = signOtpPayload({
         purpose: 'account_deletion_verified',
         uid,
-        email: payload.email,
+        email: check.payload.email,
         verifiedAt: verifiedAtIso,
         exp: Date.now() + OTP_TTL_MS,
       });
@@ -1824,7 +2683,7 @@ export function createApiApp() {
       return res.json({
         success: true,
         uid,
-        email: payload.email,
+        email: check.payload.email,
         otpVerifiedAt: verifiedAtIso,
         deletionVerificationToken,
       });

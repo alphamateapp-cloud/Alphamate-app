@@ -9,10 +9,20 @@ Deploy this project using the existing `npm start` command. The Express server e
 - `GET /api/webrtc/turn-credentials` – issues short-lived Cloudflare Realtime TURN ICE servers via `/v1/turn/keys/{id}/credentials/generate-ice-servers`.
 - `POST /api/sfu/sessions`, `POST /api/sfu/sessions/:sessionId/tracks`, `PUT /api/sfu/sessions/:sessionId/renegotiate`, `PUT /api/sfu/sessions/:sessionId/tracks/close`, `GET /api/sfu/sessions/:sessionId`, `DELETE /api/sfu/sessions/:sessionId` – Cloudflare Realtime SFU gateway.
 - `POST /api/sfu/party/rooms`, `POST /api/sfu/party/rooms/:roomId/token`, `POST /api/sfu/party/rooms/:roomId/leave` – authenticated Party Room SFU session & role token management.
+- `GET /api/auth/otp/status` – safe readiness check for Resend Email OTP (`configured`, `provider`, `sender`, `otpPolicy`; never exposes secrets).
+- `POST /api/auth/pre-signup-otp/send`, `POST /api/auth/pre-signup-otp/verify`, `POST /api/auth/pre-signup-otp/complete` – 3-step Registration Email OTP (6-digit code, 10m expiry, 60s cooldown, max 5 attempts, Firebase Auth + Firestore user sync).
+- `POST /api/auth/signup-otp/send`, `POST /api/auth/signup-otp/verify` – authenticated account Email OTP verification.
+- `POST /api/auth/login-otp/send`, `POST /api/auth/login-otp/verify` – 6-digit Login Email OTP with Firebase Auth `customToken` minting and Firestore user profile sync.
+- `POST /api/account/deletion-otp/send`, `POST /api/account/deletion-otp/verify` – 15-day account deletion Email OTP verification.
 
 ## Railway Variables (private)
 
+- `RESEND_API_KEY` – **Required for Email OTP.** Resend API key with Sending Access for verified domain `alphamate.app`. Store only in Railway Variables (never in GitHub, frontend `VITE_*`, or logs).
+- `RESEND_FROM_EMAIL` – `Alpha Mate <no-reply@alphamate.app>` (optional; defaults to `Alpha Mate <no-reply@alphamate.app>`).
+- `FIREBASE_SERVICE_ACCOUNT_JSON` – **Required for Login OTP `customToken` minting, Firestore `emailOtpChallenges` persistence, and Admin API.** Complete service-account JSON for Firebase project `gen-lang-client-0468444352`.
 - `FIREBASE_API_KEY` – Firebase Web API key for validating Firebase ID tokens through Identity Toolkit.
+- `FIREBASE_PROJECT_ID` – `gen-lang-client-0468444352`.
+- `FIREBASE_DATABASE_ID` – `ai-studio-alphamatelivepar-88a3637b-56a3-47f2-a3ab-b67bf1702cff`.
 - `CLOUDFLARE_TURN_TOKEN_ID` (or `CLOUDFLARE_TURN_KEY_ID`) – Cloudflare Realtime TURN Token ID.
 - `CLOUDFLARE_TURN_API_TOKEN` – Cloudflare API token permitted to generate TURN credentials. Keep secret.
 - `TURN_CREDENTIAL_TTL` – optional integer seconds (default 3600; min 300, max 86400).

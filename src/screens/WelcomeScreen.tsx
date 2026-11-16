@@ -21,14 +21,19 @@ export const WelcomeScreen: React.FC = () => {
     firebaseUser,
     firebaseAuthLoading,
     isEmailVerified,
+    savedAccounts,
+    maxSavedAccounts,
+    isAddingAccount,
+    switchAccount,
   } = useApp();
+  const [switchingUid, setSwitchingUid] = React.useState<string | null>(null);
 
   // If user already has an active, verified Firebase session on this device, enter directly
   React.useEffect(() => {
-    if (!firebaseAuthLoading && isAuthenticated && firebaseUser && isEmailVerified) {
+    if (!firebaseAuthLoading && isAuthenticated && firebaseUser && isEmailVerified && !isAddingAccount) {
       setCurrentScreen('home');
     }
-  }, [firebaseAuthLoading, isAuthenticated, firebaseUser, isEmailVerified, setCurrentScreen]);
+  }, [firebaseAuthLoading, isAuthenticated, firebaseUser, isEmailVerified, isAddingAccount, setCurrentScreen]);
 
   return (
     <div className="relative w-full h-full min-h-[660px] flex flex-col justify-between p-4 sm:p-5 overflow-y-auto scrollbar-none bg-[#09070F] select-none text-white">
@@ -280,6 +285,50 @@ export const WelcomeScreen: React.FC = () => {
       {/* 6. GET STARTED BUTTON & AUTH NAVIGATION */}
       {/* ============================================================ */}
       <div className="relative z-10 pb-1 flex flex-col items-center gap-2 w-full max-w-sm mx-auto">
+        {savedAccounts.length > 0 && (
+          <div className="w-full p-2.5 rounded-2xl bg-[#140D27]/95 border border-[#A855F7]/35 mb-1">
+            <div className="flex items-center justify-between mb-1.5 px-1">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
+                Saved Accounts ({savedAccounts.length}/{maxSavedAccounts})
+              </span>
+              <span className="text-[10px] text-emerald-400 font-semibold">Tap to Enter</span>
+            </div>
+            <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+              {savedAccounts.map((acc) => (
+                <button
+                  key={acc.uid}
+                  type="button"
+                  disabled={Boolean(switchingUid)}
+                  onClick={async () => {
+                    setSwitchingUid(acc.uid);
+                    await switchAccount(acc.uid);
+                    setSwitchingUid(null);
+                  }}
+                  className="min-h-[44px] px-2.5 py-1 rounded-xl bg-[#1F143A] hover:bg-[#2A1B4E] border border-white/10 flex items-center gap-2 shrink-0 cursor-pointer"
+                >
+                  <img
+                    src={
+                      acc.avatar ||
+                      'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80'
+                    }
+                    alt={acc.displayName}
+                    referrerPolicy="no-referrer"
+                    className="w-7 h-7 rounded-full object-cover"
+                  />
+                  <div className="text-left">
+                    <span className="text-[11px] font-bold text-white block leading-tight max-w-[92px] truncate">
+                      {acc.displayName}
+                    </span>
+                    <span className="text-[9px] text-zinc-400 block leading-tight">
+                      {switchingUid === acc.uid ? 'Entering...' : `@${acc.username}`}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Large Premium Gradient Pill Button */}
         <button
           onClick={() => setCurrentScreen('register')}

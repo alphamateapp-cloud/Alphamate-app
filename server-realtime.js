@@ -3,9 +3,14 @@ import { WebSocketServer } from 'ws';
 const LIVE_TTL_MS = 120_000;
 const PARTY_TTL_MS = 12 * 60 * 60_000;
 const HEARTBEAT_INTERVAL_MS = 25_000;
+const HOST_DISCONNECT_LIVE_GRACE_MS = 6_000;
 
 function isValidId(value) {
   return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
+}
+
+function isLegacyErrorId(value) {
+  return typeof value === 'string' && (/^party_\d+$/.test(value) || /^live_my_\d+$/.test(value));
 }
 
 function safeJsonSend(ws, payload) {
@@ -43,6 +48,46 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
   const activePartyRooms = new Map(); // roomId -> { data, updatedAtMs }
   const rooms = new Map(); // `${roomType}:${roomId}` -> { viewers: Map<uid, { profile, sockets: Set<ws> }>, heartCount: number }
   const authenticatedClients = new Set();
+  const pendingLiveHostDisconnectTimers = new Map(); // streamId -> Timeout
+
+  function clearHostDisconnectTimer(streamId) {
+    const t = pendingLiveHostDisconnectTimers.get(streamId);
+    if (t) {
+      clearTimeout(t);
+      pendingLiveHostDisconnectTimers.delete(streamId);
+    }
+  }
+
+  function hasAnyOpenSocketForUid(uid) {
+    if (!uid) return false;
+    for (const client of authenticatedClients) {
+      if (client.readyState === 1 && client.uid === uid) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function removeOtherLiveStreamsForHost(hostUid, keepStreamId) {
+    if (!hostUid) return;
+    for (const [existingId, entry] of Array.from(activeLiveStreams.entries())) {
+      if (existingId !== keepStreamId && entry.data?.host?.id === hostUid) {
+        clearHostDisconnectTimer(existingId);
+        activeLiveStreams.delete(existingId);
+        broadcastAll({ type: 'live:remove', streamId: existingId });
+      }
+    }
+  }
+
+  function removeOtherPartyRoomsForHost(hostUid, keepRoomId) {
+    if (!hostUid) return;
+    for (const [existingId, entry] of Array.from(activePartyRooms.entries())) {
+      if (existingId !== keepRoomId && entry.data?.host?.id === hostUid) {
+        activePartyRooms.delete(existingId);
+        broadcastAll({ type: 'party:remove', roomId: existingId });
+      }
+    }
+  }
 
   function getOrCreateRoom(roomKey) {
     let room = rooms.get(roomKey);
@@ -89,16 +134,42 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     }
   }
 
+  function syncPartyDiscoveryPresence(roomId, viewers, departedUid = null) {
+    const entry = activePartyRooms.get(roomId);
+    if (!entry || !entry.data) return;
+    const now = Date.now();
+    const hostId = entry.data.host?.id || '';
+    const isHostPresent = Boolean(hostId && viewers.some((v) => v.id === hostId));
+    let nextSeats = Array.isArray(entry.data.seats) ? entry.data.seats : [];
+    if (departedUid && nextSeats.some((s) => s?.user?.id === departedUid)) {
+      nextSeats = nextSeats.map((s) =>
+        s?.user?.id === departedUid
+          ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
+          : s
+      );
+    }
+    const updated = {
+      ...entry.data,
+      seats: nextSeats,
+      activeViewers: viewers.length,
+      isHostPresent,
+      lastSeenAtMs: now,
+    };
+    activePartyRooms.set(roomId, { data: updated, updatedAtMs: now });
+    broadcastAll({ type: 'party:upsert', room: updated });
+  }
+
   function pruneExpiredDiscovery() {
     const now = Date.now();
     for (const [streamId, entry] of activeLiveStreams.entries()) {
-      if (now - entry.updatedAtMs > LIVE_TTL_MS) {
+      if (isLegacyErrorId(streamId) || now - entry.updatedAtMs > LIVE_TTL_MS) {
+        clearHostDisconnectTimer(streamId);
         activeLiveStreams.delete(streamId);
         broadcastAll({ type: 'live:remove', streamId });
       }
     }
     for (const [roomId, entry] of activePartyRooms.entries()) {
-      if (now - entry.updatedAtMs > PARTY_TTL_MS) {
+      if (isLegacyErrorId(roomId) || now - entry.updatedAtMs > PARTY_TTL_MS) {
         activePartyRooms.delete(roomId);
         broadcastAll({ type: 'party:remove', roomId });
       }
@@ -113,7 +184,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     };
   }
 
-  function removeSocketFromRoom(ws, roomKey) {
+  function removeSocketFromRoom(ws, roomKey, isExplicitLeave = false) {
     if (!ws.joinedRooms?.has(roomKey)) return;
     ws.joinedRooms.delete(roomKey);
     const room = rooms.get(roomKey);
@@ -127,7 +198,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         room.viewers.delete(uid);
         const [roomType, roomId] = roomKey.split(':');
         const viewers = getRoomViewerList(roomKey);
-        const count = Math.max(1, viewers.length);
+        const count = viewers.length;
         broadcastToRoom(roomKey, {
           type: 'room:viewers',
           roomType,
@@ -135,6 +206,31 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
           count,
           viewers,
         });
+
+        if (roomType === 'party') {
+          syncPartyDiscoveryPresence(roomId, viewers, uid);
+        } else if (roomType === 'live') {
+          const liveEntry = activeLiveStreams.get(roomId);
+          if (liveEntry && liveEntry.data?.host?.id === uid) {
+            if (isExplicitLeave) {
+              clearHostDisconnectTimer(roomId);
+              activeLiveStreams.delete(roomId);
+              broadcastAll({ type: 'live:remove', streamId: roomId });
+            } else {
+              clearHostDisconnectTimer(roomId);
+              const timer = setTimeout(() => {
+                pendingLiveHostDisconnectTimers.delete(roomId);
+                const currentRoom = rooms.get(roomKey);
+                const hostRejoined = Boolean(currentRoom?.viewers?.has(uid)) || hasAnyOpenSocketForUid(uid);
+                if (!hostRejoined && activeLiveStreams.has(roomId)) {
+                  activeLiveStreams.delete(roomId);
+                  broadcastAll({ type: 'live:remove', streamId: roomId });
+                }
+              }, HOST_DISCONNECT_LIVE_GRACE_MS);
+              pendingLiveHostDisconnectTimers.set(roomId, timer);
+            }
+          }
+        }
       }
     }
 
@@ -154,10 +250,16 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
       return activePartyRooms.get(roomId)?.data || null;
     },
     upsertPartyRoom(room) {
-      if (!room || !isValidId(room.id)) return;
+      if (!room || !isValidId(room.id) || isLegacyErrorId(room.id)) return;
       const now = Date.now();
+      const hostId = room.host?.id || activePartyRooms.get(room.id)?.data?.host?.id;
+      if (hostId) {
+        removeOtherPartyRoomsForHost(hostId, room.id);
+      }
       const existing = activePartyRooms.get(room.id)?.data;
-      const merged = existing ? { ...existing, ...room, lastSeenAtMs: now } : { ...room, lastSeenAtMs: now };
+      const merged = existing
+        ? { ...existing, ...room, seats: Array.isArray(room.seats) ? room.seats : existing.seats || [], lastSeenAtMs: now }
+        : { ...room, seats: Array.isArray(room.seats) ? room.seats : [], lastSeenAtMs: now };
       activePartyRooms.set(room.id, { data: merged, updatedAtMs: now });
       broadcastAll({ type: 'party:upsert', room: merged });
     },
@@ -238,11 +340,13 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
 
       case 'live:upsert': {
         const stream = msg.stream;
-        if (!stream || !isValidId(stream.id)) return;
+        if (!stream || !isValidId(stream.id) || isLegacyErrorId(stream.id)) return;
         const existing = activeLiveStreams.get(stream.id)?.data;
         const hostId = stream.host?.id || existing?.host?.id;
         if (hostId !== uid) return;
         if (!stream.sfuSessionId || stream.isActive === false) return;
+        clearHostDisconnectTimer(stream.id);
+        removeOtherLiveStreamsForHost(uid, stream.id);
         const now = Date.now();
         const normalized = {
           ...(existing || {}),
@@ -262,6 +366,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         if (!isValidId(streamId)) return;
         const existing = activeLiveStreams.get(streamId)?.data;
         if (existing && existing.host?.id && existing.host.id !== uid) return;
+        clearHostDisconnectTimer(streamId);
         activeLiveStreams.delete(streamId);
         broadcastAll({ type: 'live:remove', streamId });
         break;
@@ -269,23 +374,50 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
 
       case 'party:upsert': {
         const room = msg.room;
-        if (!room || !isValidId(room.id) || room.isActive === false) return;
+        if (!room || !isValidId(room.id) || isLegacyErrorId(room.id) || room.isActive === false) return;
         const existing = activePartyRooms.get(room.id)?.data;
         const now = Date.now();
+        const liveViewers = getRoomViewerList(`party:${room.id}`);
         if (!existing) {
           if (room.host?.id !== uid) return;
-          const normalized = { ...room, isActive: true, lastSeenAtMs: now };
+          removeOtherPartyRoomsForHost(uid, room.id);
+          const normalized = {
+            ...room,
+            seats: Array.isArray(room.seats) ? room.seats : [],
+            isActive: true,
+            isHostPresent: room.isHostPresent !== false,
+            activeViewers:
+              typeof room.activeViewers === 'number'
+                ? Math.max(0, Math.floor(room.activeViewers))
+                : liveViewers.length,
+            lastSeenAtMs: now,
+          };
           activePartyRooms.set(room.id, { data: normalized, updatedAtMs: now });
           broadcastAll({ type: 'party:upsert', room: normalized });
         } else if (existing.host?.id === uid) {
-          const normalized = { ...existing, ...room, isActive: true, lastSeenAtMs: now };
+          removeOtherPartyRoomsForHost(uid, room.id);
+          const normalized = {
+            ...existing,
+            ...room,
+            seats: Array.isArray(room.seats) ? room.seats : existing.seats || [],
+            isActive: true,
+            isHostPresent:
+              typeof room.isHostPresent === 'boolean' ? room.isHostPresent : existing.isHostPresent !== false,
+            activeViewers:
+              typeof room.activeViewers === 'number'
+                ? Math.max(0, Math.floor(room.activeViewers))
+                : liveViewers.length,
+            lastSeenAtMs: now,
+          };
           activePartyRooms.set(room.id, { data: normalized, updatedAtMs: now });
           broadcastAll({ type: 'party:upsert', room: normalized });
         } else {
           // Non-host seated participant or viewer may sync bounded live fields (seats / activeViewers)
           const partial = { ...existing, lastSeenAtMs: now };
           if (Array.isArray(room.seats)) partial.seats = room.seats;
-          if (typeof room.activeViewers === 'number') partial.activeViewers = room.activeViewers;
+          if (typeof room.activeViewers === 'number') {
+            partial.activeViewers = Math.max(0, Math.floor(room.activeViewers));
+          }
           activePartyRooms.set(room.id, { data: partial, updatedAtMs: now });
           broadcastAll({ type: 'party:upsert', room: partial });
         }
@@ -323,8 +455,12 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
           viewerEntry.sockets.add(ws);
         }
 
+        if (roomType === 'live') {
+          clearHostDisconnectTimer(roomId);
+        }
+
         const viewers = getRoomViewerList(roomKey);
-        const count = Math.max(1, viewers.length);
+        const count = viewers.length;
 
         safeJsonSend(ws, {
           type: 'room:state_init',
@@ -342,6 +478,10 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
           count,
           viewers,
         });
+
+        if (roomType === 'party') {
+          syncPartyDiscoveryPresence(roomId, viewers);
+        }
         break;
       }
 
@@ -349,7 +489,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         const roomType = msg.roomType === 'live' || msg.roomType === 'party' ? msg.roomType : null;
         const roomId = msg.roomId;
         if (!roomType || !isValidId(roomId)) return;
-        removeSocketFromRoom(ws, `${roomType}:${roomId}`);
+        removeSocketFromRoom(ws, `${roomType}:${roomId}`, true);
         break;
       }
 
@@ -414,7 +554,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
       authenticatedClients.delete(ws);
       const joined = Array.from(ws.joinedRooms || []);
       for (const roomKey of joined) {
-        removeSocketFromRoom(ws, roomKey);
+        removeSocketFromRoom(ws, roomKey, false);
       }
     });
 

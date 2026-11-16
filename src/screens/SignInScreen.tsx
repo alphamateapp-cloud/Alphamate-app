@@ -14,6 +14,7 @@ import {
   Sparkles,
   ChevronRight,
   CheckCircle2,
+  Users,
 } from 'lucide-react';
 
 export const SignInScreen: React.FC = () => {
@@ -28,9 +29,17 @@ export const SignInScreen: React.FC = () => {
     loginWithFirebaseGoogle,
     sendSignupEmailOtp,
     verifySignupEmailOtp,
+    sendLoginEmailOtp,
+    verifyLoginEmailOtp,
     legalConsent,
     setLegalConsent,
+    savedAccounts,
+    maxSavedAccounts,
+    isAddingAccount,
+    cancelAddAccountFlow,
+    switchAccount,
   } = useApp();
+  const [switchingUid, setSwitchingUid] = useState<string | null>(null);
 
   // Only auto-redirect if a real, verified Firebase Auth session is already active
   React.useEffect(() => {
@@ -39,6 +48,7 @@ export const SignInScreen: React.FC = () => {
     }
   }, [firebaseAuthLoading, isAuthenticated, firebaseUser, isEmailVerified, setCurrentScreen]);
 
+  const [loginMethod, setLoginMethod] = useState<'password' | 'otp'>('password');
   const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -46,7 +56,9 @@ export const SignInScreen: React.FC = () => {
   const [statusMessage, setStatusMessage] = useState('');
   const [needsEmailVerification, setNeedsEmailVerification] = useState(false);
   const [otpChallengeToken, setOtpChallengeToken] = useState('');
+  const [loginOtpChallengeToken, setLoginOtpChallengeToken] = useState('');
   const [otpInput, setOtpInput] = useState('');
+  const [loginOtpInput, setLoginOtpInput] = useState('');
   const [otpCooldownSec, setOtpCooldownSec] = useState(0);
   const [sendingOtp, setSendingOtp] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -128,11 +140,36 @@ export const SignInScreen: React.FC = () => {
 
     if (!ensureLegalConsent()) return;
 
-    const emailVal = identifier.trim();
+    const emailVal = identifier.trim().toLowerCase();
     if (!emailVal || !emailVal.includes('@')) {
       setErrorMessage('Please enter your registered email address (e.g. name@gmail.com)');
       return;
     }
+
+    if (loginMethod === 'otp') {
+      if (!loginOtpChallengeToken) {
+        await handleSendLoginOtp();
+        return;
+      }
+      const cleanCode = loginOtpInput.replace(/\D/g, '').slice(0, 6);
+      if (cleanCode.length !== 6) {
+        setErrorMessage('Please enter the 6-digit OTP code sent to your email.');
+        return;
+      }
+      setIsSubmitting(true);
+      try {
+        const res = await verifyLoginEmailOtp(emailVal, loginOtpChallengeToken, cleanCode);
+        setIsSubmitting(false);
+        if (!res.success) {
+          setErrorMessage(res.error || 'Invalid or expired OTP code. Please try again.');
+        }
+      } catch (err: any) {
+        setIsSubmitting(false);
+        setErrorMessage(err?.message || 'OTP sign-in could not complete.');
+      }
+      return;
+    }
+
     if (!password.trim()) {
       setErrorMessage('Please enter your password');
       return;
@@ -148,10 +185,10 @@ export const SignInScreen: React.FC = () => {
           const otpRes = await sendSignupEmailOtp();
           if (otpRes.success && otpRes.challengeToken) {
             setOtpChallengeToken(otpRes.challengeToken);
-            setOtpCooldownSec(otpRes.cooldownSeconds || 30);
+            setOtpCooldownSec(otpRes.cooldownSeconds || 60);
             setOtpInput('');
             setStatusMessage(
-              `A 6-digit verification OTP has been sent to ${otpRes.emailMasked || emailVal}.`
+              `A 6-digit verification OTP was sent from no-reply@alphamate.app to ${otpRes.emailMasked || emailVal}.`
             );
             setErrorMessage('');
             return;
@@ -165,6 +202,38 @@ export const SignInScreen: React.FC = () => {
     } catch (err: any) {
       setIsSubmitting(false);
       setErrorMessage(formatFirebaseLoginError(err?.message));
+    }
+  };
+
+  const handleSendLoginOtp = async () => {
+    if (!ensureLegalConsent()) return;
+    const emailVal = identifier.trim().toLowerCase();
+    if (!emailVal || !emailVal.includes('@')) {
+      setErrorMessage('Please enter your registered email address first.');
+      return;
+    }
+    setSendingOtp(true);
+    setErrorMessage('');
+    setStatusMessage('');
+    try {
+      const otpRes = await sendLoginEmailOtp(emailVal);
+      if (!otpRes.success || !otpRes.challengeToken) {
+        if (otpRes.retryAfterSeconds) {
+          setOtpCooldownSec(otpRes.retryAfterSeconds);
+        }
+        setErrorMessage(otpRes.error || 'Could not send 6-digit login OTP right now.');
+        return;
+      }
+      setLoginOtpChallengeToken(otpRes.challengeToken);
+      setOtpCooldownSec(otpRes.cooldownSeconds || 60);
+      setLoginOtpInput('');
+      setStatusMessage(
+        `A 6-digit login code was sent from no-reply@alphamate.app to ${otpRes.emailMasked || emailVal}. Valid for 10 minutes.`
+      );
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Could not send login OTP right now.');
+    } finally {
+      setSendingOtp(false);
     }
   };
 
@@ -229,9 +298,11 @@ export const SignInScreen: React.FC = () => {
         return;
       }
       setOtpChallengeToken(otpRes.challengeToken);
-      setOtpCooldownSec(otpRes.cooldownSeconds || 30);
+      setOtpCooldownSec(otpRes.cooldownSeconds || 60);
       setOtpInput('');
-      setStatusMessage(`A 6-digit OTP has been sent to ${otpRes.emailMasked || identifier}. Check Inbox or Spam.`);
+      setStatusMessage(
+        `A 6-digit OTP was sent from no-reply@alphamate.app to ${otpRes.emailMasked || identifier}. Check Inbox or Spam.`
+      );
     } catch (err: any) {
       setErrorMessage(err?.message || 'Could not send OTP right now.');
     } finally {
@@ -270,8 +341,15 @@ export const SignInScreen: React.FC = () => {
       {/* Top Bar with Back Button & Centered Logo */}
       <div className="relative z-10 flex items-center justify-between pt-1">
         <button
-          onClick={() => setCurrentScreen('welcome')}
-          className="w-10 h-10 rounded-full bg-[#18102C] border border-[#A855F7]/30 flex items-center justify-center text-zinc-300 hover:text-white hover:border-[#A855F7] transition cursor-pointer"
+          type="button"
+          onClick={() => {
+            if (isAddingAccount) {
+              cancelAddAccountFlow();
+            } else {
+              setCurrentScreen('welcome');
+            }
+          }}
+          className="w-11 h-11 rounded-full bg-[#18102C] border border-[#A855F7]/30 flex items-center justify-center text-zinc-300 hover:text-white hover:border-[#A855F7] transition cursor-pointer"
         >
           <ArrowLeft className="w-5 h-5" />
         </button>
@@ -279,17 +357,88 @@ export const SignInScreen: React.FC = () => {
           <AlphaMateLogo size="sm" showText={false} customLogoUrl={customLogoUrl} />
           <span className="text-xs font-black tracking-wider text-purple-200">ALPHA MATE</span>
         </div>
-        <div className="w-10" />
+        <div className="w-11" />
       </div>
+
+      {isAddingAccount && (
+        <div className="relative z-10 mt-3 max-w-sm w-full mx-auto p-3 rounded-2xl bg-[#1A1033] border border-[#EC4899]/40 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0">
+            <Users className="w-4 h-4 text-[#EC4899] shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-white truncate">
+                Log Into Account ({savedAccounts.length + 1}/{maxSavedAccounts})
+              </p>
+              <p className="text-[10px] text-zinc-400 truncate">
+                Log in once — switch anytime without password
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => cancelAddAccountFlow()}
+            className="min-h-[40px] px-3 rounded-xl bg-white/10 hover:bg-white/15 text-[11px] font-bold text-purple-200 shrink-0 cursor-pointer"
+          >
+            Back to App
+          </button>
+        </div>
+      )}
 
       {/* Main Sign In Content */}
       <div className="relative z-10 py-4 max-w-sm w-full mx-auto my-auto">
         <div className="text-center mb-4">
           <h1 className="text-2xl font-black text-white tracking-tight">Welcome Back</h1>
           <p className="mt-1 text-xs text-zinc-400">
-            Sign in to continue your live entertainment journey
+            Sign in with Email + Password or Continue with Google (opens the exact same ID)
           </p>
         </div>
+
+        {savedAccounts.length > 0 && (
+          <div className="mb-4 p-3 rounded-2xl bg-[#140D27] border border-[#A855F7]/30">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider text-purple-300">
+                1-Tap Saved Accounts ({savedAccounts.length}/{maxSavedAccounts})
+              </span>
+              <span className="text-[10px] text-emerald-400 font-semibold">No Password Needed</span>
+            </div>
+            <div className="flex items-center gap-2 overflow-x-auto pb-1">
+              {savedAccounts.map((acc) => (
+                <button
+                  key={acc.uid}
+                  type="button"
+                  disabled={Boolean(switchingUid)}
+                  onClick={async () => {
+                    setErrorMessage('');
+                    setSwitchingUid(acc.uid);
+                    const res = await switchAccount(acc.uid);
+                    setSwitchingUid(null);
+                    if (!res.success && res.error) {
+                      setErrorMessage(res.error);
+                    }
+                  }}
+                  className="min-h-[44px] px-2.5 py-1.5 rounded-xl bg-[#1F143A] hover:bg-[#291B4C] border border-white/10 flex items-center gap-2 shrink-0 cursor-pointer"
+                >
+                  <img
+                    src={
+                      acc.avatar ||
+                      'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=120&q=80'
+                    }
+                    alt={acc.displayName}
+                    referrerPolicy="no-referrer"
+                    className="w-7 h-7 rounded-full object-cover"
+                  />
+                  <div className="text-left">
+                    <span className="text-[11px] font-bold text-white block leading-tight max-w-[96px] truncate">
+                      {acc.displayName}
+                    </span>
+                    <span className="text-[9px] text-zinc-400 block leading-tight">
+                      {switchingUid === acc.uid ? 'Entering...' : `@${acc.username}`}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Mandatory Legal Consent Checkboxes (Required before Google or Email Sign In) */}
         <div className="mb-4 space-y-2.5">
@@ -377,15 +526,49 @@ export const SignInScreen: React.FC = () => {
         <div className="flex items-center gap-3 my-4">
           <div className="flex-1 h-[1px] bg-zinc-800" />
           <span className="text-[10px] text-zinc-500 uppercase tracking-widest font-semibold">
-            Or with Email & Password
+            Or Sign In with Email
           </span>
           <div className="flex-1 h-[1px] bg-zinc-800" />
         </div>
 
+        {/* Compact Login Method Switcher: Password vs 6-Digit Email OTP */}
+        <div className="grid grid-cols-2 gap-1.5 p-1 mb-3 rounded-xl bg-[#120B22] border border-[#A855F7]/25">
+          <button
+            type="button"
+            onClick={() => {
+              setLoginMethod('password');
+              setErrorMessage('');
+              setStatusMessage('');
+            }}
+            className={`h-8 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+              loginMethod === 'password'
+                ? 'bg-gradient-to-r from-[#7928CA] to-[#9333EA] text-white shadow'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            Password
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setLoginMethod('otp');
+              setNeedsEmailVerification(false);
+              setErrorMessage('');
+              setStatusMessage('');
+            }}
+            className={`h-8 rounded-lg text-[11px] font-bold transition-all cursor-pointer ${
+              loginMethod === 'otp'
+                ? 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            6-Digit Email OTP
+          </button>
+        </div>
+
         {/* Manual Form */}
         <form onSubmit={handleSignIn} className="flex flex-col gap-3">
-
-          {needsEmailVerification && (
+          {loginMethod === 'password' && needsEmailVerification && (
             <div className="p-3 rounded-xl bg-[#1A1033] border border-[#A855F7]/40 flex flex-col gap-2">
               {otpChallengeToken && (
                 <input
@@ -439,56 +622,118 @@ export const SignInScreen: React.FC = () => {
               type="email"
               placeholder="Email Address (e.g. name@gmail.com)"
               value={identifier}
-              onChange={(e) => setIdentifier(e.target.value)}
+              onChange={(e) => {
+                setIdentifier(e.target.value);
+                if (loginOtpChallengeToken) {
+                  setLoginOtpChallengeToken('');
+                  setLoginOtpInput('');
+                }
+              }}
               className="w-full h-11 pl-10 pr-3.5 rounded-xl bg-[#140D27] border border-[#A855F7]/30 text-white placeholder-zinc-500 text-xs sm:text-sm focus:outline-none focus:border-[#C084FC] transition-colors"
             />
           </div>
 
-          {/* Password Input */}
-          <div className="relative">
-            <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-            <input
-              type={showPassword ? 'text' : 'password'}
-              placeholder="Password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full h-11 pl-10 pr-10 rounded-xl bg-[#140D27] border border-[#A855F7]/30 text-white placeholder-zinc-500 text-xs sm:text-sm focus:outline-none focus:border-[#C084FC] transition-colors"
-            />
-            <button
-              type="button"
-              onClick={() => setShowPassword(!showPassword)}
-              className="absolute right-3.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
-            >
-              {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-            </button>
-          </div>
+          {loginMethod === 'password' ? (
+            <>
+              {/* Password Input */}
+              <div className="relative">
+                <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  placeholder="Password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="w-full h-11 pl-10 pr-10 rounded-xl bg-[#140D27] border border-[#A855F7]/30 text-white placeholder-zinc-500 text-xs sm:text-sm focus:outline-none focus:border-[#C084FC] transition-colors"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
 
-          {/* Forgot Password */}
-          <div className="flex justify-end items-center text-xs">
-            <button
-              type="button"
-              onClick={() => setShowForgotPassword(true)}
-              className="text-xs text-[#C084FC] hover:underline cursor-pointer"
-            >
-              Forgot Password?
-            </button>
-          </div>
+              {/* Forgot Password */}
+              <div className="flex justify-end items-center text-xs">
+                <button
+                  type="button"
+                  onClick={() => setShowForgotPassword(true)}
+                  className="text-xs text-[#C084FC] hover:underline cursor-pointer"
+                >
+                  Forgot Password?
+                </button>
+              </div>
 
-          {/* Sign In Button */}
-          <button
-            type="submit"
-            disabled={isSubmitting}
-            className="w-full h-12 mt-1 rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] font-extrabold text-white text-xs sm:text-sm shadow-lg shadow-[#7928CA]/40 hover:opacity-95 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
-          >
-            {isSubmitting ? (
-              <span>Verifying Credentials...</span>
-            ) : (
-              <>
+              {/* Sign In Button */}
+              <button
+                type="submit"
+                disabled={isSubmitting}
+                className="w-full h-12 mt-1 rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] font-extrabold text-white text-xs sm:text-sm shadow-lg shadow-[#7928CA]/40 hover:opacity-95 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2"
+              >
+                {isSubmitting ? (
+                  <span>Verifying Credentials...</span>
+                ) : (
+                  <>
+                    <Sparkles className="w-4 h-4 text-amber-300" />
+                    <span>Sign In to Alpha Mate</span>
+                  </>
+                )}
+              </button>
+            </>
+          ) : (
+            <>
+              {loginOtpChallengeToken && (
+                <div className="space-y-1.5">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={loginOtpInput}
+                    onChange={(e) => setLoginOtpInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                    placeholder="000000"
+                    className="w-full h-12 px-4 rounded-xl bg-[#140D27] border border-[#A855F7]/50 text-center font-mono text-lg font-black tracking-[0.4em] text-white placeholder-zinc-600 focus:outline-none focus:border-[#EC4899]"
+                  />
+                  <div className="flex items-center justify-between text-[11px] px-1">
+                    <span className="text-zinc-400">Sent from no-reply@alphamate.app</span>
+                    <button
+                      type="button"
+                      onClick={handleSendLoginOtp}
+                      disabled={sendingOtp || isSubmitting || otpCooldownSec > 0}
+                      className="text-[#C084FC] font-bold hover:underline disabled:opacity-50 cursor-pointer"
+                    >
+                      {otpCooldownSec > 0 ? `Resend in ${otpCooldownSec}s` : 'Resend Code'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                disabled={
+                  isSubmitting ||
+                  sendingOtp ||
+                  (!loginOtpChallengeToken && otpCooldownSec > 0) ||
+                  (Boolean(loginOtpChallengeToken) && loginOtpInput.length !== 6)
+                }
+                className="w-full h-12 mt-1 rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] font-extrabold text-white text-xs sm:text-sm shadow-lg shadow-[#7928CA]/40 hover:opacity-95 active:scale-[0.98] transition-all cursor-pointer flex items-center justify-center gap-2 disabled:opacity-50"
+              >
                 <Sparkles className="w-4 h-4 text-amber-300" />
-                <span>Sign In to Alpha Mate</span>
-              </>
-            )}
-          </button>
+                <span>
+                  {sendingOtp
+                    ? 'Sending 6-Digit OTP...'
+                    : isSubmitting
+                    ? 'Verifying OTP...'
+                    : loginOtpChallengeToken
+                    ? 'Verify OTP & Sign In'
+                    : otpCooldownSec > 0
+                    ? `Wait ${otpCooldownSec}s to Resend`
+                    : 'Send 6-Digit Sign-In Code'}
+                </span>
+              </button>
+            </>
+          )}
         </form>
       </div>
 

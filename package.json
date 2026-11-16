@@ -14,7 +14,12 @@
     "android:open": "cap open android",
     "android:apk": "vite build && cap sync android && cd android && ./gradlew assembleDebug",
     "android:release-apk": "vite build && cap sync android && cd android && ./gradlew assembleRelease",
-    "android:aab": "vite build && cap sync android && cd android && ./gradlew bundleRelease"
+    "android:aab": "vite build && cap sync android && cd android && ./gradlew bundleRelease",
+    "otp:test": "npm --prefix functions test && node scripts/verify-resend-otp.mjs",
+    "otp:verify": "node scripts/verify-resend-otp.mjs --live",
+    "firebase:secret:resend": "firebase functions:secrets:set RESEND_API_KEY --project gen-lang-client-0468444352",
+    "firebase:deploy:rules": "firebase deploy --only firestore:rules,firestore:indexes --project gen-lang-client-0468444352",
+    "firebase:deploy:functions": "npm --prefix functions run build && firebase deploy --only functions --project gen-lang-client-0468444352"
   },
   "dependencies": {
     "@capacitor/android": "^8.6.0",

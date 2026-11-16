@@ -30,6 +30,15 @@
         "pushLastActiveAt": { "type": "string", "format": "date-time" },
         "notificationPreferences": { "type": "object" },
         "equippedBadgeIds": { "type": "array" },
+        "profileCompleted": { "type": "boolean" },
+        "hasPassword": { "type": "boolean" },
+        "dob": { "type": "string", "maxLength": 32 },
+        "age": { "type": "number" },
+        "gender": { "type": "string", "enum": ["male", "female", "other"] },
+        "lastNameChangeDate": { "type": "string", "format": "date-time" },
+        "lastUsernameChangeDate": { "type": "string", "format": "date-time" },
+        "emailOtpVerified": { "type": "boolean" },
+        "emailOtpVerifiedAt": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -353,9 +362,172 @@
         "createdAtMs": { "type": "number" }
       },
       "required": ["followerId", "targetId", "createdAt", "createdAtMs"]
+    },
+    "EmailOtpChallenge": {
+      "title": "EmailOtpChallenge",
+      "description": "Server-only hashed 6-digit Email OTP challenge state managed exclusively by Firebase Cloud Functions",
+      "type": "object",
+      "properties": {
+        "docId": { "type": "string", "maxLength": 128 },
+        "purpose": { "type": "string", "enum": ["signup", "login", "account_deletion"] },
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "format": "email", "maxLength": 128 },
+        "challengeId": { "type": "string", "maxLength": 64 },
+        "salt": { "type": "string", "maxLength": 64 },
+        "otpHash": { "type": "string", "maxLength": 64 },
+        "attempts": { "type": "number" },
+        "consumed": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "expiresAtMs": { "type": "number" },
+        "lastSentAtMs": { "type": "number" },
+        "hourlyWindowStartMs": { "type": "number" },
+        "hourlySendCount": { "type": "number" },
+        "verifiedAt": { "type": "string", "format": "date-time" },
+        "verifiedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "docId",
+        "purpose",
+        "uid",
+        "email",
+        "challengeId",
+        "salt",
+        "otpHash",
+        "attempts",
+        "consumed",
+        "createdAtMs",
+        "expiresAtMs",
+        "lastSentAtMs",
+        "updatedAt"
+      ]
+    },
+    "DeviceSwitchSession": {
+      "title": "DeviceSwitchSession",
+      "description": "Server-only hashed multi-account switch session ticket for up to 5 accounts per device",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string", "maxLength": 128 },
+        "uid": { "type": "string", "maxLength": 128 },
+        "salt": { "type": "string", "maxLength": 64 },
+        "tokenHash": { "type": "string", "maxLength": 128 },
+        "createdAtMs": { "type": "number" },
+        "expiresAtMs": { "type": "number" },
+        "lastUsedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["sessionId", "uid", "salt", "tokenHash", "createdAtMs", "expiresAtMs", "updatedAt"]
+    },
+    "ChatRequest": {
+      "title": "ChatRequest",
+      "description": "Pending, accepted, rejected, or blocked 1:1 direct message request stored until recipient approval",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recipientId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "sender": { "type": "object" },
+        "recipient": { "type": "object" },
+        "firstMessage": { "type": "string", "maxLength": 4000 },
+        "lastMessage": { "type": "string", "maxLength": 4000 },
+        "pendingMessages": { "type": "array" },
+        "status": { "type": "string", "enum": ["pending", "accepted", "rejected", "blocked"] },
+        "chatId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedAtMs": { "type": "number" }
+      },
+      "required": ["senderId", "recipientId", "firstMessage", "status"]
+    },
+    "ChatThread": {
+      "title": "ChatThread",
+      "description": "Approved 1:1 direct or group real-time conversation thread",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["direct", "group"] },
+        "groupName": { "type": "string", "maxLength": 60 },
+        "ownerId": { "type": "string", "maxLength": 128 },
+        "participantIds": { "type": "array" },
+        "participantProfiles": { "type": "object" },
+        "memberStatus": { "type": "object" },
+        "lastMessage": { "type": "string", "maxLength": 4000 },
+        "lastSenderId": { "type": "string", "maxLength": 128 },
+        "unreadBy": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "updatedAtMs": { "type": "number" }
+      },
+      "required": ["type", "participantIds"]
+    },
+    "ChatMessageDoc": {
+      "title": "ChatMessageDoc",
+      "description": "Individual message inside an approved chat thread",
+      "type": "object",
+      "properties": {
+        "senderId": { "type": "string", "maxLength": 128 },
+        "text": { "type": "string", "maxLength": 4000 },
+        "mediaUrl": { "type": "string", "maxLength": 2048 },
+        "mediaType": { "type": "string", "enum": ["image", "video", "audio", "file"] },
+        "linkUrl": { "type": "string", "maxLength": 2048 },
+        "replyTo": { "type": "string", "maxLength": 128 },
+        "fromAcceptedRequestId": { "type": "string", "maxLength": 128 },
+        "readBy": { "type": "array" },
+        "deliveredTo": { "type": "array" },
+        "deletedFor": { "type": "array" },
+        "edited": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" }
+      },
+      "required": ["senderId", "text"]
+    },
+    "GroupInvite": {
+      "title": "GroupInvite",
+      "description": "Pending or answered group chat invitation",
+      "type": "object",
+      "properties": {
+        "chatId": { "type": "string", "maxLength": 128 },
+        "groupName": { "type": "string", "maxLength": 60 },
+        "inviterId": { "type": "string", "maxLength": 128 },
+        "inviteeId": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "accepted", "declined"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "respondedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["chatId", "inviterId", "inviteeId", "status"]
+    },
+    "ChatPresence": {
+      "title": "ChatPresence",
+      "description": "Online presence indicator for chat users",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "online": { "type": "boolean" },
+        "lastSeen": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "online"]
+    },
+    "BlockedUser": {
+      "title": "BlockedUser",
+      "description": "Per-user blocked user record",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId"]
     }
   },
   "firestore": {
+    "/emailOtpChallenges/{challengeId}": {
+      "schema": "EmailOtpChallenge",
+      "description": "Server-only hashed Email OTP records (client access denied; accessed solely via Cloud Functions Admin SDK)"
+    },
+    "/deviceSwitchSessions/{sessionId}": {
+      "schema": "DeviceSwitchSession",
+      "description": "Server-only hashed multi-account switch credentials (client access denied)"
+    },
     "/users/{userId}": {
       "schema": "User",
       "description": "User profile documents keyed by Firebase auth UID"
@@ -371,6 +543,30 @@
     "/users/{userId}/notifications/{notificationId}": {
       "schema": "Notification",
       "description": "Real-time user notifications inbox scoped per recipient UID"
+    },
+    "/users/{userId}/blockedUsers/{blockedId}": {
+      "schema": "BlockedUser",
+      "description": "Blocked user IDs scoped under the blocking user"
+    },
+    "/chatRequests/{requestId}": {
+      "schema": "ChatRequest",
+      "description": "1:1 chat requests awaiting recipient approval before creating an active DM thread"
+    },
+    "/chats/{chatId}": {
+      "schema": "ChatThread",
+      "description": "Approved 1:1 direct and group chat threads"
+    },
+    "/chats/{chatId}/messages/{messageId}": {
+      "schema": "ChatMessageDoc",
+      "description": "Messages inside an approved chat thread"
+    },
+    "/groupInvites/{inviteId}": {
+      "schema": "GroupInvite",
+      "description": "Group chat invitations"
+    },
+    "/presence/{userId}": {
+      "schema": "ChatPresence",
+      "description": "Real-time online presence status per user"
     },
     "/giftTransactions/{txId}": {
       "schema": "GiftTransaction",

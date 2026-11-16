@@ -22,6 +22,8 @@ import {
   FileText,
   ShieldCheck,
   Trash2,
+  Users,
+  Plus,
 } from 'lucide-react';
 import { AndroidSetupModal } from '../components/modals/AndroidSetupModal';
 
@@ -36,6 +38,11 @@ export const SettingsScreen: React.FC = () => {
     setShowPushSettingsModal,
     notificationPreferences,
     refreshScope,
+    currentUser,
+    savedAccounts,
+    maxSavedAccounts,
+    setShowAccountSwitcherModal,
+    startAddAccountFlow,
   } = useApp();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -134,6 +141,70 @@ export const SettingsScreen: React.FC = () => {
               </div>
               <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
             </div>
+          </div>
+        </div>
+
+        {/* Multi-Account System (Up to 5 Accounts Instant Switch) */}
+        <div>
+          <span className="text-[11px] font-bold uppercase tracking-wider text-[#C084FC] px-1 mb-2 flex items-center justify-between">
+            <span className="flex items-center gap-1.5">
+              <Users className="w-3.5 h-3.5 text-[#EC4899]" />
+              <span>Multi-Account Switcher</span>
+            </span>
+            <span>
+              {Math.max(1, savedAccounts.length)} / {maxSavedAccounts} IDs
+            </span>
+          </span>
+          <div className="rounded-2xl bg-[#140D26] border border-[#A855F7]/30 divide-y divide-white/5 overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setShowAccountSwitcherModal(true)}
+              className="w-full min-h-[56px] p-3.5 flex items-center justify-between hover:bg-white/[0.03] cursor-pointer text-left"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <img
+                  src={currentUser.avatar}
+                  alt={currentUser.displayName}
+                  referrerPolicy="no-referrer"
+                  className="w-9 h-9 rounded-full object-cover border border-[#EC4899]/60 shrink-0"
+                />
+                <div className="min-w-0">
+                  <div className="text-xs font-bold text-white truncate">
+                    Switch Account ({Math.max(1, savedAccounts.length)}/{maxSavedAccounts})
+                  </div>
+                  <div className="text-[10px] text-zinc-400 truncate">
+                    Active: @{currentUser.username} &bull; 1-tap switch without password
+                  </div>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-zinc-400 shrink-0" />
+            </button>
+
+            {savedAccounts.length < maxSavedAccounts && (
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await startAddAccountFlow('register');
+                  if (!res.success && res.error) {
+                    showToast(res.error);
+                  }
+                }}
+                className="w-full min-h-[46px] px-3.5 py-2.5 flex items-center justify-between hover:bg-white/[0.03] cursor-pointer text-left"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-xl bg-[#7928CA]/25 border border-[#A855F7]/40 flex items-center justify-center text-[#E9D5FF]">
+                    <Plus className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-white block">Add New Account</span>
+                    <span className="text-[10px] text-zinc-400">
+                      Sign up or log into another ID ({maxSavedAccounts - savedAccounts.length} slots free)
+                    </span>
+                  </div>
+                </div>
+                <ChevronRight className="w-4 h-4 text-zinc-500 shrink-0" />
+              </button>
+            )}
           </div>
         </div>
 

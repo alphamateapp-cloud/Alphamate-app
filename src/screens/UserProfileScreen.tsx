@@ -107,6 +107,9 @@ export const UserProfileScreen: React.FC = () => {
     openLeaderboard,
     openBadgesModal,
     userHistoricalStats,
+    savedAccounts,
+    maxSavedAccounts,
+    setShowAccountSwitcherModal,
   } = useApp();
 
   // Navigation & Modal states: Videos, Posts, Liked, Saved, Private
@@ -385,21 +388,34 @@ export const UserProfileScreen: React.FC = () => {
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            {/* Switch Account (Up to 5 IDs) button */}
+            <button
+              type="button"
+              onClick={() => setShowAccountSwitcherModal(true)}
+              className="min-h-[38px] px-2.5 py-1 rounded-full bg-black/55 hover:bg-black/80 border border-[#EC4899]/40 text-white text-[11px] font-bold backdrop-blur-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-lg"
+              title="Switch or Add Account (Up to 5)"
+            >
+              <Users className="w-3.5 h-3.5 text-[#EC4899]" />
+              <span>Accounts ({Math.max(1, savedAccounts.length)}/{maxSavedAccounts})</span>
+            </button>
+
             {/* Working "Edit Cover" button */}
             <button
+              type="button"
               onClick={() => setShowCoverModal(true)}
-              className="px-2.5 py-1 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white text-[11px] font-bold backdrop-blur-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-lg"
+              className="min-h-[38px] px-2.5 py-1 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white text-[11px] font-bold backdrop-blur-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-lg"
               title="Change Cover"
             >
               <Camera className="w-3.5 h-3.5 text-[#C084FC]" />
-              <span>Edit Cover</span>
+              <span className="hidden sm:inline">Edit Cover</span>
             </button>
 
             {/* Settings shortcut */}
             <button
+              type="button"
               onClick={() => setCurrentScreen('settings')}
-              className="w-8 h-8 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white backdrop-blur-md flex items-center justify-center transition-all cursor-pointer shadow-lg"
+              className="w-9 h-9 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white backdrop-blur-md flex items-center justify-center transition-all cursor-pointer shadow-lg"
               title="Settings"
             >
               <Settings className="w-4 h-4" />

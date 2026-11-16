@@ -33,7 +33,7 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.sendPushOnNotificationCreated = exports.processExpiredAccountDeletions = exports.cleanupStaleLiveStreams = void 0;
+exports.monthlyLeaderboardMaintenance = exports.sendPushOnNotificationCreated = exports.processExpiredAccountDeletions = exports.cleanupStaleLiveStreams = exports.verifyLoginEmailOtp = exports.sendLoginEmailOtp = exports.verifyEmailOtp = exports.sendEmailOtp = exports.switchDeviceAccount = exports.registerDeviceSwitchSession = exports.setAuthenticatedUserPassword = exports.completePreSignupWithPassword = exports.verifyPreSignupEmailOtp = exports.sendPreSignupEmailOtp = void 0;
 const app_1 = require("firebase-admin/app");
 const firestore_1 = require("firebase-admin/firestore");
 const auth_1 = require("firebase-admin/auth");
@@ -41,6 +41,7 @@ const messaging_1 = require("firebase-admin/messaging");
 const scheduler_1 = require("firebase-functions/v2/scheduler");
 const firestore_2 = require("firebase-functions/v2/firestore");
 const logger = __importStar(require("firebase-functions/logger"));
+const emailOtp_1 = require("./emailOtp");
 const FIRESTORE_DATABASE_ID = process.env.FIREBASE_DATABASE_ID ||
     'ai-studio-alphamatelivepar-88a3637b-56a3-47f2-a3ab-b67bf1702cff';
 const CLOUDFLARE_SFU_BASE = 'https://rtc.live.cloudflare.com/v1';
@@ -51,6 +52,17 @@ const ENDED_STREAM_RETENTION_MS = 5 * 60 * 1000;
 const MAX_BATCH_SIZE = 450;
 const app = (0, app_1.getApps)().length > 0 ? (0, app_1.getApps)()[0] : (0, app_1.initializeApp)();
 const db = (0, firestore_1.getFirestore)(app, FIRESTORE_DATABASE_ID);
+const emailOtpCloudFunctions = (0, emailOtp_1.createEmailOtpCloudFunctions)(app, db);
+exports.sendPreSignupEmailOtp = emailOtpCloudFunctions.sendPreSignupEmailOtp;
+exports.verifyPreSignupEmailOtp = emailOtpCloudFunctions.verifyPreSignupEmailOtp;
+exports.completePreSignupWithPassword = emailOtpCloudFunctions.completePreSignupWithPassword;
+exports.setAuthenticatedUserPassword = emailOtpCloudFunctions.setAuthenticatedUserPassword;
+exports.registerDeviceSwitchSession = emailOtpCloudFunctions.registerDeviceSwitchSession;
+exports.switchDeviceAccount = emailOtpCloudFunctions.switchDeviceAccount;
+exports.sendEmailOtp = emailOtpCloudFunctions.sendEmailOtp;
+exports.verifyEmailOtp = emailOtpCloudFunctions.verifyEmailOtp;
+exports.sendLoginEmailOtp = emailOtpCloudFunctions.sendLoginEmailOtp;
+exports.verifyLoginEmailOtp = emailOtpCloudFunctions.verifyLoginEmailOtp;
 function extractTimestampMs(data, ...keys) {
     for (const key of keys) {
         const val = data[key];
@@ -236,6 +248,10 @@ exports.processExpiredAccountDeletions = (0, scheduler_1.onSchedule)({
     if (processedCount > 0) {
         logger.info('Processed expired 15-day permanent account deletions', { processedCount });
     }
+    const purgedOtps = await emailOtpCloudFunctions.purgeExpiredOtpChallenges().catch(() => 0);
+    if (purgedOtps > 0) {
+        logger.info('Purged expired Email OTP challenge documents', { purgedOtps });
+    }
 });
 function mapNotificationTypeToCategoryKey(type) {
     switch (type) {
@@ -370,6 +386,51 @@ exports.sendPushOnNotificationCreated = (0, firestore_2.onDocumentCreated)({
             notificationId: event.params.notificationId,
             errorCode: err?.code,
             errorMessage: err?.message,
+        });
+    }
+});
+/**
+ * Scheduled Cloud Function running daily at 00:05 UTC to enforce the monthly
+ * leaderboard retention policy: keeps the active calendar month and up to 1 previous
+ * calendar month (max ~1-2 months), deleting expired monthly entry partitions.
+ */
+exports.monthlyLeaderboardMaintenance = (0, scheduler_1.onSchedule)({
+    schedule: '5 0 * * *',
+    timeZone: 'UTC',
+    timeoutSeconds: 180,
+    memory: '256MiB',
+}, async () => {
+    const now = new Date();
+    const currentYear = now.getUTCFullYear();
+    const currentMonth = now.getUTCMonth(); // 0..11
+    const formatKey = (y, mZero) => `${y}-${String(mZero + 1).padStart(2, '0')}`;
+    const prevDate = new Date(Date.UTC(currentYear, currentMonth - 1, 1));
+    const allowedMonthKeys = new Set([
+        formatKey(currentYear, currentMonth),
+        formatKey(prevDate.getUTCFullYear(), prevDate.getUTCMonth()),
+    ]);
+    const monthsSnap = await db.collection('leaderboardMonths').listDocuments();
+    let purgedEntries = 0;
+    for (const monthDocRef of monthsSnap) {
+        if (allowedMonthKeys.has(monthDocRef.id))
+            continue;
+        const entriesSnap = await monthDocRef.collection('entries').limit(450).get();
+        if (!entriesSnap.empty) {
+            const batch = db.batch();
+            for (const entryDoc of entriesSnap.docs) {
+                batch.delete(entryDoc.ref);
+            }
+            await batch.commit();
+            purgedEntries += entriesSnap.size;
+        }
+        if (entriesSnap.size < 450) {
+            await monthDocRef.delete().catch(() => { });
+        }
+    }
+    if (purgedEntries > 0) {
+        logger.info('Purged expired monthly leaderboard partitions', {
+            keptMonths: Array.from(allowedMonthKeys),
+            purgedEntries,
         });
     }
 });

@@ -9,7 +9,15 @@ import {
   runTransaction,
   serverTimestamp,
 } from 'firebase/firestore';
-import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import {
+  auth,
+  db,
+  handleFirestoreError,
+  isFirestoreQuotaExceeded,
+  isFirestoreQuotaExceededError,
+  notifyFirestoreQuotaExceeded,
+  OperationType,
+} from './firebase';
 import { realtimeSocket } from './realtimeSocket';
 
 export type LiveRoomType = 'live' | 'party';
@@ -26,7 +34,7 @@ function getParentCollection(type: LiveRoomType): string {
 
 /**
  * Send a heart reaction to a Solo Live stream or Party Room.
- * Emits immediately over WebSocket for <50ms cross-device delivery AND persists to Firestore.
+ * Emits immediately over WebSocket for <50ms cross-device delivery AND persists to Firestore when quota permits.
  */
 export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<void> {
   if (!id) return;
@@ -35,6 +43,8 @@ export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<voi
 
   // 1. Instant WebSocket broadcast for sub-50ms counter & animation sync
   realtimeSocket.sendHeartTap(type, id);
+
+  if (isFirestoreQuotaExceeded()) return;
 
   const parentCol = getParentCollection(type);
   const statsRef = doc(db, parentCol, id, 'stats', 'hearts');
@@ -57,6 +67,10 @@ export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<voi
         });
       }
     }).catch((err: any) => {
+      if (isFirestoreQuotaExceededError(err)) {
+        notifyFirestoreQuotaExceeded();
+        return;
+      }
       if (err?.code === 'permission-denied') {
         handleFirestoreError(err, OperationType.WRITE, `${parentCol}/${id}/stats/hearts`);
       }
@@ -65,6 +79,10 @@ export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<voi
       senderId: uid,
       createdAt: serverTimestamp(),
     }).catch((err: any) => {
+      if (isFirestoreQuotaExceededError(err)) {
+        notifyFirestoreQuotaExceeded();
+        return;
+      }
       if (err?.code === 'permission-denied') {
         handleFirestoreError(err, OperationType.CREATE, `${parentCol}/${id}/heartEvents`);
       }
@@ -103,6 +121,10 @@ export function subscribeToLiveHeartCount(
       emitMax();
     },
     (error) => {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+        return;
+      }
       onError?.(error);
     }
   );
@@ -187,6 +209,10 @@ export function subscribeToLiveHeartEvents(
       });
     },
     (error) => {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+        return;
+      }
       onError?.(error);
     }
   );

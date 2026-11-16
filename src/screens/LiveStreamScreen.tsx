@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import { VIRTUAL_GIFTS } from '../data/mockData';
@@ -67,6 +67,7 @@ import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGivers
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
 import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } from '../services/liveHeartService';
 import { getHdImageUrl } from '../utils/imageHd';
+import { audioManager } from '../services/audioManager';
 
 const GIFT_COMBO_WINDOW_MS = 4200;
 
@@ -163,11 +164,13 @@ export const LiveStreamScreen: React.FC = () => {
   const [showLuckyDrawModal, setShowLuckyDrawModal] = useState(false);
   const [selectedGift, setSelectedGift] = useState<Gift>(VIRTUAL_GIFTS[0]);
 
-  // Spectacular Visual Gift Animation & Rapid-Combo states
+  // Spectacular Visual Gift Animation & Rapid-Combo states (strictly scoped per streamId)
   const [activeGiftAnimation, setActiveGiftAnimation] = useState<ActiveGiftEvent | null>(null);
   const [activeGiftCombo, setActiveGiftCombo] = useState<LiveGiftComboState | null>(null);
   const [comboRemainingMs, setComboRemainingMs] = useState<number>(0);
   const [giftQuantityMultiplier, setGiftQuantityMultiplier] = useState<number>(1);
+  const streamJoinedAtRef = useRef<number>(Date.now());
+  const seenGiftBannerIdsRef = useRef<Set<string>>(new Set());
   const comboTrackingRef = useRef<{
     giftId: string;
     count: number;
@@ -175,6 +178,10 @@ export const LiveStreamScreen: React.FC = () => {
     startedAt: number;
     lastTapAt: number;
   } | null>(null);
+
+  const handleGiftOverlayComplete = useCallback(() => {
+    setActiveGiftAnimation(null);
+  }, []);
 
   // Top Givers Leaderboard State for Current Broadcast Session
   const [sessionGivers, setSessionGivers] = useState<SessionGiver[]>([]);
@@ -210,14 +217,29 @@ export const LiveStreamScreen: React.FC = () => {
   useEffect(() => {
     if (!activeStream?.id || isHost) return;
 
-    const unsub = onSnapshot(doc(db, 'liveStreams', activeStream.id), (snapshot) => {
-      // If doc is deleted by host or marked inactive
-      if (!snapshot.exists() || snapshot.data()?.isActive === false) {
+    let firestoreDocSeen = false;
+    const unsubDoc = onSnapshot(doc(db, 'liveStreams', activeStream.id), (snapshot) => {
+      if (snapshot.exists()) {
+        firestoreDocSeen = true;
+        if (snapshot.data()?.isActive === false) {
+          setIsBroadcastEnded(true);
+        }
+      } else if (firestoreDocSeen) {
+        // Only mark ended if doc previously existed in Firestore and was deleted by host
         setIsBroadcastEnded(true);
       }
     });
 
-    return () => unsub();
+    const unsubWsDiscovery = realtimeSocket.onDiscoveryUpdate((ev) => {
+      if (ev.type === 'live:remove' && ev.streamId === activeStream.id) {
+        setIsBroadcastEnded(true);
+      }
+    });
+
+    return () => {
+      unsubDoc();
+      unsubWsDiscovery();
+    };
   }, [activeStream?.id, isHost]);
 
   useEffect(() => {
@@ -508,13 +530,22 @@ export const LiveStreamScreen: React.FC = () => {
         setIsBroadcastEnded(true);
       } else if (
         ev.type === 'room:signal' &&
+        ev.roomId === streamId &&
         ev.signal?.type === 'gift_combo' &&
         ev.senderId !== (auth.currentUser?.uid || currentUser.id)
       ) {
         const sig = ev.signal;
-        if (sig.gift && typeof sig.comboCount === 'number') {
+        const sigTs = Number(sig.timestamp || ev.ts || Date.now());
+        const now = Date.now();
+        // Only show fresh gift signals that occurred during this live broadcast session
+        if (
+          sig.gift &&
+          typeof sig.comboCount === 'number' &&
+          sigTs >= streamJoinedAtRef.current - 1500 &&
+          Math.abs(now - sigTs) < 8000
+        ) {
           setActiveGiftAnimation({
-            id: `ws_gift_${sig.timestamp || Date.now()}_${Math.random()}`,
+            id: `ws_gift_${streamId}_${sigTs}_${Math.random().toString(36).slice(2, 7)}`,
             gift: sig.gift as Gift,
             senderName: String(sig.senderName || 'Viewer'),
             senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
@@ -522,7 +553,8 @@ export const LiveStreamScreen: React.FC = () => {
             recipientName: String(sig.recipientName || activeStream.host.displayName || 'Host'),
             comboCount: Number(sig.comboCount),
             quantity: Number(sig.quantity || 1),
-            timestamp: Number(sig.timestamp || Date.now()),
+            timestamp: sigTs,
+            streamId,
           });
         }
       }
@@ -614,6 +646,8 @@ export const LiveStreamScreen: React.FC = () => {
 
     const handlePageHide = () => {
       if (activeRole === 'host') {
+        realtimeSocket.sendRoomSignal('live', activeStream.id, { type: 'stream_ended' });
+        realtimeSocket.removeLiveStream(activeStream.id);
         p2pStreamingEngine.stopHostBroadcast(activeStream.id, true).catch(() => {});
         deleteLiveStreamFromFirestore(activeStream.id).catch(() => {});
       } else {
@@ -716,14 +750,23 @@ export const LiveStreamScreen: React.FC = () => {
         attemptViewerSubscribe(activeStream.sfuSessionId, activeStream.publishedTracks, activeStream);
       }
 
+      let firestoreDocSeen = false;
       const unsubDoc = onSnapshot(doc(db, 'liveStreams', activeStream.id), (snapshot) => {
         if (!isMounted) return;
-        if (!snapshot.exists() || snapshot.data()?.isActive === false) {
+        if (!snapshot.exists()) {
+          if (firestoreDocSeen) {
+            setIsBroadcastEnded(true);
+            p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+          }
+          return;
+        }
+        firestoreDocSeen = true;
+        const data = snapshot.data() as any;
+        if (data?.isActive === false) {
           setIsBroadcastEnded(true);
           p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
           return;
         }
-        const data = snapshot.data() as any;
         setIsRemoteVideoOn(data.isVideoOn !== false);
         setIsRemoteMicOn(data.isMicOn !== false);
         if (typeof data.viewerCount === 'number' && realViewersList.length <= 1) {
@@ -735,15 +778,31 @@ export const LiveStreamScreen: React.FC = () => {
 
         if (data.sfuSessionId && Array.isArray(data.publishedTracks) && data.publishedTracks.length > 0) {
           attemptViewerSubscribe(data.sfuSessionId, data.publishedTracks, data);
-        } else {
+        } else if (!subscribedSfuKeyRef.current) {
           setStreamStatus('error');
           setStreamError('Host media stream is not active yet.');
+        }
+      });
+
+      const unsubWsLiveMeta = realtimeSocket.onDiscoveryUpdate((ev) => {
+        if (!isMounted) return;
+        if (ev.type === 'live:remove' && ev.streamId === activeStream.id) {
+          setIsBroadcastEnded(true);
+          p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+        } else if (ev.type === 'live:upsert' && ev.stream?.id === activeStream.id) {
+          const item = ev.stream;
+          if (typeof item.isVideoOn === 'boolean') setIsRemoteVideoOn(item.isVideoOn);
+          if (typeof item.isMicOn === 'boolean') setIsRemoteMicOn(item.isMicOn);
+          if (item.sfuSessionId && Array.isArray(item.publishedTracks) && item.publishedTracks.length > 0) {
+            attemptViewerSubscribe(item.sfuSessionId, item.publishedTracks, item);
+          }
         }
       });
 
       return () => {
         isMounted = false;
         unsubDoc();
+        unsubWsLiveMeta();
         window.removeEventListener('pagehide', handlePageHide);
         window.removeEventListener('beforeunload', handlePageHide);
         subscribedSfuKeyRef.current = null;
@@ -757,6 +816,7 @@ export const LiveStreamScreen: React.FC = () => {
       setStreamError(null);
 
       let earlyPublishedKey = '';
+      let latestPublishedPayload: any = null;
       const announceStreamReady = async (sfuSessionId: string, publishedTracks: any[], stream: MediaStream) => {
         const key = `${sfuSessionId}:${publishedTracks.map((t) => t.trackName).join(',')}`;
         if (earlyPublishedKey === key || !isMounted) return;
@@ -765,7 +825,7 @@ export const LiveStreamScreen: React.FC = () => {
           hostVideoRef.current.srcObject = stream;
           hostVideoRef.current.play().catch(() => {});
         }
-        await publishLiveStream({
+        const streamPayload = {
           ...activeStream,
           host: {
             ...activeStream.host,
@@ -777,8 +837,19 @@ export const LiveStreamScreen: React.FC = () => {
           isVideoOn: isHostVideoOn,
           isMicOn: isHostMicOn,
           lastSeenAtMs: Date.now(),
-        });
+        };
+        latestPublishedPayload = streamPayload;
+        await publishLiveStream(streamPayload);
       };
+
+      // Continuous 18s WebSocket discovery heartbeat so remote devices never drop active Solo Live cards
+      const wsHeartbeatTimer = setInterval(() => {
+        if (!isMounted || !latestPublishedPayload) return;
+        realtimeSocket.announceLiveStream({
+          ...latestPublishedPayload,
+          lastSeenAtMs: Date.now(),
+        });
+      }, 18_000);
 
       const initHostCameraAndSfu = async () => {
         try {
@@ -845,6 +916,7 @@ export const LiveStreamScreen: React.FC = () => {
 
       return () => {
         isMounted = false;
+        clearInterval(wsHeartbeatTimer);
         window.removeEventListener('pagehide', handlePageHide);
         window.removeEventListener('beforeunload', handlePageHide);
         p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
@@ -1036,12 +1108,25 @@ export const LiveStreamScreen: React.FC = () => {
     }).catch((err) => console.warn('Failed to send live comment:', err));
   };
 
-  // Reset active gift combo when switching streams
+  // Reset all gift animations, banners, and active gift combos when entering, switching, or leaving streams
   useEffect(() => {
+    streamJoinedAtRef.current = Date.now();
     comboTrackingRef.current = null;
+    setActiveGiftAnimation(null);
     setActiveGiftCombo(null);
     setComboRemainingMs(0);
-  }, [activeStream?.id]);
+    clearActiveGiftBanner();
+    audioManager.stopAll();
+
+    return () => {
+      comboTrackingRef.current = null;
+      setActiveGiftAnimation(null);
+      setActiveGiftCombo(null);
+      setComboRemainingMs(0);
+      clearActiveGiftBanner();
+      audioManager.stopAll();
+    };
+  }, [activeStream?.id, clearActiveGiftBanner]);
 
   // Smooth rapid-combo countdown timer that auto-resets when window expires
   useEffect(() => {
@@ -1072,27 +1157,43 @@ export const LiveStreamScreen: React.FC = () => {
     return () => clearInterval(timer);
   }, [activeGiftCombo]);
 
-  // Sync incoming external gift banner to full visual animation
+  // Sync incoming external gift banner ONLY if strictly scoped to this live stream and fresh
   useEffect(() => {
-    if (activeGiftBanner && !activeGiftAnimation) {
+    if (!activeGiftBanner) return;
+    const now = Date.now();
+    const isCurrentStreamBanner =
+      activeGiftBanner.context === 'live' &&
+      Boolean(activeStream?.id) &&
+      activeGiftBanner.streamId === activeStream?.id &&
+      activeGiftBanner.createdAtMs >= streamJoinedAtRef.current - 500 &&
+      now - activeGiftBanner.createdAtMs < 3500 &&
+      !seenGiftBannerIdsRef.current.has(activeGiftBanner.id);
+
+    if (isCurrentStreamBanner && activeStream?.id) {
+      seenGiftBannerIdsRef.current.add(activeGiftBanner.id);
       setActiveGiftAnimation({
-        id: `ext_gift_${Date.now()}`,
+        id: `ext_gift_${activeGiftBanner.id}`,
         gift: activeGiftBanner.gift,
         senderName: activeGiftBanner.sender,
+        senderAvatar: activeGiftBanner.senderAvatar,
+        senderVipTier: activeGiftBanner.senderVipTier || 1,
         recipientName: activeGiftBanner.recipient,
         comboCount: 1,
-        quantity: 1,
-        timestamp: Date.now(),
+        quantity: activeGiftBanner.quantity || 1,
+        timestamp: activeGiftBanner.createdAtMs,
+        streamId: activeStream.id,
       });
-      clearActiveGiftBanner();
     }
-  }, [activeGiftBanner, activeGiftAnimation, clearActiveGiftBanner]);
+    clearActiveGiftBanner();
+  }, [activeGiftBanner, activeStream?.id, clearActiveGiftBanner]);
 
   // Enhanced Virtual Gift Sending Handler with Atomic Rapid Combos & Visual Animations
   const handleSendSelectedGift = (customMultiplier?: number, overrideGift?: Gift) => {
+    if (!activeStream?.id) return;
     const giftToSend = overrideGift || selectedGift;
     const qty = customMultiplier || giftQuantityMultiplier;
-    const requiredCoins = giftToSend.coins * qty;
+    const unitCost = giftToSend.costInCoins ?? giftToSend.coins;
+    const requiredCoins = unitCost * qty;
 
     if (coins < requiredCoins) {
       showToast(
@@ -1101,16 +1202,19 @@ export const LiveStreamScreen: React.FC = () => {
       return;
     }
 
-    const recipientId = giftRecipientUser ? giftRecipientUser.id : (activeStream?.host.id || 'host_01');
+    const recipientId = giftRecipientUser ? giftRecipientUser.id : (activeStream.host.id || 'host_01');
     const recipientName = giftRecipientUser
       ? giftRecipientUser.displayName
-      : (activeStream?.host.displayName || 'Host');
+      : (activeStream.host.displayName || 'Host');
 
     // Deduct coins & record 60% Host Diamonds / 40% App Share via AppContext
-    sendLiveGift(giftToSend, recipientId, qty, recipientName, {
+    const giftSentOk = sendLiveGift(giftToSend, recipientId, qty, recipientName, {
       context: 'live',
-      streamId: activeStream?.id,
+      streamId: activeStream.id,
     });
+    if (!giftSentOk) return;
+    // Clear global banner immediately since LiveStreamScreen drives the scoped gift overlay directly
+    clearActiveGiftBanner();
 
     // Atomically calculate rapid combo streaks (resets if > 4.2s elapsed or gift changed)
     const now = Date.now();
@@ -1145,24 +1249,10 @@ export const LiveStreamScreen: React.FC = () => {
     });
     setComboRemainingMs(GIFT_COMBO_WINDOW_MS);
 
-    // Broadcast live combo event over room WebSocket so Host & all Viewers see the rapid streak
-    if (activeStream?.id) {
-      realtimeSocket.sendRoomSignal('live', activeStream.id, {
-        type: 'gift_combo',
-        gift: giftToSend,
-        senderName: currentUser.displayName,
-        senderAvatar: currentUser.avatar,
-        senderVipTier: currentUser.vipTier || 1,
-        recipientName,
-        comboCount: nextCombo,
-        quantity: qty,
-        timestamp: now,
-      });
-    }
-
-    // Trigger Spectacular Screen Takeover Animation
-    setActiveGiftAnimation({
-      id: `gift_anim_${now}_${Math.random()}`,
+    // Broadcast live combo event over room WebSocket so Host & Viewers in THIS stream see it
+    realtimeSocket.sendRoomSignal('live', activeStream.id, {
+      type: 'gift_combo',
+      streamId: activeStream.id,
       gift: giftToSend,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
@@ -1173,19 +1263,43 @@ export const LiveStreamScreen: React.FC = () => {
       timestamp: now,
     });
 
-    // Add Highlighted Gift Notification into Live Chat Stream
+    // Trigger Scoped Gift Banner / Animation strictly for this streamId
+    setActiveGiftAnimation({
+      id: `gift_anim_${activeStream.id}_${now}_${Math.random().toString(36).slice(2, 7)}`,
+      gift: giftToSend,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipTier: currentUser.vipTier || 1,
+      recipientName,
+      comboCount: nextCombo,
+      quantity: qty,
+      timestamp: now,
+      streamId: activeStream.id,
+    });
+
+    const giftChatText = `sent ${giftToSend.name} ${qty > 1 ? `x${qty} ` : ''}to ${recipientName}! ${giftToSend.icon} (+${requiredCoins.toLocaleString()} 💰)${
+      nextCombo > 1 ? ` [Combo x${nextCombo} 🔥]` : ''
+    }`;
+
+    // Add Highlighted Gift Notification into Live Chat Stream & sync to stream messages
     setComments((prev) => [
       ...prev,
       {
         id: `gift_msg_${now}_${nextCombo}`,
         user: currentUser.displayName,
-        text: `sent ${giftToSend.name} ${qty > 1 ? `x${qty} ` : ''}to ${recipientName}! ${giftToSend.icon} (+${requiredCoins.toLocaleString()} 💰)${
-          nextCombo > 1 ? ` [Combo x${nextCombo} 🔥]` : ''
-        }`,
+        text: giftChatText,
         vipLevel: currentUser.vipTier,
         isGiftHighlight: true,
       },
     ]);
+    sendLiveStreamMessage(activeStream.id, {
+      user: currentUser.displayName,
+      text: giftChatText,
+      vipLevel: currentUser.vipTier || 0,
+      level: currentUser.level || 1,
+      isGiftHighlight: true,
+      senderId: auth.currentUser?.uid || currentUser.id,
+    }).catch(() => {});
 
     // Spawn floating celebration hearts
     spawnHeart();
@@ -1440,10 +1554,14 @@ export const LiveStreamScreen: React.FC = () => {
         ))}
       </div>
 
-      {/* Full-Screen Visual Animations & Spectacular Takeover for Virtual Gifts */}
+      {/* Scoped Gift Banner (<=100 coins, 2s) & Big Gift Showcase (5-7.5s) ONLY for this activeStream.id */}
       <GiftAnimationOverlay
-        currentEvent={activeGiftAnimation}
-        onComplete={() => setActiveGiftAnimation(null)}
+        currentEvent={
+          activeGiftAnimation && activeGiftAnimation.streamId === activeStream.id
+            ? activeGiftAnimation
+            : null
+        }
+        onComplete={handleGiftOverlayComplete}
       />
 
       {/* Interactive Rapid-Succession Gift Combo Counter HUD */}
@@ -1935,12 +2053,20 @@ export const LiveStreamScreen: React.FC = () => {
                         VIP
                       </span>
                     )}
-                    <span className="text-2xl mb-1 drop-shadow">{g.icon}</span>
+                    {g.thumbnailUrl ? (
+                      <img
+                        src={g.thumbnailUrl}
+                        alt={g.name}
+                        className="w-9 h-9 object-contain mb-1 drop-shadow"
+                      />
+                    ) : (
+                      <span className="text-2xl mb-1 drop-shadow">{g.icon}</span>
+                    )}
                     <span className="text-[10.5px] font-bold text-white truncate max-w-full">
                       {g.name}
                     </span>
                     <span className="text-[10px] text-amber-300 font-extrabold mt-0.5 flex items-center gap-0.5">
-                      <span>{g.coins.toLocaleString()}</span>
+                      <span>{(g.costInCoins ?? g.coins).toLocaleString()}</span>
                       <span className="text-[9px]">💰</span>
                     </span>
                   </div>
@@ -2227,8 +2353,13 @@ export const LiveStreamScreen: React.FC = () => {
               animationType: 'sparkle',
               description: `Lucky Draw Prize Shared with ${activeStream.host.displayName}!`,
             };
-            sendLiveGift(bonusGift, activeStream.host.id);
-            showToast(`Sent ${halfCoins.toLocaleString()} Lucky Bonus Coins to ${activeStream.host.displayName}! 🎁`);
+            const ok = sendLiveGift(bonusGift, activeStream.host.id, 1, activeStream.host.displayName, {
+              context: 'live',
+              streamId: activeStream.id,
+            });
+            if (ok) {
+              showToast(`Sent ${halfCoins.toLocaleString()} Lucky Bonus Coins to ${activeStream.host.displayName}! 🎁`);
+            }
           }
         }}
       />

@@ -7,7 +7,7 @@ import { CreateStoryModal } from '../components/story/CreateStoryModal';
 import { PKComingSoonModal } from '../components/modals/PKComingSoonModal';
 import { CoinSellerAgenciesCarousel } from '../components/home/CoinSellerAgenciesCarousel';
 import { LiveStream, FriendStory } from '../types';
-import { auth } from '../services/firebase';
+import { auth, getCanonicalLiveStreamId } from '../services/firebase';
 import {
   Radio,
   Users,
@@ -100,8 +100,8 @@ export const HomeScreen: React.FC = () => {
     });
 
     return list.sort((a, b) => {
-      const isLiveA = a.id.startsWith('live_my_') || (a as any).isActive;
-      const isLiveB = b.id.startsWith('live_my_') || (b as any).isActive;
+      const isLiveA = a.id.startsWith('live_host_') || a.id.startsWith('live_my_') || (a as any).isActive;
+      const isLiveB = b.id.startsWith('live_host_') || b.id.startsWith('live_my_') || (b as any).isActive;
       if (isLiveA && !isLiveB) return -1;
       if (!isLiveA && isLiveB) return 1;
 
@@ -119,8 +119,17 @@ export const HomeScreen: React.FC = () => {
   const launchBroadcastWithUid = (uid: string) => {
     setGoLiveAuthError(null);
     setShowGoLiveModal(false);
+
+    const existingMyStream = liveStreams.find(
+      (s) => s.isActive !== false && !s.isPK && s.host?.id === uid
+    );
+    if (existingMyStream) {
+      openLiveStream(existingMyStream);
+      return;
+    }
+
     const myStream: LiveStream = {
-      id: `live_my_${Date.now()}`,
+      id: getCanonicalLiveStreamId(uid),
       title: customRoomTitle || 'My Live Stream',
       host: {
         ...currentUser,

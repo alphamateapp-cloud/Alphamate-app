@@ -10,6 +10,7 @@ import {
   StoryItem,
   FriendStory,
 } from '../types';
+import { getAllVirtualGifts } from '../services/virtual-gift-database';
 
 export const CURRENT_USER: User = {
   id: 'user_me_01',
@@ -47,80 +48,7 @@ export const MOCK_LIVE_STREAMS: LiveStream[] = [];
 
 export const MOCK_PARTY_ROOMS: PartyRoom[] = [];
 
-export const VIRTUAL_GIFTS: Gift[] = [
-  {
-    id: 'gift_rose',
-    name: 'Red Rose',
-    icon: '🌹',
-    coins: 10,
-    animationType: 'sparkle',
-    description: 'A fresh scented rose for your favorite host',
-  },
-  {
-    id: 'gift_ice_cream',
-    name: 'Sweet Gelato',
-    icon: '🍦',
-    coins: 50,
-    animationType: 'sparkle',
-    description: 'Refreshing treat to brighten up the chat',
-  },
-  {
-    id: 'gift_heart',
-    name: 'Heart Sparkle',
-    icon: '💖',
-    coins: 100,
-    animationType: 'heart',
-    description: 'Animated pulse of affection and loyalty',
-  },
-  {
-    id: 'gift_ring',
-    name: 'Diamond Ring',
-    icon: '💍',
-    coins: 520,
-    animationType: 'ring',
-    description: 'Sparkling engagement diamond of prestige',
-  },
-  {
-    id: 'gift_crown',
-    name: 'Alpha Crown',
-    icon: '👑',
-    coins: 1999,
-    animationType: 'crown',
-    description: 'Royal imperial crown of honor',
-  },
-  {
-    id: 'gift_car',
-    name: 'Cyber Supercar',
-    icon: '🏎️',
-    coins: 4999,
-    animationType: 'car',
-    description: 'Twin-turbo neon supercar road takeover',
-  },
-  {
-    id: 'gift_yacht',
-    name: 'Royal Yacht',
-    icon: '🛥️',
-    coins: 9999,
-    animationType: 'yacht',
-    description: 'Cruise the private neon sea in luxury',
-  },
-  {
-    id: 'gift_rocket',
-    name: 'Galaxy Rocket',
-    icon: '🚀',
-    coins: 19999,
-    animationType: 'rocket',
-    description: 'Blast off across the cosmos with orbital sparks',
-  },
-  {
-    id: 'gift_dragon',
-    name: 'Mythic Dragon',
-    icon: '🐉',
-    coins: 49999,
-    animationType: 'dragon',
-    description: 'Imperial fire-breathing mythical dragon screen takeover!',
-  },
-];
+export const VIRTUAL_GIFTS: Gift[] = getAllVirtualGifts();
 
 export const MOCK_CONVERSATIONS: Conversation[] = [];
 

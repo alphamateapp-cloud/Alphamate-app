@@ -3,7 +3,13 @@ import { useApp } from '../context/AppContext';
 import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import { PartyRoom, PartySeat, User, Gift } from '../types';
 import { p2pStreamingEngine, PartyParticipantPresence } from '../services/webrtcService';
-import { auth, db, updatePartyRoomFields, togglePartySeatLockInFirestore } from '../services/firebase';
+import {
+  auth,
+  db,
+  updatePartyRoomFields,
+  togglePartySeatLockInFirestore,
+  getCanonicalPartyRoomId,
+} from '../services/firebase';
 import { deleteDoc, doc, updateDoc } from 'firebase/firestore';
 import { PartyRoomAtmosphere } from '../components/party/PartyRoomAtmosphere';
 import { PartyRemoteAudioPlayer } from '../components/party/PartyRemoteAudioPlayer';
@@ -22,6 +28,7 @@ import {
   VOICE_FILTER_PRESETS,
   VoiceFilterPresetId,
 } from '../services/audioFilter';
+import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 import {
   Radio,
   Mic,
@@ -180,6 +187,7 @@ export const PartyRoomsScreen: React.FC = () => {
     coins,
     setCurrentScreen,
     activeGiftBanner,
+    clearActiveGiftBanner,
     startDirectMessage,
     sendNotificationToUser,
     refreshScope,
@@ -246,10 +254,60 @@ export const PartyRoomsScreen: React.FC = () => {
     audioFilter.getPreset()
   );
   const [partyGivers, setPartyGivers] = useState<PartyLeaderboardEntry[]>([]);
+  const [activePartyGiftAnimation, setActivePartyGiftAnimation] = useState<ActiveGiftEvent | null>(null);
+  const partyJoinedAtRef = useRef<number>(Date.now());
+  const seenPartyBannerIdsRef = useRef<Set<string>>(new Set());
+
+  const handlePartyGiftOverlayComplete = useCallback(() => {
+    setActivePartyGiftAnimation(null);
+  }, []);
 
   useEffect(() => {
     return audioFilter.subscribe(setActiveVoiceFilter);
   }, []);
+
+  // Reset party gift overlay & stale banners whenever entering, switching, or leaving a Party Room
+  useEffect(() => {
+    partyJoinedAtRef.current = Date.now();
+    setActivePartyGiftAnimation(null);
+    clearActiveGiftBanner();
+    audioManager.stopAll();
+    return () => {
+      setActivePartyGiftAnimation(null);
+      clearActiveGiftBanner();
+      audioManager.stopAll();
+    };
+  }, [activePartyRoom?.id, clearActiveGiftBanner]);
+
+  // Consume external party gift banners ONLY if strictly scoped to this activePartyRoom.id
+  useEffect(() => {
+    if (!activeGiftBanner) return;
+    const now = Date.now();
+    const isCurrentRoomBanner =
+      activeGiftBanner.context === 'party' &&
+      Boolean(activePartyRoom?.id) &&
+      activeGiftBanner.roomId === activePartyRoom?.id &&
+      activeGiftBanner.createdAtMs >= partyJoinedAtRef.current - 500 &&
+      now - activeGiftBanner.createdAtMs < 3500 &&
+      !seenPartyBannerIdsRef.current.has(activeGiftBanner.id);
+
+    if (isCurrentRoomBanner && activePartyRoom?.id) {
+      seenPartyBannerIdsRef.current.add(activeGiftBanner.id);
+      setActivePartyGiftAnimation({
+        id: `party_ext_gift_${activeGiftBanner.id}`,
+        gift: activeGiftBanner.gift,
+        senderName: activeGiftBanner.sender,
+        senderAvatar: activeGiftBanner.senderAvatar,
+        senderVipTier: activeGiftBanner.senderVipTier || 1,
+        recipientName: activeGiftBanner.recipient,
+        comboCount: 1,
+        quantity: activeGiftBanner.quantity || 1,
+        timestamp: activeGiftBanner.createdAtMs,
+        roomId: activePartyRoom.id,
+      });
+    }
+    clearActiveGiftBanner();
+  }, [activeGiftBanner, activePartyRoom?.id, clearActiveGiftBanner]);
 
   // Daily Top Platform Contributors (real-time givers)
   const dailyTopGivers: PartyLeaderboardEntry[] = useMemo(() => {
@@ -429,6 +487,20 @@ export const PartyRoomsScreen: React.FC = () => {
     }
   }, [partyRooms, activePartyRoom?.id, effectiveUserId]);
 
+  const handleTryCreatePartyRoom = () => {
+    const uid = auth.currentUser?.uid || currentUser.id;
+    const existingMyRoom = partyRooms.find(
+      (r) => r.isActive !== false && r.host?.id === uid
+    );
+    if (existingMyRoom) {
+      showToast('آپ کا پارٹی روم پہلے سے چل رہا ہے! آپ کو اسی روم میں لے جایا جا رہا ہے 🎙️');
+      openPartyRoom(existingMyRoom);
+      return;
+    }
+    setCreateRoomError(null);
+    setShowCreateModal(true);
+  };
+
   const handleExitClick = async () => {
     const isRoomHost = activePartyRoom?.host?.id === effectiveUserId;
     if (isRoomHost) {
@@ -437,7 +509,11 @@ export const PartyRoomsScreen: React.FC = () => {
       if (userSeatIndex !== null) {
         await toggleSeat(userSeatIndex).catch(() => {});
       }
-      closePartyRoom(false);
+      const remainingCount = Math.max(
+        0,
+        realViewersList.filter((u) => u.id !== effectiveUserId).length
+      );
+      closePartyRoom(false, { remainingViewers: remainingCount });
     }
   };
 
@@ -1138,6 +1214,33 @@ export const PartyRoomsScreen: React.FC = () => {
       if (cancelled) return;
       if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
         setWsPartyViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
+      } else if (
+        ev.type === 'room:signal' &&
+        ev.roomId === roomId &&
+        ev.signal?.type === 'gift_combo' &&
+        ev.senderId !== effectiveUserId
+      ) {
+        const sig = ev.signal;
+        const sigTs = Number(sig.timestamp || ev.ts || Date.now());
+        const now = Date.now();
+        if (
+          sig.gift &&
+          sigTs >= partyJoinedAtRef.current - 1500 &&
+          Math.abs(now - sigTs) < 8000
+        ) {
+          setActivePartyGiftAnimation({
+            id: `party_ws_gift_${roomId}_${sigTs}_${Math.random().toString(36).slice(2, 7)}`,
+            gift: sig.gift as Gift,
+            senderName: String(sig.senderName || 'Guest'),
+            senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
+            senderVipTier: Number(sig.senderVipTier || 1),
+            recipientName: String(sig.recipientName || activePartyRoom.host.displayName || 'Host'),
+            comboCount: Number(sig.comboCount || 1),
+            quantity: Number(sig.quantity || 1),
+            timestamp: sigTs,
+            roomId,
+          });
+        }
       }
     });
 
@@ -1436,26 +1539,35 @@ export const PartyRoomsScreen: React.FC = () => {
           id: effectiveUserId,
           isHost: effectiveUserId === activePartyRoom.host?.id,
         });
-      } else if (activePartyRoom.host?.id) {
-        addUniqueViewer({ ...activePartyRoom.host, isHost: true });
       }
     }
 
     return Array.from(byId.values());
   }, [activePartyRoom, activeVoiceParticipants, wsPartyViewers, effectiveUserId, currentUser]);
 
-  // Synchronize live activeViewers count strictly from deduplicated real active participants
+  // Synchronize live activeViewers count strictly from deduplicated real active participants (0 when empty)
   useEffect(() => {
     if (!activePartyRoom?.id) {
       setActiveViewers(0);
       return;
     }
-    const realCount = Math.max(1, realViewersList.length);
+    const realCount = realViewersList.length;
     setActiveViewers(realCount);
 
-    if (isHost && lastSyncedViewerCountRef.current !== realCount) {
+    if (lastSyncedViewerCountRef.current !== realCount) {
       lastSyncedViewerCountRef.current = realCount;
-      updatePartyRoomFields(activePartyRoom.id, { activeViewers: realCount }).catch(() => {});
+      const patch: Record<string, unknown> = {
+        activeViewers: realCount,
+        lastSeenAtMs: Date.now(),
+        ...(isHost ? { isHostPresent: true } : {}),
+      };
+      updatePartyRoomFields(activePartyRoom.id, patch).catch(() => {});
+      realtimeSocket.announcePartyRoom({
+        ...activePartyRoom,
+        activeViewers: realCount,
+        ...(isHost ? { isHostPresent: true } : {}),
+        lastSeenAtMs: Date.now(),
+      });
     }
   }, [activePartyRoom?.id, realViewersList.length, isHost]);
 
@@ -1551,6 +1663,7 @@ export const PartyRoomsScreen: React.FC = () => {
       timestamp: 'Just now',
     };
 
+    setChatItems((prev) => [...prev.slice(-149), newMsg]);
     setInputChat('');
     sendPartyRoomMessage(activePartyRoom.id, {
       sender: { id: currentUser.id, displayName: currentUser.displayName, avatar: currentUser.avatar, vipTier: currentUser.vipTier, level: currentUser.level, isHost },
@@ -1559,19 +1672,64 @@ export const PartyRoomsScreen: React.FC = () => {
     }).catch((error) => showToast(error instanceof Error ? error.message : 'Message could not be sent.'));
   };
 
-  // Send Virtual Gift
+  // Send Virtual Gift (strictly validated and scoped to this activePartyRoom.id)
   const handleSendSelectedGift = () => {
-    const recipient = giftRecipientUser ? giftRecipientUser.displayName : (activePartyRoom?.host.displayName || 'Host');
-    const recipientId = giftRecipientUser ? giftRecipientUser.id : (activePartyRoom?.host.id || currentUser.id);
-    sendLiveGift(selectedGift, recipientId, 1, recipient, {
+    if (!activePartyRoom?.id) return;
+    const giftCost = selectedGift.costInCoins ?? selectedGift.coins;
+    if (coins < giftCost) {
+      showToast(
+        `Insufficient coins! You need ${giftCost.toLocaleString()} coins for ${selectedGift.name}. Recharge in Wallet 💰`
+      );
+      return;
+    }
+
+    const recipient = giftRecipientUser
+      ? giftRecipientUser.displayName
+      : activePartyRoom.host.displayName || 'Host';
+    const recipientId = giftRecipientUser
+      ? giftRecipientUser.id
+      : activePartyRoom.host.id || currentUser.id;
+
+    const sentOk = sendLiveGift(selectedGift, recipientId, 1, recipient, {
       context: 'party',
-      roomId: activePartyRoom?.id,
+      roomId: activePartyRoom.id,
     });
-    void audioManager.playGiftSfx(selectedGift);
+    if (!sentOk) return;
+    clearActiveGiftBanner();
+
+    const now = Date.now();
     spawnHeart();
 
+    // Broadcast gift animation signal ONLY to participants inside this Party Room
+    realtimeSocket.sendRoomSignal('party', activePartyRoom.id, {
+      type: 'gift_combo',
+      roomId: activePartyRoom.id,
+      gift: selectedGift,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipTier: currentUser.vipTier || 1,
+      recipientName: recipient,
+      comboCount: 1,
+      quantity: 1,
+      timestamp: now,
+    });
+
+    // Trigger scoped banner (2s for <=100 coins) or full-screen showcase (5-7.5s for big gifts)
+    setActivePartyGiftAnimation({
+      id: `party_gift_${activePartyRoom.id}_${now}_${Math.random().toString(36).slice(2, 7)}`,
+      gift: selectedGift,
+      senderName: currentUser.displayName,
+      senderAvatar: currentUser.avatar,
+      senderVipTier: currentUser.vipTier || 1,
+      recipientName: recipient,
+      comboCount: 1,
+      quantity: 1,
+      timestamp: now,
+      roomId: activePartyRoom.id,
+    });
+
     const giftMsg: ChatItem = {
-      id: `gift_${Date.now()}`,
+      id: `gift_${now}`,
       sender: {
         displayName: currentUser.displayName,
         avatar: currentUser.avatar,
@@ -1581,20 +1739,26 @@ export const PartyRoomsScreen: React.FC = () => {
       type: 'gift',
       giftName: selectedGift.name,
       giftIcon: selectedGift.icon,
-      giftCoins: selectedGift.coins,
+      giftCoins: giftCost,
       timestamp: 'Just now',
     };
 
-    if (activePartyRoom) {
-      sendPartyRoomMessage(activePartyRoom.id, {
-        sender: { id: currentUser.id, displayName: currentUser.displayName, avatar: currentUser.avatar, vipTier: currentUser.vipTier, level: currentUser.level },
-        text: giftMsg.text,
-        type: 'gift',
-        giftName: selectedGift.name,
-        giftIcon: selectedGift.icon,
-        giftCoins: selectedGift.coins,
-      }).catch((error) => showToast(error instanceof Error ? error.message : 'Gift activity could not be posted.'));
-    }
+    setChatItems((prev) => [...prev.slice(-149), giftMsg]);
+
+    sendPartyRoomMessage(activePartyRoom.id, {
+      sender: {
+        id: auth.currentUser?.uid || currentUser.id,
+        displayName: currentUser.displayName,
+        avatar: currentUser.avatar,
+        vipTier: currentUser.vipTier || 0,
+        level: currentUser.level || 1,
+      },
+      text: giftMsg.text,
+      type: 'gift',
+      giftName: selectedGift.name,
+      giftIcon: selectedGift.icon,
+      giftCoins: giftCost,
+    }).catch(() => {});
 
     // Dynamically update Party Room Leaderboard
     setPartyGivers((prev) => {
@@ -1605,7 +1769,7 @@ export const PartyRoomsScreen: React.FC = () => {
           idx === existingIdx
             ? {
                 ...g,
-                totalCoins: g.totalCoins + selectedGift.coins,
+                totalCoins: g.totalCoins + giftCost,
                 giftCount: (g.giftCount || 0) + 1,
                 lastGiftName: selectedGift.name,
                 lastGiftIcon: selectedGift.icon,
@@ -1617,7 +1781,7 @@ export const PartyRoomsScreen: React.FC = () => {
           ...prev,
           {
             user: currentUser,
-            totalCoins: selectedGift.coins,
+            totalCoins: giftCost,
             giftCount: 1,
             lastGiftName: selectedGift.name,
             lastGiftIcon: selectedGift.icon,
@@ -1628,7 +1792,7 @@ export const PartyRoomsScreen: React.FC = () => {
     });
 
     if (isRoomPKActive) {
-      setLeftRoomPKScore((prev) => prev + selectedGift.coins);
+      setLeftRoomPKScore((prev) => prev + giftCost);
     }
 
     setShowGiftDrawer(false);
@@ -1707,10 +1871,15 @@ export const PartyRoomsScreen: React.FC = () => {
   if (activePartyRoom) {
     const currentTrack = PLAYLIST_TRACKS[currentTrackIndex];
     const remoteHostPresence = voiceParticipantsById.get(activePartyRoom.host.id);
+    const isHostSeatedOnThrone =
+      isHost ||
+      wsPartyViewers.some((v) => v.id === activePartyRoom.host.id) ||
+      activePartyRoom.isHostPresent !== false;
     const effectiveHostMicMuted = isHost
       ? isHostMicMuted
       : Boolean(remoteHostPresence ? remoteHostPresence.isMuted : false);
     const effectiveHostSpeaking =
+      isHostSeatedOnThrone &&
       !effectiveHostMicMuted &&
       (isHost
         ? isHostSpeaking
@@ -1786,32 +1955,15 @@ export const PartyRoomsScreen: React.FC = () => {
           ))}
         </div>
 
-        {/* Spectacular Screen Takeover Gift Banner */}
-        {activeGiftBanner && (
-          <div className="absolute top-16 left-4 right-4 z-40 pointer-events-none animate-bounce">
-            <div className="relative rounded-2xl bg-gradient-to-r from-[#7928CA] via-[#EC4899] to-[#F59E0B] p-[2px] shadow-[0_0_35px_rgba(236,72,153,0.7)]">
-              <div className="rounded-[14px] bg-[#140A28]/95 backdrop-blur-xl px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <span className="text-3xl animate-spin-slow">{activeGiftBanner.gift.icon}</span>
-                  <div>
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-black text-amber-300">{activeGiftBanner.sender}</span>
-                      <span className="text-[11px] text-zinc-300">sent</span>
-                    </div>
-                    <div className="text-sm font-extrabold text-white tracking-wide">
-                      {activeGiftBanner.gift.name}
-                    </div>
-                  </div>
-                </div>
-                <div className="text-right">
-                  <span className="text-xs font-black text-[#F43F5E] px-2 py-1 rounded-full bg-[#EC4899]/20 border border-[#EC4899]/40">
-                    +{activeGiftBanner.gift.coins} Coins
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Scoped Party Room Gift Banner (2s for <=100 coins) & Big Gift Showcase (5-7.5s) */}
+        <GiftAnimationOverlay
+          currentEvent={
+            activePartyGiftAnimation && activePartyGiftAnimation.roomId === activePartyRoom.id
+              ? activePartyGiftAnimation
+              : null
+          }
+          onComplete={handlePartyGiftOverlayComplete}
+        />
 
         {/* =====================================================================
             2. ROOM HEADER & LEVEL SWITCHER (Top Bar)
@@ -2084,57 +2236,84 @@ export const PartyRoomsScreen: React.FC = () => {
           />
         ) : (
           <div className="relative z-10 -mt-3 flex flex-col items-center px-2 pt-0 pb-1 shrink-0 w-full">
-          {/* Royal Crown Emblem atop Host Avatar */}
+          {/* Royal Crown Emblem atop Host Throne */}
           <div className="relative -mb-1.5 z-10">
-            <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-amber-400 via-amber-300 to-yellow-500 flex items-center justify-center shadow-[0_0_12px_rgba(251,191,36,0.8)] border border-amber-200">
-              <Crown className="w-3.5 h-3.5 text-black fill-black" />
-            </div>
-          </div>
-
-          {/* Host Profile Picture with Multi-Layered Glowing Circular Frame */}
-          <div
-            className="relative cursor-pointer group"
-            onClick={() => {
-              if (isHost) {
-                const nextState = !isHostMicMuted;
-                setIsHostMicMuted(nextState);
-                p2pStreamingEngine.toggleMicrophone(!nextState);
-                showToast(nextState ? 'Host Mic Muted 🔇' : 'Host Mic Live 🎙️');
-              } else {
-                setSelectedUserForActionSheet(activePartyRoom.host);
-                setSelectedUserSeatIndex(null);
-                setShowUserActionSheet(true);
-              }
-            }}
-          >
-            {/* Host Speaking Soundwave Waves (strictly live audio, never shown when muted) */}
-            {effectiveHostSpeaking && (
-              <>
-                <div className="absolute -inset-1.5 rounded-full border border-[#EC4899]/70 animate-ping opacity-75" />
-                <div className="absolute -inset-3 rounded-full border border-[#A855F7]/40 animate-pulse" />
-              </>
-            )}
-
-            {/* Glowing Host Profile Frame with Animated Breathing VIP Frame */}
-            <VipAvatarFrame
-              avatarUrl={activePartyRoom.host.avatar}
-              vipTier={activePartyRoom.host.vipTier || 3}
-              size="md"
-              showCrownBadge={true}
-            />
-
-            {/* Host Microphone Status Badge */}
             <div
-              className={`absolute bottom-0 right-0 w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md ${
-                effectiveHostMicMuted ? 'bg-rose-600 text-white' : 'bg-emerald-500 text-black'
+              className={`w-6 h-6 rounded-full flex items-center justify-center border ${
+                isHostSeatedOnThrone
+                  ? 'bg-gradient-to-tr from-amber-400 via-amber-300 to-yellow-500 shadow-[0_0_12px_rgba(251,191,36,0.8)] border-amber-200'
+                  : 'bg-zinc-900/90 border-amber-400/35 shadow-inner'
               }`}
             >
-              {effectiveHostMicMuted ? <MicOff className="w-2.5 h-2.5" /> : <Mic className="w-2.5 h-2.5" />}
+              <Crown
+                className={`w-3.5 h-3.5 ${
+                  isHostSeatedOnThrone ? 'text-black fill-black' : 'text-amber-300/60'
+                }`}
+              />
             </div>
           </div>
+
+          {/* Host Throne: Occupied by Host when present, or Visually Empty Seat when Host left */}
+          {isHostSeatedOnThrone ? (
+            <div
+              className="relative cursor-pointer group"
+              onClick={() => {
+                if (isHost) {
+                  const nextState = !isHostMicMuted;
+                  setIsHostMicMuted(nextState);
+                  p2pStreamingEngine.toggleMicrophone(!nextState);
+                  showToast(nextState ? 'Host Mic Muted 🔇' : 'Host Mic Live 🎙️');
+                } else {
+                  setSelectedUserForActionSheet(activePartyRoom.host);
+                  setSelectedUserSeatIndex(null);
+                  setShowUserActionSheet(true);
+                }
+              }}
+            >
+              {/* Host Speaking Soundwave Waves (strictly live audio, never shown when muted) */}
+              {effectiveHostSpeaking && (
+                <>
+                  <div className="absolute -inset-1.5 rounded-full border border-[#EC4899]/70 animate-ping opacity-75" />
+                  <div className="absolute -inset-3 rounded-full border border-[#A855F7]/40 animate-pulse" />
+                </>
+              )}
+
+              {/* Glowing Host Profile Frame with Animated Breathing VIP Frame */}
+              <VipAvatarFrame
+                avatarUrl={activePartyRoom.host.avatar}
+                vipTier={activePartyRoom.host.vipTier || 3}
+                size="md"
+                showCrownBadge={true}
+              />
+
+              {/* Host Microphone Status Badge */}
+              <div
+                className={`absolute bottom-0 right-0 w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md ${
+                  effectiveHostMicMuted ? 'bg-rose-600 text-white' : 'bg-emerald-500 text-black'
+                }`}
+              >
+                {effectiveHostMicMuted ? <MicOff className="w-2.5 h-2.5" /> : <Mic className="w-2.5 h-2.5" />}
+              </div>
+            </div>
+          ) : (
+            <div
+              className="relative w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-[#150A2A]/85 border-2 border-dashed border-amber-400/40 flex flex-col items-center justify-center shadow-[0_0_16px_rgba(168,85,247,0.2)]"
+              title="Host Seat Empty — Host is currently away"
+            >
+              <MicOff className="w-4 h-4 text-zinc-400" />
+              <span className="text-[7.5px] font-extrabold uppercase tracking-wider text-zinc-400 mt-0.5">
+                Empty
+              </span>
+            </div>
+          )}
 
           {/* Host Badges: Level Badge + VIP Badge + Received Coins + Follow Button */}
           <div className="mt-0.5 flex items-center gap-1 flex-wrap justify-center">
+            {!isHostSeatedOnThrone && (
+              <span className="px-2 py-0.2 rounded-full bg-zinc-900/90 text-zinc-300 text-[8px] font-bold border border-white/15">
+                Host Seat Empty
+              </span>
+            )}
             <LevelBadgeIcon level={activePartyRoom.host.level || 45} size="xs" />
             <span className="px-1.5 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black border border-[#A855F7]/30">
               VIP {activePartyRoom.host.vipTier || 6}
@@ -2629,9 +2808,19 @@ export const PartyRoomsScreen: React.FC = () => {
                           : 'bg-[#1D1438] border border-white/5 hover:border-white/20'
                       }`}
                     >
-                      <span className="text-2xl mb-1">{g.icon}</span>
+                      {g.thumbnailUrl ? (
+                        <img
+                          src={g.thumbnailUrl}
+                          alt={g.name}
+                          className="w-9 h-9 object-contain mb-1 drop-shadow"
+                        />
+                      ) : (
+                        <span className="text-2xl mb-1">{g.icon}</span>
+                      )}
                       <span className="text-[10px] font-bold text-white truncate max-w-full">{g.name}</span>
-                      <span className="text-[10px] text-amber-400 font-semibold mt-0.5">{g.coins}</span>
+                      <span className="text-[10px] text-amber-400 font-semibold mt-0.5">
+                        {(g.costInCoins ?? g.coins).toLocaleString()}
+                      </span>
                     </div>
                   );
                 })}
@@ -2640,7 +2829,15 @@ export const PartyRoomsScreen: React.FC = () => {
               {/* Selected Gift Footer */}
               <div className="flex items-center justify-between pt-2 border-t border-[#A855F7]/15">
                 <div className="flex items-center gap-2">
-                  <span className="text-xl">{selectedGift.icon}</span>
+                  {selectedGift.thumbnailUrl ? (
+                    <img
+                      src={selectedGift.thumbnailUrl}
+                      alt={selectedGift.name}
+                      className="w-8 h-8 object-contain rounded-lg"
+                    />
+                  ) : (
+                    <span className="text-xl">{selectedGift.icon}</span>
+                  )}
                   <div>
                     <div className="text-xs font-bold text-white">{selectedGift.name}</div>
                     <div className="text-[10px] text-zinc-400">{selectedGift.description}</div>
@@ -2651,7 +2848,7 @@ export const PartyRoomsScreen: React.FC = () => {
                   onClick={handleSendSelectedGift}
                   className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-bold text-xs shadow-lg shadow-[#7928CA]/50 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
                 >
-                  Send ({selectedGift.coins} 💰)
+                  Send ({(selectedGift.costInCoins ?? selectedGift.coins).toLocaleString()} 💰)
                 </button>
               </div>
             </div>
@@ -3385,12 +3582,16 @@ export const PartyRoomsScreen: React.FC = () => {
               </p>
 
               <div className="space-y-3 mb-5">
-                {/* 1. Leave Room (Lounge stays open) */}
+                {/* 1. Leave Room (Lounge stays open, Host Seat becomes empty) */}
                 <button
                   onClick={() => {
                     setShowExitConfirmModal(false);
-                    closePartyRoom(false);
-                    showToast('Lounge is still active for guests! 🎙️');
+                    const remainingCount = Math.max(
+                      0,
+                      realViewersList.filter((u) => u.id !== effectiveUserId).length
+                    );
+                    closePartyRoom(false, { remainingViewers: remainingCount });
+                    showToast('روم کھلا ہے اور ہوسٹ سیٹ خالی ہو گئی ہے — واپسی پر آپ ڈائریکٹ ہوسٹ سیٹ پر آئیں گے 🎙️');
                   }}
                   className="w-full p-3.5 rounded-2xl bg-[#1C1033] border border-[#A855F7]/30 hover:border-[#A855F7] flex items-start gap-3 text-left transition-all cursor-pointer group hover:bg-[#231540]"
                 >
@@ -3403,7 +3604,7 @@ export const PartyRoomsScreen: React.FC = () => {
                       <span className="text-[9px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-bold uppercase tracking-wider">Keep Open</span>
                     </div>
                     <p className="text-[11px] text-zinc-400 mt-1 leading-normal">
-                      The room remains active. Seated guests and viewers can stay and chat. Your host throne remains reserved.
+                      Your Host Seat becomes empty and viewer count drops to actual remaining guests (0 if empty). Re-entering puts you directly back on your Host Seat.
                     </p>
                   </div>
                 </button>
@@ -3673,7 +3874,7 @@ export const PartyRoomsScreen: React.FC = () => {
             {/* Create Party & Leaderboard Action */}
             <div className="mt-3 flex items-center gap-2">
               <button
-                onClick={() => setShowCreateModal(true)}
+                onClick={handleTryCreatePartyRoom}
                 className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white text-[11px] font-black shadow-lg shadow-[#7928CA]/40 hover:brightness-110 active:scale-95 transition-all flex items-center gap-1.5 cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5 stroke-[3]" />
@@ -3737,7 +3938,9 @@ export const PartyRoomsScreen: React.FC = () => {
             {/* Top 2 Trending Highlight Cards */}
             <div className="space-y-2.5">
               {filteredRooms.slice(0, 2).map((room, rankIdx) => {
-                const filledSeats = room.seats.filter((s) => s.user !== null).length;
+                const roomSeats = Array.isArray(room.seats) ? room.seats : [];
+                const filledSeats = roomSeats.filter((s) => s.user !== null).length;
+                const displayViewers = Math.max(0, Number(room.activeViewers) || 0);
                 const isTop1 = rankIdx === 0;
 
                 return (
@@ -3786,7 +3989,10 @@ export const PartyRoomsScreen: React.FC = () => {
                             <h3 className="text-sm font-bold text-white max-w-[150px] truncate">{room.title}</h3>
                             {room.countryFlag && <span className="text-xs">{room.countryFlag}</span>}
                           </div>
-                          <p className="text-[11px] text-zinc-300 mt-0.5">Host: {room.host.displayName}</p>
+                          <p className="text-[11px] text-zinc-300 mt-0.5">
+                            Host: {room.host.displayName}
+                            {room.isHostPresent === false ? ' • Seat Empty' : ''}
+                          </p>
                         </div>
                       </div>
                     </div>
@@ -3803,13 +4009,13 @@ export const PartyRoomsScreen: React.FC = () => {
                         {/* Viewers */}
                         <div className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-white/10 text-zinc-300 text-[10px] font-semibold">
                           <Users className="w-3 h-3 text-[#A855F7]" />
-                          <span>{room.activeViewers}</span>
+                          <span>{displayViewers}</span>
                         </div>
                       </div>
 
                       {/* Guest avatars preview */}
                       <div className="flex items-center -space-x-1.5">
-                        {room.seats
+                        {roomSeats
                           .filter((s) => s.user !== null)
                           .slice(0, 4)
                           .map((seat, i) => (
@@ -3849,7 +4055,9 @@ export const PartyRoomsScreen: React.FC = () => {
 
           <div className="space-y-2.5">
             {(activeCategory === 'Trending' ? filteredRooms.slice(2) : filteredRooms).map((room) => {
-              const filledSeats = room.seats.filter((s) => s.user !== null).length;
+              const roomSeats = Array.isArray(room.seats) ? room.seats : [];
+              const filledSeats = roomSeats.filter((s) => s.user !== null).length;
+              const displayViewers = Math.max(0, Number(room.activeViewers) || 0);
 
               return (
                 <div
@@ -3878,13 +4086,16 @@ export const PartyRoomsScreen: React.FC = () => {
                           <h3 className="text-sm font-bold text-white max-w-[170px] truncate">{room.title}</h3>
                           {room.countryFlag && <span className="text-xs">{room.countryFlag}</span>}
                         </div>
-                        <p className="text-[11px] text-zinc-400 mt-0.5">Host: {room.host.displayName}</p>
+                        <p className="text-[11px] text-zinc-400 mt-0.5">
+                          Host: {room.host.displayName}
+                          {room.isHostPresent === false ? ' • Seat Empty' : ''}
+                        </p>
                       </div>
                     </div>
 
                     <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#1F1238] border border-white/5 text-[10px] text-zinc-300 font-semibold">
                       <Users className="w-3 h-3 text-[#A855F7]" />
-                      <span>{room.activeViewers}</span>
+                      <span>{displayViewers}</span>
                     </div>
                   </div>
 
@@ -3912,7 +4123,7 @@ export const PartyRoomsScreen: React.FC = () => {
                       ) : null}
 
                       <div className="flex items-center -space-x-2">
-                        {room.seats
+                        {roomSeats
                           .filter((s) => s.user !== null)
                           .slice(0, 4)
                           .map((seat, i) => (
@@ -3951,10 +4162,7 @@ export const PartyRoomsScreen: React.FC = () => {
               </p>
               <button
                 type="button"
-                onClick={() => {
-                  setCreateRoomError(null);
-                  setShowCreateModal(true);
-                }}
+                onClick={handleTryCreatePartyRoom}
                 className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold shadow-md cursor-pointer"
               >
                 + Create Party Room
@@ -4252,12 +4460,13 @@ export const PartyRoomsScreen: React.FC = () => {
 
                     const normalizedHost = { ...currentUser, id: fbUser.uid };
                     const newParty: PartyRoom = {
-                      id: `party_${Date.now()}`,
+                      id: getCanonicalPartyRoomId(fbUser.uid),
                       title: newRoomTitle || `${normalizedHost.displayName}'s Lounge 💜`,
                       host: normalizedHost,
                       announcement: `Welcome to our ${finalTier.name} Audio Lounge! Tap an open seat to talk.`,
                       category: createCategory,
                       activeViewers: 1,
+                      isHostPresent: true,
                       backgroundTheme: 'from-[#1E103A] to-[#0A0614]',
                       level: finalLevel,
                       isActive: true,
@@ -4278,7 +4487,11 @@ export const PartyRoomsScreen: React.FC = () => {
                       }
 
                       setShowCreateModal(false);
-                      showToast(`🎉 ${finalTier.name} Created Successfully! 🚀`);
+                      if (res.alreadyExists) {
+                        showToast('آپ کا پارٹی روم پہلے سے چل رہا ہے! آپ کو اسی روم میں لے جایا جا رہا ہے 🎙️');
+                      } else {
+                        showToast(`🎉 ${finalTier.name} Created Successfully! 🚀`);
+                      }
                     } catch (launchErr: any) {
                       const errMsg = launchErr?.message || 'Could not launch Party Room. Please try again.';
                       setCreateRoomError(errMsg);

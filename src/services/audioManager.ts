@@ -242,19 +242,65 @@ class GiftAudioManager {
     const isGiftObject = typeof giftOrTrigger === 'object' && giftOrTrigger !== null;
     const rawTrigger = isGiftObject
       ? giftOrTrigger.animationType
-      : (giftOrTrigger as string);
-    const giftId = giftIdOverride || (isGiftObject ? giftOrTrigger.id : undefined);
+      : String(giftOrTrigger || '');
+    const giftId =
+      giftIdOverride ||
+      (isGiftObject
+        ? giftOrTrigger.id
+        : rawTrigger.startsWith('gift_')
+        ? rawTrigger
+        : undefined);
+
+    const cssClassToAnimMap: Record<string, GiftAnimationTrigger> = {
+      'animate-supercar': 'car',
+      'animate-rocket-launch': 'rocket',
+      'animate-dragon-fly': 'dragon',
+      'animate-yacht': 'yacht',
+      'animate-crown-drop': 'crown',
+      'animate-ring-levitate': 'ring',
+      'animate-petal': 'heart',
+      'animate-shockwave': 'sparkle',
+      'animate-float-heart': 'sparkle',
+      'animate-combo-pop': 'sparkle',
+    };
+
+    const giftIdToAnimMap: Record<string, GiftAnimationTrigger> = {
+      gift_rose: 'sparkle',
+      gift_ice_cream: 'sparkle',
+      gift_heart: 'heart',
+      gift_ring: 'ring',
+      gift_crown: 'crown',
+      gift_car: 'car',
+      gift_yacht: 'yacht',
+      gift_rocket: 'rocket',
+      gift_dragon: 'dragon',
+    };
 
     const normalizedAnim: GiftAnimationTrigger =
       rawTrigger in GIFT_SFX_ASSET_MAP
         ? (rawTrigger as GiftAnimationTrigger)
-        : 'sparkle';
+        : cssClassToAnimMap[rawTrigger] ||
+          (giftId ? giftIdToAnimMap[giftId] : undefined) ||
+          'sparkle';
 
     const cueConfig = GIFT_SFX_ASSET_MAP[normalizedAnim];
     const candidatePaths: string[] = [];
 
     if (giftId && this.customTriggerOverrides.has(giftId)) {
       candidatePaths.push(this.customTriggerOverrides.get(giftId)!);
+    }
+    if (rawTrigger && this.customTriggerOverrides.has(rawTrigger)) {
+      candidatePaths.push(this.customTriggerOverrides.get(rawTrigger)!);
+    }
+    if (isGiftObject && typeof giftOrTrigger.audioAssetPath === 'string' && giftOrTrigger.audioAssetPath.trim()) {
+      candidatePaths.push(giftOrTrigger.audioAssetPath.trim());
+    }
+    if (
+      isGiftObject &&
+      typeof giftOrTrigger.animationClassName === 'string' &&
+      this.customTriggerOverrides.has(giftOrTrigger.animationClassName)
+    ) {
+      candidatePaths.push(this.customTriggerOverrides.get(giftOrTrigger.animationClassName)!);
     }
     if (this.customTriggerOverrides.has(normalizedAnim)) {
       candidatePaths.push(this.customTriggerOverrides.get(normalizedAnim)!);
@@ -335,6 +381,10 @@ class GiftAudioManager {
         ? triggers
         : (Object.keys(GIFT_SFX_ASSET_MAP) as GiftAnimationTrigger[]);
     const paths = new Set<string>(keys.map((k) => GIFT_SFX_ASSET_MAP[k].assetPath));
+    if (!triggers || triggers.length === 0) {
+      Object.values(GIFT_ID_SFX_ASSET_MAP).forEach((p) => paths.add(p));
+      this.customTriggerOverrides.forEach((p) => paths.add(p));
+    }
     paths.add(COMBO_SFX_ASSET_PATH);
     await Promise.allSettled(Array.from(paths).map((p) => this.loadAndDecodeAsset(p)));
   }

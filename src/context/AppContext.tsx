@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
 import {
   ScreenType,
@@ -26,6 +26,7 @@ import {
   LeaderboardScope,
   UserBadgeId,
   UserHistoricalStats,
+  SavedDeviceAccount,
 } from '../types';
 import {
   CURRENT_USER,
@@ -42,22 +43,34 @@ import {
   signInWithGoogle,
   consumeGoogleRedirectResult,
   signInWithEmail,
+  signInWithFirebaseCustomToken,
   registerWithEmail,
   resendVerificationEmail,
   reloadCurrentFirebaseUser,
   isFirebaseUserVerified,
+  hasFirebasePasswordProvider,
+  linkOrSetUserPassword,
+  serializeFirebaseUserBlob,
+  hydrateFirebaseUserOnDefaultAuth,
+  clearDefaultAuthCurrentUser,
+  checkUsernameAvailabilityFirestore,
   logoutUser,
   onAuthStateChanged,
+  onIdTokenChanged,
   syncUserProfileToFirestore,
   getUserProfileFromFirestore,
   subscribeToUserProfile,
   syncPartyRoomToFirestore,
+  updatePartyRoomFields,
   deletePartyRoomFromFirestore,
   subscribeToPartyRooms,
   updatePartyRoomSeat,
   syncLiveStreamToFirestore,
   deleteLiveStreamFromFirestore,
   subscribeToLiveStreams,
+  getCanonicalPartyRoomId,
+  isLegacyErrorCardId,
+  purgeStaleHostCardsInFirestore,
   submitAccountDeactivationFirestore,
   submitPermanentDeletionRequestFirestore,
   recoverAccountLifecycleFirestore,
@@ -113,7 +126,27 @@ import {
   subscribeToMyFollowEdges,
   setUserFollowStateFirestore,
 } from '../services/userDirectoryService';
-import { getOrCreateDirectChat } from '../services/chatService';
+import { buildDirectChatId } from '../services/chatService';
+import {
+  requestAuthenticatedEmailOtp,
+  confirmAuthenticatedEmailOtp,
+  requestLoginEmailOtp,
+  confirmLoginEmailOtp,
+  requestPreSignupEmailOtp,
+  confirmPreSignupEmailOtp,
+  finalizePreSignupWithPassword,
+  setCloudAccountPassword,
+  registerCloudDeviceSwitchSession,
+  redeemCloudDeviceSwitchSession,
+} from '../services/emailOtpService';
+import {
+  MAX_DEVICE_ACCOUNTS,
+  getOrCreateDeviceFingerprint,
+  loadSavedDeviceAccounts,
+  upsertSavedDeviceAccount,
+  updateSavedDeviceAccountSessionData,
+  removeSavedDeviceAccount,
+} from '../services/multiAccountService';
 
 export type RefreshScope =
   | 'home'
@@ -210,6 +243,85 @@ interface AppContextType {
     remainingAttempts?: number;
     error?: string;
   }>;
+  sendLoginEmailOtp: (email: string) => Promise<{
+    success: boolean;
+    emailMasked?: string;
+    challengeToken?: string;
+    expiresAt?: number;
+    cooldownSeconds?: number;
+    retryAfterSeconds?: number;
+    provider?: string;
+    code?: string;
+    error?: string;
+  }>;
+  verifyLoginEmailOtp: (
+    email: string,
+    challengeToken: string,
+    otp: string
+  ) => Promise<{
+    success: boolean;
+    user?: User;
+    code?: string;
+    remainingAttempts?: number;
+    error?: string;
+  }>;
+  sendPreSignupEmailOtp: (email: string) => Promise<{
+    success: boolean;
+    emailMasked?: string;
+    challengeToken?: string;
+    expiresAt?: number;
+    cooldownSeconds?: number;
+    retryAfterSeconds?: number;
+    provider?: string;
+    code?: string;
+    error?: string;
+  }>;
+  verifyPreSignupEmailOtp: (
+    email: string,
+    challengeToken: string,
+    otp: string
+  ) => Promise<{
+    success: boolean;
+    registrationTicket?: string;
+    emailVerifiedAt?: string;
+    code?: string;
+    remainingAttempts?: number;
+    error?: string;
+  }>;
+  completePreSignupPassword: (
+    email: string,
+    password: string,
+    registrationTicket: string
+  ) => Promise<{
+    success: boolean;
+    user?: User;
+    code?: string;
+    error?: string;
+  }>;
+  needsProfileRegistration: boolean;
+  completeInAppProfileRegistration: (data: {
+    avatar: string;
+    displayName: string;
+    username: string;
+    gender: 'male' | 'female' | 'other';
+    dob: string;
+    age: number;
+    bio: string;
+    password?: string;
+  }) => Promise<{ success: boolean; user?: User; error?: string }>;
+  checkUsernameAvailable: (username: string) => Promise<boolean>;
+
+  // Multi-Account System (Up to 5 Instant-Switch Accounts on Device)
+  savedAccounts: SavedDeviceAccount[];
+  maxSavedAccounts: number;
+  isAddingAccount: boolean;
+  addingAccountReturnUid: string | null;
+  showAccountSwitcherModal: boolean;
+  setShowAccountSwitcherModal: (show: boolean) => void;
+  switchAccount: (uid: string) => Promise<{ success: boolean; error?: string }>;
+  startAddAccountFlow: (targetScreen?: 'register' | 'signin') => Promise<{ success: boolean; error?: string }>;
+  cancelAddAccountFlow: () => Promise<void>;
+  removeSavedAccount: (uid: string) => Promise<void>;
   logoutFirebase: () => Promise<void>;
   sendAccountDeletionOtp: () => Promise<{
     success: boolean;
@@ -250,8 +362,20 @@ interface AppContextType {
     quantity?: number,
     recipientDisplayName?: string,
     meta?: { context?: 'live' | 'party' | 'moments' | 'pk' | 'demo'; roomId?: string; streamId?: string; reelId?: string }
-  ) => void;
-  activeGiftBanner: { gift: Gift; sender: string; recipient: string } | null;
+  ) => boolean;
+  activeGiftBanner: {
+    id: string;
+    gift: Gift;
+    quantity: number;
+    sender: string;
+    senderAvatar?: string;
+    senderVipTier?: number;
+    recipient: string;
+    context: 'live' | 'party' | 'pk';
+    streamId?: string;
+    roomId?: string;
+    createdAtMs: number;
+  } | null;
   clearActiveGiftBanner: () => void;
   giftTransactions: GiftTransactionRecord[];
   simulateDemoHostGift: (
@@ -269,8 +393,10 @@ interface AppContextType {
   partyRooms: PartyRoom[];
   activePartyRoom: PartyRoom | null;
   openPartyRoom: (room: PartyRoom) => void;
-  closePartyRoom: (shouldDelete?: boolean) => void;
-  createPartyRoom: (room: PartyRoom) => Promise<{ success: boolean; error?: string }>;
+  closePartyRoom: (shouldDelete?: boolean, options?: { remainingViewers?: number }) => void;
+  createPartyRoom: (
+    room: PartyRoom
+  ) => Promise<{ success: boolean; alreadyExists?: boolean; room?: PartyRoom; error?: string }>;
   updateActivePartyRoomLevel: (level: 1 | 2 | 3) => void;
   toggleSeat: (seatIndex: number) => Promise<{ success: boolean; reason?: string }>;
   userSeatIndex: number | null;
@@ -281,7 +407,7 @@ interface AppContextType {
   // Chat & Messaging
   conversations: Conversation[];
   activeConversation: Conversation | null;
-  openConversation: (conv: Conversation) => void;
+  openConversation: (conv: Conversation | null) => void;
   startDirectMessage: (user: User) => Promise<void>;
   sendMessage: (convId: string, text: string, imageUrl?: string) => void;
 
@@ -584,6 +710,86 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [firebaseAuthLoading, setFirebaseAuthLoading] = useState<boolean>(true);
   const [isEmailVerified, setIsEmailVerified] = useState<boolean>(false);
 
+  // Multi-Account (Up to 5 Accounts on Device) & In-App Registration Window State
+  const [savedAccounts, setSavedAccounts] = useState<SavedDeviceAccount[]>(() =>
+    loadSavedDeviceAccounts()
+  );
+  const [isAddingAccount, setIsAddingAccount] = useState<boolean>(false);
+  const isAddingAccountRef = React.useRef<boolean>(false);
+  React.useEffect(() => {
+    isAddingAccountRef.current = isAddingAccount;
+  }, [isAddingAccount]);
+  const [addingAccountReturnUid, setAddingAccountReturnUid] = useState<string | null>(null);
+  const [showAccountSwitcherModal, setShowAccountSwitcherModal] = useState<boolean>(false);
+  const registeredSwitchTicketUidsRef = React.useRef<Set<string>>(new Set());
+
+  const isProfileRegistrationCompleted = (u?: Partial<User> | null): boolean => {
+    if (!u) return false;
+    if (u.profileCompleted === true) return true;
+    if (u.profileCompleted === false) return false;
+    // Legacy accounts created before profileCompleted flag that already set DOB, Gender, or Name/Username timestamps
+    return Boolean(
+      u.dob ||
+        u.gender ||
+        typeof u.age === 'number' ||
+        u.lastNameChangeDate ||
+        u.lastUsernameChangeDate
+    );
+  };
+
+  const syncAccountToDeviceSlot = useCallback(
+    (userObj: User, fbUserOverride?: FirebaseUser | null) => {
+      const targetFbUser = fbUserOverride ?? auth.currentUser;
+      const uid = String(userObj?.id || targetFbUser?.uid || '').trim();
+      if (!uid || uid === 'current_user' || uid.startsWith('user_demo')) return;
+
+      const blob =
+        targetFbUser && targetFbUser.uid === uid ? serializeFirebaseUserBlob(targetFbUser) : null;
+      const { accounts } = upsertSavedDeviceAccount({
+        user: userObj,
+        firebaseUserBlob: blob,
+      });
+      setSavedAccounts(accounts);
+
+      if (
+        targetFbUser &&
+        targetFbUser.uid === uid &&
+        !registeredSwitchTicketUidsRef.current.has(uid)
+      ) {
+        registeredSwitchTicketUidsRef.current.add(uid);
+        const fp = getOrCreateDeviceFingerprint();
+        registerCloudDeviceSwitchSession(fp)
+          .then((res) => {
+            if (res?.success && res.sessionId && res.switchTicket) {
+              const next = updateSavedDeviceAccountSessionData(uid, {
+                switchSessionId: res.sessionId,
+                switchTicket: res.switchTicket,
+              });
+              setSavedAccounts(next);
+            }
+          })
+          .catch(() => {});
+      }
+    },
+    []
+  );
+
+  // Keep stored Firebase refresh/access token blob fresh whenever Firebase rotates tokens
+  useEffect(() => {
+    const unsubToken = onIdTokenChanged(auth, (fbUser) => {
+      if (!fbUser?.uid) return;
+      const blob = serializeFirebaseUserBlob(fbUser);
+      if (!blob) return;
+      const updated = updateSavedDeviceAccountSessionData(fbUser.uid, {
+        firebaseUserBlob: blob,
+        hasPassword: hasFirebasePasswordProvider(fbUser) ? true : undefined,
+        lastActiveAt: new Date().toISOString(),
+      });
+      setSavedAccounts(updated);
+    });
+    return () => unsubToken();
+  }, []);
+
   const saveUserSession = (user: User, authenticated = true) => {
     setCurrentUser(user);
     setCoins(typeof user.coins === 'number' ? user.coins : CURRENT_USER.coins);
@@ -610,6 +816,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const suggestedUsername = emailPrefix.toLowerCase().replace(/[^a-z0-9_]/g, '_') || `user_${fbUser.uid.slice(0, 6)}`;
     const verified = isFirebaseUserVerified(fbUser);
     const isGoogle = fbUser.providerData?.some((p) => p.providerId === 'google.com');
+    const hasPass = hasFirebasePasswordProvider(fbUser);
 
     return {
       id: fbUser.uid,
@@ -631,6 +838,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       coins: 1000,
       diamonds: 100,
       isVerified: verified,
+      hasPassword: hasPass,
+      profileCompleted: false,
       familyCrew: 'Alpha Champions 👑',
       isHost: false,
       authProvider: isGoogle ? 'google' : 'email',
@@ -658,17 +867,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const verified = providerVerified || Boolean(remoteProfile?.emailOtpVerified);
           setIsEmailVerified(verified);
 
+          const hasPass =
+            hasFirebasePasswordProvider(fbUser) || Boolean(remoteProfile?.hasPassword);
+          const completed = remoteProfile ? isProfileRegistrationCompleted(remoteProfile) : false;
+
           const mergedUser: User = remoteProfile
             ? {
                 ...buildNewUserFromFirebase(fbUser),
                 ...remoteProfile,
                 id: fbUser.uid,
-                email: fbUser.email || remoteProfile.email || '',
+                email: (fbUser.email || remoteProfile.email || '').toLowerCase(),
                 displayName: remoteProfile.displayName || fbUser.displayName || 'Alpha Mate',
                 avatar: remoteProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
                 isVerified: verified || Boolean(remoteProfile.isVerified),
+                hasPassword: hasPass,
+                profileCompleted: completed,
               }
-            : buildNewUserFromFirebase(fbUser);
+            : buildNewUserFromFirebase(fbUser, {
+                hasPassword: hasPass,
+                profileCompleted: false,
+              });
 
           if (!remoteProfile) {
             await syncUserProfileToFirestore(mergedUser, { background: true }).catch(() => {});
@@ -685,6 +903,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setNotificationPreferences(hydratedPrefs);
           }
           const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
+          if (verified && !restricted) {
+            setIsAddingAccount(false);
+            setAddingAccountReturnUid(null);
+            syncAccountToDeviceSlot(mergedUser, fbUser);
+          }
           saveUserSession(mergedUser, verified && !restricted);
 
           // Restore an existing Firebase session directly into the app after
@@ -717,14 +940,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const parsed = JSON.parse(raw);
               if (parsed?.id === fbUser.uid) cachedForSameUid = parsed;
             }
+            if (!cachedForSameUid) {
+              const savedMatch = loadSavedDeviceAccounts().find((a) => a.uid === fbUser.uid);
+              if (savedMatch) {
+                cachedForSameUid = {
+                  id: savedMatch.uid,
+                  uniqueId: savedMatch.uniqueId,
+                  username: savedMatch.username,
+                  displayName: savedMatch.displayName,
+                  email: savedMatch.email,
+                  avatar: savedMatch.avatar,
+                  vipTier: savedMatch.vipTier,
+                  level: savedMatch.level,
+                  hasPassword: savedMatch.hasPassword,
+                  profileCompleted: savedMatch.profileCompleted,
+                };
+              }
+            }
           } catch {
             // ignore
           }
           const verified = providerVerified || Boolean(cachedForSameUid?.emailOtpVerified);
           setIsEmailVerified(verified);
-          const fallbackUser = cachedForSameUid
-            ? { ...defaults, ...cachedForSameUid, id: fbUser.uid, isVerified: verified || Boolean(cachedForSameUid.isVerified) }
+          const fallbackUser: User = cachedForSameUid
+            ? {
+                ...defaults,
+                ...cachedForSameUid,
+                id: fbUser.uid,
+                isVerified: verified || Boolean(cachedForSameUid.isVerified),
+                hasPassword:
+                  hasFirebasePasswordProvider(fbUser) || Boolean(cachedForSameUid.hasPassword),
+                profileCompleted: isProfileRegistrationCompleted(cachedForSameUid),
+              }
             : defaults;
+          if (verified) {
+            setIsAddingAccount(false);
+            setAddingAccountReturnUid(null);
+            syncAccountToDeviceSlot(fallbackUser, fbUser);
+          }
           saveUserSession(fallbackUser, verified);
           if (verified) {
             const activeLegal =
@@ -747,7 +1000,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       } else {
         setIsEmailVerified(false);
         setIsAuthenticated(false);
-        setCurrentUser(CURRENT_USER);
+        if (!isAddingAccountRef.current) {
+          setCurrentUser(CURRENT_USER);
+        }
         try {
           localStorage.removeItem('alphamate_current_user');
           localStorage.setItem('alphamate_is_authenticated', 'false');
@@ -762,92 +1017,232 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       active = false;
       unsubscribeAuth();
     };
-  }, []);
+  }, [syncAccountToDeviceSlot]);
+
+  const removedPartyUntilRef = React.useRef<Map<string, number>>(new Map());
+  const removedLiveUntilRef = React.useRef<Map<string, number>>(new Map());
+  const activeStreamIdRef = React.useRef<string | null>(null);
 
   // Real-time Firestore + WebSocket discovery listeners (rebinds automatically on auth transitions)
   useEffect(() => {
     let firestoreRooms: PartyRoom[] = [];
     let firestoreStreams: LiveStream[] = [];
-    const wsPartyMap = new Map<string, PartyRoom>();
-    const wsLiveMap = new Map<string, LiveStream>();
-    const removedPartyUntil = new Map<string, number>();
-    const removedLiveUntil = new Map<string, number>();
+    const wsPartyMap = new Map<string, PartyRoom & { _localReceivedAtMs?: number }>();
+    const wsLiveMap = new Map<string, LiveStream & { _localReceivedAtMs?: number }>();
+    const removedPartyUntil = removedPartyUntilRef.current;
+    const removedLiveUntil = removedLiveUntilRef.current;
+    const myUid = firebaseUser?.uid || '';
+
+    const normalizePartyItem = (r: any): PartyRoom | null => {
+      if (!r?.id || isLegacyErrorCardId(String(r.id)) || r.isActive === false) return null;
+      const hostId = String(r.host?.id || '').trim();
+      if (!hostId) return null;
+      const { _localReceivedAtMs, ...clean } = r;
+      return {
+        ...clean,
+        seats: Array.isArray(clean.seats) ? clean.seats : [],
+        activeViewers:
+          typeof clean.activeViewers === 'number' && Number.isFinite(clean.activeViewers)
+            ? Math.max(0, Math.floor(clean.activeViewers))
+            : 0,
+        isHostPresent: clean.isHostPresent !== false,
+      };
+    };
+
+    const normalizeLiveItem = (s: any): LiveStream | null => {
+      if (!s?.id || isLegacyErrorCardId(String(s.id)) || s.isActive === false || !s.sfuSessionId) {
+        return null;
+      }
+      const hostId = String(s.host?.id || '').trim();
+      if (!hostId) return null;
+      const { _localReceivedAtMs, ...clean } = s;
+      return clean;
+    };
 
     const mergeAndPublishRooms = () => {
       const now = Date.now();
-      const merged = new Map<string, PartyRoom>();
-      firestoreRooms.forEach((r) => {
-        if (!r?.id) return;
+      const byId = new Map<string, PartyRoom>();
+
+      firestoreRooms.forEach((raw) => {
+        const r = normalizePartyItem(raw);
+        if (!r) return;
         const removedAt = removedPartyUntil.get(r.id);
-        if (removedAt && now - removedAt < 15_000) return;
-        merged.set(r.id, r);
+        if (removedAt && now - removedAt < 25_000) return;
+        byId.set(r.id, r);
       });
-      wsPartyMap.forEach((r, id) => {
+
+      wsPartyMap.forEach((raw, id) => {
         const removedAt = removedPartyUntil.get(id);
-        if (removedAt && now - removedAt < 15_000) return;
-        const existing = merged.get(id);
-        merged.set(id, existing ? { ...existing, ...r } : r);
+        if (removedAt && now - removedAt < 25_000) return;
+        const existing = byId.get(id);
+        const rawTs = Number(raw.lastSeenAtMs || 0);
+        const existingTs = Number(existing?.lastSeenAtMs || 0);
+        const mergedCandidate = existing
+          ? existingTs > rawTs
+            ? { ...raw, ...existing }
+            : { ...existing, ...raw }
+          : raw;
+        const r = normalizePartyItem(mergedCandidate);
+        if (!r) return;
+        byId.set(id, r);
       });
-      const nextRooms = Array.from(merged.values());
+
+      // Strictly 1 active Party Room card per host
+      const byHost = new Map<string, PartyRoom>();
+      byId.forEach((room) => {
+        const hostId = room.host.id;
+        const prev = byHost.get(hostId);
+        if (!prev) {
+          byHost.set(hostId, room);
+          return;
+        }
+        const canonicalId = getCanonicalPartyRoomId(hostId);
+        const preferIncoming =
+          room.id === canonicalId ||
+          (prev.id !== canonicalId &&
+            Number(room.lastSeenAtMs || 0) >= Number(prev.lastSeenAtMs || 0));
+        if (preferIncoming) {
+          byHost.set(hostId, room);
+        }
+      });
+
+      const nextRooms = Array.from(byHost.values());
       setPartyRooms(nextRooms);
       setActivePartyRoom((currentActive) => {
         if (!currentActive) return null;
-        const fresh = nextRooms.find((r) => r.id === currentActive.id);
+        const fresh =
+          nextRooms.find((r) => r.id === currentActive.id) ||
+          nextRooms.find((r) => r.host?.id && r.host.id === currentActive.host?.id);
         return fresh ? { ...currentActive, ...fresh } : currentActive;
       });
     };
 
     const mergeAndPublishStreams = () => {
       const now = Date.now();
-      const merged = new Map<string, LiveStream>();
-      firestoreStreams.forEach((s) => {
-        if (!s?.id) return;
+      const byId = new Map<string, LiveStream>();
+
+      firestoreStreams.forEach((raw) => {
+        const s = normalizeLiveItem(raw);
+        if (!s) return;
         const removedAt = removedLiveUntil.get(s.id);
-        if (removedAt && now - removedAt < 15_000) return;
-        merged.set(s.id, s);
+        if (removedAt && now - removedAt < 25_000) return;
+        byId.set(s.id, s);
       });
-      wsLiveMap.forEach((s, id) => {
+
+      wsLiveMap.forEach((raw, id) => {
         const removedAt = removedLiveUntil.get(id);
-        if (removedAt && now - removedAt < 15_000) return;
-        const existing = merged.get(id);
-        merged.set(id, existing ? { ...existing, ...s } : s);
+        if (removedAt && now - removedAt < 25_000) return;
+        const existing = byId.get(id);
+        const mergedCandidate = existing ? { ...existing, ...raw } : raw;
+        const s = normalizeLiveItem(mergedCandidate);
+        if (!s) return;
+        byId.set(id, s);
       });
-      setLiveStreams(Array.from(merged.values()));
+
+      // Strictly 1 active Solo Live card per host
+      const byHost = new Map<string, LiveStream>();
+      byId.forEach((stream) => {
+        const hostId = stream.host.id;
+        const prev = byHost.get(hostId);
+        if (!prev) {
+          byHost.set(hostId, stream);
+          return;
+        }
+        if (Number(stream.lastSeenAtMs || 0) >= Number(prev.lastSeenAtMs || 0)) {
+          byHost.set(hostId, stream);
+        }
+      });
+
+      setLiveStreams(Array.from(byHost.values()));
     };
 
-    if (firebaseUser?.uid) {
+    if (myUid) {
       realtimeSocket.ensureConnected();
+      purgeStaleHostCardsInFirestore(myUid, {
+        keepPartyId: getCanonicalPartyRoomId(myUid),
+        keepLiveId: activeStreamIdRef.current,
+      }).catch(() => {});
     } else {
       realtimeSocket.disconnect();
     }
 
     const unsubscribeWs = realtimeSocket.onDiscoveryUpdate((event) => {
+      const localNow = Date.now();
       if (event.type === 'discovery:snapshot') {
         wsLiveMap.clear();
         wsPartyMap.clear();
         event.liveStreams.forEach((s) => {
-          if (s?.id && s.isActive !== false && s.sfuSessionId) wsLiveMap.set(s.id, s);
+          if (!s?.id) return;
+          const hostId = String(s.host?.id || '').trim();
+          // Auto-purge our own stale/legacy Solo Live cards from live server memory
+          if (myUid && hostId === myUid && (isLegacyErrorCardId(s.id) || activeStreamIdRef.current !== s.id)) {
+            realtimeSocket.removeLiveStream(s.id);
+            return;
+          }
+          if (!isLegacyErrorCardId(s.id) && s.isActive !== false && s.sfuSessionId) {
+            wsLiveMap.set(s.id, { ...s, _localReceivedAtMs: localNow });
+          }
         });
         event.partyRooms.forEach((r) => {
-          if (r?.id && r.isActive !== false) wsPartyMap.set(r.id, r);
+          if (!r?.id) return;
+          const hostId = String(r.host?.id || '').trim();
+          const canonicalPartyId = myUid ? getCanonicalPartyRoomId(myUid) : '';
+          // Auto-purge our own legacy/duplicate Party Room cards from live server memory
+          if (myUid && hostId === myUid && (isLegacyErrorCardId(r.id) || r.id !== canonicalPartyId)) {
+            realtimeSocket.removePartyRoom(r.id);
+            return;
+          }
+          if (!isLegacyErrorCardId(r.id) && r.isActive !== false) {
+            wsPartyMap.set(r.id, { ...r, _localReceivedAtMs: localNow });
+          }
         });
         mergeAndPublishStreams();
         mergeAndPublishRooms();
       } else if (event.type === 'live:upsert' && event.stream?.id) {
-        removedLiveUntil.delete(event.stream.id);
-        wsLiveMap.set(event.stream.id, event.stream);
+        const s = event.stream;
+        if (isLegacyErrorCardId(s.id) || s.isActive === false || !s.sfuSessionId) {
+          wsLiveMap.delete(s.id);
+          mergeAndPublishStreams();
+          return;
+        }
+        // Evict any earlier stream ID for the same host in wsLiveMap
+        const hostId = String(s.host?.id || '').trim();
+        if (hostId) {
+          for (const [existingId, item] of Array.from(wsLiveMap.entries())) {
+            if (existingId !== s.id && item.host?.id === hostId) {
+              wsLiveMap.delete(existingId);
+            }
+          }
+        }
+        removedLiveUntil.delete(s.id);
+        wsLiveMap.set(s.id, { ...s, _localReceivedAtMs: localNow });
         mergeAndPublishStreams();
       } else if (event.type === 'live:remove' && event.streamId) {
         wsLiveMap.delete(event.streamId);
-        removedLiveUntil.set(event.streamId, Date.now());
+        removedLiveUntil.set(event.streamId, localNow);
         mergeAndPublishStreams();
       } else if (event.type === 'party:upsert' && event.room?.id) {
-        removedPartyUntil.delete(event.room.id);
-        wsPartyMap.set(event.room.id, event.room);
+        const r = event.room;
+        if (isLegacyErrorCardId(r.id) || r.isActive === false) {
+          wsPartyMap.delete(r.id);
+          mergeAndPublishRooms();
+          return;
+        }
+        const hostId = String(r.host?.id || '').trim();
+        if (hostId) {
+          for (const [existingId, item] of Array.from(wsPartyMap.entries())) {
+            if (existingId !== r.id && item.host?.id === hostId) {
+              wsPartyMap.delete(existingId);
+            }
+          }
+        }
+        removedPartyUntil.delete(r.id);
+        const existingWs = wsPartyMap.get(r.id);
+        wsPartyMap.set(r.id, { ...(existingWs || {}), ...r, _localReceivedAtMs: localNow });
         mergeAndPublishRooms();
       } else if (event.type === 'party:remove' && event.roomId) {
         wsPartyMap.delete(event.roomId);
-        removedPartyUntil.set(event.roomId, Date.now());
+        removedPartyUntil.set(event.roomId, localNow);
         mergeAndPublishRooms();
       }
     });
@@ -855,10 +1250,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubscribeRooms = subscribeToPartyRooms((remoteRooms) => {
       firestoreRooms = Array.isArray(remoteRooms) ? remoteRooms : [];
       const activeIds = new Set(firestoreRooms.map((r) => r.id));
+      const localNow = Date.now();
       for (const id of Array.from(wsPartyMap.keys())) {
-        if (!activeIds.has(id)) {
-          const item = wsPartyMap.get(id) as any;
-          if (item?.lastSeenAtMs && Date.now() - item.lastSeenAtMs > 20_000) {
+        if (!activeIds.has(id) && !isFirestoreQuotaExceeded()) {
+          const item = wsPartyMap.get(id);
+          if (item?._localReceivedAtMs && localNow - item._localReceivedAtMs > 90_000) {
             wsPartyMap.delete(id);
           }
         }
@@ -869,10 +1265,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const unsubscribeLiveStreams = subscribeToLiveStreams((remoteStreams) => {
       firestoreStreams = Array.isArray(remoteStreams) ? remoteStreams : [];
       const activeIds = new Set(firestoreStreams.map((s) => s.id));
+      const localNow = Date.now();
       for (const id of Array.from(wsLiveMap.keys())) {
-        if (!activeIds.has(id)) {
-          const item = wsLiveMap.get(id) as any;
-          if (item?.lastSeenAtMs && Date.now() - item.lastSeenAtMs > 20_000) {
+        if (!activeIds.has(id) && !isFirestoreQuotaExceeded()) {
+          const item = wsLiveMap.get(id);
+          if (item?._localReceivedAtMs && localNow - item._localReceivedAtMs > 90_000) {
             wsLiveMap.delete(id);
           }
         }
@@ -1076,9 +1473,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   // Live Streams & PK
   const [liveStreams, setLiveStreams] = useState<LiveStream[]>([]);
   const [activeStream, setActiveStream] = useState<LiveStream | null>(null);
+  useEffect(() => {
+    activeStreamIdRef.current = activeStream?.id || null;
+  }, [activeStream?.id]);
   const [activePKBattle, setActivePKBattle] = useState<LiveStream | null>(null);
   const [pkScores, setPkScores] = useState<{ left: number; right: number }>({ left: 3420, right: 2890 });
-  const [activeGiftBanner, setActiveGiftBanner] = useState<{ gift: Gift; sender: string; recipient: string } | null>(null);
+  const [activeGiftBanner, setActiveGiftBanner] = useState<{
+    id: string;
+    gift: Gift;
+    quantity: number;
+    sender: string;
+    senderAvatar?: string;
+    senderVipTier?: number;
+    recipient: string;
+    context: 'live' | 'party' | 'pk';
+    streamId?: string;
+    roomId?: string;
+    createdAtMs: number;
+  } | null>(null);
+
+  // Guaranteed auto-expiry for activeGiftBanner so stale banners never linger across broadcasts or rooms
+  useEffect(() => {
+    if (!activeGiftBanner) return;
+    const coinsCost = Number(activeGiftBanner.gift.costInCoins ?? activeGiftBanner.gift.coins) || 10;
+    const ttlMs = coinsCost <= 100 ? 2100 : coinsCost >= 19999 ? 7200 : 6200;
+    const bannerId = activeGiftBanner.id;
+    const timer = setTimeout(() => {
+      setActiveGiftBanner((prev) => (prev?.id === bannerId ? null : prev));
+    }, ttlMs);
+    return () => clearTimeout(timer);
+  }, [activeGiftBanner?.id]);
 
   // Audio Party Rooms
   const [partyRooms, setPartyRooms] = useState<PartyRoom[]>([]);
@@ -2798,6 +3222,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const navigateBack = () => {
+    if (activeConversation) {
+      setActiveConversation(null);
+      setActiveTabState('chat');
+      setCurrentScreenState('chat');
+      syncBrowserUrlForScreen('chat');
+      return;
+    }
     if (screenHistory.length > 1) {
       const newHistory = [...screenHistory];
       newHistory.pop();
@@ -2940,7 +3371,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loginWithFirebaseGoogle = async (options?: { skipRedirect?: boolean }) => {
     try {
-      const fbUser = await signInWithGoogle();
+      const fbUser = await signInWithGoogle({ forceAccountPicker: true });
       if (!fbUser) {
         const redirectPending = (() => {
           try {
@@ -2956,7 +3387,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         };
       }
 
-      const existingProfile = await getUserProfileFromFirestore(fbUser.uid);
+      const currentSaved = loadSavedDeviceAccounts();
+      const alreadyOnDevice = currentSaved.some((a) => a.uid === fbUser.uid);
+      if (!alreadyOnDevice && currentSaved.length >= MAX_DEVICE_ACCOUNTS) {
+        await clearDefaultAuthCurrentUser();
+        return {
+          success: false,
+          error: `Maximum ${MAX_DEVICE_ACCOUNTS} accounts can be active on this device at once. Remove an account from Switch Account first.`,
+        };
+      }
+
+      const existingProfile = await getUserProfileFromFirestore(fbUser.uid).catch(() => null);
+      const hasPass =
+        hasFirebasePasswordProvider(fbUser) || Boolean(existingProfile?.hasPassword);
+      const completed = existingProfile ? isProfileRegistrationCompleted(existingProfile) : false;
+
       const userObj: User = existingProfile
         ? {
             ...buildNewUserFromFirebase(fbUser),
@@ -2966,19 +3411,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             email: (fbUser.email || existingProfile.email || '').toLowerCase(),
             avatar: existingProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
             isVerified: true,
+            hasPassword: hasPass,
+            profileCompleted: completed,
           }
-        : buildNewUserFromFirebase(fbUser, { isVerified: true });
+        : buildNewUserFromFirebase(fbUser, {
+            isVerified: true,
+            hasPassword: hasPass,
+            profileCompleted: false,
+            authProvider: 'google',
+          });
 
-      await syncUserProfileToFirestore(userObj, { background: true });
+      await syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
+      setIsAddingAccount(false);
+      setAddingAccountReturnUid(null);
       setFirebaseUser(fbUser);
       setIsEmailVerified(true);
       const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      if (!restricted) {
+        syncAccountToDeviceSlot(userObj, fbUser);
+      }
       saveUserSession(userObj, !restricted);
       if (!options?.skipRedirect) {
         if (restricted) {
           setScreenHistory(['welcome', 'account_recovery']);
           setCurrentScreenState('account_recovery');
         } else {
+          setActiveTabState('home');
           setScreenHistory(['home']);
           setCurrentScreenState('home');
         }
@@ -2992,20 +3450,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const loginWithFirebaseEmail = async (email: string, pass: string) => {
     try {
-      const fbUser = await signInWithEmail(email, pass);
+      const cleanEmail = email.trim().toLowerCase();
+      const currentSaved = loadSavedDeviceAccounts();
+      const emailAlreadyOnDevice = currentSaved.some(
+        (a) => a.email?.toLowerCase() === cleanEmail
+      );
+      if (!emailAlreadyOnDevice && currentSaved.length >= MAX_DEVICE_ACCOUNTS) {
+        return {
+          success: false,
+          error: `Maximum ${MAX_DEVICE_ACCOUNTS} accounts can be saved on this device at once. Remove an account from Switch Account first.`,
+        };
+      }
+
+      const fbUser = await signInWithEmail(cleanEmail, pass);
       const remoteProfile = await getUserProfileFromFirestore(fbUser.uid).catch(() => null);
       const verified = isFirebaseUserVerified(fbUser) || Boolean(remoteProfile?.emailOtpVerified);
       setFirebaseUser(fbUser);
       setIsEmailVerified(verified);
+
+      const completed = remoteProfile ? isProfileRegistrationCompleted(remoteProfile) : false;
 
       const userObj: User = remoteProfile
         ? {
             ...buildNewUserFromFirebase(fbUser),
             ...remoteProfile,
             id: fbUser.uid,
+            email: (fbUser.email || remoteProfile.email || cleanEmail).toLowerCase(),
             isVerified: verified,
+            hasPassword: true,
+            profileCompleted: completed,
           }
-        : buildNewUserFromFirebase(fbUser, { isVerified: verified });
+        : buildNewUserFromFirebase(fbUser, {
+            email: cleanEmail,
+            isVerified: verified,
+            hasPassword: true,
+            profileCompleted: false,
+          });
 
       if (!verified) {
         saveUserSession(userObj, false);
@@ -3018,12 +3498,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      setIsAddingAccount(false);
+      setAddingAccountReturnUid(null);
       await syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
+      if (!restricted) {
+        syncAccountToDeviceSlot(userObj, fbUser);
+      }
       saveUserSession(userObj, !restricted);
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
         setCurrentScreenState('account_recovery');
       } else {
+        setActiveTabState('home');
         setScreenHistory(['home']);
         setCurrentScreenState('home');
       }
@@ -3051,6 +3537,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         displayName: data.displayName.trim() || data.username.trim(),
         email: data.email.trim().toLowerCase(),
         isVerified: verified,
+        hasPassword: true,
+        profileCompleted: false,
         authProvider: 'email',
       });
 
@@ -3061,12 +3549,467 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         return { success: true, needsVerification: true, user: newUser };
       }
 
+      setIsAddingAccount(false);
+      setAddingAccountReturnUid(null);
+      syncAccountToDeviceSlot(newUser, fbUser);
       setScreenHistory(['home']);
       setCurrentScreenState('home');
       return { success: true, user: newUser };
     } catch (error: any) {
       console.error('Firebase Email Registration error:', error);
       return { success: false, error: error.message || 'Email registration failed' };
+    }
+  };
+
+  const sendPreSignupEmailOtp = async (email: string) => {
+    const cleanEmail = email.trim().toLowerCase();
+    const currentSaved = loadSavedDeviceAccounts();
+    const alreadySaved = currentSaved.some((a) => a.email?.toLowerCase() === cleanEmail);
+    if (!alreadySaved && currentSaved.length >= MAX_DEVICE_ACCOUNTS) {
+      return {
+        success: false,
+        code: 'MAX_ACCOUNTS_REACHED',
+        error: `You already have ${MAX_DEVICE_ACCOUNTS} accounts saved on this device. Remove one account from Switch Account to sign up a new one.`,
+      };
+    }
+
+    const res = await requestPreSignupEmailOtp(cleanEmail);
+    return {
+      success: Boolean(res?.success),
+      emailMasked: res?.emailMasked,
+      challengeToken: res?.challengeToken,
+      expiresAt: res?.expiresAt,
+      cooldownSeconds: res?.cooldownSeconds,
+      retryAfterSeconds: res?.retryAfterSeconds,
+      provider: res?.provider,
+      code: res?.code,
+      error: res?.error,
+    };
+  };
+
+  const verifyPreSignupEmailOtp = async (email: string, challengeToken: string, otp: string) => {
+    const res = await confirmPreSignupEmailOtp({
+      email: email.trim().toLowerCase(),
+      challengeToken,
+      otp,
+    });
+    return {
+      success: Boolean(res?.success),
+      registrationTicket: res?.registrationTicket,
+      emailVerifiedAt: res?.emailVerifiedAt,
+      code: res?.code,
+      remainingAttempts: res?.remainingAttempts,
+      error: res?.error,
+    };
+  };
+
+  const completePreSignupPassword = async (
+    email: string,
+    password: string,
+    registrationTicket: string
+  ) => {
+    const cleanEmail = email.trim().toLowerCase();
+    const completeRes = await finalizePreSignupWithPassword({
+      email: cleanEmail,
+      password,
+      registrationTicket,
+    });
+    if (!completeRes?.success) {
+      return {
+        success: false,
+        code: completeRes?.code,
+        error: completeRes?.error || 'Could not save password. Please try again.',
+      };
+    }
+
+    try {
+      let fbUser: FirebaseUser | null = null;
+
+      if (completeRes.clientCompleteFallback) {
+        try {
+          fbUser = await registerWithEmail(cleanEmail, password, { skipVerificationEmail: true });
+        } catch (regErr: any) {
+          if (regErr?.code === 'auth/email-already-in-use') {
+            fbUser = await signInWithEmail(cleanEmail, password);
+          } else {
+            throw regErr;
+          }
+        }
+      } else {
+        // Sign in with Email + Password so Firebase stores a durable password refresh token for multi-account switching
+        try {
+          fbUser = await signInWithEmail(cleanEmail, password);
+        } catch {
+          if (completeRes.customToken) {
+            fbUser = await signInWithFirebaseCustomToken(completeRes.customToken);
+          }
+        }
+      }
+
+      if (!fbUser) {
+        return {
+          success: false,
+          error: 'Account created, please sign in with your email and password.',
+        };
+      }
+
+      await fbUser.getIdToken(true).catch(() => {});
+      const verifiedAtIso = completeRes.emailVerifiedAt || new Date().toISOString();
+      const existingProfile = await getUserProfileFromFirestore(fbUser.uid).catch(() => null);
+      const alreadyCompleted = existingProfile
+        ? isProfileRegistrationCompleted(existingProfile)
+        : false;
+
+      const userObj: User = existingProfile
+        ? {
+            ...buildNewUserFromFirebase(fbUser),
+            ...existingProfile,
+            id: fbUser.uid,
+            email: cleanEmail,
+            isVerified: true,
+            emailOtpVerified: true,
+            emailOtpVerifiedAt: existingProfile.emailOtpVerifiedAt || verifiedAtIso,
+            hasPassword: true,
+            profileCompleted: alreadyCompleted,
+          }
+        : buildNewUserFromFirebase(fbUser, {
+            email: cleanEmail,
+            isVerified: true,
+            emailOtpVerified: true,
+            emailOtpVerifiedAt: verifiedAtIso,
+            hasPassword: true,
+            profileCompleted: false,
+            authProvider: 'email',
+          });
+
+      await syncUserProfileToFirestore(userObj).catch((err) => {
+        console.warn('Initial Firestore profile write warning:', err);
+      });
+
+      setIsAddingAccount(false);
+      setAddingAccountReturnUid(null);
+      setFirebaseUser(fbUser);
+      setIsEmailVerified(true);
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      if (!restricted) {
+        syncAccountToDeviceSlot(userObj, fbUser);
+      }
+      saveUserSession(userObj, !restricted);
+      if (restricted) {
+        setScreenHistory(['welcome', 'account_recovery']);
+        setCurrentScreenState('account_recovery');
+      } else {
+        setActiveTabState('home');
+        setScreenHistory(['home']);
+        setCurrentScreenState('home');
+      }
+      return { success: true, user: userObj };
+    } catch (err: any) {
+      console.error('Complete Pre-Signup Password error:', err);
+      return {
+        success: false,
+        error: err?.message || 'Unable to finalize account creation. Please try signing in.',
+      };
+    }
+  };
+
+  const checkUsernameAvailable = async (username: string): Promise<boolean> => {
+    const clean = username.trim().toLowerCase().replace(/[^a-z0-9_]/g, '');
+    if (clean.length < 3) return false;
+    const uid = auth.currentUser?.uid || firebaseUser?.uid || currentUser.id;
+    const takenInLocal = realUsers.some(
+      (u) => u.id !== uid && u.username?.trim().toLowerCase() === clean
+    );
+    if (takenInLocal) return false;
+    return checkUsernameAvailabilityFirestore(clean, uid);
+  };
+
+  const completeInAppProfileRegistration = async (data: {
+    avatar: string;
+    displayName: string;
+    username: string;
+    gender: 'male' | 'female' | 'other';
+    dob: string;
+    age: number;
+    bio: string;
+    password?: string;
+  }): Promise<{ success: boolean; user?: User; error?: string }> => {
+    const activeFb = auth.currentUser || firebaseUser;
+    if (!activeFb?.uid) {
+      return { success: false, error: 'No active authenticated account found. Please sign in again.' };
+    }
+
+    const cleanName = data.displayName.trim();
+    const cleanUsername = data.username
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_]/g, '');
+    const cleanBio = data.bio.trim();
+
+    if (cleanName.length < 2) {
+      return { success: false, error: 'Please enter your full display name (at least 2 characters).' };
+    }
+    if (cleanUsername.length < 3) {
+      return { success: false, error: 'Username must be at least 3 letters/numbers.' };
+    }
+    if (!data.dob || Number(data.age) < 18) {
+      return { success: false, error: 'You must be at least 18 years old to register on Alpha Mate.' };
+    }
+
+    const isAvailable = await checkUsernameAvailable(cleanUsername);
+    if (!isAvailable) {
+      return {
+        success: false,
+        error: `@${cleanUsername} is already taken by another member. Please choose a unique username.`,
+      };
+    }
+
+    const alreadyHasPassword =
+      Boolean(currentUser.hasPassword) || hasFirebasePasswordProvider(activeFb);
+
+    if (!alreadyHasPassword || (data.password && data.password.length > 0)) {
+      const pass = String(data.password || '');
+      if (pass.length < 6) {
+        return {
+          success: false,
+          error: 'Please create a password (at least 6 characters) so you can also sign in with Email & Password.',
+        };
+      }
+
+      try {
+        await linkOrSetUserPassword(activeFb.email || currentUser.email || '', pass);
+      } catch (linkErr: any) {
+        // Fallback to server-side Cloud Function if recent-login or provider state requires Admin SDK
+        const cloudSet = await setCloudAccountPassword(pass);
+        if (!cloudSet.success) {
+          return {
+            success: false,
+            error:
+              linkErr?.message ||
+              cloudSet.error ||
+              'Could not save password for this account. Please try again.',
+          };
+        }
+      }
+    }
+
+    const refreshedFb = (await reloadCurrentFirebaseUser().catch(() => null)) || auth.currentUser || activeFb;
+    await refreshedFb.getIdToken(true).catch(() => {});
+
+    const nowIso = new Date().toISOString();
+    const updatedUser: User = {
+      ...currentUser,
+      id: refreshedFb.uid,
+      email: (refreshedFb.email || currentUser.email || '').trim().toLowerCase(),
+      avatar: data.avatar || currentUser.avatar,
+      displayName: cleanName,
+      username: cleanUsername,
+      gender: data.gender,
+      dob: data.dob,
+      age: Number(data.age),
+      bio: cleanBio || '🌟 Alpha Mate Official Member | LIVE • PARTY • SOCIAL 💜',
+      isVerified: true,
+      hasPassword: true,
+      profileCompleted: true,
+      lastNameChangeDate: currentUser.lastNameChangeDate || nowIso,
+      lastUsernameChangeDate: currentUser.lastUsernameChangeDate || nowIso,
+    };
+
+    try {
+      await syncUserProfileToFirestore(updatedUser);
+    } catch (err) {
+      console.warn('Foreground profile registration write warning (saved locally):', err);
+      await syncUserProfileToFirestore(updatedUser, { background: true }).catch(() => {});
+    }
+
+    setFirebaseUser(refreshedFb);
+    setIsEmailVerified(true);
+    saveUserSession(updatedUser, true);
+    syncAccountToDeviceSlot(updatedUser, refreshedFb);
+
+    setRegisteredUsers((users) => {
+      const without = users.filter((u) => u.id !== updatedUser.id);
+      const next = [updatedUser, ...without];
+      try {
+        localStorage.setItem('alphamate_registered_users', JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+
+    return { success: true, user: updatedUser };
+  };
+
+  const teardownActiveRoomMedia = () => {
+    if (activePartyRoom) {
+      p2pStreamingEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
+    }
+    if (activeStream) {
+      p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
+      p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+    }
+    setActivePartyRoom(null);
+    setUserSeatIndex(null);
+    setIsMicMuted(false);
+    setActiveStream(null);
+    setActiveConversation(null);
+  };
+
+  const switchAccount = async (targetUid: string): Promise<{ success: boolean; error?: string }> => {
+    const cleanUid = String(targetUid || '').trim();
+    if (!cleanUid) {
+      return { success: false, error: 'Invalid account selected.' };
+    }
+
+    if (
+      cleanUid === auth.currentUser?.uid &&
+      isAuthenticated &&
+      isEmailVerified &&
+      !isAddingAccount
+    ) {
+      setShowAccountSwitcherModal(false);
+      setActiveTabState('home');
+      setScreenHistory(['home']);
+      setCurrentScreenState('home');
+      return { success: true };
+    }
+
+    // Snapshot outgoing account token blob before switching
+    if (auth.currentUser && currentUser?.id === auth.currentUser.uid && isAuthenticated) {
+      syncAccountToDeviceSlot(currentUser, auth.currentUser);
+    }
+
+    const slots = loadSavedDeviceAccounts();
+    const targetSlot = slots.find((s) => s.uid === cleanUid);
+    if (!targetSlot) {
+      return { success: false, error: 'Account slot not found on this device.' };
+    }
+
+    teardownActiveRoomMedia();
+
+    let switchedFbUser = await hydrateFirebaseUserOnDefaultAuth(targetSlot.firebaseUserBlob);
+
+    if (!switchedFbUser && targetSlot.switchSessionId && targetSlot.switchTicket) {
+      const redeemed = await redeemCloudDeviceSwitchSession({
+        sessionId: targetSlot.switchSessionId,
+        switchTicket: targetSlot.switchTicket,
+        deviceFingerprint: getOrCreateDeviceFingerprint(),
+      });
+      if (redeemed.success && redeemed.customToken) {
+        switchedFbUser = await signInWithFirebaseCustomToken(redeemed.customToken).catch(() => null);
+      }
+    }
+
+    if (!switchedFbUser) {
+      return {
+        success: false,
+        error: 'Saved session for this account needs a one-time refresh. Please sign in once to re-link it.',
+      };
+    }
+
+    const remoteProfile = await getUserProfileFromFirestore(switchedFbUser.uid).catch(() => null);
+    const hasPass =
+      hasFirebasePasswordProvider(switchedFbUser) ||
+      Boolean(remoteProfile?.hasPassword) ||
+      Boolean(targetSlot.hasPassword);
+    const completed = remoteProfile
+      ? isProfileRegistrationCompleted(remoteProfile)
+      : Boolean(targetSlot.profileCompleted);
+
+    const mergedUser: User = {
+      ...buildNewUserFromFirebase(switchedFbUser),
+      uniqueId: targetSlot.uniqueId,
+      username: targetSlot.username,
+      displayName: targetSlot.displayName,
+      email: targetSlot.email,
+      avatar: targetSlot.avatar,
+      vipTier: targetSlot.vipTier,
+      level: targetSlot.level,
+      ...(remoteProfile || {}),
+      id: switchedFbUser.uid,
+      isVerified: true,
+      hasPassword: hasPass,
+      profileCompleted: completed,
+    };
+
+    setIsAddingAccount(false);
+    setAddingAccountReturnUid(null);
+    setFirebaseUser(switchedFbUser);
+    setIsEmailVerified(true);
+    const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
+    saveUserSession(mergedUser, !restricted);
+    if (!restricted) {
+      syncAccountToDeviceSlot(mergedUser, switchedFbUser);
+    }
+    setShowAccountSwitcherModal(false);
+
+    if (restricted) {
+      setScreenHistory(['welcome', 'account_recovery']);
+      setCurrentScreenState('account_recovery');
+    } else {
+      setActiveTabState('home');
+      setScreenHistory(['home']);
+      setCurrentScreenState('home');
+    }
+    return { success: true };
+  };
+
+  const startAddAccountFlow = async (
+    targetScreen: 'register' | 'signin' = 'register'
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (auth.currentUser && currentUser?.id === auth.currentUser.uid && isAuthenticated) {
+      syncAccountToDeviceSlot(currentUser, auth.currentUser);
+    }
+
+    const currentSlots = loadSavedDeviceAccounts();
+    if (currentSlots.length >= MAX_DEVICE_ACCOUNTS) {
+      return {
+        success: false,
+        error: `You already have ${MAX_DEVICE_ACCOUNTS} accounts saved. Remove one account first to add another.`,
+      };
+    }
+
+    const returnUid = auth.currentUser?.uid || currentSlots[0]?.uid || null;
+    teardownActiveRoomMedia();
+    setShowAccountSwitcherModal(false);
+    setIsAddingAccount(true);
+    setAddingAccountReturnUid(returnUid);
+    setLegalConsent({ terms: true, privacy: true });
+
+    await clearDefaultAuthCurrentUser();
+    setFirebaseUser(null);
+    setIsEmailVerified(false);
+    setIsAuthenticated(false);
+
+    setScreenHistory(['welcome', targetScreen]);
+    setCurrentScreenState(targetScreen);
+    return { success: true };
+  };
+
+  const cancelAddAccountFlow = async (): Promise<void> => {
+    const slots = loadSavedDeviceAccounts();
+    const fallbackUid = addingAccountReturnUid || slots[0]?.uid || null;
+    setIsAddingAccount(false);
+    setAddingAccountReturnUid(null);
+
+    if (fallbackUid) {
+      const switched = await switchAccount(fallbackUid);
+      if (switched.success) return;
+    }
+    setScreenHistory(['welcome']);
+    setCurrentScreenState('welcome');
+  };
+
+  const removeSavedAccount = async (uid: string): Promise<void> => {
+    const cleanUid = String(uid || '').trim();
+    const updated = removeSavedDeviceAccount(cleanUid);
+    setSavedAccounts(updated);
+
+    if (cleanUid && (cleanUid === currentUser.id || cleanUid === auth.currentUser?.uid)) {
+      if (updated.length > 0) {
+        const switched = await switchAccount(updated[0].uid);
+        if (switched.success) return;
+      }
+      await performCleanLogout();
     }
   };
 
@@ -3079,10 +4022,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (verified) {
       const remoteProfile = await getUserProfileFromFirestore(refreshed.uid).catch(() => null);
       const userObj: User = remoteProfile
-        ? { ...buildNewUserFromFirebase(refreshed), ...remoteProfile, id: refreshed.uid, isVerified: true }
-        : buildNewUserFromFirebase(refreshed, { isVerified: true });
+        ? {
+            ...buildNewUserFromFirebase(refreshed),
+            ...remoteProfile,
+            id: refreshed.uid,
+            isVerified: true,
+            profileCompleted: isProfileRegistrationCompleted(remoteProfile),
+          }
+        : buildNewUserFromFirebase(refreshed, { isVerified: true, profileCompleted: false });
       const restricted = isAccountRestrictedStatus(userObj.accountStatus);
       await syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
+      if (!restricted) {
+        syncAccountToDeviceSlot(userObj, refreshed);
+      }
       saveUserSession(userObj, !restricted);
       if (restricted) {
         setScreenHistory(['welcome', 'account_recovery']);
@@ -3100,18 +4052,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const performCleanLogout = async () => {
-    if (activePartyRoom) {
-      p2pStreamingEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
+    const outgoingUid = auth.currentUser?.uid || currentUser?.id || '';
+    teardownActiveRoomMedia();
+
+    const remainingAccounts = outgoingUid
+      ? removeSavedDeviceAccount(outgoingUid)
+      : loadSavedDeviceAccounts();
+    setSavedAccounts(remainingAccounts);
+
+    if (remainingAccounts.length > 0) {
+      const switched = await switchAccount(remainingAccounts[0].uid);
+      if (switched.success) {
+        return;
+      }
     }
-    if (activeStream) {
-      p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
-      p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
-    }
-    setActivePartyRoom(null);
-    setUserSeatIndex(null);
-    setIsMicMuted(false);
-    setActiveStream(null);
-    setActiveConversation(null);
 
     try {
       await logoutUser();
@@ -3119,6 +4073,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       console.warn('Firebase logout warning:', e);
     }
 
+    setIsAddingAccount(false);
+    setAddingAccountReturnUid(null);
     setFirebaseUser(null);
     setIsEmailVerified(false);
     setIsAuthenticated(false);
@@ -3139,52 +4095,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     await performCleanLogout();
   };
 
-  const callAccountOtpEndpoint = async (subPath: string, body: Record<string, unknown>) => {
-    const activeFbUser = auth.currentUser || firebaseUser;
-    if (!activeFbUser) {
-      return { success: false, status: 401, error: 'Please sign in first to verify your account.' };
-    }
-    const idToken = await activeFbUser.getIdToken(true);
-    const railwayBase = p2pStreamingEngine.getResolvedBackendApiBase();
-    const isLocalPreview =
-      typeof window !== 'undefined' &&
-      !Capacitor.isNativePlatform() &&
-      (window.location.hostname.endsWith('.run.app') ||
-        window.location.hostname === 'localhost' ||
-        window.location.hostname === '127.0.0.1');
-
-    const endpoints = isLocalPreview ? [subPath, `${railwayBase}${subPath}`] : [`${railwayBase}${subPath}`];
-    let lastError = 'Unable to reach OTP verification service.';
-
-    for (const url of endpoints) {
-      try {
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${idToken}`,
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          body: JSON.stringify(body),
-        });
-        const contentType = res.headers.get('content-type') || '';
-        if (!contentType.includes('application/json')) {
-          lastError = `Unexpected non-JSON response (${res.status}) from ${url}.`;
-          continue;
-        }
-        const data = await res.json();
-        return { ...data, status: res.status };
-      } catch (err: any) {
-        lastError = err?.message || lastError;
-      }
-    }
-    return { success: false, status: 503, error: lastError };
-  };
-
   const sendSignupEmailOtp = async (displayName?: string) => {
     const email = (auth.currentUser?.email || firebaseUser?.email || currentUser?.email || '').trim().toLowerCase();
     const nameToSend = (displayName || currentUserRef.current?.displayName || '').trim();
-    const res = await callAccountOtpEndpoint('/api/auth/signup-otp/send', {
+    const res = await requestAuthenticatedEmailOtp({
+      purpose: 'signup',
       email,
       displayName: nameToSend,
     });
@@ -3206,7 +4121,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const verifySignupEmailOtp = async (challengeToken: string, otp: string) => {
-    const res = await callAccountOtpEndpoint('/api/auth/signup-otp/verify', { challengeToken, otp });
+    const res = await confirmAuthenticatedEmailOtp({
+      purpose: 'signup',
+      challengeToken,
+      otp,
+    });
     if (!res?.success) {
       return {
         success: false,
@@ -3218,6 +4137,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const verifiedAtIso = res.emailVerifiedAt || new Date().toISOString();
     const refreshedFbUser = (await reloadCurrentFirebaseUser().catch(() => null)) || auth.currentUser || firebaseUser;
+    if (refreshedFbUser) {
+      await refreshedFbUser.getIdToken(true).catch(() => {});
+    }
     const remoteProfile = refreshedFbUser
       ? await getUserProfileFromFirestore(refreshedFbUser.uid).catch(() => null)
       : null;
@@ -3234,14 +4156,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       isVerified: true,
       emailOtpVerified: true,
       emailOtpVerifiedAt: verifiedAtIso,
+      profileCompleted: remoteProfile ? isProfileRegistrationCompleted(remoteProfile) : false,
     };
 
     await syncUserProfileToFirestore(mergedUser, { background: true }).catch(() => {});
     if (refreshedFbUser) {
       setFirebaseUser(refreshedFbUser);
     }
+    setIsAddingAccount(false);
+    setAddingAccountReturnUid(null);
     setIsEmailVerified(true);
     const restricted = isAccountRestrictedStatus(mergedUser.accountStatus);
+    if (!restricted && refreshedFbUser) {
+      syncAccountToDeviceSlot(mergedUser, refreshedFbUser);
+    }
     saveUserSession(mergedUser, !restricted);
     if (restricted) {
       setScreenHistory(['welcome', 'account_recovery']);
@@ -3257,9 +4185,91 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
+  const sendLoginEmailOtp = async (email: string) => {
+    const res = await requestLoginEmailOtp(email);
+    return {
+      success: Boolean(res?.success),
+      emailMasked: res?.emailMasked,
+      challengeToken: res?.challengeToken,
+      expiresAt: res?.expiresAt,
+      cooldownSeconds: res?.cooldownSeconds,
+      retryAfterSeconds: res?.retryAfterSeconds,
+      provider: res?.provider,
+      code: res?.code,
+      error: res?.error,
+    };
+  };
+
+  const verifyLoginEmailOtp = async (email: string, challengeToken: string, otp: string) => {
+    const res = await confirmLoginEmailOtp({ email, challengeToken, otp });
+    if (!res?.success || !res.customToken) {
+      return {
+        success: false,
+        code: res?.code,
+        remainingAttempts: res?.remainingAttempts,
+        error: res?.error || 'Invalid or expired verification code.',
+      };
+    }
+
+    try {
+      const fbUser = await signInWithFirebaseCustomToken(res.customToken);
+      await fbUser.getIdToken(true).catch(() => {});
+      const verifiedAtIso = res.emailVerifiedAt || new Date().toISOString();
+      const remoteProfile = await getUserProfileFromFirestore(fbUser.uid).catch(() => null);
+
+      const userObj: User = remoteProfile
+        ? {
+            ...buildNewUserFromFirebase(fbUser),
+            ...remoteProfile,
+            id: fbUser.uid,
+            email: (fbUser.email || remoteProfile.email || email).toLowerCase(),
+            isVerified: true,
+            emailOtpVerified: true,
+            emailOtpVerifiedAt: remoteProfile.emailOtpVerifiedAt || verifiedAtIso,
+            profileCompleted: isProfileRegistrationCompleted(remoteProfile),
+          }
+        : buildNewUserFromFirebase(fbUser, {
+            email: email.trim().toLowerCase(),
+            isVerified: true,
+            emailOtpVerified: true,
+            emailOtpVerifiedAt: verifiedAtIso,
+            profileCompleted: false,
+          });
+
+      setIsAddingAccount(false);
+      setAddingAccountReturnUid(null);
+      setFirebaseUser(fbUser);
+      setIsEmailVerified(true);
+      const restricted = isAccountRestrictedStatus(userObj.accountStatus);
+      await syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
+      if (!restricted) {
+        syncAccountToDeviceSlot(userObj, fbUser);
+      }
+      saveUserSession(userObj, !restricted);
+      if (restricted) {
+        setScreenHistory(['welcome', 'account_recovery']);
+        setCurrentScreenState('account_recovery');
+      } else {
+        setActiveTabState('home');
+        setScreenHistory(['home']);
+        setCurrentScreenState('home');
+      }
+      return { success: true, user: userObj };
+    } catch (err: any) {
+      console.error('Firebase Custom Token OTP Sign-In error:', err);
+      return {
+        success: false,
+        error: err?.message || 'Could not complete Email OTP sign-in.',
+      };
+    }
+  };
+
   const sendAccountDeletionOtp = async () => {
     const email = (auth.currentUser?.email || firebaseUser?.email || currentUser?.email || '').trim().toLowerCase();
-    const res = await callAccountOtpEndpoint('/api/account/deletion-otp/send', { email });
+    const res = await requestAuthenticatedEmailOtp({
+      purpose: 'account_deletion',
+      email,
+    });
     return {
       success: Boolean(res?.success),
       emailMasked: res?.emailMasked,
@@ -3272,11 +4282,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const verifyAccountDeletionOtp = async (challengeToken: string, otp: string) => {
-    const res = await callAccountOtpEndpoint('/api/account/deletion-otp/verify', { challengeToken, otp });
+    const res = await confirmAuthenticatedEmailOtp({
+      purpose: 'account_deletion',
+      challengeToken,
+      otp,
+    });
     return {
       success: Boolean(res?.success),
       otpVerifiedAt: res?.otpVerifiedAt,
-      deletionVerificationToken: res?.deletionVerificationToken,
       code: res?.code,
       remainingAttempts: res?.remainingAttempts,
       error: res?.error,
@@ -3351,6 +4364,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setCurrentUser((prev) => {
       const updated = { ...prev, ...data };
       saveUserSession(updated, isAuthenticated);
+      if (isAuthenticated && auth.currentUser?.uid === updated.id) {
+        syncAccountToDeviceSlot(updated, auth.currentUser);
+      }
       syncUserProfileToFirestore(updated, { background: true }).catch(() => {});
 
       setRegisteredUsers((users) => {
@@ -3394,6 +4410,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const openLiveStream = (stream: LiveStream) => {
+    setActiveGiftBanner(null);
     if (stream.isPK) {
       openPKBattle(stream);
     } else {
@@ -3403,59 +4420,89 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const publishLiveStream = async (publishedStream: LiveStream) => {
+    const hostId = publishedStream.host?.id || auth.currentUser?.uid || currentUser.id;
+    removedLiveUntilRef.current.delete(publishedStream.id);
+
+    // Clean up any other Solo Live card owned by this host so strictly 1 card exists
+    liveStreams.forEach((s) => {
+      if (s.host?.id === hostId && s.id !== publishedStream.id) {
+        removedLiveUntilRef.current.set(s.id, Date.now());
+        realtimeSocket.removeLiveStream(s.id);
+        deleteLiveStreamFromFirestore(s.id).catch(() => {});
+      }
+    });
+
     realtimeSocket.announceLiveStream(publishedStream);
     setActiveStream((prev) => (prev && prev.id === publishedStream.id ? publishedStream : prev));
     setLiveStreams((prev) => {
-      const withoutCurrent = prev.filter((s) => s.id !== publishedStream.id);
-      return [publishedStream, ...withoutCurrent];
+      const withoutHost = prev.filter((s) => s.id !== publishedStream.id && s.host?.id !== hostId);
+      return [publishedStream, ...withoutHost];
     });
-    try {
-      await syncLiveStreamToFirestore(publishedStream);
-      if (
-        firebaseUser?.uid &&
-        publishedStream.isActive !== false &&
-        publishedStream.sfuSessionId &&
-        !announcedLiveIdsRef.current.has(publishedStream.id)
-      ) {
-        announcedLiveIdsRef.current.add(publishedStream.id);
-        fetchBroadcastRecipientIds(firebaseUser.uid, 25)
-          .then((uids) => {
-            uids.forEach((recipientId) => {
-              sendFirestoreNotification({
-                recipientId,
-                type: 'live_on',
-                category: 'liveOn',
-                title: `🔴 ${publishedStream.host.displayName} is LIVE now!`,
-                message: publishedStream.title || 'Tap to join the live stream now!',
-                senderName: publishedStream.host.displayName,
-                senderAvatar: publishedStream.host.avatar,
-                screen: 'live_stream',
-                streamId: publishedStream.id,
-              }).catch(() => {});
-            });
-          })
-          .catch(() => {});
-      }
-    } catch (err) {
-      realtimeSocket.removeLiveStream(publishedStream.id);
-      throw err;
-    }
+
+    // Sync to Firestore in background without tearing down the live WebSocket broadcast if Spark quota is full
+    syncLiveStreamToFirestore(publishedStream)
+      .then(() => {
+        if (
+          firebaseUser?.uid &&
+          publishedStream.isActive !== false &&
+          publishedStream.sfuSessionId &&
+          !announcedLiveIdsRef.current.has(publishedStream.id)
+        ) {
+          announcedLiveIdsRef.current.add(publishedStream.id);
+          fetchBroadcastRecipientIds(firebaseUser.uid, 25)
+            .then((uids) => {
+              uids.forEach((recipientId) => {
+                sendFirestoreNotification({
+                  recipientId,
+                  type: 'live_on',
+                  category: 'liveOn',
+                  title: `🔴 ${publishedStream.host.displayName} is LIVE now!`,
+                  message: publishedStream.title || 'Tap to join the live stream now!',
+                  senderName: publishedStream.host.displayName,
+                  senderAvatar: publishedStream.host.avatar,
+                  screen: 'live_stream',
+                  streamId: publishedStream.id,
+                }).catch(() => {});
+              });
+            })
+            .catch(() => {});
+        }
+      })
+      .catch((err) => {
+        console.warn('Live stream Firestore persistence warning (WebSocket broadcast active):', err);
+      });
   };
 
   const closeLiveStream = () => {
+    setActiveGiftBanner(null);
     if (activeStream) {
+      const streamToClose = activeStream;
+      const hostUid = auth.currentUser?.uid || currentUser.id;
       const isOwnerHost =
-        activeStream.host.id === currentUser.id ||
-        (auth.currentUser?.uid && activeStream.host.id === auth.currentUser.uid) ||
-        activeStream.id.startsWith('live_my_');
-      realtimeSocket.leaveRoom('live', activeStream.id);
+        streamToClose.host.id === currentUser.id ||
+        Boolean(auth.currentUser?.uid && streamToClose.host.id === auth.currentUser.uid) ||
+        streamToClose.id.startsWith('live_my_') ||
+        streamToClose.id.startsWith('live_host_');
+
       if (isOwnerHost) {
-        realtimeSocket.removeLiveStream(activeStream.id);
-        p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
-        deleteLiveStreamFromFirestore(activeStream.id).catch(() => {});
-        setLiveStreams((prev) => prev.filter((s) => s.id !== activeStream.id));
+        removedLiveUntilRef.current.set(streamToClose.id, Date.now());
+        realtimeSocket.sendRoomSignal('live', streamToClose.id, { type: 'stream_ended' });
+        realtimeSocket.leaveRoom('live', streamToClose.id);
+        realtimeSocket.removeLiveStream(streamToClose.id);
+        p2pStreamingEngine.stopHostBroadcast(streamToClose.id).catch(() => {});
+        deleteLiveStreamFromFirestore(streamToClose.id).catch(() => {});
+        if (auth.currentUser?.uid) {
+          purgeStaleHostCardsInFirestore(auth.currentUser.uid, {
+            keepPartyId: getCanonicalPartyRoomId(auth.currentUser.uid),
+            keepLiveId: null,
+          }).catch(() => {});
+        }
+        setLiveStreams((prev) =>
+          prev.filter((s) => s.id !== streamToClose.id && s.host?.id !== hostUid)
+        );
       } else {
-        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id).catch(() => {});
+        realtimeSocket.leaveRoom('live', streamToClose.id);
+        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(streamToClose.id).catch(() => {});
       }
     }
     setActiveStream(null);
@@ -3463,6 +4510,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const openPKBattle = (stream: LiveStream) => {
+    setActiveGiftBanner(null);
     setActivePKBattle(stream);
     setPkScores({ left: 3420, right: 2890 });
     setCurrentScreen('pk_battle');
@@ -3667,11 +4715,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...prev,
       [side]: prev[side] + amount,
     }));
-    setActiveGiftBanner({
-      gift: pkGift,
-      sender: currentUser.displayName,
-      recipient: hostRecipientName,
-    });
+    if (activePKBattle?.id) {
+      const now = Date.now();
+      setActiveGiftBanner({
+        id: `pk_banner_${now}_${Math.random().toString(36).slice(2, 7)}`,
+        gift: pkGift,
+        quantity: 1,
+        sender: currentUser.displayName,
+        senderAvatar: currentUser.avatar,
+        senderVipTier: currentUser.vipTier || 1,
+        recipient: hostRecipientName,
+        context: 'pk',
+        streamId: activePKBattle.id,
+        createdAtMs: now,
+      });
+    }
   };
 
   const sendLiveGift = (
@@ -3680,20 +4738,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     quantity = 1,
     recipientDisplayName?: string,
     meta?: { context?: 'live' | 'party' | 'moments' | 'pk' | 'demo'; roomId?: string; streamId?: string; reelId?: string }
-  ) => {
+  ): boolean => {
     const resolvedRecipientName =
       recipientDisplayName ||
       activeStream?.host.displayName ||
       activePartyRoom?.host.displayName ||
       'Host';
     const res = executeGiftEconomy(gift, recipientHostId, quantity, resolvedRecipientName, meta);
-    if (!res.success) return;
+    if (!res.success) return false;
 
-    setActiveGiftBanner({
-      gift,
-      sender: currentUser.displayName,
-      recipient: resolvedRecipientName,
-    });
+    const resolvedContext = meta?.context;
+    const resolvedStreamId = meta?.streamId || (resolvedContext === 'live' ? activeStream?.id : undefined);
+    const resolvedRoomId = meta?.roomId || (resolvedContext === 'party' ? activePartyRoom?.id : undefined);
+
+    // Scope banner strictly to the active live stream or party room where the gift was sent
+    if (
+      (resolvedContext === 'live' && resolvedStreamId) ||
+      (resolvedContext === 'party' && resolvedRoomId)
+    ) {
+      const now = Date.now();
+      setActiveGiftBanner({
+        id: `gift_banner_${now}_${Math.random().toString(36).slice(2, 7)}`,
+        gift,
+        quantity: Math.max(1, Number(quantity) || 1),
+        sender: currentUser.displayName,
+        senderAvatar: currentUser.avatar,
+        senderVipTier: currentUser.vipTier || 1,
+        recipient: resolvedRecipientName,
+        context: resolvedContext,
+        streamId: resolvedStreamId,
+        roomId: resolvedRoomId,
+        createdAtMs: now,
+      });
+    }
+
+    return true;
   };
 
   const simulateDemoHostGift = (coinsAmount = 1000, giftName = 'Demo Royal Gift') => {
@@ -3724,29 +4803,122 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const clearActiveGiftBanner = () => {
+  const clearActiveGiftBanner = useCallback(() => {
     setActiveGiftBanner(null);
-  };
+  }, []);
 
   const openPartyRoom = (room: PartyRoom) => {
+    setActiveGiftBanner(null);
     const uid = auth.currentUser?.uid || currentUser.id;
-    setActivePartyRoom(room);
-    const mySeat = Array.isArray(room.seats)
-      ? room.seats.find((s: any) => s.user?.id === uid)
-      : null;
+    const isOwnerHost = Boolean(uid && room.host?.id === uid);
+    const safeSeats = Array.isArray(room.seats) ? room.seats : [];
+
+    // When the Host enters or re-enters their Party Room, seat them directly on the Host Throne
+    const nextRoom: PartyRoom = isOwnerHost
+      ? {
+          ...room,
+          seats: safeSeats,
+          isHostPresent: true,
+          activeViewers: Math.max(1, Number(room.activeViewers) || 0),
+        }
+      : {
+          ...room,
+          seats: safeSeats,
+        };
+
+    setActivePartyRoom(nextRoom);
+    if (isOwnerHost) {
+      setPartyRooms((prev) => prev.map((r) => (r.id === nextRoom.id ? nextRoom : r)));
+      realtimeSocket.announcePartyRoom(nextRoom);
+      updatePartyRoomFields(nextRoom.id, {
+        isHostPresent: true,
+        activeViewers: nextRoom.activeViewers,
+      }).catch(() => {});
+    }
+
+    const mySeat = safeSeats.find((s: any) => s.user?.id === uid);
     setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
     setIsMicMuted(mySeat ? Boolean(mySeat.isMuted || mySeat.isHostMuted) : false);
     setCurrentScreen('party_room');
   };
 
-  const closePartyRoom = (shouldDelete = false) => {
+  const closePartyRoom = (shouldDelete = false, options?: { remainingViewers?: number }) => {
+    setActiveGiftBanner(null);
     if (activePartyRoom) {
-      realtimeSocket.leaveRoom('party', activePartyRoom.id);
-      p2pStreamingEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
+      const roomToClose = activePartyRoom;
+      const uid = auth.currentUser?.uid || currentUser.id;
+      const isOwnerHost = Boolean(uid && roomToClose.host?.id === uid);
+
+      realtimeSocket.leaveRoom('party', roomToClose.id);
+      p2pStreamingEngine.stopPartyVoice(roomToClose.id).catch(() => {});
+
       if (shouldDelete) {
-        realtimeSocket.removePartyRoom(activePartyRoom.id);
-        deletePartyRoomFromFirestore(activePartyRoom.id).catch(() => {});
-        setPartyRooms((prev) => prev.filter((r) => r.id !== activePartyRoom.id));
+        removedPartyUntilRef.current.set(roomToClose.id, Date.now());
+        partyRooms.forEach((r) => {
+          if (r.host?.id === uid) {
+            removedPartyUntilRef.current.set(r.id, Date.now());
+            realtimeSocket.removePartyRoom(r.id);
+            deletePartyRoomFromFirestore(r.id).catch(() => {});
+          }
+        });
+        realtimeSocket.removePartyRoom(roomToClose.id);
+        deletePartyRoomFromFirestore(roomToClose.id).catch(() => {});
+        if (auth.currentUser?.uid) {
+          purgeStaleHostCardsInFirestore(auth.currentUser.uid, {
+            keepPartyId: null,
+            keepLiveId: activeStreamIdRef.current,
+          }).catch(() => {});
+        }
+        setPartyRooms((prev) =>
+          prev.filter((r) => r.id !== roomToClose.id && r.host?.id !== uid)
+        );
+      } else {
+        const nextViewers =
+          typeof options?.remainingViewers === 'number'
+            ? Math.max(0, Math.floor(options.remainingViewers))
+            : 0;
+        const safeSeats = Array.isArray(roomToClose.seats) ? roomToClose.seats : [];
+
+        if (isOwnerHost) {
+          // Host left without closing: Host Seat becomes empty and viewer count drops to actual remaining viewers (0 if empty)
+          const updatedRoom: PartyRoom = {
+            ...roomToClose,
+            seats: safeSeats,
+            isHostPresent: false,
+            activeViewers: nextViewers,
+          };
+          setPartyRooms((prev) => prev.map((r) => (r.id === roomToClose.id ? updatedRoom : r)));
+          realtimeSocket.announcePartyRoom(updatedRoom);
+          updatePartyRoomFields(roomToClose.id, {
+            isHostPresent: false,
+            activeViewers: nextViewers,
+          }).catch(() => {});
+        } else {
+          // Guest / Viewer left: release any guest seat they occupied and sync accurate remaining viewer count
+          const mySeated = safeSeats.find((s) => s.user?.id === uid);
+          const vacatedSeats = mySeated
+            ? safeSeats.map((s) =>
+                s.user?.id === uid
+                  ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
+                  : s
+              )
+            : safeSeats;
+          const updatedRoom: PartyRoom = {
+            ...roomToClose,
+            seats: vacatedSeats,
+            activeViewers: nextViewers,
+          };
+          setPartyRooms((prev) => prev.map((r) => (r.id === roomToClose.id ? updatedRoom : r)));
+          realtimeSocket.announcePartyRoom({
+            id: roomToClose.id,
+            seats: vacatedSeats,
+            activeViewers: nextViewers,
+          });
+          if (mySeated) {
+            updatePartyRoomSeat(roomToClose.id, mySeated.seatIndex, null, uid).catch(() => {});
+          }
+          updatePartyRoomFields(roomToClose.id, { activeViewers: nextViewers }).catch(() => {});
+        }
       }
     }
     setActivePartyRoom(null);
@@ -3755,20 +4927,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     navigateBack();
   };
 
-  const createPartyRoom = async (room: PartyRoom): Promise<{ success: boolean; error?: string }> => {
+  const createPartyRoom = async (
+    room: PartyRoom
+  ): Promise<{ success: boolean; alreadyExists?: boolean; room?: PartyRoom; error?: string }> => {
     const firebaseUid = auth.currentUser?.uid;
     if (!firebaseUid) {
       return { success: false, error: 'Please sign in first to host a Party Room.' };
     }
+
+    // Enforce strictly ONE Party Room per host: if host already has an active room, enter that existing room
+    const existingMyRoom = partyRooms.find(
+      (r) => r.isActive !== false && r.host?.id === firebaseUid
+    );
+    if (existingMyRoom) {
+      openPartyRoom(existingMyRoom);
+      return { success: true, alreadyExists: true, room: existingMyRoom };
+    }
+
+    const canonicalId = getCanonicalPartyRoomId(firebaseUid);
+    removedPartyUntilRef.current.delete(canonicalId);
+
     const normalizedRoom: PartyRoom = {
       ...room,
+      id: canonicalId,
       isActive: true,
+      isHostPresent: true,
+      activeViewers: 1,
+      seats: Array.isArray(room.seats) ? room.seats : [],
       host: { ...room.host, id: firebaseUid },
     };
     try {
       realtimeSocket.announcePartyRoom(normalizedRoom);
       await syncPartyRoomToFirestore(normalizedRoom);
-      setPartyRooms((prev) => [normalizedRoom, ...prev.filter((r) => r.id !== normalizedRoom.id)]);
+      purgeStaleHostCardsInFirestore(firebaseUid, {
+        keepPartyId: canonicalId,
+        keepLiveId: activeStreamIdRef.current,
+      }).catch(() => {});
+      setPartyRooms((prev) => [
+        normalizedRoom,
+        ...prev.filter((r) => r.id !== canonicalId && r.host?.id !== firebaseUid),
+      ]);
       fetchBroadcastRecipientIds(firebaseUid, 25)
         .then((uids) => {
           uids.forEach((recipientId) => {
@@ -3787,7 +4985,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         })
         .catch(() => {});
       openPartyRoom(normalizedRoom);
-      return { success: true };
+      return { success: true, alreadyExists: false, room: normalizedRoom };
     } catch (err: any) {
       realtimeSocket.removePartyRoom(normalizedRoom.id);
       console.error('Failed to create party room:', err);
@@ -3879,9 +5077,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return { success: false, reason: result.reason || 'REJECTED' };
   };
 
-  const openConversation = (conv: Conversation) => {
+  const openConversation = (conv: Conversation | null) => {
     setActiveConversation(conv);
-    setCurrentScreen('chat_conversation');
+    if (conv) {
+      setCurrentScreen('chat_conversation');
+    } else {
+      setActiveTabState('chat');
+      setCurrentScreen('chat');
+    }
   };
 
   const openPublicUserProfile = (user: User) => {
@@ -3921,42 +5124,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const startDirectMessage = async (targetUser: User) => {
-    const myUid = auth.currentUser?.uid;
-    let chatId = `conv_${targetUser.id || Date.now()}`;
+    if (!targetUser?.id) return;
+    const myUid = auth.currentUser?.uid || currentUser.id;
+    if (targetUser.id === myUid) return;
 
-    if (myUid && targetUser.id && targetUser.id !== myUid) {
-      try {
-        chatId = await getOrCreateDirectChat(
-          {
-            id: myUid,
-            displayName: currentUser.displayName,
-            username: currentUser.username,
-            uniqueId: currentUser.uniqueId,
-            avatar: currentUser.avatar,
-          },
-          {
-            id: targetUser.id,
-            displayName: targetUser.displayName,
-            username: targetUser.username,
-            uniqueId: targetUser.uniqueId,
-            avatar: targetUser.avatar,
-          }
-        );
-      } catch (err) {
-        console.warn('Direct chat initialization fallback:', err);
-      }
-    }
+    const chatId = auth.currentUser?.uid
+      ? buildDirectChatId(auth.currentUser.uid, targetUser.id)
+      : `conv_${targetUser.id}`;
 
     const existingConv = conversations.find(
       (c) => c.id === chatId || (!c.isGroup && c.user?.id === targetUser.id)
     );
     const convToOpen: Conversation = existingConv || {
       id: chatId,
-      user: targetUser,
-      lastMessage: 'Connected on Alpha Mate',
+      user: {
+        ...targetUser,
+        displayName: targetUser.displayName || 'Alpha Mate User',
+        username: targetUser.username || '',
+        uniqueId: targetUser.uniqueId || '',
+        avatar: targetUser.avatar || '',
+      },
+      lastMessage: 'Selected for chat',
       lastTimestamp: 'Just now',
       unreadCount: 0,
       isGroup: false,
+      requestStatus: 'new_request',
       messages: [],
     };
     setActiveConversation(convToOpen);
@@ -4568,6 +5760,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         resendEmailVerificationLink,
         sendSignupEmailOtp,
         verifySignupEmailOtp,
+        sendLoginEmailOtp,
+        verifyLoginEmailOtp,
+        sendPreSignupEmailOtp,
+        verifyPreSignupEmailOtp,
+        completePreSignupPassword,
+        needsProfileRegistration: Boolean(
+          isAuthenticated &&
+            firebaseUser &&
+            isEmailVerified &&
+            !isAccountRestrictedStatus(currentUser?.accountStatus) &&
+            !isProfileRegistrationCompleted(currentUser)
+        ),
+        completeInAppProfileRegistration,
+        checkUsernameAvailable,
+        savedAccounts,
+        maxSavedAccounts: MAX_DEVICE_ACCOUNTS,
+        isAddingAccount,
+        addingAccountReturnUid,
+        showAccountSwitcherModal,
+        setShowAccountSwitcherModal,
+        switchAccount,
+        startAddAccountFlow,
+        cancelAddAccountFlow,
+        removeSavedAccount,
         logoutFirebase,
         sendAccountDeletionOtp,
         verifyAccountDeletionOtp,

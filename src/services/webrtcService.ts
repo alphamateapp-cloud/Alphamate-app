@@ -1787,6 +1787,7 @@ class RealtimeSfuStreamingEngine {
         subPc: newSubPc,
         pubSfuSessionId: null,
         pubPc: null,
+        rawLocalStream: null,
         localStream: null,
         localTrackName: null,
         localMid: null,
@@ -1831,6 +1832,7 @@ class RealtimeSfuStreamingEngine {
           );
           newSession.pubSfuSessionId = newPubSessionId;
           newSession.pubPc = newPubPc;
+          newSession.rawLocalStream = existing.rawLocalStream || existing.localStream;
           newSession.localStream = existing.localStream;
           newSession.localTrackName = trackName;
           newSession.localMid = published[0]?.mid || null;
@@ -1849,7 +1851,14 @@ class RealtimeSfuStreamingEngine {
       }
 
       if (existing.isClosed || this.partySfuSessions.get(roomId) !== existing) {
-        if (newSession.localStream && newSession.localStream !== existing.localStream) {
+        if (newSession.rawLocalStream && newSession.rawLocalStream !== existing.rawLocalStream) {
+          newSession.rawLocalStream.getTracks().forEach((t) => t.stop());
+        }
+        if (
+          newSession.localStream &&
+          newSession.localStream !== existing.localStream &&
+          newSession.localStream !== newSession.rawLocalStream
+        ) {
           newSession.localStream.getTracks().forEach((t) => t.stop());
         }
         newSubPc.close();
@@ -1900,7 +1909,20 @@ class RealtimeSfuStreamingEngine {
         existing.unsubscribeParticipants();
         existing.unsubscribeParticipants = null;
       }
-      if (existing.localStream && existing.localStream !== newSession.localStream) {
+      if (existing.rawLocalStream && existing.rawLocalStream !== newSession.rawLocalStream) {
+        existing.rawLocalStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      if (
+        existing.localStream &&
+        existing.localStream !== newSession.localStream &&
+        existing.localStream !== existing.rawLocalStream
+      ) {
         existing.localStream.getTracks().forEach((t) => {
           try {
             t.stop();
@@ -1937,7 +1959,20 @@ class RealtimeSfuStreamingEngine {
       }
       return true;
     } catch (err) {
-      if (newSession?.localStream && newSession.localStream !== existing.localStream) {
+      if (newSession?.rawLocalStream && newSession.rawLocalStream !== existing.rawLocalStream) {
+        newSession.rawLocalStream.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      if (
+        newSession?.localStream &&
+        newSession.localStream !== existing.localStream &&
+        newSession.localStream !== newSession.rawLocalStream
+      ) {
         newSession.localStream.getTracks().forEach((t) => {
           try {
             t.stop();

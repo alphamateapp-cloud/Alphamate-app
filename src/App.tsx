@@ -36,6 +36,8 @@ import { PushNotificationSettingsModal } from './components/modals/PushNotificat
 import { GlobalWeeklyLeaderboardModal } from './components/leaderboard/GlobalWeeklyLeaderboard';
 import { UserBadgesModal } from './components/badges/UserBadgesModal';
 import { PublicUserProfileModal } from './components/modals/PublicUserProfileModal';
+import { ProfileRegistrationModal } from './components/modals/ProfileRegistrationModal';
+import { AccountSwitcherModal } from './components/modals/AccountSwitcherModal';
 import {
   subscribeToFirestoreQuotaExceeded,
   FIRESTORE_PROJECT_ID,
@@ -278,6 +280,8 @@ export default function App() {
         <GlobalWeeklyLeaderboardModal />
         <UserBadgesModal />
         <PublicUserProfileModal />
+        <ProfileRegistrationModal />
+        <AccountSwitcherModal />
         <AppContent />
       </DeviceFrame>
     </AppProvider>
