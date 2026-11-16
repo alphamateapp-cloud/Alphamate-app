@@ -1,4 +1,4 @@
-name: Repair npm lockfile and verify build
+name: Sync lockfiles and verify build
 
 on:
   workflow_dispatch:
@@ -16,23 +16,29 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: npm
+          node-version: '24.12.0'
 
-      - name: Repair package lock
-        run: npm install --package-lock-only --legacy-peer-deps --no-audit --no-fund
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
 
-      - name: Verify clean install
-        run: npm ci --legacy-peer-deps --no-audit --no-fund
+      - name: Sync Bun lockfile
+        run: bun install --lockfile-only
+
+      - name: Sync npm lockfile
+        run: npm install --package-lock-only --legacy-peer-deps --ignore-scripts --no-audit --no-fund
+
+      - name: Verify clean Bun install
+        run: bun install --frozen-lockfile
 
       - name: Verify production build
-        run: npm run build
+        run: bun run build
 
-      - name: Commit repaired lockfile
+      - name: Commit repaired lockfiles
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package-lock.json
-          git diff --cached --quiet || git commit -m "fix: sync npm package lock"
+          git add bun.lock package-lock.json
+          git diff --cached --quiet || git commit -m "fix: sync bun.lock and package-lock.json"
           git push
-          

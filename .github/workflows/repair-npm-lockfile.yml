@@ -1,4 +1,4 @@
-name: Repair npm lockfile and verify build
+name: Sync Bun & npm lockfiles and verify build
 
 on:
   workflow_dispatch:
@@ -7,6 +7,8 @@ on:
       - main
     paths:
       - "package.json"
+      - "bun.lock"
+      - "package-lock.json"
       - ".github/workflows/repair-npm-lockfile.yml"
 
 permissions:
@@ -25,28 +27,32 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '24.12.0'
-          cache: npm
 
-      - name: Set npm version
-        run: npm install --global npm@10.9.2
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
 
-      - name: Regenerate root lockfile
+      - name: Regenerate Bun lockfile
+        run: bun install --lockfile-only
+
+      - name: Regenerate npm lockfile
         run: npm install --package-lock-only --legacy-peer-deps --ignore-scripts --no-audit --no-fund
 
-      - name: Clean install from regenerated lockfile
-        run: npm ci --legacy-peer-deps --no-audit --no-fund
+      - name: Verify clean frozen Bun install
+        run: bun install --frozen-lockfile
 
       - name: Verify production build
-        run: npm run build
+        run: bun run build
 
-      - name: Commit repaired lockfile
+      - name: Commit repaired lockfiles
         run: |
-          if ! git diff --quiet -- package-lock.json; then
+          if ! git diff --quiet -- bun.lock package-lock.json; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add package-lock.json
-            git commit -m "Fix root npm lockfile for deployment"
+            git add bun.lock package-lock.json
+            git commit -m "fix: sync bun.lock and package-lock.json for deployment"
             git push
           else
-            echo "Root package-lock.json is already synchronized."
+            echo "Lockfiles are already synchronized."
           fi
