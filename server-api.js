@@ -70,6 +70,27 @@ export function createApiApp() {
     'https://api.alphamate.app',
   ]);
 
+  const UPSTREAM_RAILWAY_API_URL = (
+    process.env.UPSTREAM_RAILWAY_API_URL || 'https://api.alphamate.app'
+  )
+    .trim()
+    .replace(/\/$/, '');
+  const IS_RAILWAY_RUNTIME = Boolean(
+    process.env.RAILWAY_ENVIRONMENT ||
+      process.env.RAILWAY_PROJECT_ID ||
+      process.env.RAILWAY_SERVICE_ID ||
+      process.env.RAILWAY_PUBLIC_DOMAIN
+  );
+
+  function isAllowedDynamicOrigin(origin) {
+    if (!origin) return false;
+    return (
+      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin) ||
+      /^https:\/\/([a-z0-9-]+\.)?alphamate\.app$/i.test(origin) ||
+      /^https:\/\/ais-(dev|pre)-[a-z0-9-]+(?:\.[a-z0-9-]+)?\.run\.app$/i.test(origin)
+    );
+  }
+
   const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '*')
     .split(',')
     .map((v) => v.trim())
@@ -84,7 +105,7 @@ export function createApiApp() {
       isWildcard ||
       ALLOWED_ORIGINS.includes(origin) ||
       ALWAYS_ALLOWED_ORIGINS.has(origin) ||
-      /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+      isAllowedDynamicOrigin(origin);
 
     if (isWildcard && !origin) {
       res.header('Access-Control-Allow-Origin', '*');
@@ -96,6 +117,79 @@ export function createApiApp() {
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Content-Length, Accept, Authorization, X-Upload-Id, X-Chunk-Index');
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
+  });
+
+  function shouldProxyWebRtcUpstream(req, hasLocalConfig) {
+    if (hasLocalConfig || IS_RAILWAY_RUNTIME) return false;
+    if (!UPSTREAM_RAILWAY_API_URL) return false;
+    if (req.headers['x-alphamate-upstream-proxy'] === '1') return false;
+    const host = String(req.headers.host || '').toLowerCase().split(':')[0];
+    try {
+      const upstreamHost = new URL(UPSTREAM_RAILWAY_API_URL).hostname.toLowerCase();
+      if (host && host === upstreamHost) return false;
+    } catch {
+      return false;
+    }
+    return true;
+  }
+
+  async function forwardWebRtcRequestUpstream(req, res) {
+    const targetUrl = `${UPSTREAM_RAILWAY_API_URL}${req.originalUrl}`;
+    const headers = {
+      Accept: req.headers.accept || 'application/json',
+      'x-alphamate-upstream-proxy': '1',
+    };
+    if (req.headers.authorization) {
+      headers.Authorization = req.headers.authorization;
+    }
+    const init = {
+      method: req.method,
+      headers,
+    };
+    if (req.method !== 'GET' && req.method !== 'HEAD' && req.body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      init.body = JSON.stringify(req.body);
+    }
+    const upstreamRes = await fetchWithTimeout(targetUrl, init, 14000);
+    const contentType = upstreamRes.headers.get('content-type') || 'application/json';
+    const rawText = await upstreamRes.text();
+    res.status(upstreamRes.status).type(contentType).send(rawText);
+  }
+
+  app.use('/api/sfu', async (req, res, next) => {
+    const hasLocalSfu = Boolean(REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN);
+    if (!shouldProxyWebRtcUpstream(req, hasLocalSfu)) {
+      return next();
+    }
+    try {
+      await forwardWebRtcRequestUpstream(req, res);
+    } catch (error) {
+      const status = error?.statusCode || 502;
+      console.warn('[SFU Proxy] Upstream forward failed:', error?.message || error);
+      return res.status(status).json({
+        success: false,
+        code: error?.code || 'SFU_BACKEND_UNREACHABLE',
+        error: error?.message || 'Unable to reach upstream Live SFU backend.',
+      });
+    }
+  });
+
+  app.use('/api/webrtc', async (req, res, next) => {
+    const hasLocalTurn = Boolean(CLOUDFLARE_TURN_TOKEN_ID && CLOUDFLARE_TURN_API_TOKEN);
+    if (!shouldProxyWebRtcUpstream(req, hasLocalTurn)) {
+      return next();
+    }
+    try {
+      await forwardWebRtcRequestUpstream(req, res);
+    } catch (error) {
+      const status = error?.statusCode || 502;
+      console.warn('[TURN Proxy] Upstream forward failed:', error?.message || error);
+      return res.status(status).json({
+        success: false,
+        code: error?.code || 'TURN_BACKEND_UNREACHABLE',
+        error: error?.message || 'Unable to reach upstream TURN backend.',
+      });
+    }
   });
 
   async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
@@ -228,7 +322,7 @@ export function createApiApp() {
                 Accept: 'application/json',
               },
             },
-            2500
+            5000
           );
           // 401/403 means invalid App ID / Bearer token; 404/400/200 means credentials authenticated against Cloudflare SFU
           const authOk = resp.status !== 401 && resp.status !== 403 && resp.status < 500;
@@ -318,6 +412,20 @@ export function createApiApp() {
 
   app.get('/api/health', async (req, res) => {
     try {
+      const hasLocalWebRtc = Boolean(
+        REALTIME_SFU_APP_ID &&
+          REALTIME_SFU_BEARER_TOKEN &&
+          CLOUDFLARE_TURN_TOKEN_ID &&
+          CLOUDFLARE_TURN_API_TOKEN
+      );
+      if (shouldProxyWebRtcUpstream(req, hasLocalWebRtc)) {
+        try {
+          await forwardWebRtcRequestUpstream(req, res);
+          return;
+        } catch {
+          // Fall back to local health status if upstream is unreachable
+        }
+      }
       const forceFresh = req.query?.fresh === '1' || req.query?.fresh === 'true';
       const report = await validateSystemHealth(forceFresh);
       return res.json(report);

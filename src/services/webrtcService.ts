@@ -229,8 +229,10 @@ class RealtimeSfuStreamingEngine {
   private hasCloudflareTurn: boolean = false;
   private sfuConfiguredUntil: number = 0;
   private sfuConfigCheckInFlight: Promise<void> | null = null;
+  private preferSameOriginProxy: boolean = false;
 
   constructor() {
+    this.preferSameOriginProxy = this.isAiStudioPreviewHost();
     this.fetchCloudflareTurnCredentials().catch(() => {});
     this.ensureSfuBackendConfigured().catch(() => {});
     if (typeof window !== 'undefined') {
@@ -241,6 +243,40 @@ class RealtimeSfuStreamingEngine {
   }
 
   public static readonly PRODUCTION_API_URL = 'https://api.alphamate.app';
+
+  private isAiStudioPreviewHost(): boolean {
+    if (Capacitor.isNativePlatform() || typeof window === 'undefined') {
+      return false;
+    }
+    const host = (window.location?.hostname || '').toLowerCase();
+    return /^ais-(dev|pre)-/i.test(host) && host.endsWith('.run.app');
+  }
+
+  private canFallbackToSameOrigin(attemptedBase: string): boolean {
+    if (Capacitor.isNativePlatform() || typeof window === 'undefined') {
+      return false;
+    }
+    const origin = window.location?.origin || '';
+    const host = (window.location?.hostname || '').toLowerCase();
+    if (!origin || !attemptedBase || origin === attemptedBase) {
+      return false;
+    }
+    if (host === 'alphamate.app' || host === 'www.alphamate.app' || host === 'api.alphamate.app') {
+      return false;
+    }
+    return window.location.protocol === 'http:' || window.location.protocol === 'https:';
+  }
+
+  private getCandidateApiBases(): string[] {
+    const remoteBase = this.getBackendApiBase();
+    if (this.preferSameOriginProxy && !Capacitor.isNativePlatform()) {
+      return ['', remoteBase];
+    }
+    if (this.canFallbackToSameOrigin(remoteBase)) {
+      return [remoteBase, ''];
+    }
+    return [remoteBase];
+  }
 
   private isValidCustomBackendUrl(rawUrl: string): boolean {
     if (!rawUrl || rawUrl.includes('YOUR-RAILWAY-DOMAIN') || !/^https?:\/\//i.test(rawUrl)) {
@@ -277,6 +313,9 @@ class RealtimeSfuStreamingEngine {
   }
 
   public getResolvedBackendApiBase(): string {
+    if (this.preferSameOriginProxy && typeof window !== 'undefined' && !Capacitor.isNativePlatform()) {
+      return window.location.origin;
+    }
     return this.getBackendApiBase();
   }
 
@@ -338,10 +377,10 @@ class RealtimeSfuStreamingEngine {
     body?: any,
     keepalive: boolean = false
   ): Promise<T> {
-    const base = this.getBackendApiBase();
-    const url = `${base}${path}`;
+    const candidateBases = this.getCandidateApiBases();
 
-    const execOnce = async (forceTokenRefresh: boolean) => {
+    const execOnce = async (base: string, forceTokenRefresh: boolean) => {
+      const url = `${base}${path}`;
       const idToken = await this.getFirebaseIdToken(forceTokenRefresh);
       const headers: Record<string, string> = {
         Authorization: `Bearer ${idToken}`,
@@ -351,7 +390,7 @@ class RealtimeSfuStreamingEngine {
         method,
         headers,
         keepalive,
-        mode: 'cors',
+        mode: base ? 'cors' : 'same-origin',
         cache: 'no-store',
       };
       if (body !== undefined && method !== 'GET') {
@@ -395,7 +434,7 @@ class RealtimeSfuStreamingEngine {
           }
         } else {
           console.warn(`[WebRTC SFU] Network error calling ${method} ${url}:`, networkErr);
-          throw this.formatNetworkFetchError(base, networkErr);
+          throw this.formatNetworkFetchError(base || this.getResolvedBackendApiBase(), networkErr);
         }
       }
 
@@ -406,14 +445,14 @@ class RealtimeSfuStreamingEngine {
           if (!contentType.includes('application/json')) {
             if (this.isRetryableGatewayStatus(responseStatus)) {
               const err: any = new Error(
-                `SFU backend gateway at ${base} temporarily unavailable (${responseStatus}).`
+                `SFU backend gateway at ${base || this.getResolvedBackendApiBase()} temporarily unavailable (${responseStatus}).`
               );
               err.status = responseStatus;
               err.code = 'SFU_BACKEND_UNREACHABLE';
               throw err;
             }
             const msg = this.hasConfiguredRailwayUrl()
-              ? `Backend API at ${base} returned non-JSON (${responseStatus}) for ${path}. Verify Railway is running the Express API (npm start).`
+              ? `Backend API at ${base || this.getResolvedBackendApiBase()} returned non-JSON (${responseStatus}) for ${path}. Verify Railway is running the Express API (npm start).`
               : `No Express/SFU API server on this host (${responseStatus} HTML). Set VITE_RAILWAY_API_URL to your deployed Railway backend.`;
             const err: any = new Error(msg);
             err.status = responseStatus;
@@ -428,50 +467,63 @@ class RealtimeSfuStreamingEngine {
       return { response: { ok: responseStatus >= 200 && responseStatus < 300, status: responseStatus }, data };
     };
 
-    const maxAttempts = keepalive ? 1 : 2;
+    const maxAttemptsPerBase = keepalive ? 1 : 2;
     let lastError: any = null;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      try {
-        let { response, data } = await execOnce(false);
-        if (response.status === 401 && !keepalive) {
-          ({ response, data } = await execOnce(true));
-        }
+    for (let baseIdx = 0; baseIdx < candidateBases.length; baseIdx++) {
+      const base = candidateBases[baseIdx];
+      for (let attempt = 0; attempt < maxAttemptsPerBase; attempt++) {
+        try {
+          let { response, data } = await execOnce(base, false);
+          if (response.status === 401 && !keepalive) {
+            ({ response, data } = await execOnce(base, true));
+          }
 
-        if (!response.ok || data?.success === false) {
-          const msg = data?.error || `SFU request failed (${response.status})`;
-          const err: any = new Error(msg);
-          err.status = response.status;
-          if (data?.code) err.code = data.code;
-          if (
+          if (!response.ok || data?.success === false) {
+            const msg = data?.error || `SFU request failed (${response.status})`;
+            const err: any = new Error(msg);
+            err.status = response.status;
+            if (data?.code) err.code = data.code;
+            if (
+              !keepalive &&
+              attempt < maxAttemptsPerBase - 1 &&
+              this.isRetryableGatewayStatus(response.status, data?.code)
+            ) {
+              lastError = err;
+              await this.delayMs(250 * (attempt + 1));
+              continue;
+            }
+            throw err;
+          }
+
+          if (base === '' && !Capacitor.isNativePlatform()) {
+            this.preferSameOriginProxy = true;
+          }
+          return data as T;
+        } catch (err: any) {
+          lastError = err;
+          const isUnreachableOrMissing =
+            err?.code === 'SFU_BACKEND_UNREACHABLE' ||
+            err?.code === 'SFU_NOT_CONFIGURED';
+          // If another candidate base exists (e.g. same-origin proxy fallback on CORS block), switch immediately.
+          if (baseIdx < candidateBases.length - 1 && isUnreachableOrMissing) {
+            break;
+          }
+          const canRetryNetwork =
             !keepalive &&
-            attempt < maxAttempts - 1 &&
-            this.isRetryableGatewayStatus(response.status, data?.code)
-          ) {
-            lastError = err;
-            await this.delayMs(250 * (attempt + 1));
+            attempt < maxAttemptsPerBase - 1 &&
+            (err?.code === 'SFU_BACKEND_UNREACHABLE' ||
+              this.isRetryableGatewayStatus(Number(err?.status || 0), err?.code));
+          if (canRetryNetwork) {
+            await this.delayMs(350 * (attempt + 1));
             continue;
           }
           throw err;
         }
-
-        return data as T;
-      } catch (err: any) {
-        lastError = err;
-        const canRetryNetwork =
-          !keepalive &&
-          attempt < maxAttempts - 1 &&
-          (err?.code === 'SFU_BACKEND_UNREACHABLE' ||
-            this.isRetryableGatewayStatus(Number(err?.status || 0), err?.code));
-        if (canRetryNetwork) {
-          await this.delayMs(350 * (attempt + 1));
-          continue;
-        }
-        throw err;
       }
     }
 
-    throw lastError || this.formatNetworkFetchError(base, null);
+    throw lastError || this.formatNetworkFetchError(this.getBackendApiBase(), null);
   }
 
   public async checkBackendHealth(): Promise<{
@@ -480,68 +532,82 @@ class RealtimeSfuStreamingEngine {
     turnConfigured: boolean;
     sfuConfigured: boolean;
   }> {
-    const base = this.getBackendApiBase();
-    const maxAttempts = 2;
+    const candidateBases = this.getCandidateApiBases();
     let lastError: unknown = null;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      let response: Response;
-      try {
-        response = await this.fetchWithTimeout(
-          `${base}/api/health`,
-          {
-            method: 'GET',
-            headers: { Accept: 'application/json' },
-            mode: 'cors',
-            cache: 'no-store',
-          },
-          12000
-        );
-      } catch (networkErr) {
-        lastError = networkErr;
-        if (attempt < maxAttempts - 1) {
-          await this.delayMs(350 * (attempt + 1));
-          continue;
-        }
-        throw this.formatNetworkFetchError(base, networkErr);
-      }
+    for (let baseIdx = 0; baseIdx < candidateBases.length; baseIdx++) {
+      const base = candidateBases[baseIdx];
+      const maxAttempts = baseIdx < candidateBases.length - 1 ? 1 : 2;
 
-      const contentType = response.headers.get('content-type') || '';
-      const rawText = await response.text().catch(() => '');
-      let data: any = null;
-      if (rawText) {
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        let response: Response;
         try {
-          data = JSON.parse(rawText);
-        } catch {
-          data = null;
+          response = await this.fetchWithTimeout(
+            `${base}/api/health`,
+            {
+              method: 'GET',
+              headers: { Accept: 'application/json' },
+              mode: base ? 'cors' : 'same-origin',
+              cache: 'no-store',
+            },
+            12000
+          );
+        } catch (networkErr) {
+          lastError = networkErr;
+          if (attempt < maxAttempts - 1) {
+            await this.delayMs(350 * (attempt + 1));
+            continue;
+          }
+          if (baseIdx < candidateBases.length - 1) {
+            break;
+          }
+          throw this.formatNetworkFetchError(base || this.getResolvedBackendApiBase(), networkErr);
         }
-      }
-      if (!data || !contentType.includes('application/json')) {
+
+        const contentType = response.headers.get('content-type') || '';
+        const rawText = await response.text().catch(() => '');
+        let data: any = null;
+        if (rawText) {
+          try {
+            data = JSON.parse(rawText);
+          } catch {
+            data = null;
+          }
+        }
+        if (!data || !contentType.includes('application/json')) {
+          if (this.isRetryableGatewayStatus(response.status) && attempt < maxAttempts - 1) {
+            await this.delayMs(350 * (attempt + 1));
+            continue;
+          }
+          if (baseIdx < candidateBases.length - 1) {
+            break;
+          }
+          const resolvedDisplay = base || this.getResolvedBackendApiBase();
+          const msg = this.hasConfiguredRailwayUrl()
+            ? `Backend API at ${resolvedDisplay} returned non-JSON (${response.status}) for /api/health. Ensure Railway is running the Express API (npm start).`
+            : `This build is serving static frontend files without an SFU API server (${response.status}). Set VITE_RAILWAY_API_URL to your Railway backend URL and rebuild.`;
+          const err: any = new Error(msg);
+          err.status = response.status;
+          err.code = 'SFU_NOT_CONFIGURED';
+          throw err;
+        }
         if (this.isRetryableGatewayStatus(response.status) && attempt < maxAttempts - 1) {
           await this.delayMs(350 * (attempt + 1));
           continue;
         }
-        const msg = this.hasConfiguredRailwayUrl()
-          ? `Backend API at ${base} returned non-JSON (${response.status}) for /api/health. Ensure Railway is running the Express API (npm start).`
-          : `This build is serving static frontend files without an SFU API server (${response.status}). Set VITE_RAILWAY_API_URL to your Railway backend URL and rebuild.`;
-        const err: any = new Error(msg);
-        err.status = response.status;
-        err.code = 'SFU_NOT_CONFIGURED';
-        throw err;
+        if (base === '' && !Capacitor.isNativePlatform()) {
+          this.preferSameOriginProxy = true;
+        }
+        return {
+          ok: Boolean(response.ok && data?.success),
+          firebaseConfigured: Boolean(data?.firebaseConfigured),
+          turnConfigured: Boolean(data?.turnConfigured),
+          sfuConfigured: Boolean(data?.sfuConfigured),
+        };
       }
-      if (this.isRetryableGatewayStatus(response.status) && attempt < maxAttempts - 1) {
-        await this.delayMs(350 * (attempt + 1));
-        continue;
-      }
-      return {
-        ok: Boolean(response.ok && data?.success),
-        firebaseConfigured: Boolean(data?.firebaseConfigured),
-        turnConfigured: Boolean(data?.turnConfigured),
-        sfuConfigured: Boolean(data?.sfuConfigured),
-      };
     }
 
-    throw this.formatNetworkFetchError(base, lastError);
+    throw this.formatNetworkFetchError(this.getBackendApiBase(), lastError);
   }
 
   private async ensureSfuBackendConfigured(): Promise<void> {
@@ -602,43 +668,58 @@ class RealtimeSfuStreamingEngine {
     }
 
     if (auth.currentUser) {
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const base = this.getBackendApiBase();
-          const idToken = await auth.currentUser.getIdToken(forceRefresh || attempt > 0);
-          const response = await this.fetchWithTimeout(
-            `${base}/api/webrtc/turn-credentials`,
-            {
-              method: 'GET',
-              headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
-              mode: 'cors',
-              cache: 'no-store',
-            },
-            5000
-          );
-          const contentType = response.headers.get('content-type') || '';
-          const data = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
-          if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
-            const hasTurn = data.iceServers.some((server: RTCIceServer) =>
-              (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
-                (url) => url.startsWith('turn:') || url.startsWith('turns:')
-              )
+      const candidateBases = this.getCandidateApiBases();
+      for (const base of candidateBases) {
+        let shouldTryNextBase = false;
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const idToken = await auth.currentUser.getIdToken(forceRefresh || attempt > 0);
+            const response = await this.fetchWithTimeout(
+              `${base}/api/webrtc/turn-credentials`,
+              {
+                method: 'GET',
+                headers: { Authorization: `Bearer ${idToken}`, Accept: 'application/json' },
+                mode: base ? 'cors' : 'same-origin',
+                cache: 'no-store',
+              },
+              5000
             );
-            if (hasTurn) {
-              this.cachedTurnServers = data.iceServers;
-              this.turnExpiresAt = now + Math.max(300, Number(data.ttl) || 3600) * 1000 - 60000;
-              this.customIceServers = data.iceServers;
-              this.hasCloudflareTurn = true;
-              return data.iceServers;
+            const contentType = response.headers.get('content-type') || '';
+            const data = contentType.includes('application/json') ? await response.json().catch(() => ({})) : {};
+            if (response.ok && data?.success && Array.isArray(data.iceServers) && data.iceServers.length) {
+              const hasTurn = data.iceServers.some((server: RTCIceServer) =>
+                (typeof server.urls === 'string' ? [server.urls] : server.urls || []).some(
+                  (url) => url.startsWith('turn:') || url.startsWith('turns:')
+                )
+              );
+              if (hasTurn) {
+                if (base === '' && !Capacitor.isNativePlatform()) {
+                  this.preferSameOriginProxy = true;
+                }
+                this.cachedTurnServers = data.iceServers;
+                this.turnExpiresAt = now + Math.max(300, Number(data.ttl) || 3600) * 1000 - 60000;
+                this.customIceServers = data.iceServers;
+                this.hasCloudflareTurn = true;
+                return data.iceServers;
+              }
+            }
+            if (!contentType.includes('application/json')) {
+              shouldTryNextBase = true;
+            }
+            break;
+          } catch (error) {
+            if (attempt === 0 && candidateBases.length === 1) {
+              await this.delayMs(250);
+              continue;
+            }
+            shouldTryNextBase = true;
+            if (base === candidateBases[candidateBases.length - 1]) {
+              console.warn('[WebRTC] Railway TURN credential request failed:', error);
             }
           }
+        }
+        if (!shouldTryNextBase) {
           break;
-        } catch (error) {
-          if (attempt === 0) {
-            await this.delayMs(250);
-            continue;
-          }
-          console.warn('[WebRTC] Railway TURN credential request failed:', error);
         }
       }
     }
