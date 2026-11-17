@@ -18,3 +18,9 @@
 - Confirm the Railway deployed backend has the latest `server-api.js` token endpoint and the `AGORA_APP_ID`, `AGORA_APP_CERTIFICATE` and token TTL configuration.
 
 This is an implementation candidate source package, not a certified production release until all release gates pass.
+
+## 2026-11-17 black-screen hotfix
+- Fixed three stale `p2pStreamingEngine` references in `PartyRoomsScreen.tsx` left behind after the Party transport was switched to `agoraPartyEngine`.
+- The component imported `agoraPartyEngine` but still invoked the undefined old identifier during Party voice startup, speaking-mode changes, and remote-audio activity polling. These stale references could throw at runtime as soon as a Party room was opened.
+- Replaced all three calls with the imported `agoraPartyEngine` instance. No Solo Live WebRTC code was changed.
+- Verification: source scan confirms no `p2pStreamingEngine` references remain in `PartyRoomsScreen.tsx`. TypeScript build could not be completed because dependencies are not installed (`vite/client` type definitions unavailable); Android/device runtime test is still required.
