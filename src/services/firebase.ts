@@ -1060,6 +1060,7 @@ export async function updatePartyRoomFields(roomId: string, fields: Record<strin
   try {
     await updateDoc(doc(db, 'partyRooms', roomId), stripUndefinedFields({
       ...fields,
+      ...(Object.prototype.hasOwnProperty.call(fields, 'seats') ? { lastSeenAtMs: Date.now() } : {}),
       updatedAt: new Date().toISOString(),
     }));
   } catch (error: any) {
@@ -1270,6 +1271,7 @@ export async function updatePartyRoomSeat(
 
       transaction.update(roomRef, {
         seats,
+        lastSeenAtMs: Date.now(),
         updatedAt: new Date().toISOString(),
       });
       return { success: true, seats };
@@ -2090,13 +2092,34 @@ export interface SendNotificationParams {
   chatId?: string;
 }
 
+const VALID_NOTIFICATION_TYPES = new Set<SendNotificationParams['type']>([
+  'live_on',
+  'live_invite',
+  'party_invite',
+  'friend_request',
+  'follow',
+  'gift',
+  'comment',
+  'message',
+  'like',
+  'pk_invite',
+  'wallet',
+  'agency',
+  'system',
+]);
+
 export async function sendFirestoreNotification(
   params: SendNotificationParams
 ): Promise<string | null> {
   if (isFirestoreQuotaExceeded()) return null;
-  const senderUid = auth.currentUser?.uid;
+  const senderUid = String(auth.currentUser?.uid || '').trim();
   const recipientId = String(params.recipientId || '').trim();
-  if (!senderUid || !recipientId || !FIRESTORE_VALID_ID_RE.test(recipientId)) {
+  if (
+    !senderUid ||
+    !recipientId ||
+    !FIRESTORE_VALID_ID_RE.test(senderUid) ||
+    !FIRESTORE_VALID_ID_RE.test(recipientId)
+  ) {
     return null;
   }
 
@@ -2105,21 +2128,39 @@ export async function sendFirestoreNotification(
   const notifId = `n_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
   const path = `users/${recipientId}/notifications/${notifId}`;
 
+  const safeType = VALID_NOTIFICATION_TYPES.has(params.type) ? params.type : 'system';
+  const safeSenderName =
+    String(params.senderName || auth.currentUser?.displayName || 'Alpha Mate User')
+      .trim()
+      .slice(0, 128) || 'Alpha Mate User';
+  const rawAvatar = sanitizeAvatarString(params.senderAvatar || auth.currentUser?.photoURL || undefined);
+  const safeAvatar =
+    rawAvatar.length <= 65000
+      ? rawAvatar
+      : 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80';
+  const safeTitle = String(params.title || '').trim().slice(0, 160) || 'Alpha Mate';
+  const safeMessage =
+    String(params.message || '').trim().slice(0, 600) || 'New activity on Alpha Mate.';
+  const trimOpt = (val: string | undefined, maxLen: number) => {
+    const trimmed = typeof val === 'string' ? val.trim() : '';
+    return trimmed ? trimmed.slice(0, maxLen) : undefined;
+  };
+
   const payload = stripUndefinedFields({
     recipientId,
     senderId: senderUid,
-    senderName: String(params.senderName || auth.currentUser?.displayName || 'Alpha Mate User').slice(0, 128),
-    senderAvatar: sanitizeAvatarString(params.senderAvatar || auth.currentUser?.photoURL || undefined),
-    type: params.type,
-    category: params.category || undefined,
-    title: String(params.title || 'Alpha Mate').slice(0, 160),
-    message: String(params.message || '').slice(0, 600),
-    screen: params.screen ? String(params.screen).slice(0, 64) : undefined,
-    tab: params.tab ? String(params.tab).slice(0, 64) : undefined,
-    roomId: params.roomId ? String(params.roomId).slice(0, 128) : undefined,
-    streamId: params.streamId ? String(params.streamId).slice(0, 128) : undefined,
-    reelId: params.reelId ? String(params.reelId).slice(0, 128) : undefined,
-    chatId: params.chatId ? String(params.chatId).slice(0, 128) : undefined,
+    senderName: safeSenderName,
+    senderAvatar: safeAvatar,
+    type: safeType,
+    category: trimOpt(params.category, 64),
+    title: safeTitle,
+    message: safeMessage,
+    screen: trimOpt(params.screen, 64),
+    tab: trimOpt(params.tab, 64),
+    roomId: trimOpt(params.roomId, 128),
+    streamId: trimOpt(params.streamId, 128),
+    reelId: trimOpt(params.reelId, 128),
+    chatId: trimOpt(params.chatId, 128),
     isRead: false,
     createdAt: nowIso,
     createdAtMs: nowMs,

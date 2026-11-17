@@ -1023,6 +1023,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const removedPartyUntilRef = React.useRef<Map<string, number>>(new Map());
   const removedLiveUntilRef = React.useRef<Map<string, number>>(new Map());
   const activeStreamIdRef = React.useRef<string | null>(null);
+  const seatMutationInFlightRef = React.useRef<Set<string>>(new Set());
 
   // Real-time Firestore + WebSocket discovery listeners (rebinds automatically on auth transitions)
   useEffect(() => {
@@ -1078,10 +1079,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const existing = byId.get(id);
         const rawTs = Number(raw.lastSeenAtMs || 0);
         const existingTs = Number(existing?.lastSeenAtMs || 0);
+        // Firestore is the single authoritative source of truth for seats & moderation state.
+        // WebSocket discovery may supplement ephemeral presence fields (activeViewers, isHostPresent),
+        // but MUST NEVER overwrite existing Firestore seats with potentially stale WS state.
         const mergedCandidate = existing
-          ? existingTs > rawTs
-            ? { ...raw, ...existing }
-            : { ...existing, ...raw }
+          ? {
+              ...raw,
+              ...existing,
+              activeViewers:
+                rawTs >= existingTs && typeof raw.activeViewers === 'number'
+                  ? raw.activeViewers
+                  : existing.activeViewers,
+              isHostPresent:
+                rawTs >= existingTs && typeof raw.isHostPresent === 'boolean'
+                  ? raw.isHostPresent
+                  : existing.isHostPresent,
+              lastSeenAtMs: Math.max(existingTs, rawTs),
+            }
           : raw;
         const r = normalizePartyItem(mergedCandidate);
         if (!r) return;
@@ -1114,7 +1128,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const fresh =
           nextRooms.find((r) => r.id === currentActive.id) ||
           nextRooms.find((r) => r.host?.id && r.host.id === currentActive.host?.id);
-        return fresh ? { ...currentActive, ...fresh } : currentActive;
+        if (!fresh) return currentActive;
+        if (seatMutationInFlightRef.current.has(currentActive.id)) {
+          return { ...currentActive, ...fresh, seats: currentActive.seats };
+        }
+        return { ...currentActive, ...fresh };
       });
     };
 
@@ -4844,7 +4862,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActivePartyRoom(nextRoom);
     if (isOwnerHost) {
       setPartyRooms((prev) => prev.map((r) => (r.id === nextRoom.id ? nextRoom : r)));
-      realtimeSocket.announcePartyRoom(nextRoom);
+      realtimeSocket.announcePartyRoom({
+        id: nextRoom.id,
+        host: nextRoom.host,
+        title: nextRoom.title,
+        level: nextRoom.level,
+        isActive: true,
+        isHostPresent: true,
+        activeViewers: nextRoom.activeViewers,
+        lastSeenAtMs: Date.now(),
+      });
       updatePartyRoomFields(nextRoom.id, {
         isHostPresent: true,
         activeViewers: nextRoom.activeViewers,
@@ -4903,7 +4930,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             activeViewers: nextViewers,
           };
           setPartyRooms((prev) => prev.map((r) => (r.id === roomToClose.id ? updatedRoom : r)));
-          realtimeSocket.announcePartyRoom(updatedRoom);
+          realtimeSocket.announcePartyRoom({
+            id: roomToClose.id,
+            isHostPresent: false,
+            activeViewers: nextViewers,
+            lastSeenAtMs: Date.now(),
+          });
           updatePartyRoomFields(roomToClose.id, {
             isHostPresent: false,
             activeViewers: nextViewers,
@@ -5031,7 +5063,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const room = activePartyRoom;
-    const prevSeatIndex = userSeatIndex;
+    if (seatMutationInFlightRef.current.has(room.id)) {
+      return { success: false, reason: 'IN_PROGRESS' };
+    }
+
     const isLeaving = userSeatIndex === seatIndex;
     const effectiveUser = auth.currentUser?.uid ? { ...currentUser, id: auth.currentUser.uid } : currentUser;
     const targetServerSeat = Array.isArray(room.seats)
@@ -5039,57 +5074,50 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       : null;
     const nextSeatMuted = isLeaving ? false : Boolean(targetServerSeat?.isHostMuted);
 
-    // Immediate optimistic update
-    setUserSeatIndex(isLeaving ? null : seatIndex);
-    setIsMicMuted(nextSeatMuted);
+    seatMutationInFlightRef.current.add(room.id);
+    try {
+      // Commit atomically in Firestore BEFORE flipping userSeatIndex / Agora role so
+      // /api/agora/party/rooms/:roomId/token always sees the committed seat & issues a publisher token.
+      const result = await updatePartyRoomSeat(
+        room.id,
+        seatIndex,
+        isLeaving ? null : effectiveUser,
+        effectiveUser.id,
+        nextSeatMuted
+      );
 
-    const roomSeats = Array.isArray(room.seats) ? [...room.seats] : [];
-    const optimisticSeats = roomSeats.map((s: any) => {
-      if (Number(s.seatIndex) === seatIndex) {
-        return isLeaving
-          ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
-          : { ...s, user: effectiveUser, isSpeaking: false, isMuted: nextSeatMuted };
+      if (result.success && result.seats) {
+        const committedSeats = result.seats;
+        const nowMs = Date.now();
+        const verifiedRoom: PartyRoom = { ...room, seats: committedSeats, lastSeenAtMs: nowMs };
+        setActivePartyRoom((prev) =>
+          prev && prev.id === room.id ? { ...prev, seats: committedSeats, lastSeenAtMs: nowMs } : verifiedRoom
+        );
+        setPartyRooms((prev) =>
+          prev.map((item) =>
+            item.id === room.id ? { ...item, seats: committedSeats, lastSeenAtMs: nowMs } : item
+          )
+        );
+        const mySeat = committedSeats.find((s: any) => s.user?.id === effectiveUser.id);
+        setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
+        if (mySeat) {
+          setIsMicMuted(Boolean(mySeat.isMuted || mySeat.isHostMuted));
+        } else {
+          setIsMicMuted(false);
+        }
+        realtimeSocket.announcePartyRoom({
+          id: room.id,
+          seats: result.seats,
+          lastSeenAtMs: nowMs,
+        });
+        return { success: true };
       }
-      if (!isLeaving && s.user?.id === effectiveUser.id) {
-        return { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false };
-      }
-      return s;
-    });
 
-    const optimisticRoom = { ...room, seats: optimisticSeats };
-    setActivePartyRoom(optimisticRoom);
-    setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? optimisticRoom : item)));
-
-    // Persist atomically via Firestore transaction
-    const result = await updatePartyRoomSeat(
-      room.id,
-      seatIndex,
-      isLeaving ? null : effectiveUser,
-      effectiveUser.id,
-      nextSeatMuted
-    );
-
-    if (result.success && result.seats) {
-      const verifiedRoom = { ...room, seats: result.seats };
-      setActivePartyRoom(verifiedRoom);
-      setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? verifiedRoom : item)));
-      const mySeat = result.seats.find((s: any) => s.user?.id === effectiveUser.id);
-      setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
-      if (mySeat) {
-        setIsMicMuted(Boolean(mySeat.isMuted || mySeat.isHostMuted));
-      } else {
-        setIsMicMuted(false);
-      }
-      return { success: true };
+      console.warn('Party seat update rejected:', result.reason);
+      return { success: false, reason: result.reason || 'REJECTED' };
+    } finally {
+      seatMutationInFlightRef.current.delete(room.id);
     }
-
-    console.warn('Party seat update rejected:', result.reason);
-    // Revert optimistic state if transaction declined (occupied/locked/restricted)
-    setUserSeatIndex(prevSeatIndex);
-    setIsMicMuted(false);
-    setActivePartyRoom(room);
-    setPartyRooms((prev) => prev.map((item) => (item.id === room.id ? room : item)));
-    return { success: false, reason: result.reason || 'REJECTED' };
   };
 
   const openConversation = (conv: Conversation | null) => {

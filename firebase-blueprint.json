@@ -52,10 +52,10 @@
         "recipientId": { "type": "string", "maxLength": 128 },
         "senderId": { "type": "string", "maxLength": 128 },
         "senderName": { "type": "string", "maxLength": 128 },
-        "senderAvatar": { "type": "string", "maxLength": 1024 },
+        "senderAvatar": { "type": "string", "maxLength": 65000 },
         "type": {
           "type": "string",
-          "enum": ["live_on", "party_invite", "friend_request", "follow", "gift", "comment", "message", "like", "pk_invite", "wallet", "agency", "system"]
+          "enum": ["live_on", "live_invite", "party_invite", "friend_request", "follow", "gift", "comment", "message", "like", "pk_invite", "wallet", "agency", "system"]
         },
         "category": { "type": "string", "maxLength": 64 },
         "title": { "type": "string", "maxLength": 160 },

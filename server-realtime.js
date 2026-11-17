@@ -134,20 +134,13 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     }
   }
 
-  function syncPartyDiscoveryPresence(roomId, viewers, departedUid = null) {
+  function syncPartyDiscoveryPresence(roomId, viewers) {
     const entry = activePartyRooms.get(roomId);
     if (!entry || !entry.data) return;
     const now = Date.now();
     const hostId = entry.data.host?.id || '';
     const isHostPresent = Boolean(hostId && viewers.some((v) => v.id === hostId));
-    let nextSeats = Array.isArray(entry.data.seats) ? entry.data.seats : [];
-    if (departedUid && nextSeats.some((s) => s?.user?.id === departedUid)) {
-      nextSeats = nextSeats.map((s) =>
-        s?.user?.id === departedUid
-          ? { ...s, user: null, isSpeaking: false, isMuted: false, isHostMuted: false }
-          : s
-      );
-    }
+    const nextSeats = Array.isArray(entry.data.seats) ? entry.data.seats : [];
     const updated = {
       ...entry.data,
       seats: nextSeats,
@@ -208,7 +201,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         });
 
         if (roomType === 'party') {
-          syncPartyDiscoveryPresence(roomId, viewers, uid);
+          syncPartyDiscoveryPresence(roomId, viewers);
         } else if (roomType === 'live') {
           const liveEntry = activeLiveStreams.get(roomId);
           if (liveEntry && liveEntry.data?.host?.id === uid) {

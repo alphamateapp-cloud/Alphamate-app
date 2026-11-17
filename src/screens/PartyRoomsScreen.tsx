@@ -1087,6 +1087,7 @@ export const PartyRoomsScreen: React.FC = () => {
   }, []);
 
   const unlockAllRemoteAudioPlayback = useCallback(async () => {
+    agoraPartyEngine.resumeAudioPlayback();
     const targets: HTMLAudioElement[] = [];
     partyAudioElsRef.current.forEach((audioEl) => {
       if (!audioEl || !audioEl.srcObject) return;
@@ -1756,8 +1757,9 @@ export const PartyRoomsScreen: React.FC = () => {
         ...(isHost ? { isHostPresent: true } : {}),
       };
       updatePartyRoomFields(activePartyRoom.id, patch).catch(() => {});
+      // Announce ONLY presence/viewer count fields (never spread stale seats)
       realtimeSocket.announcePartyRoom({
-        ...activePartyRoom,
+        id: activePartyRoom.id,
         activeViewers: realCount,
         ...(isHost ? { isHostPresent: true } : {}),
         lastSeenAtMs: Date.now(),
@@ -2027,6 +2029,8 @@ export const PartyRoomsScreen: React.FC = () => {
       const res = await toggleSeat(seat.seatIndex);
       if (res.success) {
         showToast(`Joined Seat ${seat.seatIndex + 1}! 🎙️`);
+      } else if (res.reason === 'IN_PROGRESS') {
+        return;
       } else if (res.reason === 'SEAT_LOCKED') {
         showToast('This seat is locked by the Host 🔒');
       } else if (res.reason === 'SEAT_OCCUPIED') {

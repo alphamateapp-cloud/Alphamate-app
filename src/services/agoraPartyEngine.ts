@@ -776,14 +776,38 @@ class AgoraPartyEngine {
     this.callbacks.onConnectionStateChange?.('connected');
   }
 
-  public async setPartySpeakingMode(
+  public resumeAudioPlayback() {
+    if (agoraPartyNative.isAvailable()) return;
+    this.webRemoteAudioTracks.forEach((track) => {
+      try {
+        track.setVolume(this.speakerEnabled ? 100 : 0);
+        track.play();
+      } catch {
+        // ignore autoplay errors until next gesture
+      }
+    });
+  }
+
+  public setPartySpeakingMode(
+    roomId: string,
+    userId: string,
+    canSpeak: boolean,
+    muted: boolean,
+    profile?: PartyProfile
+  ): Promise<void> {
+    return this.enqueueOp(() =>
+      this.setPartySpeakingModeInternal(roomId, userId, canSpeak, muted, profile)
+    );
+  }
+
+  private async setPartySpeakingModeInternal(
     roomId: string,
     _userId: string,
     canSpeak: boolean,
     muted: boolean,
     _profile?: PartyProfile
   ) {
-    if (this.roomId !== roomId) return;
+    if (this.roomId !== roomId || this.manualStop) return;
     this.listenOnly = !canSpeak;
     this.canPublish = canSpeak;
     this.muted = !canSpeak || muted;
@@ -792,19 +816,35 @@ class AgoraPartyEngine {
       this.localSpeakingUntilMs = 0;
     }
 
-    const payload = await this.fetchPartyToken(roomId, canSpeak, false);
+    let payload = await this.fetchPartyToken(roomId, canSpeak, false);
+    if (canSpeak && !payload.canPublish && this.roomId === roomId && !this.manualStop) {
+      for (let retry = 1; retry <= 2; retry += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * retry));
+        if (this.roomId !== roomId || this.manualStop) return;
+        payload = await this.fetchPartyToken(roomId, true, false);
+        if (payload.canPublish) break;
+      }
+    }
     if (this.roomId !== roomId || this.manualStop) return;
 
+    const effectiveCanSpeak = canSpeak && Boolean(payload.canPublish);
+    this.canPublish = effectiveCanSpeak;
+    this.listenOnly = !effectiveCanSpeak;
+    this.muted = !effectiveCanSpeak || muted;
+
     if (agoraPartyNative.isAvailable()) {
-      await agoraPartyNative.setCanPublish(canSpeak);
+      await agoraPartyNative.setCanPublish(effectiveCanSpeak);
       await agoraPartyNative.renewToken(payload.token);
       await agoraPartyNative.setMuted(this.muted);
     } else if (this.webClient && this.webJoined) {
       const mod = await import('agora-rtc-sdk-ng');
       const AgoraRTC = mod.default || mod;
-      await this.webClient.renewToken(payload.token).catch(() => {});
-      await this.webClient.setClientRole(canSpeak ? 'host' : 'audience');
-      if (canSpeak) {
+
+      if (effectiveCanSpeak) {
+        await this.webClient.renewToken(payload.token).catch(() => {});
+        await this.webClient.setClientRole('host');
+        if (this.roomId !== roomId || this.manualStop) return;
+
         if (!this.webLocalAudioTrack) {
           try {
             this.webLocalAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
@@ -816,6 +856,7 @@ class AgoraPartyEngine {
           } catch (micErr: any) {
             this.canPublish = false;
             this.muted = true;
+            await this.unpublishAndCloseWebLocalAudioTrack();
             await this.webClient.setClientRole('audience').catch(() => {});
             throw Object.assign(new Error(micErr?.message || 'Microphone permission denied.'), {
               code: 'MIC_PERMISSION_REQUIRED',
@@ -825,19 +866,49 @@ class AgoraPartyEngine {
           }
         }
         await this.webLocalAudioTrack.setMuted(this.muted);
-        await this.webClient.publish([this.webLocalAudioTrack]).catch(() => {});
-      } else if (this.webLocalAudioTrack) {
-        await this.webClient.unpublish([this.webLocalAudioTrack]).catch(() => {});
-        try {
-          this.webLocalAudioTrack.stop();
-          this.webLocalAudioTrack.close();
-        } catch {
-          // ignore
+        const alreadyPublished =
+          Array.isArray(this.webClient.localTracks) &&
+          this.webClient.localTracks.includes(this.webLocalAudioTrack);
+        if (!alreadyPublished) {
+          await this.webClient.publish([this.webLocalAudioTrack]);
         }
-        this.webLocalAudioTrack = null;
+      } else {
+        // CRITICAL: Agora Web SDK forbids setClientRole('audience') while any stream is still published.
+        await this.unpublishAndCloseWebLocalAudioTrack();
+        if (this.roomId !== roomId || this.manualStop) return;
+        await this.webClient.setClientRole('audience');
+        await this.webClient.renewToken(payload.token).catch(() => {});
       }
     }
     this.emitSpeakingSnapshot();
+  }
+
+  private async unpublishAndCloseWebLocalAudioTrack() {
+    if (this.webClient) {
+      const tracksToUnpublish: any[] = [];
+      if (this.webLocalAudioTrack) {
+        tracksToUnpublish.push(this.webLocalAudioTrack);
+      }
+      if (Array.isArray(this.webClient.localTracks)) {
+        for (const t of this.webClient.localTracks) {
+          if (t && !tracksToUnpublish.includes(t)) {
+            tracksToUnpublish.push(t);
+          }
+        }
+      }
+      if (tracksToUnpublish.length > 0) {
+        await this.webClient.unpublish(tracksToUnpublish).catch(() => {});
+      }
+    }
+    if (this.webLocalAudioTrack) {
+      try {
+        this.webLocalAudioTrack.stop();
+        this.webLocalAudioTrack.close();
+      } catch {
+        // ignore
+      }
+      this.webLocalAudioTrack = null;
+    }
   }
 
   public stopPartyVoice(roomId?: string, force = false): Promise<void> {

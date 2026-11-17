@@ -67,6 +67,16 @@ service cloud.firestore {
         ]
         && data.title is string && data.title.size() > 0 && data.title.size() <= 160
         && data.message is string && data.message.size() > 0 && data.message.size() <= 600
+        && (!('senderName' in data) || (data.senderName is string && data.senderName.size() <= 128))
+        && (!('senderAvatar' in data) || (data.senderAvatar is string && data.senderAvatar.size() <= 65000))
+        && (!('category' in data) || (data.category is string && data.category.size() <= 64))
+        && (!('screen' in data) || (data.screen is string && data.screen.size() <= 64))
+        && (!('tab' in data) || (data.tab is string && data.tab.size() <= 64))
+        && (!('roomId' in data) || (data.roomId is string && data.roomId.size() <= 128))
+        && (!('streamId' in data) || (data.streamId is string && data.streamId.size() <= 128))
+        && (!('reelId' in data) || (data.reelId is string && data.reelId.size() <= 128))
+        && (!('chatId' in data) || (data.chatId is string && data.chatId.size() <= 128))
+        && (!('readAt' in data) || (data.readAt is string && data.readAt.size() <= 64))
         && data.isRead is bool
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.createdAtMs is number;
@@ -213,6 +223,7 @@ service cloud.firestore {
         allow update: if isValidId(userId)
           && isValidId(notificationId)
           && isOwner(userId)
+          && isValidNotification(request.resource.data)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt'])
           && request.resource.data.isRead is bool;
         allow delete: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);

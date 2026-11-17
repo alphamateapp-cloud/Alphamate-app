@@ -16013,7 +16013,7 @@ var __vitePreload = function preload(baseModule, deps, importerUrl) {
 	});
 };
 // node_modules/@capacitor-firebase/authentication/dist/esm/index.js
-var FirebaseAuthentication = registerPlugin("FirebaseAuthentication", { web: () => __vitePreload(() => import("./web-Bc0cl5V6.js").then((m) => new m.FirebaseAuthenticationWeb()), []) });
+var FirebaseAuthentication = registerPlugin("FirebaseAuthentication", { web: () => __vitePreload(() => import("./web-C7sj-SGW.js").then((m) => new m.FirebaseAuthenticationWeb()), []) });
 // node_modules/@firebase/auth/dist/esm/index-NmqYMaDt.js
 /**
 * @license
@@ -53771,6 +53771,7 @@ async function updatePartyRoomFields(roomId, fields) {
 	try {
 		await updateDoc(doc(db, "partyRooms", roomId), stripUndefinedFields({
 			...fields,
+			...Object.prototype.hasOwnProperty.call(fields, "seats") ? { lastSeenAtMs: Date.now() } : {},
 			updatedAt: (/* @__PURE__ */ new Date()).toISOString()
 		}));
 	} catch (error) {
@@ -53937,6 +53938,7 @@ async function updatePartyRoomSeat(roomId, seatIndex, user, currentUserId, initi
 			}
 			transaction.update(roomRef, {
 				seats,
+				lastSeenAtMs: Date.now(),
 				updatedAt: (/* @__PURE__ */ new Date()).toISOString()
 			});
 			return {
@@ -54481,30 +54483,55 @@ async function updateUserNotificationPreferencesFirestore(userId, preferences) {
 		handleFirestoreError(error, "write", path);
 	}
 }
+var VALID_NOTIFICATION_TYPES = /* @__PURE__ */ new Set([
+	"live_on",
+	"live_invite",
+	"party_invite",
+	"friend_request",
+	"follow",
+	"gift",
+	"comment",
+	"message",
+	"like",
+	"pk_invite",
+	"wallet",
+	"agency",
+	"system"
+]);
 async function sendFirestoreNotification(params) {
 	if (isFirestoreQuotaExceeded()) return null;
-	const senderUid = auth.currentUser?.uid;
+	const senderUid = String(auth.currentUser?.uid || "").trim();
 	const recipientId = String(params.recipientId || "").trim();
-	if (!senderUid || !recipientId || !FIRESTORE_VALID_ID_RE.test(recipientId)) return null;
+	if (!senderUid || !recipientId || !FIRESTORE_VALID_ID_RE.test(senderUid) || !FIRESTORE_VALID_ID_RE.test(recipientId)) return null;
 	const nowMs = Date.now();
 	const nowIso = new Date(nowMs).toISOString();
 	const notifId = `n_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
 	const path = `users/${recipientId}/notifications/${notifId}`;
+	const safeType = VALID_NOTIFICATION_TYPES.has(params.type) ? params.type : "system";
+	const safeSenderName = String(params.senderName || auth.currentUser?.displayName || "Alpha Mate User").trim().slice(0, 128) || "Alpha Mate User";
+	const rawAvatar = sanitizeAvatarString(params.senderAvatar || auth.currentUser?.photoURL || void 0);
+	const safeAvatar = rawAvatar.length <= 65e3 ? rawAvatar : "https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80";
+	const safeTitle = String(params.title || "").trim().slice(0, 160) || "Alpha Mate";
+	const safeMessage = String(params.message || "").trim().slice(0, 600) || "New activity on Alpha Mate.";
+	const trimOpt = (val, maxLen) => {
+		const trimmed = typeof val === "string" ? val.trim() : "";
+		return trimmed ? trimmed.slice(0, maxLen) : void 0;
+	};
 	const payload = stripUndefinedFields({
 		recipientId,
 		senderId: senderUid,
-		senderName: String(params.senderName || auth.currentUser?.displayName || "Alpha Mate User").slice(0, 128),
-		senderAvatar: sanitizeAvatarString(params.senderAvatar || auth.currentUser?.photoURL || void 0),
-		type: params.type,
-		category: params.category || void 0,
-		title: String(params.title || "Alpha Mate").slice(0, 160),
-		message: String(params.message || "").slice(0, 600),
-		screen: params.screen ? String(params.screen).slice(0, 64) : void 0,
-		tab: params.tab ? String(params.tab).slice(0, 64) : void 0,
-		roomId: params.roomId ? String(params.roomId).slice(0, 128) : void 0,
-		streamId: params.streamId ? String(params.streamId).slice(0, 128) : void 0,
-		reelId: params.reelId ? String(params.reelId).slice(0, 128) : void 0,
-		chatId: params.chatId ? String(params.chatId).slice(0, 128) : void 0,
+		senderName: safeSenderName,
+		senderAvatar: safeAvatar,
+		type: safeType,
+		category: trimOpt(params.category, 64),
+		title: safeTitle,
+		message: safeMessage,
+		screen: trimOpt(params.screen, 64),
+		tab: trimOpt(params.tab, 64),
+		roomId: trimOpt(params.roomId, 128),
+		streamId: trimOpt(params.streamId, 128),
+		reelId: trimOpt(params.reelId, 128),
+		chatId: trimOpt(params.chatId, 128),
 		isRead: false,
 		createdAt: nowIso,
 		createdAtMs: nowMs
@@ -59025,7 +59052,7 @@ var AgoraPartyEngine = class {
 		}
 	}
 	async startWebAgoraFallback(roomId, payload) {
-		const mod = await __vitePreload(() => import("./AgoraRTC_N-production-B3Ds0zm6.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+		const mod = await __vitePreload(() => import("./AgoraRTC_N-production-CEgiTr8t.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 		const AgoraRTC = mod.default || mod;
 		if (this.manualStop || this.roomId !== roomId) return;
 		try {
@@ -59157,8 +59184,20 @@ var AgoraPartyEngine = class {
 		}
 		this.callbacks.onConnectionStateChange?.("connected");
 	}
-	async setPartySpeakingMode(roomId, _userId, canSpeak, muted, _profile) {
-		if (this.roomId !== roomId) return;
+	resumeAudioPlayback() {
+		if (agoraPartyNative.isAvailable()) return;
+		this.webRemoteAudioTracks.forEach((track) => {
+			try {
+				track.setVolume(this.speakerEnabled ? 100 : 0);
+				track.play();
+			} catch {}
+		});
+	}
+	setPartySpeakingMode(roomId, userId, canSpeak, muted, profile) {
+		return this.enqueueOp(() => this.setPartySpeakingModeInternal(roomId, userId, canSpeak, muted, profile));
+	}
+	async setPartySpeakingModeInternal(roomId, _userId, canSpeak, muted, _profile) {
+		if (this.roomId !== roomId || this.manualStop) return;
 		this.listenOnly = !canSpeak;
 		this.canPublish = canSpeak;
 		this.muted = !canSpeak || muted;
@@ -59166,18 +59205,29 @@ var AgoraPartyEngine = class {
 			this.localVolume = 0;
 			this.localSpeakingUntilMs = 0;
 		}
-		const payload = await this.fetchPartyToken(roomId, canSpeak, false);
+		let payload = await this.fetchPartyToken(roomId, canSpeak, false);
+		if (canSpeak && !payload.canPublish && this.roomId === roomId && !this.manualStop) for (let retry = 1; retry <= 2; retry += 1) {
+			await new Promise((resolve) => setTimeout(resolve, 250 * retry));
+			if (this.roomId !== roomId || this.manualStop) return;
+			payload = await this.fetchPartyToken(roomId, true, false);
+			if (payload.canPublish) break;
+		}
 		if (this.roomId !== roomId || this.manualStop) return;
+		const effectiveCanSpeak = canSpeak && Boolean(payload.canPublish);
+		this.canPublish = effectiveCanSpeak;
+		this.listenOnly = !effectiveCanSpeak;
+		this.muted = !effectiveCanSpeak || muted;
 		if (agoraPartyNative.isAvailable()) {
-			await agoraPartyNative.setCanPublish(canSpeak);
+			await agoraPartyNative.setCanPublish(effectiveCanSpeak);
 			await agoraPartyNative.renewToken(payload.token);
 			await agoraPartyNative.setMuted(this.muted);
 		} else if (this.webClient && this.webJoined) {
-			const mod = await __vitePreload(() => import("./AgoraRTC_N-production-B3Ds0zm6.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+			const mod = await __vitePreload(() => import("./AgoraRTC_N-production-CEgiTr8t.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 			const AgoraRTC = mod.default || mod;
-			await this.webClient.renewToken(payload.token).catch(() => {});
-			await this.webClient.setClientRole(canSpeak ? "host" : "audience");
-			if (canSpeak) {
+			if (effectiveCanSpeak) {
+				await this.webClient.renewToken(payload.token).catch(() => {});
+				await this.webClient.setClientRole("host");
+				if (this.roomId !== roomId || this.manualStop) return;
 				if (!this.webLocalAudioTrack) try {
 					this.webLocalAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
 						encoderConfig: "speech_standard",
@@ -59188,6 +59238,7 @@ var AgoraPartyEngine = class {
 				} catch (micErr) {
 					this.canPublish = false;
 					this.muted = true;
+					await this.unpublishAndCloseWebLocalAudioTrack();
 					await this.webClient.setClientRole("audience").catch(() => {});
 					throw Object.assign(new Error(micErr?.message || "Microphone permission denied."), {
 						code: "MIC_PERMISSION_REQUIRED",
@@ -59196,17 +59247,32 @@ var AgoraPartyEngine = class {
 					});
 				}
 				await this.webLocalAudioTrack.setMuted(this.muted);
-				await this.webClient.publish([this.webLocalAudioTrack]).catch(() => {});
-			} else if (this.webLocalAudioTrack) {
-				await this.webClient.unpublish([this.webLocalAudioTrack]).catch(() => {});
-				try {
-					this.webLocalAudioTrack.stop();
-					this.webLocalAudioTrack.close();
-				} catch {}
-				this.webLocalAudioTrack = null;
+				if (!(Array.isArray(this.webClient.localTracks) && this.webClient.localTracks.includes(this.webLocalAudioTrack))) await this.webClient.publish([this.webLocalAudioTrack]);
+			} else {
+				await this.unpublishAndCloseWebLocalAudioTrack();
+				if (this.roomId !== roomId || this.manualStop) return;
+				await this.webClient.setClientRole("audience");
+				await this.webClient.renewToken(payload.token).catch(() => {});
 			}
 		}
 		this.emitSpeakingSnapshot();
+	}
+	async unpublishAndCloseWebLocalAudioTrack() {
+		if (this.webClient) {
+			const tracksToUnpublish = [];
+			if (this.webLocalAudioTrack) tracksToUnpublish.push(this.webLocalAudioTrack);
+			if (Array.isArray(this.webClient.localTracks)) {
+				for (const t of this.webClient.localTracks) if (t && !tracksToUnpublish.includes(t)) tracksToUnpublish.push(t);
+			}
+			if (tracksToUnpublish.length > 0) await this.webClient.unpublish(tracksToUnpublish).catch(() => {});
+		}
+		if (this.webLocalAudioTrack) {
+			try {
+				this.webLocalAudioTrack.stop();
+				this.webLocalAudioTrack.close();
+			} catch {}
+			this.webLocalAudioTrack = null;
+		}
 	}
 	stopPartyVoice(roomId, force = false) {
 		if (roomId && this.roomId && roomId !== this.roomId && !force) return Promise.resolve();
@@ -64285,6 +64351,7 @@ var AppProvider = ({ children }) => {
 	const removedPartyUntilRef = import_react.useRef(/* @__PURE__ */ new Map());
 	const removedLiveUntilRef = import_react.useRef(/* @__PURE__ */ new Map());
 	const activeStreamIdRef = import_react.useRef(null);
+	const seatMutationInFlightRef = import_react.useRef(/* @__PURE__ */ new Set());
 	(0, import_react.useEffect)(() => {
 		let firestoreRooms = [];
 		let firestoreStreams = [];
@@ -64326,12 +64393,12 @@ var AppProvider = ({ children }) => {
 				const existing = byId.get(id);
 				const rawTs = Number(raw.lastSeenAtMs || 0);
 				const existingTs = Number(existing?.lastSeenAtMs || 0);
-				const mergedCandidate = existing ? existingTs > rawTs ? {
+				const mergedCandidate = existing ? {
 					...raw,
-					...existing
-				} : {
 					...existing,
-					...raw
+					activeViewers: rawTs >= existingTs && typeof raw.activeViewers === "number" ? raw.activeViewers : existing.activeViewers,
+					isHostPresent: rawTs >= existingTs && typeof raw.isHostPresent === "boolean" ? raw.isHostPresent : existing.isHostPresent,
+					lastSeenAtMs: Math.max(existingTs, rawTs)
 				} : raw;
 				const r = normalizePartyItem(mergedCandidate);
 				if (!r) return;
@@ -64353,10 +64420,16 @@ var AppProvider = ({ children }) => {
 			setActivePartyRoom((currentActive) => {
 				if (!currentActive) return null;
 				const fresh = nextRooms.find((r) => r.id === currentActive.id) || nextRooms.find((r) => r.host?.id && r.host.id === currentActive.host?.id);
-				return fresh ? {
+				if (!fresh) return currentActive;
+				if (seatMutationInFlightRef.current.has(currentActive.id)) return {
+					...currentActive,
+					...fresh,
+					seats: currentActive.seats
+				};
+				return {
 					...currentActive,
 					...fresh
-				} : currentActive;
+				};
 			});
 		};
 		const mergeAndPublishStreams = () => {
@@ -67373,7 +67446,16 @@ var AppProvider = ({ children }) => {
 		setActivePartyRoom(nextRoom);
 		if (isOwnerHost) {
 			setPartyRooms((prev) => prev.map((r) => r.id === nextRoom.id ? nextRoom : r));
-			realtimeSocket.announcePartyRoom(nextRoom);
+			realtimeSocket.announcePartyRoom({
+				id: nextRoom.id,
+				host: nextRoom.host,
+				title: nextRoom.title,
+				level: nextRoom.level,
+				isActive: true,
+				isHostPresent: true,
+				activeViewers: nextRoom.activeViewers,
+				lastSeenAtMs: Date.now()
+			});
 			updatePartyRoomFields(nextRoom.id, {
 				isHostPresent: true,
 				activeViewers: nextRoom.activeViewers
@@ -67419,7 +67501,12 @@ var AppProvider = ({ children }) => {
 						activeViewers: nextViewers
 					};
 					setPartyRooms((prev) => prev.map((r) => r.id === roomToClose.id ? updatedRoom : r));
-					realtimeSocket.announcePartyRoom(updatedRoom);
+					realtimeSocket.announcePartyRoom({
+						id: roomToClose.id,
+						isHostPresent: false,
+						activeViewers: nextViewers,
+						lastSeenAtMs: Date.now()
+					});
 					updatePartyRoomFields(roomToClose.id, {
 						isHostPresent: false,
 						activeViewers: nextViewers
@@ -67543,7 +67630,10 @@ var AppProvider = ({ children }) => {
 			reason: "NO_ACTIVE_ROOM"
 		};
 		const room = activePartyRoom;
-		const prevSeatIndex = userSeatIndex;
+		if (seatMutationInFlightRef.current.has(room.id)) return {
+			success: false,
+			reason: "IN_PROGRESS"
+		};
 		const isLeaving = userSeatIndex === seatIndex;
 		const effectiveUser = auth.currentUser?.uid ? {
 			...currentUser,
@@ -67551,59 +67641,46 @@ var AppProvider = ({ children }) => {
 		} : currentUser;
 		const targetServerSeat = Array.isArray(room.seats) ? room.seats.find((s) => Number(s.seatIndex) === seatIndex) : null;
 		const nextSeatMuted = isLeaving ? false : Boolean(targetServerSeat?.isHostMuted);
-		setUserSeatIndex(isLeaving ? null : seatIndex);
-		setIsMicMuted(nextSeatMuted);
-		const optimisticSeats = (Array.isArray(room.seats) ? [...room.seats] : []).map((s) => {
-			if (Number(s.seatIndex) === seatIndex) return isLeaving ? {
-				...s,
-				user: null,
-				isSpeaking: false,
-				isMuted: false,
-				isHostMuted: false
-			} : {
-				...s,
-				user: effectiveUser,
-				isSpeaking: false,
-				isMuted: nextSeatMuted
+		seatMutationInFlightRef.current.add(room.id);
+		try {
+			const result = await updatePartyRoomSeat(room.id, seatIndex, isLeaving ? null : effectiveUser, effectiveUser.id, nextSeatMuted);
+			if (result.success && result.seats) {
+				const committedSeats = result.seats;
+				const nowMs = Date.now();
+				const verifiedRoom = {
+					...room,
+					seats: committedSeats,
+					lastSeenAtMs: nowMs
+				};
+				setActivePartyRoom((prev) => prev && prev.id === room.id ? {
+					...prev,
+					seats: committedSeats,
+					lastSeenAtMs: nowMs
+				} : verifiedRoom);
+				setPartyRooms((prev) => prev.map((item) => item.id === room.id ? {
+					...item,
+					seats: committedSeats,
+					lastSeenAtMs: nowMs
+				} : item));
+				const mySeat = committedSeats.find((s) => s.user?.id === effectiveUser.id);
+				setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
+				if (mySeat) setIsMicMuted(Boolean(mySeat.isMuted || mySeat.isHostMuted));
+				else setIsMicMuted(false);
+				realtimeSocket.announcePartyRoom({
+					id: room.id,
+					seats: result.seats,
+					lastSeenAtMs: nowMs
+				});
+				return { success: true };
+			}
+			console.warn("Party seat update rejected:", result.reason);
+			return {
+				success: false,
+				reason: result.reason || "REJECTED"
 			};
-			if (!isLeaving && s.user?.id === effectiveUser.id) return {
-				...s,
-				user: null,
-				isSpeaking: false,
-				isMuted: false,
-				isHostMuted: false
-			};
-			return s;
-		});
-		const optimisticRoom = {
-			...room,
-			seats: optimisticSeats
-		};
-		setActivePartyRoom(optimisticRoom);
-		setPartyRooms((prev) => prev.map((item) => item.id === room.id ? optimisticRoom : item));
-		const result = await updatePartyRoomSeat(room.id, seatIndex, isLeaving ? null : effectiveUser, effectiveUser.id, nextSeatMuted);
-		if (result.success && result.seats) {
-			const verifiedRoom = {
-				...room,
-				seats: result.seats
-			};
-			setActivePartyRoom(verifiedRoom);
-			setPartyRooms((prev) => prev.map((item) => item.id === room.id ? verifiedRoom : item));
-			const mySeat = result.seats.find((s) => s.user?.id === effectiveUser.id);
-			setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
-			if (mySeat) setIsMicMuted(Boolean(mySeat.isMuted || mySeat.isHostMuted));
-			else setIsMicMuted(false);
-			return { success: true };
+		} finally {
+			seatMutationInFlightRef.current.delete(room.id);
 		}
-		console.warn("Party seat update rejected:", result.reason);
-		setUserSeatIndex(prevSeatIndex);
-		setIsMicMuted(false);
-		setActivePartyRoom(room);
-		setPartyRooms((prev) => prev.map((item) => item.id === room.id ? room : item));
-		return {
-			success: false,
-			reason: result.reason || "REJECTED"
-		};
 	};
 	const openConversation = (conv) => {
 		setActiveConversation(conv);
@@ -71485,7 +71562,7 @@ var RefreshScopeButton = ({ scope, onAfterRefresh, onBeforeRefresh, compact = fa
 	});
 };
 // node_modules/@capacitor/app/dist/esm/index.js
-var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-Db0ah7-C.js").then((m) => new m.AppWeb()), []) });
+var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-DAC5pkYC.js").then((m) => new m.AppWeb()), []) });
 // node_modules/@capacitor/status-bar/dist/esm/definitions.js
 var Style;
 (function(Style) {
@@ -86964,6 +87041,7 @@ var PartyRoomsScreen = () => {
 		setPartyAudioAutoplayBlocked(blocked);
 	}, []);
 	const unlockAllRemoteAudioPlayback = (0, import_react.useCallback)(async () => {
+		agoraPartyEngine.resumeAudioPlayback();
 		const targets = [];
 		partyAudioElsRef.current.forEach((audioEl) => {
 			if (!audioEl || !audioEl.srcObject) return;
@@ -87563,7 +87641,7 @@ var PartyRoomsScreen = () => {
 			};
 			updatePartyRoomFields(activePartyRoom.id, patch).catch(() => {});
 			realtimeSocket.announcePartyRoom({
-				...activePartyRoom,
+				id: activePartyRoom.id,
 				activeViewers: realCount,
 				...isHost ? { isHostPresent: true } : {},
 				lastSeenAtMs: Date.now()
@@ -87793,6 +87871,7 @@ var PartyRoomsScreen = () => {
 			}
 			const res = await toggleSeat(seat.seatIndex);
 			if (res.success) showToast(`Joined Seat ${seat.seatIndex + 1}! 🎙️`);
+			else if (res.reason === "IN_PROGRESS") return;
 			else if (res.reason === "SEAT_LOCKED") showToast("This seat is locked by the Host 🔒");
 			else if (res.reason === "SEAT_OCCUPIED") showToast("That seat was just taken by someone else.");
 			else if (res.reason === "USER_RESTRICTED") showToast("You are restricted from taking a seat here. 🚫");
