@@ -19,6 +19,7 @@ public class MainActivity extends BridgeActivity {
         }
         registerPlugin(KeepScreenOnPlugin.class);
         registerPlugin(NativeGoogleAuthPlugin.class);
+        registerPlugin(AgoraPartyPlugin.class);
         super.onCreate(savedInstanceState);
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
         try {

@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useApp } from '../context/AppContext';
 import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import { PartyRoom, PartySeat, User, Gift } from '../types';
-import { p2pStreamingEngine, PartyParticipantPresence } from '../services/webrtcService';
+import { agoraPartyEngine } from '../services/agoraPartyEngine';
+import type { PartyParticipantPresence } from '../services/webrtcService';
 import {
   auth,
   db,
@@ -1037,11 +1038,11 @@ export const PartyRoomsScreen: React.FC = () => {
     const nowHostMuted = Boolean(mySeat?.isHostMuted);
     if (nowHostMuted && !isMicMuted) {
       setIsMicMuted(true);
-      p2pStreamingEngine.toggleMicrophone(false);
+      agoraPartyEngine.toggleMicrophone(false);
     } else if (wasHostMutedRef.current && !nowHostMuted && mySeat) {
       const nextMuted = Boolean(mySeat.isMuted);
       setIsMicMuted(nextMuted);
-      p2pStreamingEngine.toggleMicrophone(!nextMuted);
+      agoraPartyEngine.toggleMicrophone(!nextMuted);
     }
     wasHostMutedRef.current = nowHostMuted;
   }, [activePartyRoom?.seats, effectiveUserId]);
@@ -1167,6 +1168,10 @@ export const PartyRoomsScreen: React.FC = () => {
           countryFlag: currentUser.countryFlag,
           isHost: isUserHost,
         },
+        roomParticipants: [
+          ...(activePartyRoom.host?.id ? [{ userId: activePartyRoom.host.id, uniqueId: activePartyRoom.host.uniqueId || activePartyRoom.host.id, displayName: activePartyRoom.host.displayName, avatar: activePartyRoom.host.avatar, level: activePartyRoom.host.level, vipTier: activePartyRoom.host.vipTier, isHost: true }] : []),
+          ...((activePartyRoom.seats || []).filter((seat: any) => seat?.user?.id).map((seat: any) => ({ userId: seat.user.id, uniqueId: seat.user.uniqueId || seat.user.id, displayName: seat.user.displayName, avatar: seat.user.avatar, level: seat.user.level, vipTier: seat.user.vipTier, isHost: false }))),
+        ],
         onError: (err) => {
           if (!cancelled) {
             setPartyVoiceError('Alpha Mate is reconnecting your Party voice…');
@@ -1225,7 +1230,7 @@ export const PartyRoomsScreen: React.FC = () => {
       .then(() => {
         if (cancelled) return;
         setPartyVoiceError(null);
-        const existingStreams = p2pStreamingEngine.getActivePartyRemoteStreams(roomId);
+        const existingStreams = agoraPartyEngine.getActivePartyRemoteStreams(roomId);
         if (existingStreams.length > 0) {
           setRemotePartyStreams(existingStreams);
         }
@@ -1305,7 +1310,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
     const handlePageHide = () => {
       realtimeSocket.leaveRoom('party', roomId);
-      p2pStreamingEngine.stopPartyVoice(roomId, true).catch(() => {});
+      agoraPartyEngine.stopPartyVoice(roomId, true).catch(() => {});
     };
     window.addEventListener('pagehide', handlePageHide);
     window.addEventListener('beforeunload', handlePageHide);
@@ -1324,7 +1329,7 @@ export const PartyRoomsScreen: React.FC = () => {
       }
       window.removeEventListener('pagehide', handlePageHide);
       window.removeEventListener('beforeunload', handlePageHide);
-      p2pStreamingEngine.stopPartyVoice(roomId).catch(() => {});
+      agoraPartyEngine.stopPartyVoice(roomId).catch(() => {});
     };
   }, [activePartyRoom?.id, effectiveUserId, partyVoiceRetryToken]);
 
@@ -1395,13 +1400,13 @@ export const PartyRoomsScreen: React.FC = () => {
       setIsSelfSpeaking(false);
       if (lastSelfSpeakingSyncedRef.current) {
         lastSelfSpeakingSyncedRef.current = false;
-        p2pStreamingEngine.updatePartySpeakingIndicator(roomId, false);
+        agoraPartyEngine.updatePartySpeakingIndicator(roomId, false);
       }
       return;
     }
 
     const volumeInterval = setInterval(() => {
-      const speaking = p2pStreamingEngine.getSpeakingVolume() > 12;
+      const speaking = agoraPartyEngine.getSpeakingVolume() > 12;
       if (isUserHost) {
         setIsHostSpeaking(speaking);
         setIsSelfSpeaking(false);
@@ -1411,7 +1416,7 @@ export const PartyRoomsScreen: React.FC = () => {
       }
       if (lastSelfSpeakingSyncedRef.current !== speaking) {
         lastSelfSpeakingSyncedRef.current = speaking;
-        p2pStreamingEngine.updatePartySpeakingIndicator(roomId, speaking);
+        agoraPartyEngine.updatePartySpeakingIndicator(roomId, speaking);
       }
     }, 220);
 
@@ -1452,7 +1457,7 @@ export const PartyRoomsScreen: React.FC = () => {
     }
 
     // Hydrate any streams already received before effect mount
-    setRemotePartyStreams(p2pStreamingEngine.getActivePartyRemoteStreams(roomId));
+    setRemotePartyStreams(agoraPartyEngine.getActivePartyRemoteStreams(roomId));
 
     const handleRemotePartyStream = (event: Event) => {
       const detail = (event as CustomEvent).detail;
@@ -2296,7 +2301,7 @@ export const PartyRoomsScreen: React.FC = () => {
               if (isHost) {
                 const nextState = !isHostMicMuted;
                 setIsHostMicMuted(nextState);
-                p2pStreamingEngine.toggleMicrophone(!nextState);
+                agoraPartyEngine.toggleMicrophone(!nextState);
                 showToast(nextState ? 'Host Mic Muted 🔇' : 'Host Mic Live 🎙️');
               }
             }}
@@ -2330,7 +2335,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 if (isHost) {
                   const nextState = !isHostMicMuted;
                   setIsHostMicMuted(nextState);
-                  p2pStreamingEngine.toggleMicrophone(!nextState);
+                  agoraPartyEngine.toggleMicrophone(!nextState);
                   showToast(nextState ? 'Host Mic Muted 🔇' : 'Host Mic Live 🎙️');
                 } else {
                   setSelectedUserForActionSheet(activePartyRoom.host);
@@ -2652,7 +2657,7 @@ export const PartyRoomsScreen: React.FC = () => {
                     }
                     const nextMuted = !isMicMuted;
                     setIsMicMuted(nextMuted);
-                    p2pStreamingEngine.toggleMicrophone(!nextMuted);
+                    agoraPartyEngine.toggleMicrophone(!nextMuted);
                     const updatedSeats = (activePartyRoom.seats || []).map((s) =>
                       Number(s.seatIndex) === userSeatIndex ? { ...s, isMuted: nextMuted } : s
                     );
@@ -2661,7 +2666,7 @@ export const PartyRoomsScreen: React.FC = () => {
                   } else if (isHost) {
                     const nextMuted = !isHostMicMuted;
                     setIsHostMicMuted(nextMuted);
-                    p2pStreamingEngine.toggleMicrophone(!nextMuted);
+                    agoraPartyEngine.toggleMicrophone(!nextMuted);
                     showToast(nextMuted ? 'Host Mic Muted 🔇' : 'Host Mic Live 🎙️');
                   } else {
                     showToast('Take a seat (+) to turn on your mic! 🎙️');
@@ -2694,6 +2699,7 @@ export const PartyRoomsScreen: React.FC = () => {
                   const nextSpeakerOn = !isSpeakerOn;
                   isSpeakerOnRef.current = nextSpeakerOn;
                   setIsSpeakerOn(nextSpeakerOn);
+                  agoraPartyEngine.setSpeaker(nextSpeakerOn).catch(() => {});
                   if (nextSpeakerOn) {
                     unlockAllRemoteAudioPlayback().catch(() => {});
                   }
@@ -3009,7 +3015,7 @@ export const PartyRoomsScreen: React.FC = () => {
                           }
                           const nextMuted = !isMicMuted;
                           setIsMicMuted(nextMuted);
-                          p2pStreamingEngine.toggleMicrophone(!nextMuted);
+                          agoraPartyEngine.toggleMicrophone(!nextMuted);
                           const updatedSeats = (activePartyRoom.seats || []).map((s) =>
                             Number(s.seatIndex) === targetSeat.seatIndex ? { ...s, isMuted: nextMuted } : s
                           );
@@ -3266,7 +3272,7 @@ export const PartyRoomsScreen: React.FC = () => {
                       key={preset.id}
                       onClick={async () => {
                         if (!activePartyRoom?.id) return;
-                        const applied = await p2pStreamingEngine.setPartyVoiceFilter(
+                        const applied = await agoraPartyEngine.setPartyVoiceFilter(
                           activePartyRoom.id,
                           preset.id
                         );

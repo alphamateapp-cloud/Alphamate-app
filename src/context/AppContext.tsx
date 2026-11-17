@@ -96,6 +96,7 @@ import {
   Reel,
 } from '../services/reelsService';
 import { p2pStreamingEngine } from '../services/webrtcService';
+import { agoraPartyEngine } from '../services/agoraPartyEngine';
 import { realtimeSocket } from '../services/realtimeSocket';
 import { pushService, DEFAULT_NOTIFICATION_PREFERENCES } from '../services/pushNotificationService';
 import {
@@ -3841,7 +3842,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const teardownActiveRoomMedia = () => {
     if (activePartyRoom) {
-      p2pStreamingEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
+      agoraPartyEngine.stopPartyVoice(activePartyRoom.id).catch(() => {});
     }
     if (activeStream) {
       p2pStreamingEngine.stopHostBroadcast(activeStream.id).catch(() => {});
@@ -4850,7 +4851,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const isOwnerHost = Boolean(uid && roomToClose.host?.id === uid);
 
       realtimeSocket.leaveRoom('party', roomToClose.id);
-      p2pStreamingEngine.stopPartyVoice(roomToClose.id).catch(() => {});
+      agoraPartyEngine.stopPartyVoice(roomToClose.id).catch(() => {});
 
       if (shouldDelete) {
         removedPartyUntilRef.current.set(roomToClose.id, Date.now());

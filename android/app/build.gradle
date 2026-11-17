@@ -7,8 +7,8 @@ android {
         applicationId "com.alphamate.liveparty"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "1.1.0"
+        versionCode 3
+        versionName "1.2.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -67,6 +67,8 @@ dependencies {
     implementation "androidx.credentials:credentials:1.2.0-rc01"
     implementation "androidx.credentials:credentials-play-services-auth:1.2.0-rc01"
     implementation "com.google.android.libraries.identity.googleid:googleid:1.1.0"
+    // Native Agora RTC is used exclusively by Party Rooms. Solo Live remains on WebRTC.
+    implementation 'io.agora.rtc:full-sdk:4.7.0'
 }
 
 apply from: 'capacitor.build.gradle'
