@@ -8,6 +8,9 @@ import https from 'https';
 import os from 'os';
 import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
+import agoraTokenPkg from 'agora-token';
+
+const { RtcTokenBuilder, RtcRole } = agoraTokenPkg;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -57,6 +60,14 @@ export function createApiApp() {
   const REALTIME_SFU_APP_ID = (process.env.REALTIME_SFU_APP_ID || '').trim();
   const REALTIME_SFU_BEARER_TOKEN = (process.env.REALTIME_SFU_BEARER_TOKEN || '').trim();
   const CLOUDFLARE_SFU_BASE = 'https://rtc.live.cloudflare.com/v1';
+
+  // Agora RTC credentials (for Party Rooms ONLY) MUST remain strictly server-side environment variables.
+  const AGORA_APP_ID = (process.env.AGORA_APP_ID || '').trim();
+  const AGORA_APP_CERTIFICATE = (process.env.AGORA_APP_CERTIFICATE || '').trim();
+  const AGORA_TOKEN_TTL_SECONDS = Math.min(
+    Math.max(Number(process.env.AGORA_TOKEN_TTL_SECONDS || 3600), 300),
+    86400
+  );
 
   const ALWAYS_ALLOWED_ORIGINS = new Set([
     'https://localhost',
@@ -192,6 +203,24 @@ export function createApiApp() {
     }
   });
 
+  app.use('/api/agora', async (req, res, next) => {
+    const hasLocalAgora = Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE);
+    if (!shouldProxyWebRtcUpstream(req, hasLocalAgora)) {
+      return next();
+    }
+    try {
+      await forwardWebRtcRequestUpstream(req, res);
+    } catch (error) {
+      const status = error?.statusCode || 502;
+      console.warn('[Agora Proxy] Upstream forward failed:', error?.message || error);
+      return res.status(status).json({
+        success: false,
+        code: error?.code || 'AGORA_BACKEND_UNREACHABLE',
+        error: error?.message || 'Unable to reach upstream Agora token backend.',
+      });
+    }
+  });
+
   async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -279,6 +308,7 @@ export function createApiApp() {
     const firebaseEnvPresent = Boolean(FIREBASE_API_KEY && FIREBASE_PROJECT_ID && FIREBASE_DATABASE_ID);
     const sfuEnvPresent = Boolean(REALTIME_SFU_APP_ID && REALTIME_SFU_BEARER_TOKEN);
     const turnEnvPresent = Boolean(CLOUDFLARE_TURN_TOKEN_ID && CLOUDFLARE_TURN_API_TOKEN);
+    const agoraEnvPresent = Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE);
 
     const [firebaseCheck, sfuCheck, turnCheck] = await Promise.all([
       (async () => {
@@ -366,6 +396,8 @@ export function createApiApp() {
       // failures must not be misreported to the client as missing Railway vars.
       sfuConfigured: Boolean(sfuEnvPresent),
       sfuValid: Boolean(firebaseCheck.valid && sfuCheck.valid),
+      agoraConfigured: Boolean(agoraEnvPresent),
+      agoraValid: Boolean(firebaseCheck.valid && agoraEnvPresent),
       emailOtpConfigured: Boolean(
         (process.env.RESEND_API_KEY || '').trim() &&
           (process.env.RESEND_API_KEY || '').trim() !== 'YOUR_RESEND_API_KEY' &&
@@ -380,6 +412,11 @@ export function createApiApp() {
         firebase: firebaseCheck,
         sfu: sfuCheck,
         turn: turnCheck,
+        agora: {
+          configured: Boolean(agoraEnvPresent),
+          valid: Boolean(agoraEnvPresent),
+          ...(!agoraEnvPresent ? { reason: 'AGORA_APP_ID or AGORA_APP_CERTIFICATE missing' } : {}),
+        },
       },
       checkedAt: new Date(now).toISOString(),
     };
@@ -416,7 +453,9 @@ export function createApiApp() {
         REALTIME_SFU_APP_ID &&
           REALTIME_SFU_BEARER_TOKEN &&
           CLOUDFLARE_TURN_TOKEN_ID &&
-          CLOUDFLARE_TURN_API_TOKEN
+          CLOUDFLARE_TURN_API_TOKEN &&
+          AGORA_APP_ID &&
+          AGORA_APP_CERTIFICATE
       );
       if (shouldProxyWebRtcUpstream(req, hasLocalWebRtc)) {
         try {
@@ -1336,6 +1375,131 @@ export function createApiApp() {
         error: error.message || 'Unable to clean up Party Room SFU session.',
       });
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Agora RTC Party Room Endpoints (PARTY ROOMS ONLY — never used by Solo Live)
+  // ---------------------------------------------------------------------------
+  function deriveAgoraNumericUid(firebaseUid) {
+    const raw = String(firebaseUid || 'anon');
+    let hash = 2166136261;
+    for (let i = 0; i < raw.length; i++) {
+      hash ^= raw.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    // Positive 31-bit integer [1..2147483647] matching Web uint32 and Android signed int
+    return (hash & 0x7fffffff) || 1;
+  }
+
+  function getAgoraPartyChannelName(roomId) {
+    const sanitized = String(roomId || '').replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 54);
+    return `am_party_${sanitized}`;
+  }
+
+  app.post('/api/agora/party/rooms/:roomId/token', requireFirebaseAuth, async (req, res) => {
+    try {
+      const { roomId } = req.params;
+      if (!isValidResourceId(roomId)) {
+        return res.status(400).json({ success: false, error: 'Valid roomId is required.' });
+      }
+
+      if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+        return res.status(503).json({
+          success: false,
+          code: 'AGORA_NOT_CONFIGURED',
+          error: 'Agora RTC is not configured on the backend server. Set AGORA_APP_ID and AGORA_APP_CERTIFICATE on Railway.',
+        });
+      }
+
+      const uid = req.firebaseUser.uid;
+      const idToken = req.firebaseIdToken;
+      const roomDoc =
+        (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
+        app.locals.realtimeRegistry?.getPartyRoom?.(roomId) ||
+        null;
+
+      if (!roomDoc || roomDoc.isActive === false) {
+        return res.status(404).json({
+          success: false,
+          code: 'ROOM_NOT_FOUND',
+          error: 'Party room is closed or does not exist.',
+        });
+      }
+
+      const blocked = Array.isArray(roomDoc.blockedUserIds) ? roomDoc.blockedUserIds : [];
+      const kicked = Array.isArray(roomDoc.kickedUserIds) ? roomDoc.kickedUserIds : [];
+      if (blocked.includes(uid) || kicked.includes(uid)) {
+        return res.status(403).json({
+          success: false,
+          code: 'USER_RESTRICTED',
+          error: 'You are restricted from joining this party room.',
+        });
+      }
+
+      const hostId = roomDoc.host?.id || '';
+      const moderators = Array.isArray(roomDoc.moderatorIds) ? roomDoc.moderatorIds : [];
+      const seats = Array.isArray(roomDoc.seats) ? roomDoc.seats : [];
+      const isHostUser = hostId === uid;
+      const isModUser = moderators.includes(uid);
+      const isSeatedSpeaker = seats.some((s) => s?.user?.id === uid);
+      const isPkListenOnly = req.body?.mode === 'pk_listen';
+
+      let role = 'viewer';
+      if (isHostUser) role = 'host';
+      else if (isModUser) role = 'moderator';
+      else if (isSeatedSpeaker) role = 'guest';
+
+      const canPublish =
+        !isPkListenOnly &&
+        (isHostUser || isSeatedSpeaker || Boolean(req.body?.wantPublish && isModUser));
+
+      const agoraRole = canPublish ? RtcRole.PUBLISHER : RtcRole.SUBSCRIBER;
+      const agoraUid = deriveAgoraNumericUid(uid);
+      const channelName = getAgoraPartyChannelName(roomId);
+
+      const token = RtcTokenBuilder.buildTokenWithUid(
+        AGORA_APP_ID,
+        AGORA_APP_CERTIFICATE,
+        channelName,
+        agoraUid,
+        agoraRole,
+        AGORA_TOKEN_TTL_SECONDS,
+        AGORA_TOKEN_TTL_SECONDS
+      );
+
+      return res.json({
+        success: true,
+        appId: AGORA_APP_ID,
+        roomId,
+        userId: uid,
+        channelName,
+        uid: agoraUid,
+        token,
+        role,
+        agoraRole: canPublish ? 'broadcaster' : 'audience',
+        canPublish,
+        canSubscribe: true,
+        ttlSeconds: AGORA_TOKEN_TTL_SECONDS,
+        expiresAt: Date.now() + AGORA_TOKEN_TTL_SECONDS * 1000,
+      });
+    } catch (error) {
+      const status = error.statusCode || 500;
+      console.error('[Agora Party Token] Generation failed:', error?.message || error);
+      return res.status(status).json({
+        success: false,
+        code: error?.code || 'AGORA_TOKEN_ERROR',
+        error: error?.message || 'Unable to generate Agora Party Room token.',
+      });
+    }
+  });
+
+  app.post('/api/agora/party/rooms/:roomId/leave', requireFirebaseAuth, async (req, res) => {
+    const { roomId } = req.params;
+    return res.json({
+      success: true,
+      roomId: isValidResourceId(roomId) ? roomId : null,
+      userId: req.firebaseUser.uid,
+    });
   });
 
   // 10. Realtime discovery HTTP fallback snapshot
