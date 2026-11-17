@@ -51,6 +51,11 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
       return;
     }
 
+    if (!agencyProfile) {
+      setErrorMsg('No active Admin-approved Coin Seller Agency found.');
+      return;
+    }
+
     if (totalCoins > agencyProfile.agencyBalance) {
       setErrorMsg(
         `Insufficient agency stock. Required: ${totalCoins.toLocaleString()} Coins. Available: ${agencyProfile.agencyBalance.toLocaleString()} Coins.`
@@ -235,7 +240,9 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
                     <Lock className="w-3.5 h-3.5 text-amber-400" />
                     <span>Enter 4-Digit Security PIN</span>
                   </label>
-                  <span className="text-[9.5px] text-zinc-400">Default: 1234</span>
+                  <span className="text-[9.5px] text-amber-300">
+                    {agencyProfile?.isPinSet ? 'Private Security PIN' : 'Set PIN in Security Settings'}
+                  </span>
                 </div>
 
                 <div className="relative">

@@ -192,7 +192,7 @@ const INITIAL_VIRTUAL_GIFT_CATALOG: readonly VirtualGiftRecord[] = [
     comboAudioAssetPath: COMBO_SFX_ASSET_PATH,
     defaultAudioVolume: GIFT_SFX_ASSET_MAP.ring.defaultVolume,
     tier: 'rare',
-    durationMs: 5200,
+    durationMs: 7100,
     isBannerOnly: false,
     triggersScreenShake: false,
     description: 'Sparkling engagement diamond of prestige',
@@ -221,7 +221,7 @@ const INITIAL_VIRTUAL_GIFT_CATALOG: readonly VirtualGiftRecord[] = [
     comboAudioAssetPath: COMBO_SFX_ASSET_PATH,
     defaultAudioVolume: GIFT_SFX_ASSET_MAP.crown.defaultVolume,
     tier: 'epic',
-    durationMs: 5600,
+    durationMs: 7200,
     isBannerOnly: false,
     triggersScreenShake: true,
     description: 'Royal imperial crown of honor',
@@ -250,7 +250,7 @@ const INITIAL_VIRTUAL_GIFT_CATALOG: readonly VirtualGiftRecord[] = [
     comboAudioAssetPath: COMBO_SFX_ASSET_PATH,
     defaultAudioVolume: GIFT_SFX_ASSET_MAP.car.defaultVolume,
     tier: 'epic',
-    durationMs: 6200,
+    durationMs: 7300,
     isBannerOnly: false,
     triggersScreenShake: true,
     description: 'Twin-turbo neon supercar road takeover',
@@ -279,7 +279,7 @@ const INITIAL_VIRTUAL_GIFT_CATALOG: readonly VirtualGiftRecord[] = [
     comboAudioAssetPath: COMBO_SFX_ASSET_PATH,
     defaultAudioVolume: GIFT_SFX_ASSET_MAP.yacht.defaultVolume,
     tier: 'legendary',
-    durationMs: 6600,
+    durationMs: 7400,
     isBannerOnly: false,
     triggersScreenShake: false,
     description: 'Cruise the private neon sea in luxury',
@@ -308,7 +308,7 @@ const INITIAL_VIRTUAL_GIFT_CATALOG: readonly VirtualGiftRecord[] = [
     comboAudioAssetPath: COMBO_SFX_ASSET_PATH,
     defaultAudioVolume: GIFT_SFX_ASSET_MAP.rocket.defaultVolume,
     tier: 'mythic',
-    durationMs: 7000,
+    durationMs: 7500,
     isBannerOnly: false,
     triggersScreenShake: true,
     description: 'Blast off across the cosmos with orbital sparks',
@@ -337,7 +337,7 @@ const INITIAL_VIRTUAL_GIFT_CATALOG: readonly VirtualGiftRecord[] = [
     comboAudioAssetPath: COMBO_SFX_ASSET_PATH,
     defaultAudioVolume: GIFT_SFX_ASSET_MAP.dragon.defaultVolume,
     tier: 'mythic',
-    durationMs: 7500,
+    durationMs: 7600,
     isBannerOnly: false,
     triggersScreenShake: true,
     description: 'Imperial fire-breathing mythical dragon screen takeover!',
@@ -534,6 +534,11 @@ class VirtualGiftDatabaseService {
     const existing = this.getGiftById(giftOrId.id);
     if (existing) {
       const coins = Number(giftOrId.costInCoins ?? giftOrId.coins ?? existing.costInCoins);
+      const isBannerOnly = coins <= 100;
+      const rawDuration = Number(giftOrId.durationMs || existing.durationMs) || (isBannerOnly ? 2000 : 7400);
+      const clampedDuration = isBannerOnly
+        ? Math.min(2800, Math.max(1500, rawDuration))
+        : Math.min(7800, Math.max(7000, rawDuration));
       return {
         ...existing,
         ...giftOrId,
@@ -545,10 +550,10 @@ class VirtualGiftDatabaseService {
         thumbnailUrl: giftOrId.thumbnailUrl || existing.thumbnailUrl,
         audioAssetPath: giftOrId.audioAssetPath || existing.audioAssetPath,
         tier: giftOrId.tier || existing.tier,
-        durationMs: giftOrId.durationMs || existing.durationMs,
-        isBannerOnly: coins <= 100,
+        durationMs: clampedDuration,
+        isBannerOnly,
         triggersScreenShake:
-          coins <= 100
+          isBannerOnly
             ? false
             : typeof giftOrId.triggersScreenShake === 'boolean'
             ? giftOrId.triggersScreenShake
@@ -570,6 +575,12 @@ class VirtualGiftDatabaseService {
       : typeof giftOrId.triggersScreenShake === 'boolean'
       ? giftOrId.triggersScreenShake
       : cssConfig.triggersScreenShake;
+    const rawDuration =
+      Number(giftOrId.durationMs) ||
+      (isBannerOnly ? 2000 : coins >= 49999 ? 7600 : coins >= 19999 ? 7500 : 7200);
+    const clampedDuration = isBannerOnly
+      ? Math.min(2800, Math.max(1500, rawDuration))
+      : Math.min(7800, Math.max(7000, rawDuration));
 
     return {
       id: giftOrId.id || `gift_custom_${animType}`,
@@ -599,9 +610,7 @@ class VirtualGiftDatabaseService {
       comboAudioAssetPath: COMBO_SFX_ASSET_PATH,
       defaultAudioVolume: cueConfig.defaultVolume,
       tier: giftOrId.tier || inferRarityTierFromCoins(coins),
-      durationMs:
-        giftOrId.durationMs ||
-        (isBannerOnly ? 2000 : coins >= 19999 ? 7000 : coins >= 4999 ? 6200 : 5400),
+      durationMs: clampedDuration,
       isBannerOnly,
       triggersScreenShake: triggersShake,
       description: giftOrId.description || 'Special virtual gift',

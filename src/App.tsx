@@ -31,6 +31,7 @@ import { DeleteAccountScreen } from './screens/DeleteAccountScreen';
 import { AccountRecoveryScreen } from './screens/AccountRecoveryScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
+import { keepScreenAwake } from './services/keepScreenAwake';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
 import { PushNotificationSettingsModal } from './components/modals/PushNotificationSettingsModal';
 import { GlobalWeeklyLeaderboardModal } from './components/leaderboard/GlobalWeeklyLeaderboard';
@@ -84,6 +85,26 @@ const AppContent: React.FC = () => {
         currentUser?.accountStatus === 'permanently_deleted')
   );
   const isSessionReadyAndAuthed = Boolean(isAuthenticated && firebaseUser && isEmailVerified && !isRestrictedLifecycleAccount);
+
+  const shouldKeepScreenAwake = Boolean(
+    deviceMode !== 'admin' &&
+      isSessionReadyAndAuthed &&
+      (activePartyRoom !== null ||
+        activeStream !== null ||
+        currentScreen === 'party_room' ||
+        currentScreen === 'live_stream' ||
+        currentScreen === 'pk_battle')
+  );
+
+  useEffect(() => {
+    void keepScreenAwake.setActive(shouldKeepScreenAwake);
+  }, [shouldKeepScreenAwake]);
+
+  useEffect(() => {
+    return () => {
+      void keepScreenAwake.setActive(false);
+    };
+  }, []);
 
   // Route guard: never allow unauthenticated or restricted accounts into protected main screens
   useEffect(() => {

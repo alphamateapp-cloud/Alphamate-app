@@ -103,7 +103,6 @@ export const UserProfileScreen: React.FC = () => {
     diamonds,
     videos,
     updateUserProfile,
-    agencyProfile,
     openLeaderboard,
     openBadgesModal,
     userHistoricalStats,

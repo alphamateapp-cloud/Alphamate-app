@@ -31,6 +31,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   const [shakeScreen, setShakeScreen] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
   const [completedEventId, setCompletedEventId] = useState<string | null>(null);
+  const completedIdsRef = useRef<Set<string>>(new Set());
 
   // Keep latest callback in a ref so parent re-renders (e.g. 1s stream clock / 80ms combo bar)
   // NEVER reset the auto-dismiss timer!
@@ -55,22 +56,33 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
   useEffect(() => {
     const eventId = currentEvent?.id;
-    if (!eventId || !currentEvent) {
+    if (!eventId || !currentEvent || completedIdsRef.current.has(eventId)) {
       setIsExiting(false);
       setShakeScreen(false);
       return;
     }
 
     const meta = virtualGiftDatabase.resolveGiftMetadata(currentEvent.gift);
-    const durationMs = Math.max(1500, Math.min(8000, Number(meta.durationMs) || 2000));
-    const fadeLeadMs = meta.isBannerOnly ? 280 : 420;
+    const durationMs = meta.isBannerOnly
+      ? Math.min(2800, Math.max(1500, Number(meta.durationMs) || 2000))
+      : Math.min(7800, Math.max(7000, Number(meta.durationMs) || 7400));
+    const fadeLeadMs = meta.isBannerOnly ? 260 : 420;
+    const fadeAtMs = Date.now() + Math.max(200, durationMs - fadeLeadMs);
+    const deadlineMs = Date.now() + durationMs;
+    let finished = false;
 
     setIsExiting(false);
 
-    // Play mapped gift SFX once when this specific gift event starts
-    void virtualGiftDatabase.playGiftAudio(meta, {
-      comboCount: currentEvent.comboCount,
-    });
+    // Play mapped gift SFX safely (never block timer setup if WebView audio throws)
+    try {
+      Promise.resolve(
+        virtualGiftDatabase.playGiftAudio(meta, {
+          comboCount: currentEvent.comboCount,
+        })
+      ).catch(() => {});
+    } catch {
+      // Ignore WebView audio playback errors
+    }
 
     // Screen shake only for heavy/epic non-banner gifts
     let shakeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -81,23 +93,61 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       setShakeScreen(false);
     }
 
-    // Smooth fade-out right before completion
-    const fadeTimer = setTimeout(() => {
-      setIsExiting(true);
-    }, Math.max(200, durationMs - fadeLeadMs));
+    let fadeTimer: ReturnType<typeof setTimeout> | null = null;
+    let completeTimer: ReturnType<typeof setTimeout> | null = null;
+    let watchdogPoll: ReturnType<typeof setInterval> | null = null;
 
-    // Guaranteed auto-dismiss: hides locally AND notifies parent
-    const completeTimer = setTimeout(() => {
+    const finishOnce = () => {
+      if (finished) return;
+      finished = true;
+      completedIdsRef.current.add(eventId);
+      if (completedIdsRef.current.size > 80) {
+        const firstKey = completedIdsRef.current.values().next().value;
+        if (firstKey) completedIdsRef.current.delete(firstKey);
+      }
+      if (shakeTimer) clearTimeout(shakeTimer);
+      if (fadeTimer) clearTimeout(fadeTimer);
+      if (completeTimer) clearTimeout(completeTimer);
+      if (watchdogPoll) clearInterval(watchdogPoll);
       setCompletedEventId(eventId);
       setIsExiting(false);
       setShakeScreen(false);
       onCompleteRef.current();
-    }, durationMs);
+    };
+
+    const checkWallClock = () => {
+      const now = Date.now();
+      if (now >= deadlineMs) {
+        finishOnce();
+        return;
+      }
+      if (now >= fadeAtMs) {
+        setIsExiting(true);
+      }
+    };
+
+    // Smooth fade-out right before completion
+    fadeTimer = setTimeout(() => {
+      if (!finished) setIsExiting(true);
+    }, Math.max(200, durationMs - fadeLeadMs));
+
+    // Primary auto-dismiss timer + Android WebView wall-clock watchdog
+    completeTimer = setTimeout(finishOnce, durationMs);
+    watchdogPoll = setInterval(checkWallClock, 250);
+
+    window.addEventListener('focus', checkWallClock);
+    window.addEventListener('pageshow', checkWallClock);
+    document.addEventListener('visibilitychange', checkWallClock);
 
     return () => {
+      finished = true;
       if (shakeTimer) clearTimeout(shakeTimer);
-      clearTimeout(fadeTimer);
-      clearTimeout(completeTimer);
+      if (fadeTimer) clearTimeout(fadeTimer);
+      if (completeTimer) clearTimeout(completeTimer);
+      if (watchdogPoll) clearInterval(watchdogPoll);
+      window.removeEventListener('focus', checkWallClock);
+      window.removeEventListener('pageshow', checkWallClock);
+      document.removeEventListener('visibilitychange', checkWallClock);
     };
   }, [currentEvent?.id]);
 
@@ -137,7 +187,12 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
     ];
   }, [currentEvent?.id]);
 
-  if (!currentEvent || !resolvedGift || currentEvent.id === completedEventId) {
+  if (
+    !currentEvent ||
+    !resolvedGift ||
+    currentEvent.id === completedEventId ||
+    completedIdsRef.current.has(currentEvent.id)
+  ) {
     return null;
   }
 

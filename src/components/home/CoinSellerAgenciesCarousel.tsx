@@ -13,118 +13,46 @@ import {
   Zap,
 } from 'lucide-react';
 import { OfficialAgency, AgencyContactModal } from '../modals/AgencyContactModal';
+import { useApp } from '../../context/AppContext';
 
-// Roster of Official Coin Seller Agencies (Easily extensible)
-export const OFFICIAL_AGENCIES: OfficialAgency[] = [
-  {
-    id: 'agency_royal_vault',
-    name: 'Alpha Royal Vault',
-    tagline: 'Get coins from official agency direct',
-    logo: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=400&q=80',
-    badge: 'Diamond Certified',
-    badgeColor: '#EC4899',
-    whatsappNumber: '+923001234567',
-    whatsappDisplay: '+92 300 1234567',
-    rating: 4.9,
-    ordersCompleted: '180k+',
-    bonusOffer: '+15% Extra Coins Bonus',
-    avgDeliveryTime: '< 2 Mins',
-    paymentMethods: ['JazzCash', 'EasyPaisa', 'Bank Transfer', 'USDT / Binance'],
-    rates: [
-      { amount: 10000, bonus: 1500, price: 'Rs. 2,500' },
-      { amount: 50000, bonus: 8000, price: 'Rs. 11,900' },
-      { amount: 100000, bonus: 18000, price: 'Rs. 22,500' },
-      { amount: 500000, bonus: 100000, price: 'Rs. 105,000' },
-    ],
-  },
-  {
-    id: 'agency_crown_exchange',
-    name: 'Crown Star Merchant',
-    tagline: 'Instant 24/7 Coin Top-Up & VIP Support',
-    logo: 'https://images.unsplash.com/photo-1639762681485-074b7f938ba0?auto=format&fit=crop&w=400&q=80',
-    badge: 'Crown Partner',
-    badgeColor: '#F59E0B',
-    whatsappNumber: '+923019876543',
-    whatsappDisplay: '+92 301 9876543',
-    rating: 5.0,
-    ordersCompleted: '145k+',
-    bonusOffer: 'Double VIP Points + 12% Bonus',
-    avgDeliveryTime: '< 1 Min',
-    paymentMethods: ['EasyPaisa', 'JazzCash', 'SadaPay', 'NayaPay'],
-    rates: [
-      { amount: 10000, bonus: 1200, price: 'Rs. 2,450' },
-      { amount: 50000, bonus: 7500, price: 'Rs. 11,800' },
-      { amount: 100000, bonus: 17000, price: 'Rs. 22,000' },
-      { amount: 1000000, bonus: 250000, price: 'Rs. 200,000' },
-    ],
-  },
-  {
-    id: 'agency_global_express',
-    name: 'Global Mate Express',
-    tagline: 'Lowest Market Rates & Fast Worldwide Delivery',
-    logo: 'https://images.unsplash.com/photo-1622979135225-d2ba269bc1df?auto=format&fit=crop&w=400&q=80',
-    badge: 'Gold Verified',
-    badgeColor: '#EAB308',
-    whatsappNumber: '+971501234567',
-    whatsappDisplay: '+971 50 123 4567',
-    rating: 4.9,
-    ordersCompleted: '210k+',
-    bonusOffer: '10,000 Free Coins on First Order',
-    avgDeliveryTime: '< 3 Mins',
-    paymentMethods: ['Bank Transfer', 'Crypto / USDT', 'Wise', 'JazzCash'],
-    rates: [
-      { amount: 10000, bonus: 1000, price: '$10.00' },
-      { amount: 50000, bonus: 6000, price: '$48.00' },
-      { amount: 100000, bonus: 15000, price: '$92.00' },
-      { amount: 500000, bonus: 90000, price: '$440.00' },
-    ],
-  },
-  {
-    id: 'agency_sultan_direct',
-    name: 'Sultan Direct Exchange',
-    tagline: 'Direct Official Agency Deposit Guaranteed',
-    logo: 'https://images.unsplash.com/photo-1614680376593-902f749f7ffc?auto=format&fit=crop&w=400&q=80',
-    badge: 'Diamond Certified',
-    badgeColor: '#38BDF8',
-    whatsappNumber: '+923215558899',
-    whatsappDisplay: '+92 321 5558899',
-    rating: 4.95,
-    ordersCompleted: '95k+',
-    bonusOffer: '+20% Bulk Purchase Bonus',
-    avgDeliveryTime: '< 2 Mins',
-    paymentMethods: ['JazzCash', 'EasyPaisa', 'Raast', 'USDT'],
-    rates: [
-      { amount: 20000, bonus: 3000, price: 'Rs. 4,800' },
-      { amount: 50000, bonus: 9000, price: 'Rs. 11,500' },
-      { amount: 150000, bonus: 35000, price: 'Rs. 32,000' },
-      { amount: 800000, bonus: 200000, price: 'Rs. 165,000' },
-    ],
-  },
-];
+// Legacy static export kept empty; Official Coin Seller Agencies come strictly from Admin-approved Firestore docs.
+export const OFFICIAL_AGENCIES: OfficialAgency[] = [];
 
 export const CoinSellerAgenciesCarousel: React.FC = () => {
+  const { officialCoinSellerAgencies } = useApp();
+  const agencies = officialCoinSellerAgencies;
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const [selectedAgency, setSelectedAgency] = useState<OfficialAgency | null>(null);
   const touchStartX = useRef<number | null>(null);
 
-  // Auto-scroll carousel every 4.5 seconds
   useEffect(() => {
-    if (isPaused) return;
+    if (currentIndex >= agencies.length && agencies.length > 0) {
+      setCurrentIndex(0);
+    }
+  }, [agencies.length, currentIndex]);
+
+  // Auto-scroll carousel every 4.5 seconds when 2+ approved agencies exist
+  useEffect(() => {
+    if (isPaused || agencies.length <= 1) return;
 
     const timer = setInterval(() => {
-      setCurrentIndex((prev) => (prev + 1) % OFFICIAL_AGENCIES.length);
+      setCurrentIndex((prev) => (prev + 1) % agencies.length);
     }, 4500);
 
     return () => clearInterval(timer);
-  }, [isPaused]);
+  }, [isPaused, agencies.length]);
+
+  if (agencies.length === 0) {
+    return null;
+  }
 
   const handleNext = () => {
-    setCurrentIndex((prev) => (prev + 1) % OFFICIAL_AGENCIES.length);
+    setCurrentIndex((prev) => (prev + 1) % agencies.length);
   };
 
   const handlePrev = () => {
-    setCurrentIndex((prev) => (prev - 1 + OFFICIAL_AGENCIES.length) % OFFICIAL_AGENCIES.length);
+    setCurrentIndex((prev) => (prev - 1 + agencies.length) % agencies.length);
   };
 
   const handleTouchStart = (e: React.TouchEvent) => {
@@ -144,7 +72,7 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
     touchStartX.current = null;
   };
 
-  const currentAgency = OFFICIAL_AGENCIES[currentIndex];
+  const currentAgency = agencies[currentIndex] || agencies[0];
 
   const handleDirectWhatsApp = (agency: OfficialAgency, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
@@ -173,7 +101,7 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
 
         {/* Slide Counter & Arrows */}
         <div className="flex items-center gap-1 text-[10px] text-zinc-400 font-mono">
-          <span>{currentIndex + 1}/{OFFICIAL_AGENCIES.length}</span>
+          <span>{currentIndex + 1}/{agencies.length}</span>
           <button
             onClick={handlePrev}
             className="w-5 h-5 rounded-full bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer transition-colors ml-1"
@@ -316,7 +244,7 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
 
         {/* Carousel Pagination Dots */}
         <div className="flex items-center justify-center gap-1.5 mt-2">
-          {OFFICIAL_AGENCIES.map((_, idx) => (
+          {agencies.map((_, idx) => (
             <button
               key={idx}
               onClick={(e) => {

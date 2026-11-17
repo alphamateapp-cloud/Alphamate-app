@@ -152,7 +152,7 @@ body {
 }
 
 .animate-supercar {
-  animation: supercarDriveBy 6.0s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+  animation: supercarDriveBy 7.2s cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
 }
 
 /* Galaxy Rocket Blast Off */
@@ -180,7 +180,7 @@ body {
 }
 
 .animate-rocket-launch {
-  animation: rocketBlastOff 6.8s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  animation: rocketBlastOff 7.4s cubic-bezier(0.4, 0, 0.2, 1) forwards;
 }
 
 /* Mythic Dragon Flying Curve */
@@ -208,7 +208,7 @@ body {
 }
 
 .animate-dragon-fly {
-  animation: dragonFly 7.2s ease-in-out forwards;
+  animation: dragonFly 7.5s ease-in-out forwards;
 }
 
 /* Royal Yacht Cruising */
@@ -236,7 +236,7 @@ body {
 }
 
 .animate-yacht {
-  animation: yachtCruise 6.4s ease-in-out forwards;
+  animation: yachtCruise 7.3s ease-in-out forwards;
 }
 
 /* Royal Crown Drop & Radiate */
@@ -264,7 +264,7 @@ body {
 }
 
 .animate-crown-drop {
-  animation: crownDescend 5.4s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
+  animation: crownDescend 7.1s cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
 }
 
 /* Diamond Ring Open Box & Shimmer */
@@ -292,7 +292,7 @@ body {
 }
 
 .animate-ring-levitate {
-  animation: ringLevitate 5.0s ease-out forwards;
+  animation: ringLevitate 7.0s ease-out forwards;
 }
 
 /* Shockwave Expanding Ring */

@@ -517,6 +517,88 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["userId"]
+    },
+    "AgencyApplication": {
+      "title": "AgencyApplication",
+      "description": "Pending, approved, or rejected application to open a Coin Seller or Host Agency",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["coin_seller", "host_agency"] },
+        "applicantUserId": { "type": "string", "maxLength": 128 },
+        "applicantName": { "type": "string", "maxLength": 128 },
+        "applicantUniqueId": { "type": "string", "maxLength": 64 },
+        "agencyName": { "type": "string", "maxLength": 128 },
+        "agencyTag": { "type": "string", "maxLength": 16 },
+        "whatsapp": { "type": "string", "maxLength": 64 },
+        "phoneNumber": { "type": "string", "maxLength": 64 },
+        "idCardNumber": { "type": "string", "maxLength": 64 },
+        "experience": { "type": "string", "maxLength": 1000 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "submittedAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "reviewedBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": [
+        "id",
+        "type",
+        "applicantUserId",
+        "applicantName",
+        "applicantUniqueId",
+        "agencyName",
+        "whatsapp",
+        "phoneNumber",
+        "experience",
+        "status",
+        "submittedAt",
+        "createdAtMs"
+      ]
+    },
+    "OfficialAgency": {
+      "title": "OfficialAgency",
+      "description": "Admin-approved Coin Seller or Host Agency record with real Admin-allocated coin stock",
+      "type": "object",
+      "properties": {
+        "agencyId": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["coin_seller", "host_agency"] },
+        "agencyName": { "type": "string", "maxLength": 128 },
+        "agencyCode": { "type": "string", "maxLength": 64 },
+        "agencyTag": { "type": "string", "maxLength": 16 },
+        "tagColor": { "type": "string", "maxLength": 32 },
+        "badge": { "type": "string", "maxLength": 80 },
+        "ownerUserId": { "type": "string", "maxLength": 128 },
+        "ownerName": { "type": "string", "maxLength": 128 },
+        "agencyBalance": { "type": "number" },
+        "isPinSet": { "type": "boolean" },
+        "whatsappNumber": { "type": "string", "maxLength": 64 },
+        "whatsappDisplay": { "type": "string", "maxLength": 64 },
+        "defaultCommissionRate": { "type": "number" },
+        "minWeeklyHours": { "type": "number" },
+        "slogan": { "type": "string", "maxLength": 300 },
+        "isOfficial": { "type": "boolean" },
+        "activeHostsCount": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "agencyId",
+        "type",
+        "agencyName",
+        "agencyCode",
+        "ownerUserId",
+        "agencyBalance",
+        "whatsappNumber",
+        "whatsappDisplay",
+        "slogan",
+        "isOfficial",
+        "status",
+        "createdAt",
+        "createdAtMs",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -575,6 +657,14 @@
     "/accountDeletionRequests/{requestId}": {
       "schema": "AccountDeletionRequest",
       "description": "Official account deactivation and 15-day pending permanent deletion records keyed by Firebase auth UID"
+    },
+    "/agencyApplications/{applicationId}": {
+      "schema": "AgencyApplication",
+      "description": "Coin Seller and Host Agency license applications awaiting Official Admin review"
+    },
+    "/agencies/{agencyId}": {
+      "schema": "OfficialAgency",
+      "description": "Admin-approved Official Coin Seller and Host Agencies"
     },
     "/leaderboardMonths/{monthKey}/entries/{userId}": {
       "schema": "LeaderboardEntry",

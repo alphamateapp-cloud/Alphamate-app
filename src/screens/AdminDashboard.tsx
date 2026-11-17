@@ -37,6 +37,8 @@ export const AdminDashboard: React.FC = () => {
     openLiveStream,
     agencyApplications,
     reviewAgencyApplication,
+    officialCoinSellerProfiles,
+    adminAllocateAgencyCoins,
     firebaseUser,
     giftTransactions,
   } = useApp();
@@ -46,6 +48,8 @@ export const AdminDashboard: React.FC = () => {
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [deletionRequests, setDeletionRequests] = useState<AccountDeletionRequest[]>([]);
   const [processingRequestUid, setProcessingRequestUid] = useState<string | null>(null);
+  const [stockAllocationInputs, setStockAllocationInputs] = useState<Record<string, string>>({});
+  const [allocatingAgencyId, setAllocatingAgencyId] = useState<string | null>(null);
 
   const isOfficialAdminUser = firebaseUser?.email?.toLowerCase() === 'alphamateapp@gmail.com';
 
@@ -94,6 +98,27 @@ export const AdminDashboard: React.FC = () => {
       setTimeout(() => setActionNotice(null), 4000);
     } finally {
       setProcessingRequestUid(null);
+    }
+  };
+
+  const handleAllocateAgencyStock = async (agencyId: string) => {
+    const raw = stockAllocationInputs[agencyId] || '100000';
+    const amount = parseInt(raw.replace(/[^0-9]/g, ''), 10);
+    if (!amount || amount <= 0) {
+      setActionNotice('Please enter a valid positive coin stock amount.');
+      setTimeout(() => setActionNotice(null), 3500);
+      return;
+    }
+    setAllocatingAgencyId(agencyId);
+    try {
+      const res = await adminAllocateAgencyCoins(agencyId, amount);
+      setActionNotice(res.message);
+      if (res.success) {
+        setStockAllocationInputs((prev) => ({ ...prev, [agencyId]: '' }));
+      }
+    } finally {
+      setAllocatingAgencyId(null);
+      setTimeout(() => setActionNotice(null), 4000);
     }
   };
 
@@ -418,13 +443,21 @@ export const AdminDashboard: React.FC = () => {
                       {app.status === 'pending' ? (
                         <div className="flex items-center justify-end gap-1.5">
                           <button
-                            onClick={() => reviewAgencyApplication(app.id, 'reject')}
+                            onClick={() => {
+                              const res = reviewAgencyApplication(app.id, 'reject');
+                              setActionNotice(res.message);
+                              setTimeout(() => setActionNotice(null), 4000);
+                            }}
                             className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10.5px] font-bold cursor-pointer"
                           >
                             Reject
                           </button>
                           <button
-                            onClick={() => reviewAgencyApplication(app.id, 'approve')}
+                            onClick={() => {
+                              const res = reviewAgencyApplication(app.id, 'approve');
+                              setActionNotice(res.message);
+                              setTimeout(() => setActionNotice(null), 4000);
+                            }}
                             className="px-3 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[10.5px] font-bold cursor-pointer border border-emerald-500/30"
                           >
                             Approve License
@@ -439,6 +472,80 @@ export const AdminDashboard: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+
+        {/* Official Admin Coin Seller Stock Allocation */}
+        <div className="rounded-3xl bg-[#120A24] border border-amber-400/25 p-5 shadow-xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2">
+              <Zap className="w-5 h-5 text-amber-400" />
+              <div>
+                <h3 className="text-sm font-black text-white">Approved Coin Seller Agencies &amp; Stock Allocation</h3>
+                <p className="text-[11px] text-zinc-400">
+                  Approved Coin Seller Agencies start with 0 Coins. Only Official Admin can allocate stock.
+                </p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-amber-400/15 text-amber-300 text-xs font-bold border border-amber-400/30 font-mono">
+              {officialCoinSellerProfiles.length} Approved Merchant(s)
+            </span>
+          </div>
+
+          {!isOfficialAdminUser ? (
+            <div className="p-4 rounded-2xl bg-[#0B0616] border border-white/10 text-xs text-zinc-400">
+              Sign in as <span className="text-zinc-200 font-mono">alphamateapp@gmail.com</span> to allocate Coin Seller agency stock.
+            </div>
+          ) : officialCoinSellerProfiles.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-[#0B0616] border border-white/10 text-xs text-zinc-400">
+              No approved Coin Seller Agencies yet. Approve a pending application above first.
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {officialCoinSellerProfiles.map((agency) => (
+                <div
+                  key={agency.agencyId}
+                  className="p-3.5 rounded-2xl bg-[#0B0616] border border-white/10 flex flex-wrap items-center justify-between gap-3"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-black text-white">{agency.agencyName}</span>
+                      <span className="px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[9px] font-mono">
+                        {agency.agencyCode}
+                      </span>
+                    </div>
+                    <div className="text-[10.5px] text-zinc-400 mt-0.5 font-mono">
+                      Owner: {agency.ownerName || agency.ownerUserId} • Current Stock:{' '}
+                      <strong className="text-amber-300">{(agency.agencyBalance || 0).toLocaleString()} Coins</strong>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      placeholder="100000"
+                      value={stockAllocationInputs[agency.agencyId] ?? ''}
+                      onChange={(e) =>
+                        setStockAllocationInputs((prev) => ({
+                          ...prev,
+                          [agency.agencyId]: e.target.value,
+                        }))
+                      }
+                      className="w-32 h-9 px-3 rounded-xl bg-white/5 border border-white/15 focus:border-amber-400 focus:outline-none text-xs font-mono text-white"
+                    />
+                    <button
+                      type="button"
+                      disabled={allocatingAgencyId === agency.agencyId}
+                      onClick={() => handleAllocateAgencyStock(agency.agencyId)}
+                      className="px-3 h-9 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 text-black font-black text-[11px] uppercase cursor-pointer hover:brightness-110 disabled:opacity-50"
+                    >
+                      {allocatingAgencyId === agency.agencyId ? 'Allocating...' : 'Allocate Stock'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* 60/40 Coin-to-Diamond Gift Economy Ledger */}

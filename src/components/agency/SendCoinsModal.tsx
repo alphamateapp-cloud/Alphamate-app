@@ -41,7 +41,7 @@ export const SendCoinsModal: React.FC<SendCoinsModalProps> = ({
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  if (!isOpen) return null;
+  if (!isOpen || !agencyProfile) return null;
 
   const handleSearchUser = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -263,7 +263,9 @@ export const SendCoinsModal: React.FC<SendCoinsModalProps> = ({
                 <Lock className="w-3.5 h-3.5 text-amber-400" />
                 <span>3. Enter 4-Digit Security PIN</span>
               </label>
-              <span className="text-[9.5px] text-zinc-400">Default: 1234</span>
+              <span className="text-[9.5px] text-amber-300">
+                {agencyProfile.isPinSet ? 'Private Security PIN' : 'Set PIN first'}
+              </span>
             </div>
 
             <div className="relative">

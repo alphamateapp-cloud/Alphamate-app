@@ -32,12 +32,11 @@ export const WalletScreen: React.FC = () => {
     diamonds,
     heldDiamonds,
     transactions,
-    rechargeCoins,
     withdrawDiamonds,
     exchangeDiamondsToCoins,
     navigateBack,
     setCurrentScreen,
-    agencyProfile,
+    officialCoinSellerProfiles,
     currentUser,
     giftTransactions,
     simulateDemoHostGift,
@@ -62,7 +61,7 @@ export const WalletScreen: React.FC = () => {
     popular: true,
   });
   const [paymentMethod, setPaymentMethod] = useState<'ApplePay' | 'GooglePay' | 'JazzCash' | 'EasyPaisa' | 'Card'>('JazzCash');
-  const [isProcessingRecharge, setIsProcessingRecharge] = useState(false);
+  const [showComingSoonModal, setShowComingSoonModal] = useState(false);
 
   // Withdrawal state (Limits in USD for global clarity, with PKR live calculations)
   const USD_TO_PKR_RATE = 280;
@@ -134,21 +133,17 @@ export const WalletScreen: React.FC = () => {
     (tx) => tx.type === 'withdrawal' && tx.status === 'pending'
   );
 
-  // Recharge Handler
-  const handleCheckout = async () => {
-    setIsProcessingRecharge(true);
-    const success = await rechargeCoins(
-      selectedPackage.coins + selectedPackage.bonus,
-      selectedPackage.price,
-      paymentMethod
-    );
-    setIsProcessingRecharge(false);
-    if (success) {
-      showToast(
-        `Added ${(selectedPackage.coins + selectedPackage.bonus).toLocaleString()} Coins to your wallet!`
-      );
-    }
+  // Online Coin Purchase Handler (Coming Soon — No payment gateway attached)
+  const handleCheckout = () => {
+    setShowComingSoonModal(true);
+    showToast('Online coin purchases are Coming Soon. Payment gateways are not attached yet.');
   };
+
+  const approvedCoinSellerStock = officialCoinSellerProfiles.reduce(
+    (sum, a) => sum + (a.agencyBalance || 0),
+    0
+  );
+  const hasApprovedCoinSellers = officialCoinSellerProfiles.length > 0;
 
   // Withdraw Handler
   const handleSubmitWithdrawal = (e: React.FormEvent) => {
@@ -391,7 +386,7 @@ export const WalletScreen: React.FC = () => {
           </div>
         </div>
 
-        {/* Agency Direct Coin Seller Banner */}
+        {/* Official Agency Center / Verified Coin Seller Banner */}
         <div
           onClick={() => setCurrentScreen('agency_management')}
           className="p-3 rounded-2xl bg-gradient-to-r from-[#2B1405] via-[#1B0A2E] to-[#120524] border border-amber-400/40 hover:border-amber-400 transition-all flex items-center justify-between gap-3 shadow-md cursor-pointer group active:scale-[0.99]"
@@ -401,16 +396,20 @@ export const WalletScreen: React.FC = () => {
               <Building2 className="w-4 h-4" />
             </div>
             <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
                 <span className="text-xs font-black text-white group-hover:text-amber-300 transition-colors">
-                  Get Coins Direct from Official Agency
+                  {hasApprovedCoinSellers
+                    ? 'Get Coins Direct from Official Agency'
+                    : 'Official Agency Center • Apply for Agency'}
                 </span>
-                <span className="text-[8.5px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-300 font-black">
-                  INSTANT
+                <span className="text-[8.5px] px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 font-black">
+                  {hasApprovedCoinSellers ? `${officialCoinSellerProfiles.length} VERIFIED` : 'ADMIN APPROVAL'}
                 </span>
               </div>
               <p className="text-[10px] text-zinc-400 truncate">
-                Zero fees & WhatsApp verified delivery • Stock: {agencyProfile.agencyBalance.toLocaleString()} Coins
+                {hasApprovedCoinSellers
+                  ? `Verified Admin-Approved Agencies • Total Stock: ${approvedCoinSellerStock.toLocaleString()} Coins`
+                  : 'Apply for Coin Seller or Host Agency (Official Admin Review Required)'}
               </p>
             </div>
           </div>
@@ -511,12 +510,30 @@ export const WalletScreen: React.FC = () => {
           ========================================================================= */}
       {activeTab === 'recharge' && (
         <div className="p-4 space-y-4 animate-fade-in">
+          {/* Online Payment Gateway Coming Soon Banner */}
+          <div className="p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/15 via-purple-500/15 to-pink-500/15 border border-amber-400/40 flex items-start gap-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-400/20 border border-amber-400/30 flex items-center justify-center text-amber-300 shrink-0">
+              <Clock className="w-4 h-4" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-xs font-black text-white">Online Coin Purchase</span>
+                <span className="px-2 py-0.5 rounded-full bg-amber-400 text-black text-[9px] font-black uppercase tracking-wider">
+                  Coming Soon
+                </span>
+              </div>
+              <p className="text-[11px] text-zinc-300 mt-1 leading-snug">
+                Online coin purchases are <strong>Coming Soon</strong>. Payment gateways (Card, JazzCash, EasyPaisa, Google Pay, Apple Pay) are not attached yet. Coins can only be obtained from Admin-approved Official Coin Seller Agencies.
+              </p>
+            </div>
+          </div>
+
           <div>
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-xs font-black uppercase tracking-wider text-zinc-300">
-                Select Coin Top-Up Package
+                Coin Top-Up Packages (Preview)
               </h3>
-              <span className="text-[10px] text-[#C084FC]">Instant Automated Delivery</span>
+              <span className="text-[10px] text-amber-300 font-bold">Coming Soon</span>
             </div>
 
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
@@ -564,7 +581,7 @@ export const WalletScreen: React.FC = () => {
                       <span className="text-xs font-bold text-zinc-300 font-mono">
                         ${pkg.price.toFixed(2)}
                       </span>
-                      <span className="text-[9.5px] font-bold text-[#C084FC]">USD</span>
+                      <span className="text-[9.5px] font-bold text-amber-300">SOON</span>
                     </div>
                   </button>
                 );
@@ -575,7 +592,7 @@ export const WalletScreen: React.FC = () => {
           {/* Payment Gateways */}
           <div>
             <h3 className="text-xs font-black uppercase tracking-wider text-zinc-300 mb-2">
-              Payment Gateway
+              Payment Gateway (Not Attached Yet)
             </h3>
             <div className="grid grid-cols-3 sm:grid-cols-5 gap-2">
               {[
@@ -590,10 +607,13 @@ export const WalletScreen: React.FC = () => {
                   <button
                     key={m.id}
                     type="button"
-                    onClick={() => setPaymentMethod(m.id as any)}
+                    onClick={() => {
+                      setPaymentMethod(m.id as any);
+                      showToast(`${m.label} gateway integration is Coming Soon.`);
+                    }}
                     className={`py-2 px-2 rounded-xl text-center text-xs font-bold border transition-all cursor-pointer ${
                       isSelected
-                        ? 'bg-amber-400 text-black border-amber-300 shadow font-black'
+                        ? 'bg-amber-400/20 text-amber-300 border-amber-400/60 shadow font-black'
                         : 'bg-white/5 border-white/10 text-zinc-400 hover:text-white'
                     }`}
                   >
@@ -604,21 +624,14 @@ export const WalletScreen: React.FC = () => {
             </div>
           </div>
 
-          {/* Checkout Action Button */}
+          {/* Coming Soon Action Button — Never Mints Coins */}
           <button
             type="button"
-            disabled={isProcessingRecharge}
             onClick={handleCheckout}
-            className="w-full h-12 rounded-2xl bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-black font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-amber-500/25 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
+            className="w-full h-12 rounded-2xl bg-zinc-800/90 hover:bg-zinc-800 border border-amber-400/40 text-amber-300 font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg transition-all cursor-pointer active:scale-95"
           >
-            <Coins className="w-4 h-4 fill-current" />
-            <span>
-              {isProcessingRecharge
-                ? 'Processing Order...'
-                : `Pay $${selectedPackage.price.toFixed(2)} for ${(
-                    selectedPackage.coins + selectedPackage.bonus
-                  ).toLocaleString()} Coins`}
-            </span>
+            <Clock className="w-4 h-4" />
+            <span>Coming Soon — Payment Gateway Not Attached</span>
           </button>
         </div>
       )}
@@ -1196,6 +1209,53 @@ export const WalletScreen: React.FC = () => {
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Coming Soon Modal for Online Coin Purchases */}
+      {showComingSoonModal && (
+        <div
+          onClick={() => setShowComingSoonModal(false)}
+          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4 animate-fade-in"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-3xl bg-gradient-to-b from-[#1C0D34] via-[#120822] to-[#0A0414] border border-amber-400/50 shadow-2xl p-5 text-center space-y-3"
+          >
+            <div className="w-12 h-12 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center mx-auto">
+              <Clock className="w-6 h-6" />
+            </div>
+            <div>
+              <span className="px-2.5 py-0.5 rounded-full bg-amber-400 text-black text-[10px] font-black uppercase tracking-wider">
+                Coming Soon
+              </span>
+              <h3 className="text-base font-black text-white mt-2">
+                Online Coin Purchases Coming Soon
+              </h3>
+              <p className="text-xs text-zinc-300 mt-1.5 leading-relaxed">
+                Payment gateways ({paymentMethod}) are not attached yet, so online coin purchases are disabled. You can apply for an agency or buy coins from an Admin-approved Official Coin Seller Agency.
+              </p>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowComingSoonModal(false)}
+                className="flex-1 h-10 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-bold text-white cursor-pointer"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowComingSoonModal(false);
+                  setCurrentScreen('agency_management');
+                }}
+                className="flex-1 h-10 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 text-black text-xs font-black uppercase cursor-pointer"
+              >
+                Agency Center
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

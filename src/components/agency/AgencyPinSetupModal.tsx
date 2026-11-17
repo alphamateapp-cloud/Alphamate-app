@@ -29,14 +29,16 @@ export const AgencyPinSetupModal: React.FC<AgencyPinSetupModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  if (!isOpen) return null;
+  if (!isOpen || !agencyProfile) return null;
+
+  const hasExistingPin = Boolean(agencyProfile.isPinSet && agencyProfile.pin);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
 
-    if (agencyProfile.isPinSet && currentPin.length !== 4) {
+    if (hasExistingPin && currentPin.length !== 4) {
       setErrorMsg('Please enter your current 4-digit PIN');
       return;
     }
@@ -94,23 +96,25 @@ export const AgencyPinSetupModal: React.FC<AgencyPinSetupModalProps> = ({
             Your 4-digit security PIN is required whenever transferring coins or fulfilling orders to keep your stock safe.
           </div>
 
-          {/* Current PIN */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-[11px] font-black uppercase tracking-wider text-zinc-300">
-                Current PIN
-              </label>
-              <span className="text-[9.5px] text-zinc-400">Default: 1234</span>
+          {/* Current PIN (Only when updating an existing PIN) */}
+          {hasExistingPin && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-[11px] font-black uppercase tracking-wider text-zinc-300">
+                  Current PIN
+                </label>
+                <span className="text-[9.5px] text-zinc-400">Required to change PIN</span>
+              </div>
+              <input
+                type={showPin ? 'text' : 'password'}
+                maxLength={4}
+                value={currentPin}
+                onChange={(e) => setCurrentPin(e.target.value.replace(/[^0-9]/g, ''))}
+                placeholder="••••"
+                className="w-full h-11 px-4 rounded-xl bg-white/5 border border-white/15 focus:border-amber-400 focus:outline-none text-center text-base font-mono tracking-[0.5em] font-black text-white"
+              />
             </div>
-            <input
-              type={showPin ? 'text' : 'password'}
-              maxLength={4}
-              value={currentPin}
-              onChange={(e) => setCurrentPin(e.target.value.replace(/[^0-9]/g, ''))}
-              placeholder="••••"
-              className="w-full h-11 px-4 rounded-xl bg-white/5 border border-white/15 focus:border-amber-400 focus:outline-none text-center text-base font-mono tracking-[0.5em] font-black text-white"
-            />
-          </div>
+          )}
 
           {/* New PIN */}
           <div>

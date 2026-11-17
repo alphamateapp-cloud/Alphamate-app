@@ -301,6 +301,143 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    function isValidAgencyApplication(data) {
+      return data.keys().hasAll([
+          'id', 'type', 'applicantUserId', 'applicantName', 'applicantUniqueId',
+          'agencyName', 'whatsapp', 'phoneNumber', 'experience', 'status',
+          'submittedAt', 'createdAtMs'
+        ])
+        && data.keys().hasOnly([
+          'id', 'type', 'applicantUserId', 'applicantName', 'applicantUniqueId',
+          'agencyName', 'agencyTag', 'whatsapp', 'phoneNumber', 'idCardNumber',
+          'experience', 'status', 'submittedAt', 'createdAtMs', 'reviewedAt', 'reviewedBy'
+        ])
+        && isNonEmptyString(data.id, 1, 128)
+        && data.type in ['coin_seller', 'host_agency']
+        && isNonEmptyString(data.applicantUserId, 1, 128)
+        && isNonEmptyString(data.applicantName, 1, 128)
+        && isNonEmptyString(data.applicantUniqueId, 1, 64)
+        && isNonEmptyString(data.agencyName, 2, 128)
+        && (!('agencyTag' in data) || (data.agencyTag is string && data.agencyTag.size() <= 16))
+        && isNonEmptyString(data.whatsapp, 3, 64)
+        && isNonEmptyString(data.phoneNumber, 3, 64)
+        && (!('idCardNumber' in data) || (data.idCardNumber is string && data.idCardNumber.size() <= 64))
+        && isNonEmptyString(data.experience, 1, 1000)
+        && data.status in ['pending', 'approved', 'rejected']
+        && data.submittedAt is string && data.submittedAt.size() <= 64
+        && data.createdAtMs is number
+        && (!('reviewedAt' in data) || (data.reviewedAt is string && data.reviewedAt.size() <= 64))
+        && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128));
+    }
+
+    function isValidOfficialAgency(data) {
+      return data.keys().hasAll([
+          'agencyId', 'type', 'agencyName', 'agencyCode', 'ownerUserId',
+          'agencyBalance', 'whatsappNumber', 'whatsappDisplay', 'slogan',
+          'isOfficial', 'status', 'createdAt', 'createdAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'agencyId', 'type', 'agencyName', 'agencyCode', 'agencyTag', 'tagColor',
+          'badge', 'ownerUserId', 'ownerName', 'agencyBalance', 'isPinSet',
+          'whatsappNumber', 'whatsappDisplay', 'defaultCommissionRate', 'minWeeklyHours',
+          'slogan', 'isOfficial', 'activeHostsCount', 'paymentMethods', 'rates',
+          'status', 'createdAt', 'createdAtMs', 'updatedAt'
+        ])
+        && isNonEmptyString(data.agencyId, 1, 128)
+        && data.type in ['coin_seller', 'host_agency']
+        && isNonEmptyString(data.agencyName, 2, 128)
+        && isNonEmptyString(data.agencyCode, 2, 64)
+        && (!('agencyTag' in data) || (data.agencyTag is string && data.agencyTag.size() <= 16))
+        && (!('tagColor' in data) || (data.tagColor is string && data.tagColor.size() <= 32))
+        && (!('badge' in data) || (data.badge is string && data.badge.size() <= 80))
+        && isNonEmptyString(data.ownerUserId, 1, 128)
+        && (!('ownerName' in data) || (data.ownerName is string && data.ownerName.size() <= 128))
+        && data.agencyBalance is number && data.agencyBalance >= 0 && data.agencyBalance <= 1000000000
+        && (!('isPinSet' in data) || data.isPinSet is bool)
+        && isNonEmptyString(data.whatsappNumber, 3, 64)
+        && isNonEmptyString(data.whatsappDisplay, 3, 64)
+        && (!('defaultCommissionRate' in data) || (data.defaultCommissionRate is number && data.defaultCommissionRate >= 0 && data.defaultCommissionRate <= 80))
+        && (!('minWeeklyHours' in data) || (data.minWeeklyHours is number && data.minWeeklyHours >= 0 && data.minWeeklyHours <= 168))
+        && isNonEmptyString(data.slogan, 1, 300)
+        && data.isOfficial is bool
+        && (!('activeHostsCount' in data) || (data.activeHostsCount is number && data.activeHostsCount >= 0 && data.activeHostsCount <= 100000))
+        && (!('paymentMethods' in data) || (data.paymentMethods is list && data.paymentMethods.size() <= 12))
+        && (!('rates' in data) || (data.rates is list && data.rates.size() <= 12))
+        && data.status in ['active', 'suspended']
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.createdAtMs is number
+        && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    // Coin Seller & Host Agency License Applications (Never auto-approved client-side)
+    match /agencyApplications/{applicationId} {
+      allow get: if isValidId(applicationId)
+        && isSignedIn()
+        && (isOfficialAdmin() || (resource != null && resource.data.applicantUserId == request.auth.uid));
+      allow list: if isSignedIn()
+        && (isOfficialAdmin() || resource.data.applicantUserId == request.auth.uid);
+      allow create: if isValidId(applicationId)
+        && isSignedIn()
+        && isValidAgencyApplication(request.resource.data)
+        && request.resource.data.id == applicationId
+        && request.resource.data.applicantUserId == request.auth.uid
+        && request.resource.data.status == 'pending';
+      allow update: if isValidId(applicationId)
+        && isOfficialAdmin()
+        && isValidAgencyApplication(request.resource.data)
+        && request.resource.data.applicantUserId == resource.data.applicantUserId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedAt', 'reviewedBy'])
+        && request.resource.data.status in ['approved', 'rejected'];
+      allow delete: if false;
+    }
+
+    // Official Admin-Approved Agencies (zero pre-seeded coins; only Official Admin can create or add coin stock)
+    match /agencies/{agencyId} {
+      allow get: if isValidId(agencyId)
+        && isSignedIn()
+        && (
+          resource == null
+          || resource.data.status == 'active'
+          || resource.data.ownerUserId == request.auth.uid
+          || isOfficialAdmin()
+        );
+      allow list: if isSignedIn()
+        && (
+          resource.data.status == 'active'
+          || resource.data.ownerUserId == request.auth.uid
+          || isOfficialAdmin()
+        );
+      allow create: if isValidId(agencyId)
+        && isOfficialAdmin()
+        && isValidOfficialAgency(request.resource.data)
+        && request.resource.data.agencyId == agencyId
+        && request.resource.data.agencyBalance == 0;
+      allow update: if isValidId(agencyId)
+        && isSignedIn()
+        && isValidOfficialAgency(request.resource.data)
+        && request.resource.data.agencyId == resource.data.agencyId
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.ownerUserId == resource.data.ownerUserId
+        && (
+          isOfficialAdmin()
+          || (
+            resource.data.ownerUserId == request.auth.uid
+            && request.resource.data.status == resource.data.status
+            && request.resource.data.isOfficial == resource.data.isOfficial
+            && (
+              request.resource.data.agencyBalance == resource.data.agencyBalance
+              || (
+                resource.data.type == 'coin_seller'
+                && request.resource.data.agencyBalance >= 0
+                && request.resource.data.agencyBalance < resource.data.agencyBalance
+              )
+            )
+          )
+        );
+      allow delete: if false;
+    }
+
     // Monthly-refreshing Global & Weekly Leaderboard (public non-PII stats per monthKey)
     match /leaderboardMonths/{monthKey}/entries/{userId} {
       allow get, list: if isSignedIn() && isValidMonthKey(monthKey);

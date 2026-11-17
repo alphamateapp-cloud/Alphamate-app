@@ -86,9 +86,18 @@ import {
   isFirestoreQuotaExceeded,
   fetchLiveStreamFromServer,
   fetchPartyRoomFromServer,
+  submitAgencyApplicationToFirestore,
+  subscribeToMyAgencyApplications,
+  subscribeToAllAgencyApplications,
+  subscribeToApprovedAgencies,
+  adminReviewAgencyApplicationInFirestore,
+  adminAllocateAgencyCoinsInFirestore,
+  updateApprovedAgencySettingsInFirestore,
+  deductCoinSellerAgencyBalanceInFirestore,
   SendNotificationParams,
   FirebaseUser,
 } from '../services/firebase';
+import type { OfficialAgency } from '../components/modals/AgencyContactModal';
 import {
   subscribeToActiveReels,
   deleteReel,
@@ -526,8 +535,10 @@ interface AppContextType {
   customLogoUrl: string | null;
   setCustomLogoUrl: (url: string | null) => void;
 
-  // Agency Center & Coin Seller Agency Management
-  agencyProfile: CoinSellerAgencyProfile;
+  // Agency Center & Coin Seller Agency Management (Strictly Admin-Approved Only)
+  agencyProfile: CoinSellerAgencyProfile | null;
+  officialCoinSellerAgencies: OfficialAgency[];
+  officialCoinSellerProfiles: CoinSellerAgencyProfile[];
   agencyOrders: AgencyOrder[];
   agencyTransactions: AgencyTransaction[];
   sendAgencyCoins: (
@@ -553,8 +564,8 @@ interface AppContextType {
   ) => AgencyOrder;
   findUserByIdOrUsername: (query: string) => User | null;
 
-  // Host Agency Management
-  hostAgencyProfile: HostAgencyProfile;
+  // Host Agency Management (Strictly Admin-Approved Only)
+  hostAgencyProfile: HostAgencyProfile | null;
   agencyHosts: HostMember[];
   hostJoinRequests: HostJoinRequest[];
   agencyApplications: AgencyApplication[];
@@ -598,6 +609,10 @@ interface AppContextType {
     applicationId: string,
     action: 'approve' | 'reject'
   ) => { success: boolean; message: string };
+  adminAllocateAgencyCoins: (
+    agencyId: string,
+    coinsToAdd: number
+  ) => Promise<{ success: boolean; message: string }>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -836,8 +851,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       xp: 0,
       nextLevelXp: 50000,
       vipTier: 0,
-      coins: 1000,
-      diamonds: 100,
+      coins: 0,
+      diamonds: 0,
       isVerified: verified,
       hasPassword: hasPass,
       profileCompleted: false,
@@ -1094,7 +1109,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 rawTs >= existingTs && typeof raw.isHostPresent === 'boolean'
                   ? raw.isHostPresent
                   : existing.isHostPresent,
-              lastSeenAtMs: Math.max(existingTs, rawTs),
+              lastSeenAtMs: existingTs,
             }
           : raw;
         const r = normalizePartyItem(mergedCandidate);
@@ -1129,8 +1144,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           nextRooms.find((r) => r.id === currentActive.id) ||
           nextRooms.find((r) => r.host?.id && r.host.id === currentActive.host?.id);
         if (!fresh) return currentActive;
-        if (seatMutationInFlightRef.current.has(currentActive.id)) {
-          return { ...currentActive, ...fresh, seats: currentActive.seats };
+        const currentTs = Number(currentActive.lastSeenAtMs || 0);
+        const freshTs = Number(fresh.lastSeenAtMs || 0);
+        if (seatMutationInFlightRef.current.has(currentActive.id) || freshTs < currentTs) {
+          return {
+            ...currentActive,
+            ...fresh,
+            seats: currentActive.seats,
+            lastSeenAtMs: Math.max(currentTs, freshTs),
+          };
         }
         return { ...currentActive, ...fresh };
       });
@@ -1515,7 +1537,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!activeGiftBanner) return;
     const coinsCost = Number(activeGiftBanner.gift.costInCoins ?? activeGiftBanner.gift.coins) || 10;
-    const ttlMs = coinsCost <= 100 ? 2100 : coinsCost >= 19999 ? 7200 : 6200;
+    const ttlMs = coinsCost <= 100 ? 2000 : 7500;
     const bannerId = activeGiftBanner.id;
     const timer = setTimeout(() => {
       setActiveGiftBanner((prev) => (prev?.id === bannerId ? null : prev));
@@ -2203,12 +2225,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setFollowerUserIds(edges.followerIds);
     });
 
+    const unsubAgencyApps = isAdmin
+      ? subscribeToAllAgencyApplications((apps) => {
+          setAgencyApplications(apps as AgencyApplication[]);
+        })
+      : subscribeToMyAgencyApplications(uid, (apps) => {
+          setAgencyApplications(apps as AgencyApplication[]);
+        });
+
+    const unsubApprovedAgencies = subscribeToApprovedAgencies((docs) => {
+      setApprovedAgencyDocs(docs);
+    });
+
     return () => {
       unsubProfile();
       unsubNotifs();
       unsubGifts();
       unsubUsers();
       unsubFollows();
+      unsubAgencyApps();
+      unsubApprovedAgencies();
     };
   }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified, userSyncRefreshEpoch]);
 
@@ -2323,33 +2359,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // =========================================================================
-  // AGENCY MANAGEMENT (COIN SELLER AGENCY & HOST AGENCY)
+  // AGENCY MANAGEMENT (COIN SELLER AGENCY & HOST AGENCY — ADMIN-APPROVED ONLY)
   // =========================================================================
-  const INITIAL_AGENCY_PROFILE: CoinSellerAgencyProfile = {
-    agencyId: 'agency_alpha_official',
-    agencyName: 'Alpha Mate Official Exchange',
-    agencyCode: 'AM-EX-001',
-    badge: 'Diamond Certified Official',
-    ownerUserId: currentUser?.id || 'current_user',
-    agencyBalance: 2500000, // 2,500,000 Coins initial agency balance
-    pin: '1234', // Default 4-digit security PIN
-    isPinSet: true,
-    whatsappNumber: '+923001234567',
-    whatsappDisplay: '+92 300 1234567',
-    isOfficial: true,
-    slogan: 'Get coins from official agency direct with instant verified delivery.',
-  };
+  const LEGACY_FAKE_AGENCY_IDS = useMemo(
+    () =>
+      new Set([
+        'agency_alpha_official',
+        'agency_royal_talent',
+        'agency_star_hosts',
+        'agency_phoenix_crew',
+      ]),
+    []
+  );
 
-  const [agencyProfile, setAgencyProfile] = useState<CoinSellerAgencyProfile>(() => {
+  // Purge any legacy pre-seeded fake agency storage from earlier builds
+  useEffect(() => {
     try {
-      const saved = localStorage.getItem('alphamate_agency_profile');
-      if (saved) return JSON.parse(saved);
+      const legacyKeys = [
+        'alphamate_agency_profile',
+        'alphamate_all_host_agencies',
+        'alphamate_host_agency_profile',
+      ];
+      legacyKeys.forEach((key) => {
+        const raw = localStorage.getItem(key);
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          if (parsed.some((item: any) => LEGACY_FAKE_AGENCY_IDS.has(String(item?.agencyId || '')))) {
+            localStorage.removeItem(key);
+          }
+        } else if (parsed && LEGACY_FAKE_AGENCY_IDS.has(String(parsed?.agencyId || ''))) {
+          localStorage.removeItem(key);
+        }
+      });
     } catch {
       // ignore
     }
-    return INITIAL_AGENCY_PROFILE;
-  });
+  }, [LEGACY_FAKE_AGENCY_IDS]);
 
+  const [approvedAgencyDocs, setApprovedAgencyDocs] = useState<any[]>([]);
+  const [agencyApplications, setAgencyApplications] = useState<AgencyApplication[]>([]);
   const [agencyOrders, setAgencyOrders] = useState<AgencyOrder[]>(() => {
     try {
       const saved = localStorage.getItem('alphamate_agency_orders');
@@ -2380,14 +2429,118 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
-  const saveAgencyProfile = (profile: CoinSellerAgencyProfile) => {
-    setAgencyProfile(profile);
+  // Reset user-scoped agency data whenever auth state clears or changes UID
+  useEffect(() => {
+    if (!firebaseUser?.uid || !isEmailVerified) {
+      setApprovedAgencyDocs([]);
+      setAgencyApplications([]);
+    }
+  }, [firebaseUser?.uid, isEmailVerified]);
+
+  const getStoredAgencyPin = useCallback((uid: string, agencyId: string): string => {
+    if (!uid || !agencyId) return '';
     try {
-      localStorage.setItem('alphamate_agency_profile', JSON.stringify(profile));
+      return localStorage.getItem(`alphamate_agency_pin_${uid}_${agencyId}`) || '';
+    } catch {
+      return '';
+    }
+  }, []);
+
+  const setStoredAgencyPin = useCallback((uid: string, agencyId: string, nextPin: string) => {
+    if (!uid || !agencyId) return;
+    try {
+      localStorage.setItem(`alphamate_agency_pin_${uid}_${agencyId}`, nextPin);
     } catch {
       // ignore
     }
-  };
+  }, []);
+
+  const officialCoinSellerProfiles: CoinSellerAgencyProfile[] = useMemo(() => {
+    const activeUid = firebaseUser?.uid || currentUser.id;
+    return approvedAgencyDocs
+      .filter((docItem) => docItem?.type === 'coin_seller' && docItem?.status !== 'suspended')
+      .map((docItem) => {
+        const storedPin =
+          docItem.ownerUserId === activeUid
+            ? getStoredAgencyPin(activeUid, String(docItem.agencyId))
+            : '';
+        return {
+          agencyId: String(docItem.agencyId),
+          agencyName: String(docItem.agencyName || 'Official Coin Agency'),
+          agencyCode: String(docItem.agencyCode || 'AM-EX'),
+          badge: String(docItem.badge || 'Diamond Certified Official'),
+          ownerUserId: String(docItem.ownerUserId || ''),
+          ownerName: docItem.ownerName ? String(docItem.ownerName) : undefined,
+          agencyBalance: Math.max(0, Number(docItem.agencyBalance) || 0),
+          pin: storedPin,
+          isPinSet: Boolean(storedPin) || Boolean(docItem.isPinSet),
+          whatsappNumber: String(docItem.whatsappNumber || ''),
+          whatsappDisplay: String(docItem.whatsappDisplay || docItem.whatsappNumber || ''),
+          isOfficial: Boolean(docItem.isOfficial ?? true),
+          slogan: String(docItem.slogan || 'Official Coin Seller Agency.'),
+          status: docItem.status === 'suspended' ? 'suspended' : 'active',
+          paymentMethods: Array.isArray(docItem.paymentMethods) ? docItem.paymentMethods : undefined,
+          rates: Array.isArray(docItem.rates) ? docItem.rates : undefined,
+        };
+      });
+  }, [approvedAgencyDocs, firebaseUser?.uid, currentUser.id, getStoredAgencyPin]);
+
+  const officialCoinSellerAgencies: OfficialAgency[] = useMemo(() => {
+    return officialCoinSellerProfiles
+      .filter((p) => p.status !== 'suspended')
+      .map((p) => ({
+        id: p.agencyId,
+        name: p.agencyName,
+        tagline: p.slogan,
+        logo: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=400&q=80',
+        badge: 'Diamond Certified',
+        badgeColor: '#F59E0B',
+        whatsappNumber: p.whatsappNumber,
+        whatsappDisplay: p.whatsappDisplay,
+        rating: 5.0,
+        ordersCompleted: p.agencyBalance > 0 ? 'Official Stock Active' : 'Official Licensed',
+        bonusOffer: `Available Stock: ${p.agencyBalance.toLocaleString()} Coins`,
+        avgDeliveryTime: 'Direct WhatsApp Delivery',
+        paymentMethods: p.paymentMethods && p.paymentMethods.length > 0 ? p.paymentMethods : ['WhatsApp Direct'],
+        rates: p.rates && p.rates.length > 0 ? p.rates : [],
+      }));
+  }, [officialCoinSellerProfiles]);
+
+  const allHostAgencies: HostAgencyProfile[] = useMemo(() => {
+    return approvedAgencyDocs
+      .filter((docItem) => docItem?.type === 'host_agency' && docItem?.status !== 'suspended')
+      .map((docItem) => ({
+        agencyId: String(docItem.agencyId),
+        agencyName: String(docItem.agencyName || 'Official Host Agency'),
+        agencyCode: String(docItem.agencyCode || 'AM-HT'),
+        agencyTag: String(docItem.agencyTag || 'VIP'),
+        tagColor: docItem.tagColor ? String(docItem.tagColor) : '#F59E0B',
+        badge: String(docItem.badge || 'Diamond Certified Host Agency'),
+        ownerUserId: String(docItem.ownerUserId || ''),
+        ownerName: docItem.ownerName ? String(docItem.ownerName) : undefined,
+        whatsappNumber: String(docItem.whatsappNumber || ''),
+        whatsappDisplay: String(docItem.whatsappDisplay || docItem.whatsappNumber || ''),
+        defaultCommissionRate: Number(docItem.defaultCommissionRate) || 15,
+        minWeeklyHours: Number(docItem.minWeeklyHours) || 15,
+        slogan: String(docItem.slogan || 'Official live talent and host agency.'),
+        isOfficial: Boolean(docItem.isOfficial ?? true),
+        activeHostsCount: Number(docItem.activeHostsCount) || 0,
+        status: docItem.status === 'suspended' ? 'suspended' : 'active',
+      }));
+  }, [approvedAgencyDocs]);
+
+  // Only expose an active agency profile if the currently signed-in user OWNS an Admin-approved agency
+  const agencyProfile: CoinSellerAgencyProfile | null = useMemo(() => {
+    const activeUid = firebaseUser?.uid || currentUser.id;
+    if (!activeUid) return null;
+    return officialCoinSellerProfiles.find((a) => a.ownerUserId === activeUid) || null;
+  }, [officialCoinSellerProfiles, firebaseUser?.uid, currentUser.id]);
+
+  const hostAgencyProfile: HostAgencyProfile | null = useMemo(() => {
+    const activeUid = firebaseUser?.uid || currentUser.id;
+    if (!activeUid) return null;
+    return allHostAgencies.find((a) => a.ownerUserId === activeUid) || null;
+  }, [allHostAgencies, firebaseUser?.uid, currentUser.id]);
 
   const saveAgencyOrders = (orders: AgencyOrder[]) => {
     setAgencyOrders(orders);
@@ -2411,46 +2564,23 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!query || !query.trim()) return null;
     const clean = query.trim().toLowerCase();
 
-    // Check registered users
-    const matched = registeredUsers.find(
+    const pool = realUsers.length > 0 ? realUsers : registeredUsers;
+    const matched = pool.find(
       (u) =>
-        u.uniqueId.toLowerCase() === clean ||
-        u.username.toLowerCase() === clean ||
-        u.displayName.toLowerCase() === clean ||
-        u.id.toLowerCase() === clean
+        (u.uniqueId && u.uniqueId.toLowerCase() === clean) ||
+        (u.username && u.username.toLowerCase() === clean) ||
+        (u.displayName && u.displayName.toLowerCase() === clean) ||
+        (u.id && u.id.toLowerCase() === clean)
     );
     if (matched) return matched;
 
-    // Check current user
     if (
       currentUser.uniqueId.toLowerCase() === clean ||
       currentUser.username.toLowerCase() === clean ||
-      currentUser.displayName.toLowerCase() === clean
+      currentUser.displayName.toLowerCase() === clean ||
+      currentUser.id.toLowerCase() === clean
     ) {
       return currentUser;
-    }
-
-    // If matches format AM_XXXXXX or alphanumeric, generate dynamic verified preview
-    if (clean.length >= 3) {
-      const cleanId = clean.toUpperCase().startsWith('AM_') ? clean.toUpperCase() : `AM_${Math.floor(100000 + Math.random() * 900000)}`;
-      return {
-        id: `user_${clean}`,
-        uniqueId: cleanId,
-        username: clean.replace(/[^a-z0-9_]/gi, '').toLowerCase() || 'user',
-        displayName: query.trim(),
-        avatar: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80',
-        bio: 'Alpha Mate Active Member',
-        followersCount: 0,
-        followingCount: 0,
-        likesCount: 0,
-        level: 0,
-        xp: 0,
-        nextLevelXp: 50000,
-        vipTier: 0,
-        coins: 0,
-        diamonds: 0,
-        isVerified: false,
-      };
     }
 
     return null;
@@ -2461,49 +2591,67 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     amount: number,
     pin: string
   ): { success: boolean; message: string; tx?: AgencyTransaction } => {
-    // 1. PIN Check
+    if (!agencyProfile || !firebaseUser?.uid) {
+      return {
+        success: false,
+        message: 'Only an Admin-approved Coin Seller Agency owner can send agency coins.',
+      };
+    }
+
+    if (!agencyProfile.pin) {
+      return {
+        success: false,
+        message: 'Please set your 4-digit Agency Security PIN first in Security PIN Settings.',
+      };
+    }
+
     if (pin !== agencyProfile.pin) {
       return { success: false, message: 'Invalid 4-digit security PIN. Please try again.' };
     }
 
-    // 2. Validate Amount
-    if (!amount || amount <= 0) {
+    const safeAmount = Math.floor(Number(amount) || 0);
+    if (!safeAmount || safeAmount <= 0) {
       return { success: false, message: 'Please enter a valid coin amount.' };
     }
 
-    // 3. Balance Check
-    if (amount > agencyProfile.agencyBalance) {
+    if (safeAmount > agencyProfile.agencyBalance) {
       return {
         success: false,
-        message: `Insufficient agency balance. You currently have ${agencyProfile.agencyBalance.toLocaleString()} Coins.`,
+        message: `Insufficient agency stock. Available stock: ${agencyProfile.agencyBalance.toLocaleString()} Coins.`,
       };
     }
 
-    // 4. Resolve recipient
     const recipient = findUserByIdOrUsername(recipientQuery);
     if (!recipient) {
-      return { success: false, message: 'Recipient not found. Please check User ID or username.' };
+      return { success: false, message: 'Real Alpha Mate user not found. Please check the exact User ID or username.' };
     }
 
-    // 5. Deduct agency balance
-    const newAgencyBalance = agencyProfile.agencyBalance - amount;
-    const updatedProfile = {
-      ...agencyProfile,
-      agencyBalance: newAgencyBalance,
-    };
-    saveAgencyProfile(updatedProfile);
+    const prevBalance = agencyProfile.agencyBalance;
+    const newAgencyBalance = Math.max(0, prevBalance - safeAmount);
 
-    // 6. Credit recipient if current user
+    setApprovedAgencyDocs((prev) =>
+      prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: newAgencyBalance } : d))
+    );
+
+    deductCoinSellerAgencyBalanceInFirestore(agencyProfile.agencyId, safeAmount).catch((err) => {
+      console.warn('Failed to deduct Firestore agency stock:', err);
+      setApprovedAgencyDocs((prev) =>
+        prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: prevBalance } : d))
+      );
+    });
+
     if (recipient.id === currentUser.id || recipient.uniqueId === currentUser.uniqueId) {
-      setCoins((c) => c + amount);
+      setCoins((c) => c + safeAmount);
       setCurrentUser((prev) => {
-        const updated = { ...prev, coins: prev.coins + amount };
+        const updated = { ...prev, coins: prev.coins + safeAmount };
         saveUserSession(updated);
+        if (firebaseUser?.uid) {
+          syncUserProfileToFirestore(updated, { background: true }).catch(() => {});
+        }
         return updated;
       });
     }
 
-    // 7. Record transaction
     const newTx: AgencyTransaction = {
       id: `atx_${Date.now()}`,
       type: 'direct_send',
@@ -2511,34 +2659,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       recipientUniqueId: recipient.uniqueId,
       recipientName: recipient.displayName,
       recipientAvatar: recipient.avatar,
-      coins: amount,
+      coins: safeAmount,
       remainingBalance: newAgencyBalance,
       timestamp: 'Just now',
       referenceId: `TX-DIR-${Math.floor(1000 + Math.random() * 9000)}`,
     };
-    const updatedTxs = [newTx, ...agencyTransactions];
-    saveAgencyTransactions(updatedTxs);
+    saveAgencyTransactions([newTx, ...agencyTransactions]);
 
-    // 8. Push notification to inbox
-    const newNotif: NotificationItem = {
-      id: `notif_agency_${Date.now()}`,
-      type: 'system',
-      title: `💎 ${amount.toLocaleString()} Coins Received from ${agencyProfile.agencyName}`,
-      message: `Official Agency transfer confirmed! ${amount.toLocaleString()} coins have been delivered to ID ${recipient.uniqueId}.`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [newNotif, ...prev]);
+    if (recipient.id && !recipient.id.startsWith('user_')) {
+      sendFirestoreNotification({
+        recipientId: recipient.id,
+        type: 'agency',
+        category: 'system',
+        title: `💎 ${safeAmount.toLocaleString()} Coins Sent from ${agencyProfile.agencyName}`,
+        message: `Official Agency transfer recorded for ${safeAmount.toLocaleString()} coins (ID ${recipient.uniqueId}).`,
+        screen: 'wallet',
+      }).catch(() => {});
+    }
 
     return {
       success: true,
-      message: `Successfully sent ${amount.toLocaleString()} Coins to ${recipient.displayName} (${recipient.uniqueId})!`,
+      message: `Successfully transferred ${safeAmount.toLocaleString()} Coins from agency stock to ${recipient.displayName} (${recipient.uniqueId})!`,
       tx: newTx,
     };
   };
 
   const deliverAgencyOrder = (orderId: string, pin: string): { success: boolean; message: string } => {
-    // 1. PIN Check
+    if (!agencyProfile || !firebaseUser?.uid) {
+      return {
+        success: false,
+        message: 'Only an Admin-approved Coin Seller Agency owner can fulfill orders.',
+      };
+    }
+
+    if (!agencyProfile.pin) {
+      return {
+        success: false,
+        message: 'Please configure your 4-digit Agency Security PIN first.',
+      };
+    }
+
     if (pin !== agencyProfile.pin) {
       return { success: false, message: 'Invalid 4-digit security PIN. Please try again.' };
     }
@@ -2553,46 +2713,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
 
     const totalCoinsToCredit = order.coins + (order.bonusCoins || 0);
-
-    // Balance check
-    if (totalCoinsToCredit > agencyProfile.agencyBalance) {
+    if (totalCoinsToCredit <= 0 || totalCoinsToCredit > agencyProfile.agencyBalance) {
       return {
         success: false,
-        message: `Insufficient agency balance to fulfill order. You need ${totalCoinsToCredit.toLocaleString()} Coins.`,
+        message: `Insufficient agency stock to fulfill order. Required: ${totalCoinsToCredit.toLocaleString()} Coins, Available: ${agencyProfile.agencyBalance.toLocaleString()} Coins.`,
       };
     }
 
-    // Deduct agency balance
-    const newAgencyBalance = agencyProfile.agencyBalance - totalCoinsToCredit;
-    const updatedProfile = {
-      ...agencyProfile,
-      agencyBalance: newAgencyBalance,
-    };
-    saveAgencyProfile(updatedProfile);
+    const prevBalance = agencyProfile.agencyBalance;
+    const newAgencyBalance = Math.max(0, prevBalance - totalCoinsToCredit);
+    setApprovedAgencyDocs((prev) =>
+      prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: newAgencyBalance } : d))
+    );
 
-    // If order was for current user, credit current user
+    deductCoinSellerAgencyBalanceInFirestore(agencyProfile.agencyId, totalCoinsToCredit).catch((err) => {
+      console.warn('Order stock deduction failed:', err);
+      setApprovedAgencyDocs((prev) =>
+        prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: prevBalance } : d))
+      );
+    });
+
     if (order.buyerId === currentUser.id || order.buyerUniqueId === currentUser.uniqueId) {
       setCoins((c) => c + totalCoinsToCredit);
       setCurrentUser((prev) => {
         const updated = { ...prev, coins: prev.coins + totalCoinsToCredit };
         saveUserSession(updated);
+        if (firebaseUser?.uid) {
+          syncUserProfileToFirestore(updated, { background: true }).catch(() => {});
+        }
         return updated;
       });
     }
 
-    // Update order status
     const updatedOrders = agencyOrders.map((o) =>
-      o.id === orderId
-        ? {
-            ...o,
-            status: 'delivered' as const,
-            deliveredAt: 'Just now',
-          }
-        : o
+      o.id === orderId ? { ...o, status: 'delivered' as const, deliveredAt: 'Just now' } : o
     );
     saveAgencyOrders(updatedOrders);
 
-    // Record transaction
     const newTx: AgencyTransaction = {
       id: `atx_${Date.now()}`,
       type: 'order_delivery',
@@ -2606,17 +2763,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       referenceId: order.orderNo,
     };
     saveAgencyTransactions([newTx, ...agencyTransactions]);
-
-    // Send Buyer confirmation notification
-    const buyerNotif: NotificationItem = {
-      id: `notif_order_${Date.now()}`,
-      type: 'system',
-      title: `🎉 Coins Delivered! Order ${order.orderNo}`,
-      message: `Your payment was verified. ${totalCoinsToCredit.toLocaleString()} Coins have been credited to your Alpha Mate account by ${agencyProfile.agencyName}.`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [buyerNotif, ...prev]);
 
     return {
       success: true,
@@ -2633,20 +2779,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const updateAgencyProfile = (updates: Partial<CoinSellerAgencyProfile>) => {
-    const updated = { ...agencyProfile, ...updates };
-    saveAgencyProfile(updated);
+    if (!agencyProfile) return;
+    // Security: never allow client settings updates to alter agencyBalance
+    const { agencyBalance: _ignoredBalance, pin: _ignoredPin, ownerUserId: _ignoredOwner, ...safeUpdates } = updates;
+    setApprovedAgencyDocs((prev) =>
+      prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, ...safeUpdates } : d))
+    );
+    updateApprovedAgencySettingsInFirestore(agencyProfile.agencyId, safeUpdates).catch((err) => {
+      console.warn('Update agency profile error:', err);
+    });
   };
 
   const setAgencySecurityPin = (oldPin: string, newPin: string): { success: boolean; message: string } => {
-    if (agencyProfile.isPinSet && oldPin !== agencyProfile.pin) {
+    if (!agencyProfile || !firebaseUser?.uid) {
+      return { success: false, message: 'Approved Coin Seller Agency ownership required.' };
+    }
+    if (agencyProfile.pin && oldPin !== agencyProfile.pin) {
       return { success: false, message: 'Current PIN is incorrect.' };
     }
     if (!/^\d{4}$/.test(newPin)) {
       return { success: false, message: 'New PIN must be exactly 4 digits (0-9).' };
     }
-    const updated = { ...agencyProfile, pin: newPin, isPinSet: true };
-    saveAgencyProfile(updated);
-    return { success: true, message: '4-digit Security PIN updated successfully.' };
+    setStoredAgencyPin(firebaseUser.uid, agencyProfile.agencyId, newPin);
+    setApprovedAgencyDocs((prev) =>
+      prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, isPinSet: true } : d))
+    );
+    updateApprovedAgencySettingsInFirestore(agencyProfile.agencyId, { isPinSet: true }).catch(() => {});
+    return { success: true, message: '4-digit Security PIN saved securely.' };
   };
 
   const createBuyerCoinOrder = (
@@ -2659,96 +2818,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: 'pending',
       createdAt: 'Just now',
     };
-    const updated = [newOrder, ...agencyOrders];
-    saveAgencyOrders(updated);
-
-    // Notification for agency
-    const agencyNotif: NotificationItem = {
-      id: `notif_new_order_${Date.now()}`,
-      type: 'system',
-      title: `📬 New Coin Order from ${newOrder.buyerName}`,
-      message: `Order #${newOrder.orderNo} for ${newOrder.coins.toLocaleString()} Coins (${newOrder.price}) has been placed. Review receipt to deliver.`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [agencyNotif, ...prev]);
-
+    saveAgencyOrders([newOrder, ...agencyOrders]);
     return newOrder;
   };
-
-  // =========================================================================
-  // HOST AGENCY STATE & MANAGEMENT
-  // =========================================================================
-  const ALL_HOST_AGENCIES: HostAgencyProfile[] = [
-    {
-      agencyId: 'agency_royal_talent',
-      agencyName: 'Alpha Royal Talent Agency',
-      agencyCode: 'AM-HT-001',
-      agencyTag: 'ROYAL',
-      tagColor: '#F59E0B',
-      badge: 'Diamond Certified Host Agency',
-      ownerUserId: currentUser?.id || 'current_user',
-      whatsappNumber: '+923008899111',
-      whatsappDisplay: '+92 300 8899111',
-      defaultCommissionRate: 15,
-      minWeeklyHours: 15,
-      slogan: 'Elite live streaming, party room hosting & VIP creator development.',
-      isOfficial: true,
-      activeHostsCount: 3,
-    },
-    {
-      agencyId: 'agency_star_hosts',
-      agencyName: 'Star Nova Agency',
-      agencyCode: 'AM-HT-002',
-      agencyTag: 'NOVA',
-      tagColor: '#EC4899',
-      badge: 'Crown Partner Agency',
-      ownerUserId: 'user_nova_admin',
-      whatsappNumber: '+923017766555',
-      whatsappDisplay: '+92 301 7766555',
-      defaultCommissionRate: 12,
-      minWeeklyHours: 20,
-      slogan: 'Top gaming streamers and party entertainment hosts worldwide.',
-      isOfficial: true,
-      activeHostsCount: 12,
-    },
-    {
-      agencyId: 'agency_phoenix_crew',
-      agencyName: 'Phoenix Live Crew',
-      agencyCode: 'AM-HT-003',
-      agencyTag: 'PHOENIX',
-      tagColor: '#38BDF8',
-      badge: 'Gold Official Agency',
-      ownerUserId: 'user_phoenix_admin',
-      whatsappNumber: '+971508822334',
-      whatsappDisplay: '+971 50 8822334',
-      defaultCommissionRate: 18,
-      minWeeklyHours: 12,
-      slogan: 'International PK battle champions and live concert broadcasters.',
-      isOfficial: true,
-      activeHostsCount: 8,
-    },
-  ];
-
-  const [allHostAgencies, setAllHostAgencies] = useState<HostAgencyProfile[]>(() => {
-    try {
-      const saved = localStorage.getItem('alphamate_all_host_agencies');
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // ignore
-    }
-    return ALL_HOST_AGENCIES;
-  });
-
-  const [hostAgencyProfile, setHostAgencyProfile] = useState<HostAgencyProfile>(() => {
-    try {
-      const saved = localStorage.getItem('alphamate_host_agency_profile');
-      if (saved) return JSON.parse(saved);
-    } catch {
-      // ignore
-    }
-    return ALL_HOST_AGENCIES[0];
-  });
 
   const [agencyHosts, setAgencyHosts] = useState<HostMember[]>(() => {
     try {
@@ -2780,21 +2852,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
-  const [agencyApplications, setAgencyApplications] = useState<AgencyApplication[]>(() => {
-    try {
-      const saved = localStorage.getItem('alphamate_agency_applications');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((a: AgencyApplication) => !String(a?.applicantUserId || '').endsWith('_demo'));
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return [];
-  });
-
   const saveAgencyHosts = (hosts: HostMember[]) => {
     setAgencyHosts(hosts);
     try {
@@ -2813,23 +2870,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const saveAgencyApplications = (apps: AgencyApplication[]) => {
-    setAgencyApplications(apps);
-    try {
-      localStorage.setItem('alphamate_agency_applications', JSON.stringify(apps));
-    } catch {
-      // ignore
-    }
-  };
-
   const updateHostAgencyProfile = (updates: Partial<HostAgencyProfile>) => {
-    const updated = { ...hostAgencyProfile, ...updates };
-    setHostAgencyProfile(updated);
-    try {
-      localStorage.setItem('alphamate_host_agency_profile', JSON.stringify(updated));
-    } catch {
-      // ignore
-    }
+    if (!hostAgencyProfile) return;
+    const { ownerUserId: _ignoredOwner, agencyId: _ignoredId, ...safeUpdates } = updates;
+    setApprovedAgencyDocs((prev) =>
+      prev.map((d) => (d.agencyId === hostAgencyProfile.agencyId ? { ...d, ...safeUpdates } : d))
+    );
+    updateApprovedAgencySettingsInFirestore(hostAgencyProfile.agencyId, safeUpdates).catch((err) => {
+      console.warn('Update host agency profile error:', err);
+    });
   };
 
   const setHostWeeklyTarget = (hostId: string, targetDiamonds: number, targetHours?: number) => {
@@ -2847,19 +2896,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return h;
     });
     saveAgencyHosts(updated);
-
-    const targetHost = agencyHosts.find((h) => h.id === hostId || h.userId === hostId);
-    if (targetHost) {
-      const newNotif: NotificationItem = {
-        id: `notif_target_${Date.now()}`,
-        type: 'system',
-        title: `🎯 Weekly Target Set by ${hostAgencyProfile.agencyName}`,
-        message: `Your new weekly target is ${targetDiamonds.toLocaleString()} Diamonds. Stream live and achieve bonus rewards!`,
-        timestamp: 'Just now',
-        isRead: false,
-      };
-      setNotifications((prev) => [newNotif, ...prev]);
-    }
   };
 
   const updateHostCommission = (hostId: string, commissionRate: number) => {
@@ -2892,32 +2928,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return h;
     });
     saveAgencyHosts(updated);
-
-    const targetHost = agencyHosts.find((h) => h.id === hostId || h.userId === hostId);
-    if (targetHost) {
-      const updateNotif: NotificationItem = {
-        id: `notif_contract_${Date.now()}`,
-        type: 'system',
-        title: `📝 Contract Terms Updated by ${hostAgencyProfile.agencyName}`,
-        message: `Your contract has been updated: Target ${targetDiamonds.toLocaleString()} Diamonds, ${targetHours} hrs/week, Commission ${commissionRate}%.`,
-        timestamp: 'Just now',
-        isRead: false,
-      };
-      setNotifications((prev) => [updateNotif, ...prev]);
-    }
   };
 
   const toggleHostLiveStatus = (hostId: string) => {
-    const updated = agencyHosts.map((h) => {
-      if (h.id === hostId || h.userId === hostId) {
-        const nextLive = !h.isLive;
-        return {
-          ...h,
-          isLive: nextLive,
-        };
-      }
-      return h;
-    });
+    const updated = agencyHosts.map((h) =>
+      h.id === hostId || h.userId === hostId ? { ...h, isLive: !h.isLive } : h
+    );
     saveAgencyHosts(updated);
   };
 
@@ -2927,10 +2943,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     commissionRate = 15,
     targetHours?: number
   ): { success: boolean; message: string } => {
+    if (!hostAgencyProfile) {
+      return { success: false, message: 'Approved Host Agency ownership required.' };
+    }
     const req = hostJoinRequests.find((r) => r.id === requestId);
     if (!req) return { success: false, message: 'Request not found' };
 
-    // Prevent duplicate joining
     const alreadyBound = agencyHosts.some((h) => h.userId === req.userId);
     if (alreadyBound) {
       return { success: false, message: 'This host is already bound to an agency!' };
@@ -2958,10 +2976,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       joinedDate: 'Joined just now',
     };
 
-    const updatedHosts = [newHost, ...agencyHosts];
-    saveAgencyHosts(updatedHosts);
+    saveAgencyHosts([newHost, ...agencyHosts]);
 
-    // Update candidate's user profile with official agency tag
     if (currentUser.id === req.userId || currentUser.uniqueId === req.uniqueId) {
       updateUserProfile({
         agencyId: hostAgencyProfile.agencyId,
@@ -2971,36 +2987,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setRegisteredUsers((prev) =>
-      prev.map((u) =>
-        u.id === req.userId || u.uniqueId === req.uniqueId
-          ? {
-              ...u,
-              agencyId: hostAgencyProfile.agencyId,
-              agencyName: hostAgencyProfile.agencyName,
-              agencyTag: hostAgencyProfile.agencyTag,
-              isAgencyHost: true,
-            }
-          : u
-      )
+    saveHostJoinRequests(
+      hostJoinRequests.map((r) => (r.id === requestId ? { ...r, status: 'approved' as const } : r))
     );
-
-    // Update request status
-    const updatedReqs = hostJoinRequests.map((r) =>
-      r.id === requestId ? { ...r, status: 'approved' as const } : r
-    );
-    saveHostJoinRequests(updatedReqs);
-
-    // Notification to host
-    const joinNotif: NotificationItem = {
-      id: `notif_host_joined_${Date.now()}`,
-      type: 'system',
-      title: `🎉 Welcome to ${hostAgencyProfile.agencyName}!`,
-      message: `Your host application was approved! Official Agency Tag [${hostAgencyProfile.agencyTag}] is now assigned to your profile.`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [joinNotif, ...prev]);
 
     return {
       success: true,
@@ -3009,24 +2998,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const rejectHostJoinRequest = (requestId: string): { success: boolean; message: string } => {
-    const updatedReqs = hostJoinRequests.map((r) =>
-      r.id === requestId ? { ...r, status: 'rejected' as const } : r
+    saveHostJoinRequests(
+      hostJoinRequests.map((r) => (r.id === requestId ? { ...r, status: 'rejected' as const } : r))
     );
-    saveHostJoinRequests(updatedReqs);
     return { success: true, message: 'Host application has been rejected.' };
   };
 
   const removeHostFromAgency = (
     hostId: string,
-    reason?: string
+    _reason?: string
   ): { success: boolean; message: string } => {
     const target = agencyHosts.find((h) => h.id === hostId || h.userId === hostId);
     if (!target) return { success: false, message: 'Host not found' };
 
-    const updatedHosts = agencyHosts.filter((h) => h.id !== hostId && h.userId !== hostId);
-    saveAgencyHosts(updatedHosts);
+    saveAgencyHosts(agencyHosts.filter((h) => h.id !== hostId && h.userId !== hostId));
 
-    // Remove agency tag from user
     if (currentUser.id === target.userId || currentUser.uniqueId === target.uniqueId) {
       updateUserProfile({
         agencyId: undefined,
@@ -3036,54 +3022,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     }
 
-    setRegisteredUsers((prev) =>
-      prev.map((u) =>
-        u.id === target.userId || u.uniqueId === target.uniqueId
-          ? {
-              ...u,
-              agencyId: undefined,
-              agencyName: undefined,
-              agencyTag: undefined,
-              isAgencyHost: false,
-            }
-          : u
-      )
-    );
-
-    const removalNotif: NotificationItem = {
-      id: `notif_host_released_${Date.now()}`,
-      type: 'system',
-      title: `Agency Release Notice`,
-      message: `You have been released from ${target.agencyName}. ${reason ? `Reason: ${reason}` : ''}`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [removalNotif, ...prev]);
-
     return { success: true, message: `${target.displayName} has been released from the agency.` };
   };
 
   const requestHostResignation = (reason: string): { success: boolean; message: string } => {
-    const updatedHosts = agencyHosts.map((h) =>
-      h.userId === currentUser.id || h.uniqueId === currentUser.uniqueId
-        ? {
-            ...h,
-            resignationRequested: true,
-            resignationReason: reason,
-          }
-        : h
+    saveAgencyHosts(
+      agencyHosts.map((h) =>
+        h.userId === currentUser.id || h.uniqueId === currentUser.uniqueId
+          ? { ...h, resignationRequested: true, resignationReason: reason }
+          : h
+      )
     );
-    saveAgencyHosts(updatedHosts);
-
-    const agencyNotif: NotificationItem = {
-      id: `notif_resign_${Date.now()}`,
-      type: 'system',
-      title: `⚠️ Resignation Request from ${currentUser.displayName}`,
-      message: `Host ${currentUser.displayName} (${currentUser.uniqueId}) has requested resignation. Reason: ${reason}`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [agencyNotif, ...prev]);
 
     return {
       success: true,
@@ -3097,7 +3046,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     experience: string,
     expectedHours: number
   ): { success: boolean; message: string } => {
-    // 1. Check if user already bound to an agency
     if (currentUser.agencyId || currentUser.agencyTag) {
       return {
         success: false,
@@ -3105,7 +3053,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const targetAgency = allHostAgencies.find((a) => a.agencyId === agencyId) || hostAgencyProfile;
+    const targetAgency = allHostAgencies.find((a) => a.agencyId === agencyId);
+    if (!targetAgency) {
+      return {
+        success: false,
+        message: 'No active Official Host Agency is selected or available yet.',
+      };
+    }
 
     const newReq: HostJoinRequest = {
       id: `hreq_${Date.now()}`,
@@ -3123,18 +3077,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       status: 'pending',
     };
 
-    const updated = [newReq, ...hostJoinRequests];
-    saveHostJoinRequests(updated);
-
-    const notif: NotificationItem = {
-      id: `notif_new_host_req_${Date.now()}`,
-      type: 'system',
-      title: `📬 New Host Application: ${currentUser.displayName}`,
-      message: `${currentUser.displayName} applied to join ${targetAgency.agencyName}. WhatsApp: ${whatsapp}`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [notif, ...prev]);
+    saveHostJoinRequests([newReq, ...hostJoinRequests]);
 
     return {
       success: true,
@@ -3145,28 +3088,81 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const submitAgencyApplication = (
     data: Omit<AgencyApplication, 'id' | 'status' | 'submittedAt'>
   ): { success: boolean; message: string } => {
+    if (!firebaseUser?.uid || !isEmailVerified) {
+      return {
+        success: false,
+        message: 'Please sign in with a verified Alpha Mate account before applying for an agency.',
+      };
+    }
+
+    // Prevent duplicate pending application for the same agency type
+    const hasPendingSameType = agencyApplications.some(
+      (a) =>
+        a.applicantUserId === firebaseUser.uid &&
+        a.type === data.type &&
+        a.status === 'pending'
+    );
+    if (hasPendingSameType) {
+      return {
+        success: false,
+        message: `You already have a pending ${
+          data.type === 'coin_seller' ? 'Coin Seller Agency' : 'Host Agency'
+        } application awaiting Official Admin approval.`,
+      };
+    }
+
+    // Prevent duplicate application if already approved & active
+    if (data.type === 'coin_seller' && agencyProfile) {
+      return {
+        success: false,
+        message: 'You already operate an approved Coin Seller Agency.',
+      };
+    }
+    if (data.type === 'host_agency' && hostAgencyProfile) {
+      return {
+        success: false,
+        message: 'You already operate an approved Host Agency.',
+      };
+    }
+
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
     const newApp: AgencyApplication = {
       ...data,
-      id: `app_${Date.now()}`,
+      applicantUserId: firebaseUser.uid,
+      id: `app_${nowMs}_${Math.random().toString(36).slice(2, 7)}`,
       status: 'pending',
-      submittedAt: 'Just now',
+      submittedAt: nowIso,
+      createdAtMs: nowMs,
     };
-    const updated = [newApp, ...agencyApplications];
-    saveAgencyApplications(updated);
 
-    const notif: NotificationItem = {
-      id: `notif_agency_app_${Date.now()}`,
-      type: 'system',
-      title: `🏢 Agency Application Received`,
-      message: `Your application to launch "${data.agencyName}" as an official ${data.type === 'coin_seller' ? 'Coin Seller' : 'Host'} Agency has been submitted for official review.`,
-      timestamp: 'Just now',
-      isRead: false,
-    };
-    setNotifications((prev) => [notif, ...prev]);
+    // Optimistically reflect as strictly PENDING ('requested'), never approved
+    setAgencyApplications((prev) => [newApp, ...prev]);
+
+    submitAgencyApplicationToFirestore({
+      id: newApp.id,
+      type: newApp.type,
+      applicantUserId: firebaseUser.uid,
+      applicantName: newApp.applicantName,
+      applicantUniqueId: newApp.applicantUniqueId,
+      agencyName: newApp.agencyName,
+      agencyTag: newApp.agencyTag,
+      whatsapp: newApp.whatsapp,
+      phoneNumber: newApp.phoneNumber,
+      idCardNumber: newApp.idCardNumber,
+      experience: newApp.experience,
+      status: 'pending',
+      submittedAt: nowIso,
+      createdAtMs: nowMs,
+    }).catch((err) => {
+      console.warn('Firestore agency application submit failed:', err);
+      setAgencyApplications((prev) => prev.filter((a) => a.id !== newApp.id));
+    });
 
     return {
       success: true,
-      message: 'Agency application submitted successfully! Our official team will review your credentials and contact you.',
+      message:
+        'Agency request submitted! Status: Pending (Requested). Your agency will remain closed until Official Admin approves it.',
     };
   };
 
@@ -3174,40 +3170,80 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     applicationId: string,
     action: 'approve' | 'reject'
   ): { success: boolean; message: string } => {
-    const app = agencyApplications.find((a) => a.id === applicationId);
-    if (!app) return { success: false, message: 'Application not found' };
-
-    const updated = agencyApplications.map((a) =>
-      a.id === applicationId ? { ...a, status: action === 'approve' ? ('approved' as const) : ('rejected' as const) } : a
-    );
-    saveAgencyApplications(updated);
-
-    if (action === 'approve') {
-      if (app.type === 'host_agency') {
-        const newAgency: HostAgencyProfile = {
-          agencyId: `agency_${Date.now()}`,
-          agencyName: app.agencyName,
-          agencyCode: `AM-HT-${Math.floor(100 + Math.random() * 900)}`,
-          agencyTag: app.agencyTag || 'VIP',
-          badge: 'Diamond Certified Host Agency',
-          ownerUserId: app.applicantUserId,
-          whatsappNumber: app.whatsapp,
-          whatsappDisplay: app.whatsapp,
-          defaultCommissionRate: 15,
-          minWeeklyHours: 15,
-          slogan: 'Official livestreaming agency.',
-          isOfficial: true,
-          activeHostsCount: 0,
-        };
-        setAllHostAgencies((prev) => [newAgency, ...prev]);
-        setHostAgencyProfile(newAgency);
-      }
+    const isOfficialAdmin = firebaseUser?.email?.toLowerCase() === 'alphamateapp@gmail.com';
+    if (!isOfficialAdmin) {
+      return {
+        success: false,
+        message: 'Only Official Alpha Mate Admin (alphamateapp@gmail.com) can approve or reject agency licenses.',
+      };
     }
+
+    const app = agencyApplications.find((a) => a.id === applicationId);
+    if (!app) return { success: false, message: 'Application not found.' };
+
+    const nextStatus = action === 'approve' ? ('approved' as const) : ('rejected' as const);
+    setAgencyApplications((prev) =>
+      prev.map((a) => (a.id === applicationId ? { ...a, status: nextStatus } : a))
+    );
+
+    adminReviewAgencyApplicationInFirestore(app, action)
+      .then(() => {
+        if (app.applicantUserId) {
+          sendFirestoreNotification({
+            recipientId: app.applicantUserId,
+            type: 'agency',
+            category: 'system',
+            title:
+              action === 'approve'
+                ? `🎉 Agency License Approved: ${app.agencyName}`
+                : `Agency Application Update: ${app.agencyName}`,
+            message:
+              action === 'approve'
+                ? `Your ${app.type === 'coin_seller' ? 'Coin Seller Agency' : 'Host Agency'} "${app.agencyName}" is now approved by Official Admin! Coin stock starts at 0 until Admin allocation.`
+                : `Your application for "${app.agencyName}" was declined by Official Admin review.`,
+            screen: 'agency_management',
+          }).catch(() => {});
+        }
+      })
+      .catch((err) => {
+        console.warn('Admin agency review failed:', err);
+        setAgencyApplications((prev) =>
+          prev.map((a) => (a.id === applicationId ? { ...a, status: app.status } : a))
+        );
+      });
 
     return {
       success: true,
-      message: `Agency application #${applicationId} ${action === 'approve' ? 'approved' : 'rejected'}.`,
+      message: `Agency application ${action === 'approve' ? 'approved (initial coin stock: 0)' : 'rejected'}.`,
     };
+  };
+
+  const adminAllocateAgencyCoins = async (
+    agencyId: string,
+    coinsToAdd: number
+  ): Promise<{ success: boolean; message: string }> => {
+    const isOfficialAdmin = firebaseUser?.email?.toLowerCase() === 'alphamateapp@gmail.com';
+    if (!isOfficialAdmin) {
+      return {
+        success: false,
+        message: 'Only Official Alpha Mate Admin can allocate agency coin stock.',
+      };
+    }
+    try {
+      const nextBalance = await adminAllocateAgencyCoinsInFirestore(agencyId, coinsToAdd);
+      setApprovedAgencyDocs((prev) =>
+        prev.map((d) => (d.agencyId === agencyId ? { ...d, agencyBalance: nextBalance } : d))
+      );
+      return {
+        success: true,
+        message: `Allocated +${coinsToAdd.toLocaleString()} Coins. New Agency Stock: ${nextBalance.toLocaleString()} Coins.`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to allocate coin stock to agency.',
+      };
+    }
   };
 
   useEffect(() => {
@@ -4816,7 +4852,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!res.success) {
       return {
         success: false,
-        message: `You need ${coinsAmount.toLocaleString()} Coins to run this demo 60/40 split test. Top up Coins above first.`,
+        message: `You need ${coinsAmount.toLocaleString()} Coins to run this demo 60/40 split test. Get Coins through an Admin-approved Coin Seller Agency first.`,
         hostDiamonds: res.hostDiamonds,
         appShareCoins: res.appShareCoins,
       };
@@ -5447,29 +5483,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setTransactions((prev) => [newTx, ...prev]);
   };
 
-  const rechargeCoins = async (amount: number, priceUSD: number, paymentMethod: string): Promise<boolean> => {
-    // realistic checkout delay
-    await new Promise((res) => setTimeout(res, 800));
-    setCoins((prev) => prev + amount);
-    setCurrentUser((prev) => {
-      const updated = { ...prev, coins: (prev.coins || 0) + amount };
-      try {
-        localStorage.setItem('alphamate_current_user', JSON.stringify(updated));
-      } catch {}
-      return updated;
-    });
-
-    const newTx: WalletTransaction = {
-      id: `tx_${Date.now()}`,
-      type: 'recharge',
-      amount,
-      currency: 'coins',
-      title: `Coin Top Up (${amount.toLocaleString()} Coins via ${paymentMethod})`,
-      date: 'Just now',
-      status: 'completed',
-    };
-    setTransactions((prev) => [newTx, ...prev]);
-    return true;
+  const rechargeCoins = async (_amount: number, _priceUSD: number, _paymentMethod: string): Promise<boolean> => {
+    // Online coin purchasing is disabled (Coming Soon) because payment gateways are not attached yet.
+    return false;
   };
 
   const withdrawDiamonds = (
@@ -5939,6 +5955,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         customLogoUrl,
         setCustomLogoUrl,
         agencyProfile,
+        officialCoinSellerAgencies,
+        officialCoinSellerProfiles,
         agencyOrders,
         agencyTransactions,
         sendAgencyCoins,
@@ -5965,6 +5983,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         submitHostJoinRequest,
         submitAgencyApplication,
         reviewAgencyApplication,
+        adminAllocateAgencyCoins,
       }}
     >
       {children}

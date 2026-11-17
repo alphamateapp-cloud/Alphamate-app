@@ -396,66 +396,76 @@ export const JoinAgencyModal: React.FC<JoinAgencyModalProps> = ({
                     Available Official Host Agencies ({allHostAgencies.length})
                   </span>
 
-                  {allHostAgencies.map((agency) => (
-                    <div
-                      key={agency.agencyId}
-                      className="p-3.5 rounded-2xl bg-[#150A2B] hover:bg-[#1B0D36] border border-white/10 hover:border-amber-400/40 transition-all flex flex-col justify-between gap-3 shadow-sm"
-                    >
-                      <div className="flex items-start justify-between gap-2.5">
-                        <div className="flex items-center gap-2.5">
-                          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#7928CA] to-[#EC4899] flex items-center justify-center text-white shadow font-black text-sm">
-                            {agency.agencyTag.slice(0, 2)}
-                          </div>
-                          <div>
-                            <div className="flex items-center gap-1.5 flex-wrap">
-                              <h4 className="text-xs sm:text-sm font-black text-white">{agency.agencyName}</h4>
-                              <span className="px-1.5 py-0.2 rounded bg-amber-400 text-black text-[8.5px] font-black uppercase">
-                                [{agency.agencyTag}]
-                              </span>
-                            </div>
-                            <p className="text-[10px] text-zinc-300 mt-0.5 line-clamp-1">{agency.slogan}</p>
-                          </div>
-                        </div>
-
-                        <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[8.5px] font-bold shrink-0">
-                          Verified
-                        </span>
-                      </div>
-
-                      {/* Agency Stats Pills */}
-                      <div className="grid grid-cols-2 gap-2 text-[10px] pt-1 border-t border-white/5">
-                        <div className="flex items-center gap-1 text-zinc-300">
-                          <Clock className="w-3 h-3 text-amber-400" />
-                          <span>Min {agency.minWeeklyHours} hrs/week</span>
-                        </div>
-                        <div className="flex items-center gap-1 text-zinc-300 justify-end">
-                          <Award className="w-3 h-3 text-emerald-400" />
-                          <span>{100 - agency.defaultCommissionRate}% Host Share</span>
-                        </div>
-                      </div>
-
-                      {/* Action Buttons */}
-                      <div className="flex items-center gap-2 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => handleWhatsAppContact(agency)}
-                          className="flex-1 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-zinc-200 text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
-                        >
-                          <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>WhatsApp 💬</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setSelectedAgency(agency)}
-                          className="flex-1 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 text-black text-[10.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 shadow cursor-pointer hover:brightness-110 active:scale-95 transition-all"
-                        >
-                          <Send className="w-3.5 h-3.5" />
-                          <span>Join Agency</span>
-                        </button>
-                      </div>
+                  {allHostAgencies.length === 0 ? (
+                    <div className="p-6 rounded-2xl bg-[#150A2B] border border-white/10 text-center space-y-2">
+                      <Users className="w-8 h-8 text-zinc-500 mx-auto" />
+                      <p className="text-xs font-bold text-white">No Official Host Agencies Available Yet</p>
+                      <p className="text-[10.5px] text-zinc-400 leading-relaxed">
+                        Verified Host Agencies will appear here only after Official Admin reviews and approves their application.
+                      </p>
                     </div>
-                  ))}
+                  ) : (
+                    allHostAgencies.map((agency) => (
+                      <div
+                        key={agency.agencyId}
+                        className="p-3.5 rounded-2xl bg-[#150A2B] hover:bg-[#1B0D36] border border-white/10 hover:border-amber-400/40 transition-all flex flex-col justify-between gap-3 shadow-sm"
+                      >
+                        <div className="flex items-start justify-between gap-2.5">
+                          <div className="flex items-center gap-2.5">
+                            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-[#7928CA] to-[#EC4899] flex items-center justify-center text-white shadow font-black text-sm">
+                              {agency.agencyTag.slice(0, 2)}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <h4 className="text-xs sm:text-sm font-black text-white">{agency.agencyName}</h4>
+                                <span className="px-1.5 py-0.2 rounded bg-amber-400 text-black text-[8.5px] font-black uppercase">
+                                  [{agency.agencyTag}]
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-zinc-300 mt-0.5 line-clamp-1">{agency.slogan}</p>
+                            </div>
+                          </div>
+
+                          <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[8.5px] font-bold shrink-0">
+                            Verified
+                          </span>
+                        </div>
+
+                        {/* Agency Stats Pills */}
+                        <div className="grid grid-cols-2 gap-2 text-[10px] pt-1 border-t border-white/5">
+                          <div className="flex items-center gap-1 text-zinc-300">
+                            <Clock className="w-3 h-3 text-amber-400" />
+                            <span>Min {agency.minWeeklyHours} hrs/week</span>
+                          </div>
+                          <div className="flex items-center gap-1 text-zinc-300 justify-end">
+                            <Award className="w-3 h-3 text-emerald-400" />
+                            <span>{100 - agency.defaultCommissionRate}% Host Share</span>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons */}
+                        <div className="flex items-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => handleWhatsAppContact(agency)}
+                            className="flex-1 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-zinc-200 text-[10.5px] font-bold flex items-center justify-center gap-1 cursor-pointer transition-colors"
+                          >
+                            <MessageCircle className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>WhatsApp 💬</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => setSelectedAgency(agency)}
+                            className="flex-1 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 text-black text-[10.5px] font-black uppercase tracking-wider flex items-center justify-center gap-1 shadow cursor-pointer hover:brightness-110 active:scale-95 transition-all"
+                          >
+                            <Send className="w-3.5 h-3.5" />
+                            <span>Join Agency</span>
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
                 </div>
               )}
             </div>

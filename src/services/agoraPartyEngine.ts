@@ -758,12 +758,23 @@ class AgoraPartyEngine {
           ANS: true,
           AGC: true,
         });
+        if (this.manualStop || this.roomId !== roomId || !this.canPublish) {
+          try {
+            micTrack.stop();
+            micTrack.close();
+          } catch {
+            // ignore
+          }
+          await this.switchWebClientToAudience(roomId, payload).catch(() => {});
+          return;
+        }
         this.webLocalAudioTrack = micTrack;
         await micTrack.setMuted(this.muted);
         await client.publish([micTrack]);
       } catch (micErr: any) {
         this.canPublish = false;
         this.muted = true;
+        await this.unpublishAndCloseWebLocalAudioTrack();
         await client.setClientRole('audience').catch(() => {});
         throw Object.assign(new Error(micErr?.message || 'Microphone access denied.'), {
           code: 'MIC_PERMISSION_REQUIRED',
@@ -874,41 +885,87 @@ class AgoraPartyEngine {
         }
       } else {
         // CRITICAL: Agora Web SDK forbids setClientRole('audience') while any stream is still published.
-        await this.unpublishAndCloseWebLocalAudioTrack();
-        if (this.roomId !== roomId || this.manualStop) return;
-        await this.webClient.setClientRole('audience');
-        await this.webClient.renewToken(payload.token).catch(() => {});
+        await this.switchWebClientToAudience(roomId, payload);
       }
     }
     this.emitSpeakingSnapshot();
   }
 
-  private async unpublishAndCloseWebLocalAudioTrack() {
-    if (this.webClient) {
-      const tracksToUnpublish: any[] = [];
-      if (this.webLocalAudioTrack) {
-        tracksToUnpublish.push(this.webLocalAudioTrack);
-      }
-      if (Array.isArray(this.webClient.localTracks)) {
-        for (const t of this.webClient.localTracks) {
-          if (t && !tracksToUnpublish.includes(t)) {
-            tracksToUnpublish.push(t);
-          }
-        }
-      }
-      if (tracksToUnpublish.length > 0) {
-        await this.webClient.unpublish(tracksToUnpublish).catch(() => {});
+  private async switchWebClientToAudience(
+    roomId: string,
+    payload: { appId: string; channelName: string; uid: number; token: string }
+  ) {
+    if (!this.webClient) return;
+
+    await this.unpublishAndCloseWebLocalAudioTrack();
+    if (this.roomId !== roomId || this.manualStop || !this.webClient) return;
+
+    try {
+      await this.webClient.setClientRole('audience');
+      await this.webClient.renewToken(payload.token).catch(() => {});
+      return;
+    } catch (err: any) {
+      const msg = String(err?.message || err?.code || '');
+      if (!/publishing stream|audience|INVALID_OPERATION/i.test(msg)) {
+        throw err;
       }
     }
-    if (this.webLocalAudioTrack) {
+
+    // Retry once after letting any in-flight publish/unpublish mutex settle
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    if (this.roomId !== roomId || this.manualStop || !this.webClient) return;
+    await this.unpublishAndCloseWebLocalAudioTrack();
+    if (this.roomId !== roomId || this.manualStop || !this.webClient) return;
+
+    try {
+      await this.webClient.setClientRole('audience');
+      await this.webClient.renewToken(payload.token).catch(() => {});
+      return;
+    } catch {
+      // Fallback: if Agora Web SDK _p2pChannel still holds a stale localTrackMap entry
+      // (e.g. unpublish happened while reconnecting), cleanly rejoin as audience.
+      if (this.roomId !== roomId || this.manualStop || !this.webClient) return;
+      await this.webClient.leave().catch(() => {});
+      this.webJoined = false;
+      if (this.roomId !== roomId || this.manualStop || !this.webClient) return;
+      await this.webClient.setClientRole('audience');
+      await this.webClient.join(
+        payload.appId,
+        payload.channelName,
+        payload.token,
+        Number(payload.uid)
+      );
+      this.webJoined = true;
+    }
+  }
+
+  private async unpublishAndCloseWebLocalAudioTrack() {
+    const trackedLocal = this.webLocalAudioTrack;
+    const clientTracks =
+      this.webClient && Array.isArray(this.webClient.localTracks)
+        ? [...this.webClient.localTracks]
+        : [];
+
+    if (this.webClient && this.webJoined) {
+      // Calling unpublish() with no arguments instructs Agora SDK to unpublish ALL
+      // tracks in _p2pChannel.getAllTracks(true), avoiding stale reference mismatches.
+      await this.webClient.unpublish().catch(() => {});
+      if (Array.isArray(this.webClient.localTracks) && this.webClient.localTracks.length > 0) {
+        await this.webClient.unpublish([...this.webClient.localTracks]).catch(() => {});
+      }
+    }
+
+    const toClose = new Set<any>(clientTracks);
+    if (trackedLocal) toClose.add(trackedLocal);
+    toClose.forEach((track) => {
       try {
-        this.webLocalAudioTrack.stop();
-        this.webLocalAudioTrack.close();
+        track?.stop?.();
+        track?.close?.();
       } catch {
         // ignore
       }
-      this.webLocalAudioTrack = null;
-    }
+    });
+    this.webLocalAudioTrack = null;
   }
 
   public stopPartyVoice(roomId?: string, force = false): Promise<void> {

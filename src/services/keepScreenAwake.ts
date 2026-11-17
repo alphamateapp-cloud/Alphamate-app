@@ -12,27 +12,62 @@ type WakeLockSentinelLike = {
   addEventListener?: (type: 'release', listener: () => void) => void;
 };
 
-/** Keeps the display awake only while the user is in a live broadcast or party room. */
+/** Keeps the display awake while the user is in any Live Stream, PK Battle, or Party Room (host, guest, viewer, or audience). */
 export class KeepScreenAwakeController {
   private active = false;
   private wakeLock: WakeLockSentinelLike | null = null;
-  private onVisibilityChange = () => {
-    if (this.active && document.visibilityState === 'visible') void this.enable();
+  private listenersAttached = false;
+  private requestInFlight = false;
+
+  private reacquireIfVisible = () => {
+    if (this.active && (typeof document === 'undefined' || document.visibilityState === 'visible')) {
+      void this.enable();
+    }
   };
 
+  private attachListeners() {
+    if (this.listenersAttached || typeof document === 'undefined' || typeof window === 'undefined') return;
+    this.listenersAttached = true;
+    document.addEventListener('visibilitychange', this.reacquireIfVisible);
+    window.addEventListener('focus', this.reacquireIfVisible);
+    window.addEventListener('pageshow', this.reacquireIfVisible);
+    window.addEventListener('pointerdown', this.reacquireIfVisible, { passive: true });
+    window.addEventListener('touchstart', this.reacquireIfVisible, { passive: true });
+  }
+
+  private detachListeners() {
+    if (!this.listenersAttached || typeof document === 'undefined' || typeof window === 'undefined') return;
+    this.listenersAttached = false;
+    document.removeEventListener('visibilitychange', this.reacquireIfVisible);
+    window.removeEventListener('focus', this.reacquireIfVisible);
+    window.removeEventListener('pageshow', this.reacquireIfVisible);
+    window.removeEventListener('pointerdown', this.reacquireIfVisible);
+    window.removeEventListener('touchstart', this.reacquireIfVisible);
+  }
+
   async setActive(active: boolean): Promise<void> {
-    this.active = active;
-    if (active) {
-      document.addEventListener('visibilitychange', this.onVisibilityChange);
+    const nextActive = Boolean(active);
+    if (this.active === nextActive) {
+      if (nextActive) {
+        await this.enable();
+      }
+      return;
+    }
+
+    this.active = nextActive;
+    if (nextActive) {
+      this.attachListeners();
       await this.enable();
       return;
     }
-    document.removeEventListener('visibilitychange', this.onVisibilityChange);
+
+    this.detachListeners();
     await this.disable();
   }
 
   private async enable(): Promise<void> {
     if (!this.active) return;
+
     if (Capacitor.isNativePlatform()) {
       try {
         await NativeKeepScreenOn.setEnabled({ enabled: true });
@@ -42,18 +77,38 @@ export class KeepScreenAwakeController {
       return;
     }
 
+    if (typeof navigator === 'undefined') return;
     const wakeLockApi = (navigator as Navigator & {
       wakeLock?: { request: (type: 'screen') => Promise<WakeLockSentinelLike> };
     }).wakeLock;
-    if (!wakeLockApi || this.wakeLock && !this.wakeLock.released) return;
+    if (!wakeLockApi) return;
+    if ((this.wakeLock && !this.wakeLock.released) || this.requestInFlight) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+
+    this.requestInFlight = true;
     try {
-      this.wakeLock = await wakeLockApi.request('screen');
-      this.wakeLock.addEventListener?.('release', () => {
-        this.wakeLock = null;
-        if (this.active && document.visibilityState === 'visible') void this.enable();
+      const sentinel = await wakeLockApi.request('screen');
+      if (!this.active) {
+        try {
+          await sentinel.release();
+        } catch {
+          // ignore
+        }
+        return;
+      }
+      this.wakeLock = sentinel;
+      sentinel.addEventListener?.('release', () => {
+        if (this.wakeLock === sentinel) {
+          this.wakeLock = null;
+        }
+        if (this.active && document.visibilityState === 'visible') {
+          void this.enable();
+        }
       });
-    } catch (error) {
-      console.warn('[KeepScreenAwake] Browser screen wake lock unavailable:', error);
+    } catch {
+      // Browser may defer wake lock until a user gesture or page focus; listener will retry automatically.
+    } finally {
+      this.requestInFlight = false;
     }
   }
 
@@ -66,8 +121,14 @@ export class KeepScreenAwakeController {
       }
     }
     if (this.wakeLock && !this.wakeLock.released) {
-      try { await this.wakeLock.release(); } catch {}
+      try {
+        await this.wakeLock.release();
+      } catch {
+        // ignore
+      }
     }
     this.wakeLock = null;
   }
 }
+
+export const keepScreenAwake = new KeepScreenAwakeController();

@@ -44,9 +44,7 @@ export const CreateCoinOrderModal: React.FC<CreateCoinOrderModalProps> = ({
   const [paymentMethod, setPaymentMethod] = useState(PAYMENT_METHODS[0]);
   const [buyerUniqueId, setBuyerUniqueId] = useState(currentUser.uniqueId);
   const [note, setNote] = useState('');
-  const [receiptImage, setReceiptImage] = useState<string>(
-    'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=600&q=80'
-  );
+  const [receiptImage, setReceiptImage] = useState<string>('');
   const [isUploading, setIsUploading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
@@ -243,17 +241,29 @@ export const CreateCoinOrderModal: React.FC<CreateCoinOrderModalProps> = ({
                 onClick={() => fileInputRef.current?.click()}
                 className="rounded-2xl border border-dashed border-amber-400/50 bg-black/30 p-2.5 flex items-center gap-3 cursor-pointer hover:bg-black/40 transition-colors"
               >
-                <img
-                  src={receiptImage}
-                  alt="Receipt Preview"
-                  className="w-16 h-12 rounded-xl object-cover border border-white/10 shrink-0"
-                />
+                {receiptImage ? (
+                  <img
+                    src={receiptImage}
+                    alt="Receipt Preview"
+                    className="w-16 h-12 rounded-xl object-cover border border-white/10 shrink-0"
+                  />
+                ) : (
+                  <div className="w-16 h-12 rounded-xl border border-white/10 bg-white/5 flex items-center justify-center shrink-0 text-amber-300">
+                    <Upload className="w-5 h-5" />
+                  </div>
+                )}
                 <div className="min-w-0 flex-1">
                   <span className="text-xs font-bold text-white block truncate">
-                    {isUploading ? 'Compressing Slip...' : 'Payment Slip Attached'}
+                    {isUploading
+                      ? 'Compressing Slip...'
+                      : receiptImage
+                      ? 'Payment Slip Attached'
+                      : 'Attach Transfer Receipt Image'}
                   </span>
                   <span className="text-[10px] text-zinc-400">
-                    Click to replace with your transfer screenshot
+                    {receiptImage
+                      ? 'Click to replace with another transfer screenshot'
+                      : 'Required: upload screenshot of your payment slip'}
                   </span>
                 </div>
                 <div className="w-8 h-8 rounded-xl bg-amber-400/20 text-amber-300 flex items-center justify-center shrink-0">

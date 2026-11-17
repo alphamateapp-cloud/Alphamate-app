@@ -277,6 +277,43 @@ export const PartyRoomsScreen: React.FC = () => {
     return audioFilter.subscribe(setActiveVoiceFilter);
   }, []);
 
+  // Parent-side wall-clock fail-safe: ensures Android WebView timer throttling never leaves a gift stuck
+  useEffect(() => {
+    if (!activePartyGiftAnimation) return;
+    const coins = Number(
+      activePartyGiftAnimation.gift?.costInCoins ?? activePartyGiftAnimation.gift?.coins ?? 0
+    );
+    const maxMs = coins <= 100 ? 3000 : 8000;
+    const startedAt = Date.now();
+    const eventId = activePartyGiftAnimation.id;
+    let cleared = false;
+
+    const clearIfExpired = (force = false) => {
+      if (cleared) return;
+      if (force || Date.now() - startedAt >= maxMs) {
+        cleared = true;
+        setActivePartyGiftAnimation((prev) => (prev?.id === eventId ? null : prev));
+      }
+    };
+
+    const failSafeTimeout = setTimeout(() => clearIfExpired(true), maxMs);
+    const failSafePoll = setInterval(() => clearIfExpired(false), 500);
+    const onResume = () => clearIfExpired(false);
+
+    window.addEventListener('focus', onResume);
+    window.addEventListener('pageshow', onResume);
+    document.addEventListener('visibilitychange', onResume);
+
+    return () => {
+      cleared = true;
+      clearTimeout(failSafeTimeout);
+      clearInterval(failSafePoll);
+      window.removeEventListener('focus', onResume);
+      window.removeEventListener('pageshow', onResume);
+      document.removeEventListener('visibilitychange', onResume);
+    };
+  }, [activePartyGiftAnimation?.id]);
+
   // Reset party gift overlay & stale banners whenever entering, switching, or leaving a Party Room
   useEffect(() => {
     partyJoinedAtRef.current = Date.now();

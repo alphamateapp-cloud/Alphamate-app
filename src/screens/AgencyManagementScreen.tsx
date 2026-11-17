@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ChevronLeft,
   Coins,
@@ -55,6 +55,8 @@ export const AgencyManagementScreen: React.FC = () => {
     hostAgencyProfile,
     agencyHosts,
     hostJoinRequests,
+    agencyApplications,
+    firebaseUser,
     setHostWeeklyTarget,
     updateHostCommission,
     updateHostContract,
@@ -117,16 +119,56 @@ export const AgencyManagementScreen: React.FC = () => {
   const [directSuccess, setDirectSuccess] = useState<string | null>(null);
 
   // Settings form (Coin Seller)
-  const [editWhatsApp, setEditWhatsApp] = useState(agencyProfile.whatsappDisplay || agencyProfile.whatsappNumber);
-  const [editSlogan, setEditSlogan] = useState(agencyProfile.slogan);
+  const [editWhatsApp, setEditWhatsApp] = useState(
+    agencyProfile?.whatsappDisplay || agencyProfile?.whatsappNumber || ''
+  );
+  const [editSlogan, setEditSlogan] = useState(agencyProfile?.slogan || '');
   const [settingsSavedToast, setSettingsSavedToast] = useState(false);
 
   // Settings form (Host Agency)
-  const [editHostWhatsApp, setEditHostWhatsApp] = useState(hostAgencyProfile.whatsappDisplay || hostAgencyProfile.whatsappNumber);
-  const [editHostSlogan, setEditHostSlogan] = useState(hostAgencyProfile.slogan);
-  const [editDefaultCommission, setEditDefaultCommission] = useState(hostAgencyProfile.defaultCommissionRate || 15);
-  const [editMinHours, setEditMinHours] = useState(hostAgencyProfile.minWeeklyHours || 15);
+  const [editHostWhatsApp, setEditHostWhatsApp] = useState(
+    hostAgencyProfile?.whatsappDisplay || hostAgencyProfile?.whatsappNumber || ''
+  );
+  const [editHostSlogan, setEditHostSlogan] = useState(hostAgencyProfile?.slogan || '');
+  const [editDefaultCommission, setEditDefaultCommission] = useState(
+    hostAgencyProfile?.defaultCommissionRate || 15
+  );
+  const [editMinHours, setEditMinHours] = useState(hostAgencyProfile?.minWeeklyHours || 15);
   const [hostSettingsSavedToast, setHostSettingsSavedToast] = useState(false);
+
+  useEffect(() => {
+    if (agencyProfile) {
+      setEditWhatsApp(agencyProfile.whatsappDisplay || agencyProfile.whatsappNumber || '');
+      setEditSlogan(agencyProfile.slogan || '');
+    }
+  }, [agencyProfile?.agencyId, agencyProfile?.whatsappDisplay, agencyProfile?.whatsappNumber, agencyProfile?.slogan]);
+
+  useEffect(() => {
+    if (hostAgencyProfile) {
+      setEditHostWhatsApp(hostAgencyProfile.whatsappDisplay || hostAgencyProfile.whatsappNumber || '');
+      setEditHostSlogan(hostAgencyProfile.slogan || '');
+      setEditDefaultCommission(hostAgencyProfile.defaultCommissionRate || 15);
+      setEditMinHours(hostAgencyProfile.minWeeklyHours || 15);
+    }
+  }, [
+    hostAgencyProfile?.agencyId,
+    hostAgencyProfile?.whatsappDisplay,
+    hostAgencyProfile?.whatsappNumber,
+    hostAgencyProfile?.slogan,
+    hostAgencyProfile?.defaultCommissionRate,
+    hostAgencyProfile?.minWeeklyHours,
+  ]);
+
+  const myCoinSellerApps = agencyApplications.filter(
+    (app) =>
+      app.type === 'coin_seller' &&
+      (!firebaseUser?.uid || app.applicantUserId === firebaseUser.uid || !app.applicantUserId)
+  );
+  const myHostAgencyApps = agencyApplications.filter(
+    (app) =>
+      app.type === 'host_agency' &&
+      (!firebaseUser?.uid || app.applicantUserId === firebaseUser.uid || !app.applicantUserId)
+  );
 
   // Filtered orders
   const filteredOrders = agencyOrders.filter((o) => {
@@ -168,12 +210,12 @@ export const AgencyManagementScreen: React.FC = () => {
   const handleOpenApprovalModal = (req: HostJoinRequest) => {
     setApprovingCandidate(req);
     setCandidateDiamonds(500000);
-    setCandidateCommission(hostAgencyProfile.defaultCommissionRate || 15);
-    setCandidateHours(req.expectedHours || hostAgencyProfile.minWeeklyHours || 20);
+    setCandidateCommission(hostAgencyProfile?.defaultCommissionRate || 15);
+    setCandidateHours(req.expectedHours || hostAgencyProfile?.minWeeklyHours || 20);
   };
 
   const handleConfirmApproval = () => {
-    if (!approvingCandidate) return;
+    if (!approvingCandidate || !hostAgencyProfile) return;
     const res = approveHostJoinRequest(
       approvingCandidate.id,
       candidateDiamonds,
@@ -305,7 +347,9 @@ export const AgencyManagementScreen: React.FC = () => {
   const handleContactHostWhatsApp = (whatsappNumber: string, hostName: string) => {
     const clean = whatsappNumber.replace(/[^0-9]/g, '');
     const msg = encodeURIComponent(
-      `Hello ${hostName}! I am contacting you from ${hostAgencyProfile.agencyName} regarding your host agreement and weekly target on Alpha Mate.`
+      `Hello ${hostName}! I am contacting you from ${
+        hostAgencyProfile?.agencyName || 'Official Host Agency'
+      } regarding your host agreement and weekly target on Alpha Mate.`
     );
     window.open(`https://wa.me/${clean}?text=${msg}`, '_blank', 'noopener,noreferrer');
   };
@@ -329,7 +373,9 @@ export const AgencyManagementScreen: React.FC = () => {
               </span>
             </div>
             <p className="text-[10px] text-zinc-400 truncate max-w-[200px] sm:max-w-[280px]">
-              {activeBranch === 'coin_seller' ? agencyProfile.agencyName : hostAgencyProfile.agencyName}
+              {activeBranch === 'coin_seller'
+                ? agencyProfile?.agencyName || 'Apply for Coin Seller Agency'
+                : hostAgencyProfile?.agencyName || 'Apply for Host Agency'}
             </p>
           </div>
         </div>
@@ -342,18 +388,20 @@ export const AgencyManagementScreen: React.FC = () => {
             title="Apply for an Official Agency License"
           >
             <Building2 className="w-3.5 h-3.5 text-pink-400" />
-            <span className="hidden sm:inline">Apply License</span>
+            <span className="hidden sm:inline">Apply for Agency</span>
             <span className="sm:hidden">Apply</span>
           </button>
 
-          <button
-            onClick={() => setIsPinModalOpen(true)}
-            className="px-2.5 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-bold text-amber-300 flex items-center gap-1 transition-colors cursor-pointer"
-            title="4-Digit Security PIN Settings"
-          >
-            <Lock className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">PIN</span>
-          </button>
+          {activeBranch === 'coin_seller' && agencyProfile && (
+            <button
+              onClick={() => setIsPinModalOpen(true)}
+              className="px-2.5 py-1 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-[10px] font-bold text-amber-300 flex items-center gap-1 transition-colors cursor-pointer"
+              title="4-Digit Security PIN Settings"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">PIN</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -401,9 +449,90 @@ export const AgencyManagementScreen: React.FC = () => {
           label="Refreshing agency data..."
           onRefresh={() => refreshScope('agency_management')}
         />
-        {activeBranch === 'host_agency' ? (
+        {activeBranch === 'host_agency' ? !hostAgencyProfile ? (
           /* =========================================================================
-             BRANCH 2: HOST AGENCY (TALENT ROSTER, WEEKLY TARGETS, COMMISSION & REQUESTS)
+             BRANCH 2 (UNAPPROVED): APPLY FOR HOST AGENCY + PENDING / REQUESTED STATUS
+             ========================================================================= */
+          <div className="space-y-4 animate-fade-in">
+            <div className="rounded-3xl p-5 bg-gradient-to-b from-[#2A0E4E] via-[#1B0A33] to-[#100520] border border-[#A855F7]/45 shadow-xl space-y-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-[#7928CA] to-[#EC4899] flex items-center justify-center text-white shadow-lg shrink-0">
+                    <Users className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <span className="px-2 py-0.5 rounded-full bg-purple-500/20 border border-purple-400/30 text-purple-200 text-[9px] font-black uppercase tracking-wider">
+                      Official Approval Required
+                    </span>
+                    <h2 className="text-lg font-black text-white mt-1">Host Agency Portal</h2>
+                    <p className="text-[11px] text-zinc-300">
+                      Host Agencies are never pre-opened. Submit an application for Official Admin approval.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-black/35 border border-white/10 text-[11px] text-zinc-300 space-y-1.5 leading-relaxed">
+                <p>
+                  • Your application stays <strong className="text-amber-300">Pending (Requested)</strong> until reviewed by Alpha Mate Official Admin.
+                </p>
+                <p>
+                  • Once approved, you can manage your talent roster, set weekly targets, and bind your official agency tag.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsApplyAgencyModalOpen(true)}
+                className="w-full h-12 rounded-2xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg hover:brightness-110 active:scale-95 transition-all cursor-pointer"
+              >
+                <Building2 className="w-4 h-4" />
+                <span>Apply for Agency</span>
+              </button>
+            </div>
+
+            {myHostAgencyApps.length > 0 && (
+              <div className="space-y-2.5">
+                <h3 className="text-xs font-black uppercase tracking-wider text-zinc-300 px-1">
+                  My Host Agency Requests ({myHostAgencyApps.length})
+                </h3>
+                {myHostAgencyApps.map((app) => (
+                  <div
+                    key={app.id}
+                    className="p-4 rounded-2xl bg-[#150A2B] border border-white/10 flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm font-black text-white truncate">{app.agencyName}</span>
+                        {app.agencyTag && (
+                          <span className="px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-300 text-[9px] font-mono font-bold">
+                            [{app.agencyTag}]
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10.5px] text-zinc-400 font-mono mt-1">
+                        WhatsApp: {app.whatsapp} • Submitted {new Date(app.submittedAt).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <span
+                      className={`px-2.5 py-1 rounded-full text-[9.5px] font-black uppercase shrink-0 border ${
+                        app.status === 'approved'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : app.status === 'rejected'
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          : 'bg-amber-400/20 text-amber-300 border-amber-400/40'
+                      }`}
+                    >
+                      {app.status === 'pending' ? 'Pending (Requested)' : app.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          /* =========================================================================
+             BRANCH 2: HOST AGENCY (APPROVED TALENT ROSTER, WEEKLY TARGETS & REQUESTS)
              ========================================================================= */
           <div className="space-y-4 animate-fade-in">
             {/* Host Agency Hero Banner Card */}
@@ -1018,9 +1147,81 @@ export const AgencyManagementScreen: React.FC = () => {
               </form>
             )}
           </div>
+        ) : !agencyProfile ? (
+          /* =========================================================================
+             BRANCH 1 (UNAPPROVED): APPLY FOR COIN SELLER AGENCY + PENDING / REQUESTED
+             ========================================================================= */
+          <div className="space-y-4 animate-fade-in">
+            <div className="rounded-3xl p-5 bg-gradient-to-b from-[#2B1705] via-[#1C0D30] to-[#0D0518] border border-amber-400/45 shadow-xl space-y-4">
+              <div className="flex items-start gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center text-black shadow-lg shrink-0">
+                  <Coins className="w-6 h-6 fill-current" />
+                </div>
+                <div>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-400/20 border border-amber-400/30 text-amber-300 text-[9px] font-black uppercase tracking-wider">
+                    Official Admin Approval Required
+                  </span>
+                  <h2 className="text-lg font-black text-white mt-1">Coin Seller Agency</h2>
+                  <p className="text-[11px] text-zinc-300">
+                    No pre-opened Coin Seller Agencies or free stock exist. Apply below to request an official license.
+                  </p>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-2xl bg-black/35 border border-white/10 text-[11px] text-zinc-300 space-y-1.5 leading-relaxed">
+                <p>
+                  • All applications enter <strong className="text-amber-300">Pending (Requested)</strong> status for Official Admin verification.
+                </p>
+                <p>
+                  • Approved Coin Seller Agencies start with <strong className="text-white">0 Coins</strong>. Only Official Admin allocates verified stock.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsApplyAgencyModalOpen(true)}
+                className="w-full h-12 rounded-2xl bg-gradient-to-r from-amber-400 via-amber-500 to-amber-600 text-black font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg shadow-amber-500/25 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
+              >
+                <Building2 className="w-4 h-4" />
+                <span>Apply for Agency</span>
+              </button>
+            </div>
+
+            {myCoinSellerApps.length > 0 && (
+              <div className="space-y-2.5">
+                <h3 className="text-xs font-black uppercase tracking-wider text-zinc-300 px-1">
+                  My Coin Seller Requests ({myCoinSellerApps.length})
+                </h3>
+                {myCoinSellerApps.map((app) => (
+                  <div
+                    key={app.id}
+                    className="p-4 rounded-2xl bg-[#150A2B] border border-white/10 flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <span className="text-sm font-black text-white block truncate">{app.agencyName}</span>
+                      <p className="text-[10.5px] text-zinc-400 font-mono mt-1">
+                        WhatsApp: {app.whatsapp} • Submitted {new Date(app.submittedAt).toLocaleDateString()}
+                      </p>
+                    </div>
+                    <span
+                      className={`px-2.5 py-1 rounded-full text-[9.5px] font-black uppercase shrink-0 border ${
+                        app.status === 'approved'
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : app.status === 'rejected'
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          : 'bg-amber-400/20 text-amber-300 border-amber-400/40'
+                      }`}
+                    >
+                      {app.status === 'pending' ? 'Pending (Requested)' : app.status}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         ) : (
           /* =========================================================================
-             BRANCH 1: COIN SELLER AGENCY (ACTIVE SYSTEM)
+             BRANCH 1: COIN SELLER AGENCY (APPROVED SYSTEM)
              ========================================================================= */
           <div className="space-y-4 animate-fade-in">
             {/* Top Hero Balance Card */}
@@ -1390,7 +1591,9 @@ export const AgencyManagementScreen: React.FC = () => {
                       <Lock className="w-3.5 h-3.5 text-amber-400" />
                       <span>Security PIN (4 Digits)</span>
                     </label>
-                    <span className="text-[9.5px] text-zinc-400">Default: 1234</span>
+                    <span className="text-[9.5px] text-amber-300">
+                      {agencyProfile.isPinSet ? 'Private 4-Digit PIN' : 'Set PIN first'}
+                    </span>
                   </div>
                   <input
                     type="password"
@@ -1620,7 +1823,7 @@ export const AgencyManagementScreen: React.FC = () => {
 
               <div className="shrink-0 text-right">
                 <span className="px-2 py-0.5 rounded-lg bg-amber-400 text-black text-[9px] font-black uppercase tracking-wider block">
-                  [{hostAgencyProfile.agencyTag}]
+                  [{hostAgencyProfile?.agencyTag || 'AGENCY'}]
                 </span>
                 <span className="text-[8.5px] text-zinc-400 block mt-0.5">Tag to Bind</span>
               </div>
@@ -1739,7 +1942,7 @@ export const AgencyManagementScreen: React.FC = () => {
             {/* Tag Binding Note */}
             <div className="p-2.5 rounded-xl bg-purple-500/10 border border-purple-400/20 text-[10.5px] text-purple-200">
               <span>
-                Upon approval, official tag <strong className="text-amber-400 font-mono">[{hostAgencyProfile.agencyTag}]</strong> will be automatically attached to {approvingCandidate.displayName}'s profile and live streams.
+                Upon approval, official tag <strong className="text-amber-400 font-mono">[{hostAgencyProfile?.agencyTag || 'AGENCY'}]</strong> will be automatically attached to {approvingCandidate.displayName}'s profile and live streams.
               </span>
             </div>
 
@@ -1759,7 +1962,7 @@ export const AgencyManagementScreen: React.FC = () => {
                 className="flex-[2] h-11 rounded-2xl bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 text-white font-black text-xs uppercase tracking-wider cursor-pointer shadow-lg hover:brightness-110 active:scale-95 transition-all flex items-center justify-center gap-1.5"
               >
                 <Check className="w-4 h-4" />
-                <span>Confirm & Bind [{hostAgencyProfile.agencyTag}]</span>
+                <span>Confirm & Bind [{hostAgencyProfile?.agencyTag || 'AGENCY'}]</span>
               </button>
             </div>
           </div>

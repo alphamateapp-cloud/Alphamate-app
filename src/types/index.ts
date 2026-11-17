@@ -477,6 +477,7 @@ export interface CoinSellerAgencyProfile {
   agencyCode: string;
   badge: string;
   ownerUserId: string;
+  ownerName?: string;
   agencyBalance: number;
   pin: string;
   isPinSet: boolean;
@@ -484,6 +485,9 @@ export interface CoinSellerAgencyProfile {
   whatsappDisplay: string;
   isOfficial: boolean;
   slogan: string;
+  status?: 'active' | 'suspended';
+  paymentMethods?: string[];
+  rates?: Array<{ amount: number; bonus: number; price: string }>;
 }
 
 export interface HostAgencyProfile {
@@ -494,6 +498,7 @@ export interface HostAgencyProfile {
   tagColor?: string;
   badge: string;
   ownerUserId: string;
+  ownerName?: string;
   whatsappNumber: string;
   whatsappDisplay: string;
   defaultCommissionRate: number; // percentage, e.g. 15
@@ -501,6 +506,7 @@ export interface HostAgencyProfile {
   slogan: string;
   isOfficial: boolean;
   activeHostsCount?: number;
+  status?: 'active' | 'suspended';
 }
 
 export interface HostMember {
@@ -557,6 +563,9 @@ export interface AgencyApplication {
   experience: string;
   status: 'pending' | 'approved' | 'rejected';
   submittedAt: string;
+  createdAtMs?: number;
+  reviewedAt?: string;
+  reviewedBy?: string;
 }
 
 export type LeaderboardScope = 'global' | 'weekly';

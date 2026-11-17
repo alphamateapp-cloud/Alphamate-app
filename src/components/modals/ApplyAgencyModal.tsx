@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   X,
   Coins,
@@ -28,6 +28,13 @@ export const ApplyAgencyModal: React.FC<ApplyAgencyModalProps> = ({
   const { currentUser, submitAgencyApplication } = useApp();
 
   const [agencyType, setAgencyType] = useState<'coin_seller' | 'host_agency'>(defaultType);
+
+  useEffect(() => {
+    if (isOpen) {
+      setAgencyType(defaultType);
+      setErrorMsg(null);
+    }
+  }, [isOpen, defaultType]);
   const [agencyName, setAgencyName] = useState('');
   const [agencyTag, setAgencyTag] = useState('');
   const [whatsapp, setWhatsapp] = useState('');

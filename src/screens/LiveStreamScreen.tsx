@@ -1162,6 +1162,43 @@ export const LiveStreamScreen: React.FC = () => {
     };
   }, [activeStream?.id, clearActiveGiftBanner]);
 
+  // Parent-side wall-clock fail-safe: ensures Android WebView timer throttling never leaves a gift stuck
+  useEffect(() => {
+    if (!activeGiftAnimation) return;
+    const coins = Number(
+      activeGiftAnimation.gift?.costInCoins ?? activeGiftAnimation.gift?.coins ?? 0
+    );
+    const maxMs = coins <= 100 ? 3000 : 8000;
+    const startedAt = Date.now();
+    const eventId = activeGiftAnimation.id;
+    let cleared = false;
+
+    const clearIfExpired = (force = false) => {
+      if (cleared) return;
+      if (force || Date.now() - startedAt >= maxMs) {
+        cleared = true;
+        setActiveGiftAnimation((prev) => (prev?.id === eventId ? null : prev));
+      }
+    };
+
+    const failSafeTimeout = setTimeout(() => clearIfExpired(true), maxMs);
+    const failSafePoll = setInterval(() => clearIfExpired(false), 500);
+    const onResume = () => clearIfExpired(false);
+
+    window.addEventListener('focus', onResume);
+    window.addEventListener('pageshow', onResume);
+    document.addEventListener('visibilitychange', onResume);
+
+    return () => {
+      cleared = true;
+      clearTimeout(failSafeTimeout);
+      clearInterval(failSafePoll);
+      window.removeEventListener('focus', onResume);
+      window.removeEventListener('pageshow', onResume);
+      document.removeEventListener('visibilitychange', onResume);
+    };
+  }, [activeGiftAnimation?.id]);
+
   // Smooth rapid-combo countdown timer that auto-resets when window expires
   useEffect(() => {
     if (!activeGiftCombo) {
@@ -1188,7 +1225,19 @@ export const LiveStreamScreen: React.FC = () => {
       }
     }, 80);
 
-    return () => clearInterval(timer);
+    const onResume = () => {
+      updateRemaining();
+    };
+    window.addEventListener('focus', onResume);
+    window.addEventListener('pageshow', onResume);
+    document.addEventListener('visibilitychange', onResume);
+
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener('focus', onResume);
+      window.removeEventListener('pageshow', onResume);
+      document.removeEventListener('visibilitychange', onResume);
+    };
   }, [activeGiftCombo]);
 
   // Sync incoming external gift banner ONLY if strictly scoped to this live stream and fresh

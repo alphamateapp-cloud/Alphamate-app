@@ -177,6 +177,24 @@ export function isFirestoreQuotaExceededError(error: unknown): boolean {
   );
 }
 
+export function isTransientFirestoreNetworkError(error: unknown): boolean {
+  if (!error) return false;
+  const code = String((error as any)?.code || '').toLowerCase();
+  const message = String(error instanceof Error ? error.message : error).toLowerCase();
+  return (
+    code === 'unavailable' ||
+    code === 'deadline-exceeded' ||
+    code === 'aborted' ||
+    code === 'cancelled' ||
+    message.includes('timed out') ||
+    message.includes('deadline-exceeded') ||
+    message.includes('the client is offline') ||
+    message.includes('unavailable') ||
+    message.includes('network error') ||
+    message.includes('failed to get document because the client is offline')
+  );
+}
+
 let firestoreQuotaExceededState = false;
 const firestoreQuotaListeners = new Set<(exceeded: boolean) => void>();
 
@@ -272,6 +290,11 @@ export function handleBackgroundWriteError(
   if (isFirestoreQuotaExceededError(error)) {
     notifyFirestoreQuotaExceeded();
     console.warn(`Firestore Quota Exceeded on background write (${path || 'unknown'}); pausing non-essential syncs.`);
+    return;
+  }
+  if (isTransientFirestoreNetworkError(error)) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`Transient Firestore background write delay (${path || 'unknown'}): ${msg}`);
     return;
   }
   handleFirestoreError(error, operationType, path);
@@ -1036,11 +1059,23 @@ export async function syncPartyRoomToFirestore(room: any) {
       updatedAt: new Date().toISOString(),
     };
 
-    await withFirestoreTimeout(
-      setDoc(doc(db, 'partyRooms', room.id), stripUndefinedFields(sanitizedRoom), { merge: true }),
-      9000,
-      'Party Room sync'
-    );
+    const sanitizedPayload = stripUndefinedFields(sanitizedRoom);
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await withFirestoreTimeout(
+          setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload, { merge: true }),
+          15000,
+          'Party Room sync'
+        );
+        break;
+      } catch (err) {
+        if (attempt === 1 && isTransientFirestoreNetworkError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          continue;
+        }
+        throw err;
+      }
+    }
   } catch (error) {
     if (isFirestoreQuotaExceededError(error)) {
       notifyFirestoreQuotaExceeded();
@@ -1369,11 +1404,23 @@ export async function syncLiveStreamToFirestore(stream: any) {
       createdAt: stream.createdAt || new Date(nowMs).toISOString(),
     };
 
-    await withFirestoreTimeout(
-      setDoc(doc(db, 'liveStreams', stream.id), stripUndefinedFields(sanitizedStream), { merge: true }),
-      9000,
-      'Live Stream sync'
-    );
+    const sanitizedPayload = stripUndefinedFields(sanitizedStream);
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        await withFirestoreTimeout(
+          setDoc(doc(db, 'liveStreams', stream.id), sanitizedPayload, { merge: true }),
+          18000,
+          'Live Stream sync'
+        );
+        break;
+      } catch (err) {
+        if (attempt === 1 && isTransientFirestoreNetworkError(err)) {
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+          continue;
+        }
+        throw err;
+      }
+    }
   } catch (error) {
     if (isFirestoreQuotaExceededError(error)) {
       notifyFirestoreQuotaExceeded();
@@ -2608,4 +2655,278 @@ export async function fetchPartyRoomFromServer(roomId: string): Promise<any | nu
     return null;
   }
 }
+
+// =========================================================================
+// AGENCY APPLICATIONS & ADMIN-APPROVED AGENCIES
+// =========================================================================
+export interface FirestoreAgencyApplicationInput {
+  id: string;
+  type: 'coin_seller' | 'host_agency';
+  applicantUserId: string;
+  applicantName: string;
+  applicantUniqueId: string;
+  agencyName: string;
+  agencyTag?: string;
+  whatsapp: string;
+  phoneNumber: string;
+  idCardNumber?: string;
+  experience: string;
+  status: 'pending' | 'approved' | 'rejected';
+  submittedAt: string;
+  createdAtMs: number;
+}
+
+export async function submitAgencyApplicationToFirestore(
+  appData: FirestoreAgencyApplicationInput
+): Promise<void> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) {
+    throw new Error('Please sign in with a verified account to submit an agency application.');
+  }
+  const path = `agencyApplications/${appData.id}`;
+  const payload = stripUndefinedFields({
+    id: String(appData.id).slice(0, 128),
+    type: appData.type,
+    applicantUserId: uid,
+    applicantName: String(appData.applicantName || 'Alpha Mate Creator').slice(0, 128),
+    applicantUniqueId: String(appData.applicantUniqueId || uid).slice(0, 64),
+    agencyName: String(appData.agencyName).trim().slice(0, 128),
+    agencyTag: appData.agencyTag ? String(appData.agencyTag).trim().slice(0, 16) : undefined,
+    whatsapp: String(appData.whatsapp).trim().slice(0, 64),
+    phoneNumber: String(appData.phoneNumber).trim().slice(0, 64),
+    idCardNumber: appData.idCardNumber ? String(appData.idCardNumber).trim().slice(0, 64) : undefined,
+    experience: String(appData.experience || 'Agency applicant').trim().slice(0, 1000),
+    status: 'pending',
+    submittedAt: String(appData.submittedAt || new Date().toISOString()).slice(0, 64),
+    createdAtMs: Number(appData.createdAtMs) || Date.now(),
+  });
+  try {
+    await setDoc(doc(db, 'agencyApplications', appData.id), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+export function subscribeToMyAgencyApplications(
+  uid: string,
+  onUpdate: (apps: any[]) => void
+) {
+  if (!uid) return () => {};
+  const path = 'agencyApplications';
+  const q = query(
+    collection(db, 'agencyApplications'),
+    where('applicantUserId', '==', uid),
+    limit(50)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0));
+      onUpdate(items);
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
+export function subscribeToAllAgencyApplications(
+  onUpdate: (apps: any[]) => void
+) {
+  const path = 'agencyApplications';
+  const q = query(
+    collection(db, 'agencyApplications'),
+    orderBy('createdAtMs', 'desc'),
+    limit(150)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      onUpdate(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
+export function subscribeToApprovedAgencies(
+  onUpdate: (agencies: any[]) => void
+) {
+  if (!auth.currentUser) return () => {};
+  const path = 'agencies';
+  const q = query(
+    collection(db, 'agencies'),
+    where('status', '==', 'active'),
+    limit(150)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ agencyId: d.id, ...d.data() }))
+        .sort((a: any, b: any) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0));
+      onUpdate(items);
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
+export async function adminReviewAgencyApplicationInFirestore(
+  app: any,
+  action: 'approve' | 'reject'
+): Promise<{ agencyId?: string }> {
+  const adminEmail = auth.currentUser?.email || 'alphamateapp@gmail.com';
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const appId = String(app.id);
+  const nextStatus = action === 'approve' ? 'approved' : 'rejected';
+
+  try {
+    await updateDoc(doc(db, 'agencyApplications', appId), {
+      status: nextStatus,
+      reviewedAt: nowIso,
+      reviewedBy: adminEmail,
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `agencyApplications/${appId}`);
+  }
+
+  if (action !== 'approve') {
+    return {};
+  }
+
+  const agencyId = `agency_${app.type}_${nowMs}_${Math.random().toString(36).slice(2, 6)}`;
+  const codeSuffix = String(Math.floor(100 + Math.random() * 900));
+  const agencyCode = app.type === 'coin_seller' ? `AM-EX-${codeSuffix}` : `AM-HT-${codeSuffix}`;
+  const cleanTag =
+    app.type === 'host_agency'
+      ? String(app.agencyTag || 'VIP').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'VIP'
+      : undefined;
+
+  const agencyPayload = stripUndefinedFields({
+    agencyId,
+    type: app.type,
+    agencyName: String(app.agencyName || 'Official Agency').slice(0, 128),
+    agencyCode,
+    agencyTag: cleanTag,
+    tagColor: app.type === 'host_agency' ? '#F59E0B' : undefined,
+    badge:
+      app.type === 'coin_seller'
+        ? 'Diamond Certified Official'
+        : 'Diamond Certified Host Agency',
+    ownerUserId: String(app.applicantUserId).slice(0, 128),
+    ownerName: String(app.applicantName || 'Agency Owner').slice(0, 128),
+    agencyBalance: 0, // Always starts at 0; only Official Admin allocates Coin Seller stock
+    isPinSet: false,
+    whatsappNumber: String(app.whatsapp || '').replace(/[^0-9+]/g, '').slice(0, 64) || String(app.whatsapp || '').slice(0, 64),
+    whatsappDisplay: String(app.whatsapp || '').slice(0, 64),
+    defaultCommissionRate: app.type === 'host_agency' ? 15 : undefined,
+    minWeeklyHours: app.type === 'host_agency' ? 15 : undefined,
+    slogan:
+      app.type === 'coin_seller'
+        ? 'Verified official coin seller agency.'
+        : 'Official live talent and party host agency.',
+    isOfficial: true,
+    activeHostsCount: app.type === 'host_agency' ? 0 : undefined,
+    status: 'active',
+    createdAt: nowIso,
+    createdAtMs: nowMs,
+    updatedAt: nowIso,
+  });
+
+  try {
+    await setDoc(doc(db, 'agencies', agencyId), agencyPayload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `agencies/${agencyId}`);
+  }
+
+  return { agencyId };
+}
+
+export async function adminAllocateAgencyCoinsInFirestore(
+  agencyId: string,
+  coinsToAdd: number
+): Promise<number> {
+  const safeAdd = Math.floor(Number(coinsToAdd) || 0);
+  if (safeAdd <= 0) {
+    throw new Error('Coin allocation amount must be greater than zero.');
+  }
+  const agencyRef = doc(db, 'agencies', agencyId);
+  let nextBalance = 0;
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(agencyRef);
+      if (!snap.exists()) {
+        throw new Error('Agency record not found.');
+      }
+      const data = snap.data() as Record<string, any>;
+      if (data.type !== 'coin_seller') {
+        throw new Error('Only Coin Seller agencies can hold coin stock.');
+      }
+      const current = Math.max(0, Number(data.agencyBalance) || 0);
+      nextBalance = current + safeAdd;
+      tx.update(agencyRef, {
+        agencyBalance: nextBalance,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `agencies/${agencyId}`);
+  }
+  return nextBalance;
+}
+
+export async function updateApprovedAgencySettingsInFirestore(
+  agencyId: string,
+  updates: Record<string, any>
+): Promise<void> {
+  if (!agencyId || !auth.currentUser) return;
+  const allowed = stripUndefinedFields({
+    whatsappNumber: updates.whatsappNumber,
+    whatsappDisplay: updates.whatsappDisplay,
+    slogan: updates.slogan,
+    defaultCommissionRate: updates.defaultCommissionRate,
+    minWeeklyHours: updates.minWeeklyHours,
+    isPinSet: updates.isPinSet,
+    updatedAt: new Date().toISOString(),
+  });
+  try {
+    await updateDoc(doc(db, 'agencies', agencyId), allowed);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `agencies/${agencyId}`);
+  }
+}
+
+export async function deductCoinSellerAgencyBalanceInFirestore(
+  agencyId: string,
+  amount: number
+): Promise<number> {
+  const safeAmount = Math.floor(Number(amount) || 0);
+  if (safeAmount <= 0) {
+    throw new Error('Transfer amount must be positive.');
+  }
+  const agencyRef = doc(db, 'agencies', agencyId);
+  let nextBalance = 0;
+  try {
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(agencyRef);
+      if (!snap.exists()) {
+        throw new Error('Official agency record not found.');
+      }
+      const data = snap.data() as Record<string, any>;
+      const current = Math.max(0, Number(data.agencyBalance) || 0);
+      if (safeAmount > current) {
+        throw new Error(`Insufficient agency coin stock (${current.toLocaleString()} Coins available).`);
+      }
+      nextBalance = current - safeAmount;
+      tx.update(agencyRef, {
+        agencyBalance: nextBalance,
+        updatedAt: new Date().toISOString(),
+      });
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `agencies/${agencyId}`);
+  }
+  return nextBalance;
+}
+
 
