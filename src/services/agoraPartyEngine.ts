@@ -10,12 +10,15 @@ class AgoraPartyEngine {
   private roomId: string | null = null;
   private muted = true;
   private volume = 0;
+  private localVolume = 0;
   private listeners: Array<{ remove: () => Promise<void> }> = [];
   private callbacks: PartyCallbacks = {};
   private initialized = false;
 
   async startPartyVoice(roomId: string, userId: string, isMuted: boolean, listenOnly: boolean, options: { profile?: PartyProfile; roomParticipants?: PartyProfile[]; onError?: (e: any) => void; onConnectionStateChange?: (s: string) => void; onParticipantJoined?: (p: any) => void; onParticipantLeft?: (p: any) => void; onParticipantsChange?: (p: PartyPresence[]) => void } = {}) {
     if (!agoraPartyNative.isAvailable()) throw Object.assign(new Error('Native Agora Party voice is available in the Android app only.'), { code: 'AGORA_ANDROID_REQUIRED' });
+    // A reconnect must leave the previous channel and detach old listeners before joining again.
+    await this.stopPartyVoice(undefined, true);
     const user = auth.currentUser;
     if (!user) throw new Error('Sign in is required before joining Party voice.');
     this.callbacks = options;
@@ -40,7 +43,7 @@ class AgoraPartyEngine {
       await agoraPartyNative.addListener('connectionState', e => this.callbacks.onConnectionStateChange?.(e.state === 3 ? 'connected' : e.state === 5 ? 'disconnected' : e.state === 1 ? 'connecting' : 'failed')),
       await agoraPartyNative.addListener('userJoined', e => { const now = Date.now(); const numericUid = Number(e.uid); const profile = profileByAgoraUid.get(numericUid); const id = profile?.userId || String(e.uid); remoteUsers.set(numericUid, { userId: id, uniqueId: profile?.uniqueId || id, displayName: profile?.displayName || 'Party Member', avatar: profile?.avatar || '', level: profile?.level || 1, vipTier: profile?.vipTier || 1, countryFlag: profile?.countryFlag, isHost: Boolean(profile?.isHost), joinedAtMs: now, sfuSessionId: `agora:${roomId}`, trackName: 'audio', mid: null, isPublishing: true, listenOnly: false, isMuted: false, isSpeaking: false, lastSeenAtMs: now }); this.callbacks.onParticipantsChange?.(Array.from(remoteUsers.values())); this.callbacks.onParticipantJoined?.({ uid: id }); }),
       await agoraPartyNative.addListener('userOffline', e => { remoteUsers.delete(Number(e.uid)); this.callbacks.onParticipantsChange?.(Array.from(remoteUsers.values())); this.callbacks.onParticipantLeft?.({ uid: String(e.uid) }); }),
-      await agoraPartyNative.addListener('audioVolume', e => { const speakers = (e.speakers || []).filter((x: any) => Number(x.uid) > 0); this.volume = Math.max(0, ...speakers.map((x: any) => Number(x.volume) || 0)); const active = new Set(speakers.filter((x: any) => Number(x.volume) > 12).map((x: any) => Number(x.uid))); let changed = false; remoteUsers.forEach((presence, uid) => { const speaking = active.has(uid); if (presence.isSpeaking !== speaking) { presence.isSpeaking = speaking; presence.lastSeenAtMs = Date.now(); changed = true; } }); if (changed) this.callbacks.onParticipantsChange?.(Array.from(remoteUsers.values())); }),
+      await agoraPartyNative.addListener('audioVolume', e => { const allSpeakers = (e.speakers || []); const local = allSpeakers.find((x: any) => Number(x.uid) === 0); this.localVolume = Number(local?.volume) || 0; const speakers = allSpeakers.filter((x: any) => Number(x.uid) > 0); const active = new Set(speakers.filter((x: any) => Number(x.volume) > 12).map((x: any) => Number(x.uid))); let changed = false; remoteUsers.forEach((presence, uid) => { const speaking = active.has(uid); if (presence.isSpeaking !== speaking) { presence.isSpeaking = speaking; presence.lastSeenAtMs = Date.now(); changed = true; } }); if (changed) this.callbacks.onParticipantsChange?.(Array.from(remoteUsers.values())); }),
       await agoraPartyNative.addListener('error', e => this.callbacks.onError?.(e)),
     ];
     this.roomId = roomId;
@@ -71,11 +74,11 @@ class AgoraPartyEngine {
     await agoraPartyNative.renewToken(payload.token);
     await agoraPartyNative.setMuted(!canSpeak || muted); this.muted = !canSpeak || muted;
   }
-  async stopPartyVoice(roomId?: string, _force = false) { if (roomId && this.roomId && roomId !== this.roomId) return; try { await agoraPartyNative.leave(); } finally { this.roomId = null; this.volume = 0; this.listeners.forEach(x => x.remove().catch(() => {})); this.listeners = []; this.callbacks = {}; } }
+  async stopPartyVoice(roomId?: string, _force = false) { if (roomId && this.roomId && roomId !== this.roomId) return; try { await agoraPartyNative.leave(); } finally { this.roomId = null; this.volume = 0; this.localVolume = 0; this.listeners.forEach(x => x.remove().catch(() => {})); this.listeners = []; this.callbacks = {}; } }
   setSpeaker(enabled: boolean) { return agoraPartyNative.setSpeaker(enabled); }
   toggleMicrophone(enabled: boolean) { this.muted = !enabled; return agoraPartyNative.setMuted(!enabled).catch(() => ({ muted: !enabled })); }
   updatePartySpeakingIndicator(_roomId: string, _speaking: boolean) { /* Presence is synchronized through the existing room data/socket layer. */ }
-  getSpeakingVolume() { return this.volume; }
+  getSpeakingVolume() { return this.localVolume; }
   getActivePartyRemoteStreams(_roomId: string): Array<{ peerId: string; stream: MediaStream }> { return []; }
   async getPartyRemoteAudioActivity(_roomId: string) { return new Set<string>(); }
   async setPartyVoiceFilter(_roomId: string, _preset: string): Promise<any> { return 'normal'; }

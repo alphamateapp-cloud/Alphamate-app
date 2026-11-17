@@ -81,7 +81,9 @@ public class AgoraPartyPlugin extends Plugin {
         boolean publish = call.getBoolean("publish", true);
         if (channel.isEmpty() || token.isEmpty() || uid <= 0) { call.reject("channel, token and positive uid are required", "AGORA_JOIN_ARGUMENTS"); return; }
         if (joining.getAndSet(true)) { call.reject("Agora join is already in progress", "AGORA_JOINING"); return; }
-        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+        // Listening-only viewers do not need microphone permission. Request it only
+        // when this client is actually publishing audio as host / seated speaker.
+        if (publish && ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             joining.set(false);
             requestPermissionForAlias("microphone", call, "joinAfterMicrophonePermission");
             return;
@@ -92,6 +94,7 @@ public class AgoraPartyPlugin extends Plugin {
     @com.getcapacitor.annotation.PermissionCallback
     private void joinAfterMicrophonePermission(PluginCall call) {
         if (getPermissionState("microphone") != com.getcapacitor.PermissionState.GRANTED) {
+            joining.set(false);
             call.reject("Microphone permission is required", "MIC_PERMISSION_REQUIRED"); return;
         }
         String channel = call.getString("channel", "").trim(); String token = call.getString("token", ""); int uid = call.getInt("uid", 0);
@@ -130,6 +133,24 @@ public class AgoraPartyPlugin extends Plugin {
     @PluginMethod public void setCanPublish(PluginCall call) {
         if (engine == null) { call.reject("Agora is not initialized"); return; }
         boolean enabled = call.getBoolean("enabled", false);
+        if (enabled && ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissionForAlias("microphone", call, "publishAfterMicrophonePermission");
+            return;
+        }
+        applyCanPublish(call, enabled);
+    }
+
+    @com.getcapacitor.annotation.PermissionCallback
+    private void publishAfterMicrophonePermission(PluginCall call) {
+        if (getPermissionState("microphone") != com.getcapacitor.PermissionState.GRANTED) {
+            call.reject("Microphone permission is required to speak in the Party Room", "MIC_PERMISSION_REQUIRED");
+            return;
+        }
+        applyCanPublish(call, true);
+    }
+
+    private void applyCanPublish(PluginCall call, boolean enabled) {
+        if (engine == null) { call.reject("Agora is not initialized"); return; }
         int result = engine.setClientRole(enabled ? Constants.CLIENT_ROLE_BROADCASTER : Constants.CLIENT_ROLE_AUDIENCE);
         if (result != 0) { call.reject("Unable to change Agora role: " + result); return; }
         ChannelMediaOptions options = new ChannelMediaOptions();

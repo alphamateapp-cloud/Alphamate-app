@@ -228,6 +228,8 @@ export const PartyRoomsScreen: React.FC = () => {
   const startupAutoRetryKeyRef = useRef<string>('');
   const startupAutoRetryCountRef = useRef<number>(0);
   const startupRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceReconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const voiceReconnectAttemptRef = useRef<number>(0);
   const initialParticipantsSeededRef = useRef<boolean>(false);
   const notifiedJoinTimestampsRef = useRef<Map<string, number>>(new Map());
   const joinNotificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1098,6 +1100,7 @@ export const PartyRoomsScreen: React.FC = () => {
       lastVoiceModeRef.current = null;
       startupAutoRetryKeyRef.current = '';
       startupAutoRetryCountRef.current = 0;
+      voiceReconnectAttemptRef.current = 0;
       voiceHasConnectedRef.current = false;
       voiceParticipantsLoadedRef.current = false;
       setPartyVoiceError(null);
@@ -1137,6 +1140,22 @@ export const PartyRoomsScreen: React.FC = () => {
         : false;
 
     let cancelled = false;
+    const scheduleVoiceReconnect = (reason: string) => {
+      if (cancelled || voiceReconnectTimerRef.current) return;
+      const attempt = voiceReconnectAttemptRef.current + 1;
+      voiceReconnectAttemptRef.current = attempt;
+      const delay = Math.min(30000, 1500 * Math.pow(2, Math.min(attempt - 1, 4)));
+      setPartyVoiceError(`Party voice reconnecting automatically… (attempt ${attempt})`);
+      console.warn('[Party Voice] Scheduling automatic reconnect:', reason, 'in', delay, 'ms');
+      voiceReconnectTimerRef.current = setTimeout(() => {
+        voiceReconnectTimerRef.current = null;
+        if (!cancelled) setPartyVoiceRetryToken((prev) => prev + 1);
+      }, delay);
+    };
+    if (voiceReconnectTimerRef.current) {
+      clearTimeout(voiceReconnectTimerRef.current);
+      voiceReconnectTimerRef.current = null;
+    }
     if (isNewRoom) {
       setIsHostMicMuted(false);
     }
@@ -1174,20 +1193,22 @@ export const PartyRoomsScreen: React.FC = () => {
         ],
         onError: (err) => {
           if (!cancelled) {
-            setPartyVoiceError('Alpha Mate is reconnecting your Party voice…');
+            console.error('[Party Voice] Native Agora error:', err);
+            scheduleVoiceReconnect(err?.message || 'Agora native error');
           }
         },
         onConnectionStateChange: (connState) => {
           if (cancelled) return;
           if (connState === 'connected') {
             voiceHasConnectedRef.current = true;
-            setPartyVoiceError(null);
-          } else if (connState === 'disconnected') {
-            if (voiceHasConnectedRef.current) {
-              setPartyVoiceError('Alpha Mate Party Voice is reconnecting…');
+            voiceReconnectAttemptRef.current = 0;
+            if (voiceReconnectTimerRef.current) {
+              clearTimeout(voiceReconnectTimerRef.current);
+              voiceReconnectTimerRef.current = null;
             }
-          } else if (connState === 'failed') {
-            setPartyVoiceError('Party Voice connection lost. Please try reconnecting.');
+            setPartyVoiceError(null);
+          } else if (connState === 'disconnected' || connState === 'failed') {
+            scheduleVoiceReconnect(`Agora connection state: ${connState}`);
           }
         },
         onParticipantsChange: (participants) => {
@@ -1257,7 +1278,7 @@ export const PartyRoomsScreen: React.FC = () => {
           return;
         }
 
-        setPartyVoiceError('Alpha Mate Party Voice is reconnecting…');
+        scheduleVoiceReconnect(error?.message || 'Party voice startup failed');
       });
 
     const wsJoinProfile: RealtimeViewerProfile = {
@@ -1322,6 +1343,10 @@ export const PartyRoomsScreen: React.FC = () => {
       if (startupRetryTimerRef.current) {
         clearTimeout(startupRetryTimerRef.current);
         startupRetryTimerRef.current = null;
+      }
+      if (voiceReconnectTimerRef.current) {
+        clearTimeout(voiceReconnectTimerRef.current);
+        voiceReconnectTimerRef.current = null;
       }
       if (joinNotificationTimerRef.current) {
         clearTimeout(joinNotificationTimerRef.current);
