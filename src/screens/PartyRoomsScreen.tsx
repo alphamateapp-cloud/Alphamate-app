@@ -1156,7 +1156,7 @@ export const PartyRoomsScreen: React.FC = () => {
     };
 
     setPartyVoiceError(null);
-    p2pStreamingEngine
+    agoraPartyEngine
       .startPartyVoice(roomId, effectiveUserId, initialMuted, !initialCanSpeak, {
         profile: {
           userId: effectiveUserId,
@@ -1355,7 +1355,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
     if (didModeChangeAfterInit) {
       lastVoiceModeRef.current = { key: modeKey, canSpeak, muted };
-      p2pStreamingEngine
+      agoraPartyEngine
         .setPartySpeakingMode(roomId, effectiveUserId, canSpeak, muted, {
           userId: effectiveUserId,
           uniqueId: currentUser.uniqueId || effectiveUserId,
@@ -1433,7 +1433,7 @@ export const PartyRoomsScreen: React.FC = () => {
       return;
     }
     const timer = setInterval(() => {
-      p2pStreamingEngine
+      agoraPartyEngine
         .getPartyRemoteAudioActivity(roomId)
         .then((activeSet) => {
           setRemoteSpeakingPeerIds((prev) => {
@@ -1940,6 +1940,34 @@ export const PartyRoomsScreen: React.FC = () => {
   }, [chatItems, chatTab]);
 
   // =========================================================================
+  // Keep all React hooks above the conditional room/lobby returns.
+  // Calling this memo below the activePartyRoom early-return changes hook order
+  // when a user enters a room and causes React to crash into a blank screen.
+  const filteredRooms = useMemo(() => {
+    let list = [...partyRooms];
+
+    if (activeCategory === 'Global') {
+      return list.filter((r) => r.country === 'Global' || !r.country);
+    }
+    if (activeCategory === 'Pakistan') {
+      return list.filter((r) => r.country === 'Pakistan');
+    }
+    if (activeCategory === 'UAE') {
+      return list.filter((r) => r.country === 'UAE');
+    }
+    if (activeCategory === 'Saudi Arabia') {
+      return list.filter((r) => r.country === 'Saudi Arabia');
+    }
+
+    // Trending & All: Sorted by dynamic ranking algorithm (Gifting & Viewers)
+    // Formula: totalGiftCoins * 1.5 + activeViewers * 50
+    return list.sort((a, b) => {
+      const scoreA = (a.totalGiftCoins || 0) * 1.5 + (a.activeViewers || 0) * 50;
+      const scoreB = (b.totalGiftCoins || 0) * 1.5 + (b.activeViewers || 0) * 50;
+      return scoreB - scoreA;
+    });
+  }, [partyRooms, activeCategory]);
+
   // IF INSIDE AN ACTIVE PARTY ROOM -> RENDER MASTER PARTY ROOM UI
   // =========================================================================
   if (activePartyRoom) {
@@ -3996,30 +4024,7 @@ export const PartyRoomsScreen: React.FC = () => {
   // =========================================================================
   // IF NO ACTIVE PARTY ROOM -> RENDER AUDIO PARTY DISCOVERY HUB
   // =========================================================================
-  const filteredRooms = useMemo(() => {
-    let list = [...partyRooms];
 
-    if (activeCategory === 'Global') {
-      return list.filter((r) => r.country === 'Global' || !r.country);
-    }
-    if (activeCategory === 'Pakistan') {
-      return list.filter((r) => r.country === 'Pakistan');
-    }
-    if (activeCategory === 'UAE') {
-      return list.filter((r) => r.country === 'UAE');
-    }
-    if (activeCategory === 'Saudi Arabia') {
-      return list.filter((r) => r.country === 'Saudi Arabia');
-    }
-
-    // Trending & All: Sorted by dynamic ranking algorithm (Gifting & Viewers)
-    // Formula: totalGiftCoins * 1.5 + activeViewers * 50
-    return list.sort((a, b) => {
-      const scoreA = (a.totalGiftCoins || 0) * 1.5 + (a.activeViewers || 0) * 50;
-      const scoreB = (b.totalGiftCoins || 0) * 1.5 + (b.activeViewers || 0) * 50;
-      return scoreB - scoreA;
-    });
-  }, [partyRooms, activeCategory]);
 
   return (
     <div className="relative w-full h-full pb-24 bg-[#09070F] text-white overflow-y-auto overscroll-contain">

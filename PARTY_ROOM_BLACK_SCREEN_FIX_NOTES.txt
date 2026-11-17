@@ -1,0 +1,16 @@
+ALPHA MATE – PARTY ROOM BLACK SCREEN FIX
+
+Root cause found in the supplied source:
+- src/screens/PartyRoomsScreen.tsx had a conditional early return for activePartyRoom.
+- The filteredRooms useMemo hook was declared below that conditional return.
+- On the lobby render, React called that useMemo; on the active-room render, the component returned before reaching it.
+- This changes the hook count/order between renders and can trigger React's "Rendered fewer hooks than expected" / hook-order runtime error, leaving the Party screen blank.
+
+Fix applied:
+- Moved filteredRooms useMemo above the activePartyRoom conditional return.
+- No Party UI, seat configuration, Firebase schema, Agora setup, or room business logic was intentionally changed.
+
+Validation:
+- Confirmed no React hooks remain below the activePartyRoom early-return branch in PartyRoomsScreen.tsx.
+- A full Vite/TypeScript build could not be run in this environment: dependencies were not installed (npm ci timed out), and the available Node version is 22.16.0 while package.json requires Node >=24.12.0.
+- Please run `npm ci` and `npm run lint && npm run build` under Node 24.12.0 or newer before producing the APK/AAB.
