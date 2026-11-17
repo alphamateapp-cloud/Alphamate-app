@@ -1,5 +1,18 @@
 import { Capacitor, registerPlugin, PluginListenerHandle } from '@capacitor/core';
 
+export type AgoraPartyNativeEventName =
+  | 'joined'
+  | 'userJoined'
+  | 'userOffline'
+  | 'userMuteAudio'
+  | 'connectionState'
+  | 'audioVolume'
+  | 'tokenWillExpire'
+  | 'requestToken'
+  | 'audioRouteChanged'
+  | 'audioFocusChanged'
+  | 'error';
+
 export interface AgoraPartyNativePlugin {
   initialize(options: { appId: string }): Promise<{ initialized: boolean }>;
   join(options: { channel: string; token: string; uid: number; publish: boolean }): Promise<{ accepted: boolean; channel: string; uid: number }>;
@@ -7,9 +20,10 @@ export interface AgoraPartyNativePlugin {
   setCanPublish(options: { enabled: boolean }): Promise<{ enabled: boolean }>;
   renewToken(options: { token: string }): Promise<{ renewed: boolean }>;
   setSpeaker(options: { enabled: boolean }): Promise<{ enabled: boolean }>;
+  setVoiceEffect(options: { preset: string }): Promise<{ preset: string }>;
   leave(): Promise<{ left: boolean }>;
   destroy(): Promise<{ destroyed: boolean }>;
-  addListener(eventName: 'joined' | 'userJoined' | 'userOffline' | 'connectionState' | 'audioVolume' | 'error', listenerFunc: (event: any) => void): Promise<PluginListenerHandle>;
+  addListener(eventName: AgoraPartyNativeEventName, listenerFunc: (event: any) => void): Promise<PluginListenerHandle>;
 }
 
 const NativeAgoraParty = registerPlugin<AgoraPartyNativePlugin>('AgoraParty');
@@ -23,6 +37,7 @@ export const agoraPartyNative = {
   setCanPublish: (enabled: boolean) => NativeAgoraParty.setCanPublish({ enabled }),
   renewToken: (token: string) => NativeAgoraParty.renewToken({ token }),
   setSpeaker: (enabled: boolean) => NativeAgoraParty.setSpeaker({ enabled }),
+  setVoiceEffect: (preset: string) => NativeAgoraParty.setVoiceEffect({ preset }),
   leave: () => NativeAgoraParty.leave(),
   destroy: () => NativeAgoraParty.destroy(),
   addListener: NativeAgoraParty.addListener.bind(NativeAgoraParty),

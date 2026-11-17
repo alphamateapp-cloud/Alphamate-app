@@ -25,6 +25,7 @@ interface RoomPKSplitStageProps {
   opponentRoomScore: number;
   timeLeft: number; // in seconds
   isHost: boolean;
+  isHostSpeaking?: boolean;
   onEndPK: () => void;
   onHostMicToggle: () => void;
   isHostMicMuted: boolean;
@@ -40,6 +41,7 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
   opponentRoomScore,
   timeLeft,
   isHost,
+  isHostSpeaking = false,
   onEndPK,
   onHostMicToggle,
   isHostMicMuted,
@@ -209,6 +211,9 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
               onClick={onHostMicToggle}
               title={isHost ? 'Toggle Mic' : undefined}
             >
+              {isHostSpeaking && !isHostMicMuted && (
+                <div className="absolute -inset-1 rounded-full border border-[#EC4899]/80 animate-ping opacity-75 pointer-events-none" />
+              )}
               <VipAvatarFrame
                 avatarUrl={myRoom.host.avatar}
                 vipTier={myRoom.host.vipTier ?? 0}
@@ -263,10 +268,15 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
                   {hasUser ? (
                     <>
                       <div className="relative">
+                        {seat.isSpeaking && !seat.isMuted && (
+                          <div className="absolute -inset-1 rounded-full border border-emerald-400 animate-ping opacity-80 pointer-events-none" />
+                        )}
                         <img
                           src={seat.user!.avatar}
                           alt={seat.user!.displayName}
-                          className="w-5 h-5 rounded-full object-cover border border-pink-400"
+                          className={`w-5 h-5 rounded-full object-cover border ${
+                            seat.isSpeaking && !seat.isMuted ? 'border-emerald-400' : 'border-pink-400'
+                          }`}
                         />
                         <div
                           className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full flex items-center justify-center text-[5px] ${

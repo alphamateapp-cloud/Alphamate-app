@@ -213,6 +213,7 @@ export const PartyRoomsScreen: React.FC = () => {
   const [isSelfSpeaking, setIsSelfSpeaking] = useState(false);
   const [partyAudioAutoplayBlocked, setPartyAudioAutoplayBlocked] = useState(false);
   const [partyVoiceError, setPartyVoiceError] = useState<string | null>(null);
+  const [partyVoiceReconnecting, setPartyVoiceReconnecting] = useState<string | null>(null);
   const [partyVoiceRetryToken, setPartyVoiceRetryToken] = useState(0);
   const [remotePartyStreams, setRemotePartyStreams] = useState<Array<{ peerId: string; stream: MediaStream }>>([]);
   const [activeVoiceParticipants, setActiveVoiceParticipants] = useState<PartyParticipantPresence[]>([]);
@@ -222,6 +223,9 @@ export const PartyRoomsScreen: React.FC = () => {
   const partyAudioElsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
   const roomSeenInListRef = useRef<boolean>(false);
   const isSpeakerOnRef = useRef<boolean>(isSpeakerOn);
+  const isHostMicMutedRef = useRef<boolean>(isHostMicMuted);
+  const isMicMutedRef = useRef<boolean>(isMicMuted);
+  const userSeatIndexRef = useRef<number | null>(userSeatIndex);
   const wasHostMutedRef = useRef<boolean>(false);
   const voiceHasConnectedRef = useRef<boolean>(false);
   const voiceParticipantsLoadedRef = useRef<boolean>(false);
@@ -445,6 +449,18 @@ export const PartyRoomsScreen: React.FC = () => {
   useEffect(() => {
     isSpeakerOnRef.current = isSpeakerOn;
   }, [isSpeakerOn]);
+
+  useEffect(() => {
+    isHostMicMutedRef.current = isHostMicMuted;
+  }, [isHostMicMuted]);
+
+  useEffect(() => {
+    isMicMutedRef.current = isMicMuted;
+  }, [isMicMuted]);
+
+  useEffect(() => {
+    userSeatIndexRef.current = userSeatIndex;
+  }, [userSeatIndex]);
 
   // Keep moderation lists synchronized from Firestore snapshot in real time
   useEffect(() => {
@@ -989,8 +1005,7 @@ export const PartyRoomsScreen: React.FC = () => {
           !peerMuted &&
           Boolean(
             peerPresence?.isSpeaking ||
-              remoteSpeakingPeerIds.has(serverSeat.user.id) ||
-              serverSeat.isSpeaking
+              remoteSpeakingPeerIds.has(serverSeat.user.id)
           );
         seats.push({
           seatIndex: i,
@@ -1104,6 +1119,7 @@ export const PartyRoomsScreen: React.FC = () => {
       voiceHasConnectedRef.current = false;
       voiceParticipantsLoadedRef.current = false;
       setPartyVoiceError(null);
+      setPartyVoiceReconnecting(null);
       setPartyAudioAutoplayBlocked(false);
       setIsHostMicMuted(false);
       setIsHostSpeaking(false);
@@ -1140,18 +1156,6 @@ export const PartyRoomsScreen: React.FC = () => {
         : false;
 
     let cancelled = false;
-    const scheduleVoiceReconnect = (reason: string) => {
-      if (cancelled || voiceReconnectTimerRef.current) return;
-      const attempt = voiceReconnectAttemptRef.current + 1;
-      voiceReconnectAttemptRef.current = attempt;
-      const delay = Math.min(30000, 1500 * Math.pow(2, Math.min(attempt - 1, 4)));
-      setPartyVoiceError(`Party voice reconnecting automatically… (attempt ${attempt})`);
-      console.warn('[Party Voice] Scheduling automatic reconnect:', reason, 'in', delay, 'ms');
-      voiceReconnectTimerRef.current = setTimeout(() => {
-        voiceReconnectTimerRef.current = null;
-        if (!cancelled) setPartyVoiceRetryToken((prev) => prev + 1);
-      }, delay);
-    };
     if (voiceReconnectTimerRef.current) {
       clearTimeout(voiceReconnectTimerRef.current);
       voiceReconnectTimerRef.current = null;
@@ -1175,6 +1179,7 @@ export const PartyRoomsScreen: React.FC = () => {
     };
 
     setPartyVoiceError(null);
+    setPartyVoiceReconnecting('Connecting Party Voice…');
     agoraPartyEngine
       .startPartyVoice(roomId, effectiveUserId, initialMuted, !initialCanSpeak, {
         profile: {
@@ -1192,24 +1197,58 @@ export const PartyRoomsScreen: React.FC = () => {
           ...((activePartyRoom.seats || []).filter((seat: any) => seat?.user?.id).map((seat: any) => ({ userId: seat.user.id, uniqueId: seat.user.uniqueId || seat.user.id, displayName: seat.user.displayName, avatar: seat.user.avatar, level: seat.user.level, vipTier: seat.user.vipTier, isHost: false }))),
         ],
         onError: (err) => {
-          if (!cancelled) {
-            console.error('[Party Voice] Native Agora error:', err);
-            scheduleVoiceReconnect(err?.message || 'Agora native error');
+          if (cancelled) return;
+          if (err?.code === 'USER_RESTRICTED' || err?.code === 'ROOM_NOT_FOUND') {
+            setPartyVoiceReconnecting(null);
+            showToast(err?.message || 'Unable to access this Party Room.');
+            closePartyRoom(false);
+            return;
           }
+          if (err?.code === 'AGORA_NOT_CONFIGURED') {
+            setPartyVoiceReconnecting(null);
+            setPartyVoiceError(err?.message || 'Party voice server is not configured.');
+            return;
+          }
+          console.warn('[Party Voice] Agora event notice:', err);
         },
-        onConnectionStateChange: (connState) => {
+        onConnectionStateChange: (connState, meta) => {
           if (cancelled) return;
           if (connState === 'connected') {
             voiceHasConnectedRef.current = true;
             voiceReconnectAttemptRef.current = 0;
-            if (voiceReconnectTimerRef.current) {
-              clearTimeout(voiceReconnectTimerRef.current);
-              voiceReconnectTimerRef.current = null;
-            }
+            setPartyVoiceReconnecting(null);
             setPartyVoiceError(null);
-          } else if (connState === 'disconnected' || connState === 'failed') {
-            scheduleVoiceReconnect(`Agora connection state: ${connState}`);
+          } else if (connState === 'connecting') {
+            setPartyVoiceReconnecting('Connecting Party Voice…');
+            setPartyVoiceError(null);
+          } else if (connState === 'reconnecting') {
+            const attemptSuffix = meta?.attempt ? ` (${meta.attempt}/${meta.maxAttempts || 5})` : '';
+            setPartyVoiceReconnecting(`Reconnecting Party Voice…${attemptSuffix}`);
+            setPartyVoiceError(null);
+          } else if (connState === 'failed' || connState === 'disconnected') {
+            setPartyVoiceReconnecting(null);
+            setPartyVoiceError(
+              meta?.reason
+                ? `Party voice disconnected (${meta.reason}). Tap Retry to reconnect.`
+                : 'Party voice connection interrupted. Tap Retry to reconnect.'
+            );
           }
+        },
+        onSpeakingChange: (localSpeakingNow, remoteSpeakingSet) => {
+          if (cancelled) return;
+          if (isUserHost) {
+            setIsHostSpeaking(!isHostMicMutedRef.current && localSpeakingNow);
+            setIsSelfSpeaking(false);
+          } else {
+            setIsSelfSpeaking(userSeatIndexRef.current !== null && !isMicMutedRef.current && localSpeakingNow);
+            setIsHostSpeaking(false);
+          }
+          setRemoteSpeakingPeerIds((prev) => {
+            if (prev.size === remoteSpeakingSet.size && Array.from(remoteSpeakingSet).every((id) => prev.has(id))) {
+              return prev;
+            }
+            return new Set(remoteSpeakingSet);
+          });
         },
         onParticipantsChange: (participants) => {
           if (cancelled) return;
@@ -1250,35 +1289,50 @@ export const PartyRoomsScreen: React.FC = () => {
       })
       .then(() => {
         if (cancelled) return;
+        setPartyVoiceReconnecting(null);
         setPartyVoiceError(null);
-        const existingStreams = agoraPartyEngine.getActivePartyRemoteStreams(roomId);
-        if (existingStreams.length > 0) {
-          setRemotePartyStreams(existingStreams);
-        }
       })
       .catch((error: any) => {
         if (cancelled) return;
-        if (error?.code === 'SFU_NOT_CONFIGURED' || error?.status === 503) {
-          console.warn('[Party Voice] SFU unavailable:', error?.message || error);
-        } else {
-          console.error('[Party Voice] Unable to start SFU session:', error);
+        setPartyVoiceReconnecting(null);
+        if (error?.code === 'MIC_PERMISSION_REQUIRED' || error?.name === 'NotAllowedError') {
+          if (isUserHost) {
+            setIsHostMicMuted(true);
+          } else if (isSeatedNow) {
+            setIsMicMuted(true);
+          }
+          showToast('Microphone permission denied — listening safely with mic muted 🔇');
+          setPartyVoiceError('Microphone permission is disabled. Enable Microphone in Settings to speak.');
+          return;
         }
+        if (error?.code === 'USER_RESTRICTED' || error?.code === 'ROOM_NOT_FOUND') {
+          showToast(error?.message || 'Unable to access this Party Room.');
+          closePartyRoom(false);
+          return;
+        }
+        if (error?.code === 'AGORA_NOT_CONFIGURED' || error?.status === 503) {
+          console.warn('[Party Voice] Agora backend unavailable:', error?.message || error);
+          setPartyVoiceError(error?.message || 'Party Voice service is temporarily unavailable.');
+          return;
+        }
+        console.error('[Party Voice] Unable to start Agora session:', error);
 
         if (
-          error?.code === 'SFU_BACKEND_UNREACHABLE' &&
-          startupAutoRetryCountRef.current < 1
+          (error?.code === 'AGORA_BACKEND_UNREACHABLE' || error?.code === 'SFU_BACKEND_UNREACHABLE') &&
+          startupAutoRetryCountRef.current < 2
         ) {
           startupAutoRetryCountRef.current += 1;
+          setPartyVoiceReconnecting(`Reconnecting Party Voice… (${startupAutoRetryCountRef.current}/2)`);
           startupRetryTimerRef.current = setTimeout(() => {
             startupRetryTimerRef.current = null;
             if (!cancelled) {
               setPartyVoiceRetryToken((prev) => prev + 1);
             }
-          }, 1500);
+          }, 1800 * startupAutoRetryCountRef.current);
           return;
         }
 
-        scheduleVoiceReconnect(error?.message || 'Party voice startup failed');
+        setPartyVoiceError(error?.message || 'Unable to connect Party Voice. Tap Retry.');
       });
 
     const wsJoinProfile: RealtimeViewerProfile = {
@@ -1392,31 +1446,36 @@ export const PartyRoomsScreen: React.FC = () => {
           isHost: isUserHost,
         })
         .catch((err: any) => {
-          if (err?.code === 'SFU_NOT_CONFIGURED' || err?.status === 503) {
+          const isMicHardwareError =
+            err?.code === 'MIC_PERMISSION_REQUIRED' ||
+            err?.name === 'NotAllowedError' ||
+            err?.name === 'NotFoundError' ||
+            err?.name === 'NotReadableError' ||
+            /microphone|permission|device/i.test(String(err?.message || ''));
+
+          if (isMicHardwareError) {
+            if (!isUserHost && userSeatIndex !== null) {
+              setIsMicMuted(true);
+              const mutedSeats = (activePartyRoom.seats || []).map((s) =>
+                Number(s.seatIndex) === userSeatIndex ? { ...s, isMuted: true, isSpeaking: false } : s
+              );
+              updatePartyRoomFields(roomId, { seats: mutedSeats }).catch(() => {});
+              showToast('Microphone permission required — seated with mic muted 🔇');
+            } else {
+              setIsHostMicMuted(true);
+              showToast('Please enable Microphone permission in Android Settings to speak 🔇');
+            }
+            return;
+          }
+
+          if (err?.code === 'AGORA_NOT_CONFIGURED' || err?.status === 503) {
             console.warn('[Party Voice] Mic publish/mode switch unavailable:', err?.message || err);
           } else {
             console.error('[Party Voice] Mic publish/mode switch failed:', err);
           }
-          const msg = err?.name === 'NotAllowedError' || err?.name === 'NotFoundError' || err?.name === 'NotReadableError'
-            ? 'Please check microphone permission and try again.'
-            : 'Alpha Mate Party Voice is reconnecting…';
-          const isMicHardwareError =
-            err?.name === 'NotAllowedError' ||
-            err?.name === 'NotFoundError' ||
-            err?.name === 'NotReadableError' ||
-            /microphone|permission|device/i.test(msg);
-
-          if (isMicHardwareError && !isUserHost && userSeatIndex !== null) {
-            setIsMicMuted(true);
-            const mutedSeats = (activePartyRoom.seats || []).map((s) =>
-              Number(s.seatIndex) === userSeatIndex ? { ...s, isMuted: true, isSpeaking: false } : s
-            );
-            updatePartyRoomFields(roomId, { seats: mutedSeats }).catch(() => {});
-            showToast('Microphone unavailable — seated with mic muted 🔇');
-          } else {
-            setPartyVoiceError(msg);
-            showToast(msg);
-          }
+          const msg = err?.message || 'Unable to switch Party microphone mode. Tap Retry.';
+          setPartyVoiceError(msg);
+          showToast(msg);
         });
     }
 
@@ -1431,7 +1490,7 @@ export const PartyRoomsScreen: React.FC = () => {
     }
 
     const volumeInterval = setInterval(() => {
-      const speaking = agoraPartyEngine.getSpeakingVolume() > 12;
+      const speaking = agoraPartyEngine.isLocalSpeaking() || agoraPartyEngine.getSpeakingVolume() >= 28;
       if (isUserHost) {
         setIsHostSpeaking(speaking);
         setIsSelfSpeaking(false);
@@ -1443,17 +1502,59 @@ export const PartyRoomsScreen: React.FC = () => {
         lastSelfSpeakingSyncedRef.current = speaking;
         agoraPartyEngine.updatePartySpeakingIndicator(roomId, speaking);
       }
-    }, 220);
+    }, 200);
 
     return () => {
       clearInterval(volumeInterval);
     };
   }, [activePartyRoom?.id, effectiveUserId, isHost, userSeatIndex, isMicMuted, isHostMicMuted]);
 
-  // 2b. Poll real WebRTC inbound RTP audio activity for remote speakers
+  // 2a. Keep Agora numeric UID -> Firebase userId profile mapping fresh for late joiners & seat takers
   useEffect(() => {
     const roomId = activePartyRoom?.id;
-    if (!roomId || remotePartyStreams.length === 0) {
+    if (!roomId) return;
+    agoraPartyEngine.syncRoomParticipants(roomId, [
+      ...(activePartyRoom.host?.id
+        ? [{
+            userId: activePartyRoom.host.id,
+            uniqueId: activePartyRoom.host.uniqueId || activePartyRoom.host.id,
+            displayName: activePartyRoom.host.displayName,
+            avatar: activePartyRoom.host.avatar,
+            level: activePartyRoom.host.level,
+            vipTier: activePartyRoom.host.vipTier,
+            countryFlag: activePartyRoom.host.countryFlag,
+            isHost: true,
+          }]
+        : []),
+      ...((activePartyRoom.seats || [])
+        .filter((seat: any) => seat?.user?.id)
+        .map((seat: any) => ({
+          userId: seat.user.id,
+          uniqueId: seat.user.uniqueId || seat.user.id,
+          displayName: seat.user.displayName,
+          avatar: seat.user.avatar,
+          level: seat.user.level,
+          vipTier: seat.user.vipTier,
+          countryFlag: seat.user.countryFlag,
+          isHost: false,
+        }))),
+      ...(wsPartyViewers || []).map((v) => ({
+        userId: v.id,
+        uniqueId: v.uniqueId || v.id,
+        displayName: v.displayName,
+        avatar: v.avatar,
+        level: v.level,
+        vipTier: v.vipTier,
+        countryFlag: v.countryFlag,
+        isHost: Boolean(v.isHost),
+      })),
+    ]);
+  }, [activePartyRoom?.id, activePartyRoom?.host, activePartyRoom?.seats, wsPartyViewers]);
+
+  // 2b. Poll real Agora remote audio activity so Host & Guest seat speaking pulses work smoothly
+  useEffect(() => {
+    const roomId = activePartyRoom?.id;
+    if (!roomId) {
       setRemoteSpeakingPeerIds((prev) => (prev.size === 0 ? prev : new Set()));
       return;
     }
@@ -1469,9 +1570,9 @@ export const PartyRoomsScreen: React.FC = () => {
           });
         })
         .catch(() => {});
-    }, 260);
+    }, 220);
     return () => clearInterval(timer);
-  }, [activePartyRoom?.id, remotePartyStreams.length]);
+  }, [activePartyRoom?.id]);
 
   // 3. Subscribe to real SFU party remote microphone streams and bind to mounted DOM <audio> elements
   useEffect(() => {
@@ -2307,7 +2408,14 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         )}
 
-        {/* SFU Voice Error Notice (never masked by fake audio) */}
+        {/* Non-blocking Party Voice Reconnecting Status */}
+        {partyVoiceReconnecting && !partyVoiceError && (
+          <div className="relative z-30 mx-3 mt-1 px-3 py-1.5 rounded-xl bg-amber-950/85 border border-amber-500/35 text-amber-200 text-[10px] flex items-center justify-between gap-2">
+            <span className="truncate">{partyVoiceReconnecting}</span>
+          </div>
+        )}
+
+        {/* Party Voice Error Notice (only shown after automatic reconnect exhausts or permanent error) */}
         {partyVoiceError && (
           <div className="relative z-30 mx-3 mt-1 px-3 py-2 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[10px] flex items-start justify-between gap-2">
             <span className="leading-snug break-words">{partyVoiceError}</span>
@@ -2315,7 +2423,7 @@ export const PartyRoomsScreen: React.FC = () => {
               <button
                 onClick={() => {
                   setPartyVoiceError(null);
-                  void refreshScope('party_room');
+                  setPartyVoiceRetryToken((prev) => prev + 1);
                 }}
                 className="text-amber-300 hover:text-white font-bold cursor-pointer"
               >
@@ -2346,6 +2454,7 @@ export const PartyRoomsScreen: React.FC = () => {
             opponentRoomScore={rightRoomPKScore}
             timeLeft={roomPKTimeLeft}
             isHost={isHost}
+            isHostSpeaking={effectiveHostSpeaking}
             onEndPK={() => {
               setIsRoomPKActive(false);
               setShowRoomPKVictoryModal(true);

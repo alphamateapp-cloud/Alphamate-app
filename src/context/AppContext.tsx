@@ -4412,6 +4412,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const openLiveStream = (stream: LiveStream) => {
     setActiveGiftBanner(null);
+    if (activePartyRoom) {
+      realtimeSocket.leaveRoom('party', activePartyRoom.id);
+      agoraPartyEngine.stopPartyVoice(activePartyRoom.id, true).catch(() => {});
+      setActivePartyRoom(null);
+      setUserSeatIndex(null);
+      setIsMicMuted(false);
+    }
     if (stream.isPK) {
       openPKBattle(stream);
     } else {
@@ -4810,6 +4817,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const openPartyRoom = (room: PartyRoom) => {
     setActiveGiftBanner(null);
+    if (activeStream) {
+      realtimeSocket.leaveRoom('live', activeStream.id);
+      p2pStreamingEngine.stopHostBroadcast(activeStream.id, true).catch(() => {});
+      p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStream.id, true).catch(() => {});
+      p2pStreamingEngine.stopLocalMediaStream();
+      setActiveStream(null);
+    }
     const uid = auth.currentUser?.uid || currentUser.id;
     const isOwnerHost = Boolean(uid && room.host?.id === uid);
     const safeSeats = Array.isArray(room.seats) ? room.seats : [];

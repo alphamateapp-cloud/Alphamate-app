@@ -31,3 +31,5 @@
 -keep class com.alphamate.liveparty.** { *; }
 -keep class com.google.android.libraries.identity.googleid.** { *; }
 -keep class androidx.credentials.** { *; }
+-keep class io.agora.** { *; }
+-dontwarn io.agora.**
