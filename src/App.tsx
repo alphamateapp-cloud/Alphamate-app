@@ -32,6 +32,7 @@ import { AccountRecoveryScreen } from './screens/AccountRecoveryScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { keepScreenAwake } from './services/keepScreenAwake';
+import { BatteryStatus } from './components/common/BatteryStatus';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
 import { PushNotificationSettingsModal } from './components/modals/PushNotificationSettingsModal';
 import { GlobalWeeklyLeaderboardModal } from './components/leaderboard/GlobalWeeklyLeaderboard';
@@ -291,11 +292,55 @@ const AppContent: React.FC = () => {
   );
 };
 
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { hasError: boolean; message: string }
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, message: '' };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return {
+      hasError: true,
+      message: error?.message || 'An unexpected error occurred.',
+    };
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="w-full h-full min-h-[100dvh] bg-[#09070F] text-white flex flex-col items-center justify-center p-6 text-center space-y-4">
+          <div className="w-14 h-14 rounded-2xl bg-rose-500/20 border border-rose-500/40 flex items-center justify-center text-2xl">
+            ⚠️
+          </div>
+          <div className="space-y-1 max-w-sm">
+            <h2 className="text-base font-extrabold text-white">Something went wrong</h2>
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              Please tap Reload to restore your session cleanly.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => this.setState({ hasError: false, message: '' })}
+            className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold shadow-lg cursor-pointer"
+          >
+            Reload View
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   return (
     <AppProvider>
       <DeviceFrame>
         <PushNotificationBanner />
+        <BatteryStatus />
         <GlobalFirestoreQuotaBanner />
         <GlobalPushSettingsHost />
         <GlobalWeeklyLeaderboardModal />
@@ -303,7 +348,9 @@ export default function App() {
         <PublicUserProfileModal />
         <ProfileRegistrationModal />
         <AccountSwitcherModal />
-        <AppContent />
+        <AppErrorBoundary>
+          <AppContent />
+        </AppErrorBoundary>
       </DeviceFrame>
     </AppProvider>
   );

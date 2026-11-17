@@ -967,7 +967,7 @@ export async function purgeStaleHostCardsInFirestore(
           !Array.isArray(data?.seats) ||
           (keepPartyId ? d.id !== keepPartyId : true);
         if (shouldRemove) {
-          await deleteDoc(doc(db, 'partyRooms', d.id)).catch(() => {});
+          await deletePartyRoomFromFirestore(d.id, typeof data?.sessionId === 'string' ? data.sessionId : undefined).catch(() => {});
         }
       })
     );
@@ -1001,7 +1001,7 @@ export async function purgeStaleHostCardsInFirestore(
  * Save Party Room to Firestore with Payload Sanitization
  * Strips unbounded sub-objects, large base64 photos, and cover images to stay well below 1MB.
  */
-export async function syncPartyRoomToFirestore(room: any) {
+export async function syncPartyRoomToFirestore(room: any, options?: { overwrite?: boolean }) {
   if (!room?.id || isLegacyErrorCardId(room.id) || isFirestoreQuotaExceeded()) return;
   const path = `partyRooms/${room.id}`;
   try {
@@ -1011,6 +1011,7 @@ export async function syncPartyRoomToFirestore(room: any) {
         : 0;
     const sanitizedRoom = {
       id: room.id,
+      sessionId: typeof room.sessionId === 'string' ? room.sessionId.slice(0, 128) : '',
       title: (room.title || '').slice(0, 100),
       category: room.category || 'Chat',
       announcement: (room.announcement || '').slice(0, 200),
@@ -1063,7 +1064,9 @@ export async function syncPartyRoomToFirestore(room: any) {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
         await withFirestoreTimeout(
-          setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload, { merge: true }),
+          options?.overwrite
+            ? setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload)
+            : setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload, { merge: true }),
           15000,
           'Party Room sync'
         );
@@ -1104,21 +1107,55 @@ export async function updatePartyRoomFields(roomId: string, fields: Record<strin
   }
 }
 
+async function deleteCollectionDocsInBatches(colRef: ReturnType<typeof collection>): Promise<void> {
+  try {
+    while (true) {
+      const snap = await getDocs(query(colRef, limit(200)));
+      if (snap.empty) break;
+      const batch = writeBatch(db);
+      snap.docs.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      if (snap.size < 200) break;
+    }
+  } catch (err) {
+    if (isFirestoreQuotaExceededError(err)) {
+      notifyFirestoreQuotaExceeded();
+    }
+  }
+}
+
 /**
- * Permanently delete Party Room from Firestore when host chooses Close Room
+ * Permanently delete Party Room and its session/legacy subcollections from Firestore when host closes room
  */
-export async function deletePartyRoomFromFirestore(roomId: string) {
+export async function deletePartyRoomFromFirestore(roomId: string, sessionId?: string) {
   if (!roomId) return;
   try {
-    if (!isFirestoreQuotaExceeded()) {
-      await updateDoc(doc(db, 'partyRooms', roomId), {
-        isActive: false,
-        roomStatus: 'ended',
-        activeViewers: 0,
-        isHostPresent: false,
-        endedAt: new Date().toISOString(),
-      }).catch(() => {});
+    let resolvedSessionId = typeof sessionId === 'string' && FIRESTORE_VALID_ID_RE.test(sessionId) ? sessionId : '';
+    if (!resolvedSessionId && !isFirestoreQuotaExceeded()) {
+      const existingSnap = await getDoc(doc(db, 'partyRooms', roomId)).catch(() => null);
+      const rawSession = existingSnap?.exists() ? (existingSnap.data() as any)?.sessionId : '';
+      if (typeof rawSession === 'string' && FIRESTORE_VALID_ID_RE.test(rawSession)) {
+        resolvedSessionId = rawSession;
+      }
     }
+
+    if (!isFirestoreQuotaExceeded()) {
+      const cleanupTasks: Array<Promise<void>> = [
+        deleteCollectionDocsInBatches(collection(db, 'partyRooms', roomId, 'voiceParticipants')),
+        deleteCollectionDocsInBatches(collection(db, 'partyRooms', roomId, 'messages')),
+        deleteCollectionDocsInBatches(collection(db, 'partyRooms', roomId, 'stats')),
+        deleteCollectionDocsInBatches(collection(db, 'partyRooms', roomId, 'heartEvents')),
+      ];
+      if (resolvedSessionId) {
+        cleanupTasks.push(
+          deleteCollectionDocsInBatches(collection(db, 'partyRooms', roomId, 'sessions', resolvedSessionId, 'messages')),
+          deleteCollectionDocsInBatches(collection(db, 'partyRooms', roomId, 'sessions', resolvedSessionId, 'stats')),
+          deleteCollectionDocsInBatches(collection(db, 'partyRooms', roomId, 'sessions', resolvedSessionId, 'heartEvents'))
+        );
+      }
+      await Promise.all(cleanupTasks);
+    }
+
     await deleteDoc(doc(db, 'partyRooms', roomId));
   } catch (error) {
     if (isFirestoreQuotaExceededError(error)) {

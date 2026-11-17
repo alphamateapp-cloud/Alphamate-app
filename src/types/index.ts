@@ -182,6 +182,7 @@ export interface PartySeat {
 
 export interface PartyRoom {
   id: string;
+  sessionId?: string;
   title: string;
   host: User;
   announcement: string;

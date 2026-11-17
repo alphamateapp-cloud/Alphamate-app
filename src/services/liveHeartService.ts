@@ -32,23 +32,47 @@ function getParentCollection(type: LiveRoomType): string {
   return type === 'live' ? 'liveStreams' : 'partyRooms';
 }
 
+const VALID_SESSION_ID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function resolveHeartRefs(type: LiveRoomType, id: string, sessionId?: string) {
+  const parentCol = getParentCollection(type);
+  const cleanSession =
+    type === 'party' && typeof sessionId === 'string' && VALID_SESSION_ID_RE.test(sessionId.trim())
+      ? sessionId.trim()
+      : '';
+  if (cleanSession) {
+    return {
+      statsRef: doc(db, parentCol, id, 'sessions', cleanSession, 'stats', 'hearts'),
+      statsPath: `${parentCol}/${id}/sessions/${cleanSession}/stats/hearts`,
+      eventsColRef: collection(db, parentCol, id, 'sessions', cleanSession, 'heartEvents'),
+      eventsPath: `${parentCol}/${id}/sessions/${cleanSession}/heartEvents`,
+      cleanSession,
+    };
+  }
+  return {
+    statsRef: doc(db, parentCol, id, 'stats', 'hearts'),
+    statsPath: `${parentCol}/${id}/stats/hearts`,
+    eventsColRef: collection(db, parentCol, id, 'heartEvents'),
+    eventsPath: `${parentCol}/${id}/heartEvents`,
+    cleanSession: undefined,
+  };
+}
+
 /**
  * Send a heart reaction to a Solo Live stream or Party Room.
  * Emits immediately over WebSocket for <50ms cross-device delivery AND persists to Firestore when quota permits.
  */
-export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<void> {
+export async function sendLiveHeart(type: LiveRoomType, id: string, sessionId?: string): Promise<void> {
   if (!id) return;
   const uid = auth.currentUser?.uid;
   if (!uid) return;
 
+  const { statsRef, statsPath, eventsColRef, eventsPath, cleanSession } = resolveHeartRefs(type, id, sessionId);
+
   // 1. Instant WebSocket broadcast for sub-50ms counter & animation sync
-  realtimeSocket.sendHeartTap(type, id);
+  realtimeSocket.sendHeartTap(type, id, cleanSession);
 
   if (isFirestoreQuotaExceeded()) return;
-
-  const parentCol = getParentCollection(type);
-  const statsRef = doc(db, parentCol, id, 'stats', 'hearts');
-  const eventsColRef = collection(db, parentCol, id, 'heartEvents');
 
   // 2. Persistent Firestore counter + event doc matching firestore.rules
   await Promise.all([
@@ -71,8 +95,9 @@ export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<voi
         notifyFirestoreQuotaExceeded();
         return;
       }
+      if (err?.code === 'not-found') return;
       if (err?.code === 'permission-denied') {
-        handleFirestoreError(err, OperationType.WRITE, `${parentCol}/${id}/stats/hearts`);
+        handleFirestoreError(err, OperationType.WRITE, statsPath);
       }
     }),
     addDoc(eventsColRef, {
@@ -83,8 +108,9 @@ export async function sendLiveHeart(type: LiveRoomType, id: string): Promise<voi
         notifyFirestoreQuotaExceeded();
         return;
       }
+      if (err?.code === 'not-found') return;
       if (err?.code === 'permission-denied') {
-        handleFirestoreError(err, OperationType.CREATE, `${parentCol}/${id}/heartEvents`);
+        handleFirestoreError(err, OperationType.CREATE, eventsPath);
       }
     }),
   ]);
@@ -97,7 +123,8 @@ export function subscribeToLiveHeartCount(
   type: LiveRoomType,
   id: string,
   onCount: (count: number) => void,
-  onError?: (err: Error) => void
+  onError?: (err: Error) => void,
+  sessionId?: string
 ): () => void {
   if (!id) {
     onCount(0);
@@ -111,8 +138,7 @@ export function subscribeToLiveHeartCount(
     onCount(Math.max(firestoreCount, wsCount));
   };
 
-  const parentCol = getParentCollection(type);
-  const statsRef = doc(db, parentCol, id, 'stats', 'hearts');
+  const { statsRef, cleanSession } = resolveHeartRefs(type, id, sessionId);
 
   const unsubFirestore = onSnapshot(
     statsRef,
@@ -130,8 +156,9 @@ export function subscribeToLiveHeartCount(
   );
 
   const unsubWs = realtimeSocket.onRoomEvent(type, id, (event) => {
+    if (cleanSession && event.roomSessionId && event.roomSessionId !== cleanSession) return;
     if (event.type === 'room:state_init') {
-      wsCount = Math.max(wsCount, Number(event.heartCount) || 0);
+      wsCount = Number(event.heartCount) || 0;
       emitMax();
     } else if (event.type === 'room:heart') {
       wsCount = Math.max(wsCount + 1, Number(event.heartCount) || 0);
@@ -153,22 +180,20 @@ export function subscribeToLiveHeartEvents(
   type: LiveRoomType,
   id: string,
   onEvent: (event: LiveHeartEvent) => void,
-  onError?: (err: Error) => void
+  onError?: (err: Error) => void,
+  sessionId?: string
 ): () => void {
   if (!id) return () => {};
 
-  const parentCol = getParentCollection(type);
-  const eventsQuery = query(
-    collection(db, parentCol, id, 'heartEvents'),
-    orderBy('createdAt', 'desc'),
-    limit(15)
-  );
+  const { eventsColRef, cleanSession } = resolveHeartRefs(type, id, sessionId);
+  const eventsQuery = query(eventsColRef, orderBy('createdAt', 'desc'), limit(15));
 
   let initialSnapshotHandled = false;
   const seenDocIds = new Set<string>();
   const recentWsTimestamps = new Map<string, number>();
 
   const unsubWs = realtimeSocket.onRoomEvent(type, id, (event) => {
+    if (cleanSession && event.roomSessionId && event.roomSessionId !== cleanSession) return;
     if (event.type === 'room:heart') {
       recentWsTimestamps.set(event.senderId, Date.now());
       onEvent({

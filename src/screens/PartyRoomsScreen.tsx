@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
+import { NetworkLatencyMonitor } from '../components/common/NetworkLatencyMonitor';
 import { PartyRoom, PartySeat, User, Gift } from '../types';
 import { agoraPartyEngine } from '../services/agoraPartyEngine';
 import type { PartyParticipantPresence } from '../services/webrtcService';
@@ -314,18 +315,32 @@ export const PartyRoomsScreen: React.FC = () => {
     };
   }, [activePartyGiftAnimation?.id]);
 
-  // Reset party gift overlay & stale banners whenever entering, switching, or leaving a Party Room
+  // Reset party gift overlay, chat, hearts, PK & givers whenever entering, switching sessions, or leaving a Party Room
   useEffect(() => {
     partyJoinedAtRef.current = Date.now();
+    seenPartyBannerIdsRef.current.clear();
+    lastSyncedViewerCountRef.current = -1;
     setActivePartyGiftAnimation(null);
     clearActiveGiftBanner();
+    setChatItems([]);
+    setPartyGivers([]);
+    setTotalHeartCount(0);
+    setHearts([]);
+    setIsRoomPKActive(false);
+    setShowRoomPKVictoryModal(false);
+    setShowRoomPKInviteModal(false);
+    setShowRoomPKIncomingModal(false);
+    setActivePKChallenger(null);
+    setRoomPKTimeLeft(300);
+    setLeftRoomPKScore(0);
+    setRightRoomPKScore(0);
     audioManager.stopAll();
     return () => {
       setActivePartyGiftAnimation(null);
       clearActiveGiftBanner();
       audioManager.stopAll();
     };
-  }, [activePartyRoom?.id, clearActiveGiftBanner]);
+  }, [activePartyRoom?.id, activePartyRoom?.sessionId, clearActiveGiftBanner]);
 
   // Consume external party gift banners ONLY if strictly scoped to this activePartyRoom.id
   useEffect(() => {
@@ -1373,6 +1388,7 @@ export const PartyRoomsScreen: React.FC = () => {
         setPartyVoiceError(error?.message || 'Unable to connect Party Voice. Tap Retry.');
       });
 
+    const roomSessionId = activePartyRoom?.sessionId || undefined;
     const wsJoinProfile: RealtimeViewerProfile = {
       id: effectiveUserId,
       uniqueId: currentUser.uniqueId || effectiveUserId,
@@ -1386,9 +1402,10 @@ export const PartyRoomsScreen: React.FC = () => {
       isHost: isUserHost,
       joinedAtMs: Date.now(),
     };
-    realtimeSocket.joinRoom('party', roomId, wsJoinProfile, totalHeartCount);
+    realtimeSocket.joinRoom('party', roomId, wsJoinProfile, 0, roomSessionId);
     const unsubWsPartyRoom = realtimeSocket.onRoomEvent('party', roomId, (ev) => {
       if (cancelled) return;
+      if (roomSessionId && ev.roomSessionId && ev.roomSessionId !== roomSessionId) return;
       if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
         setWsPartyViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
       } else if (
@@ -1448,7 +1465,7 @@ export const PartyRoomsScreen: React.FC = () => {
       window.removeEventListener('beforeunload', handlePageHide);
       agoraPartyEngine.stopPartyVoice(roomId).catch(() => {});
     };
-  }, [activePartyRoom?.id, effectiveUserId, partyVoiceRetryToken]);
+  }, [activePartyRoom?.id, activePartyRoom?.sessionId, effectiveUserId, partyVoiceRetryToken]);
 
   // 2. Sync speaking / mic publish state inside the SAME SFU session when sitting, leaving seat, or muting
   useEffect(() => {
@@ -1804,39 +1821,108 @@ export const PartyRoomsScreen: React.FC = () => {
     }
   }, [activePartyRoom?.id, realViewersList.length, isHost]);
 
-  // Subscribe to real Firestore party-room comments and gift events.
+  // Subscribe to real Firestore party-room comments & gift events, and hydrate session Top Givers when open.
   useEffect(() => {
     if (!activePartyRoom?.id) return;
+    const roomSessionId = activePartyRoom.sessionId;
+    let unsubscribed = false;
     const unsubscribe = subscribeToPartyRoomMessages(
       activePartyRoom.id,
-      (messages) => setChatItems(messages.map((message: any) => ({
-        id: message.id,
-        sender: {
-          ...message.sender,
-          id: message.sender?.id || message.senderId,
-        },
-        text: message.text,
-        type: message.type,
-        giftName: message.giftName,
-        giftIcon: message.giftIcon,
-        giftCoins: message.giftCoins,
-        timestamp: message.createdAt?.toDate ? message.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now',
-      }))),
-      (error) => showToast(`Room chat connection error: ${error.message}`),
-    );
-    return unsubscribe;
-  }, [activePartyRoom?.id, partyRefreshTick]);
+      (messages) => {
+        if (unsubscribed) return;
+        const mapped: ChatItem[] = messages.map((message: any) => ({
+          id: message.id,
+          sender: {
+            ...message.sender,
+            id: message.sender?.id || message.senderId,
+          },
+          text: message.text,
+          type: message.type,
+          giftName: message.giftName,
+          giftIcon: message.giftIcon,
+          giftCoins: message.giftCoins,
+          timestamp: message.createdAt?.toDate
+            ? message.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+            : 'Just now',
+        }));
+        setChatItems(mapped);
 
-  // Shared real-time room heart count and incoming double-tap events.
+        // Reconstruct accurate session leaderboard from persisted session gift messages
+        const giverMap = new Map<string, PartyLeaderboardEntry>();
+        messages.forEach((message: any) => {
+          if (message.type !== 'gift') return;
+          const giftCoins = Math.max(0, Number(message.giftCoins) || 0);
+          if (giftCoins <= 0) return;
+          const sid = String(message.sender?.id || message.senderId || message.sender?.displayName || '').trim();
+          if (!sid) return;
+          const qty = Math.max(1, Number(message.quantity) || 1);
+          const existing = giverMap.get(sid);
+          if (existing) {
+            existing.totalCoins += giftCoins;
+            existing.giftCount = (existing.giftCount || 0) + qty;
+            if (message.giftName) existing.lastGiftName = message.giftName;
+            if (message.giftIcon) existing.lastGiftIcon = message.giftIcon;
+          } else {
+            const matchedSeatUser = activePartyRoom.seats?.find((s) => s.user?.id === sid)?.user;
+            const resolvedUser: User =
+              sid === currentUser.id || sid === auth.currentUser?.uid
+                ? { ...currentUser, id: sid }
+                : sid === activePartyRoom.host?.id
+                ? activePartyRoom.host
+                : matchedSeatUser || {
+                    id: sid,
+                    uniqueId: sid,
+                    username: String(message.sender?.displayName || 'user').replace(/\s+/g, '').toLowerCase() || 'user',
+                    displayName: String(message.sender?.displayName || 'Supporter'),
+                    avatar: String(message.sender?.avatar || ''),
+                    bio: 'Alpha Mate Member',
+                    followersCount: 0,
+                    followingCount: 0,
+                    likesCount: 0,
+                    level: Number(message.sender?.level ?? 0),
+                    xp: 0,
+                    nextLevelXp: 50000,
+                    vipTier: Number(message.sender?.vipTier ?? 0),
+                    coins: 0,
+                    diamonds: 0,
+                    isVerified: false,
+                    isHost: Boolean(message.sender?.isHost),
+                  };
+            giverMap.set(sid, {
+              user: resolvedUser,
+              totalCoins: giftCoins,
+              giftCount: qty,
+              lastGiftName: message.giftName,
+              lastGiftIcon: message.giftIcon,
+            });
+          }
+        });
+        setPartyGivers(Array.from(giverMap.values()).sort((a, b) => b.totalCoins - a.totalCoins));
+      },
+      (error) => {
+        if (!unsubscribed) {
+          showToast(`Room chat connection error: ${error.message}`);
+        }
+      },
+      roomSessionId
+    );
+    return () => {
+      unsubscribed = true;
+      unsubscribe();
+    };
+  }, [activePartyRoom?.id, activePartyRoom?.sessionId, partyRefreshTick]);
+
+  // Shared real-time room heart count and incoming double-tap events scoped to session.
   useEffect(() => {
     const roomId = activePartyRoom?.id;
+    const roomSessionId = activePartyRoom?.sessionId;
     if (!roomId) { setTotalHeartCount(0); return; }
-    const offCount = subscribeToLiveHeartCount('party', roomId, setTotalHeartCount, (e) => console.warn('[Party hearts]', e));
+    const offCount = subscribeToLiveHeartCount('party', roomId, setTotalHeartCount, (e) => console.warn('[Party hearts]', e), roomSessionId);
     const offEvents = subscribeToLiveHeartEvents('party', roomId, (event) => {
       if (event.senderId !== auth.currentUser?.uid) { spawnHeart(); spawnHeart(); }
-    }, (e) => console.warn('[Party heart events]', e));
+    }, (e) => console.warn('[Party heart events]', e), roomSessionId);
     return () => { offCount(); offEvents(); };
-  }, [activePartyRoom?.id, partyRefreshTick]);
+  }, [activePartyRoom?.id, activePartyRoom?.sessionId, partyRefreshTick]);
 
   // Auto-scroll chat feed
   useEffect(() => {
@@ -1871,7 +1957,7 @@ export const PartyRoomsScreen: React.FC = () => {
       spawnHeart(clientX, clientY);
       spawnHeart(clientX ? clientX + 15 : undefined, clientY ? clientY - 15 : undefined);
       lastHeartSentAtRef.current = Date.now();
-      if (activePartyRoom?.id) sendLiveHeart('party', activePartyRoom.id).catch((err) => console.warn('[Party heart send]', err));
+      if (activePartyRoom?.id) sendLiveHeart('party', activePartyRoom.id, activePartyRoom.sessionId).catch((err) => console.warn('[Party heart send]', err));
       lastTapRef.current = 0;
     } else {
       lastTapRef.current = now;
@@ -1884,9 +1970,10 @@ export const PartyRoomsScreen: React.FC = () => {
     if (!activePartyRoom || !inputChat.trim()) return;
 
     const isHost = activePartyRoom.host?.id === currentUser.id;
+    const msgId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
     const newMsg: ChatItem = {
-      id: `chat_${Date.now()}`,
+      id: msgId,
       sender: {
         id: auth.currentUser?.uid || currentUser.id,
         displayName: currentUser.displayName,
@@ -1902,11 +1989,16 @@ export const PartyRoomsScreen: React.FC = () => {
 
     setChatItems((prev) => [...prev.slice(-149), newMsg]);
     setInputChat('');
-    sendPartyRoomMessage(activePartyRoom.id, {
-      sender: { id: currentUser.id, displayName: currentUser.displayName, avatar: currentUser.avatar, vipTier: currentUser.vipTier, level: currentUser.level, isHost },
-      text: newMsg.text,
-      type: isHost ? 'host' : 'room',
-    }).catch((error) => showToast(error instanceof Error ? error.message : 'Message could not be sent.'));
+    sendPartyRoomMessage(
+      activePartyRoom.id,
+      {
+        id: msgId,
+        sender: { id: currentUser.id, displayName: currentUser.displayName, avatar: currentUser.avatar, vipTier: currentUser.vipTier, level: currentUser.level, isHost },
+        text: newMsg.text,
+        type: isHost ? 'host' : 'room',
+      },
+      activePartyRoom.sessionId
+    ).catch((error) => showToast(error instanceof Error ? error.message : 'Message could not be sent.'));
   };
 
   // Send Virtual Gift (strictly validated and scoped to this activePartyRoom.id)
@@ -1965,8 +2057,9 @@ export const PartyRoomsScreen: React.FC = () => {
       roomId: activePartyRoom.id,
     });
 
+    const giftMsgId = `gift_${now}_${Math.random().toString(36).slice(2, 7)}`;
     const giftMsg: ChatItem = {
-      id: `gift_${now}`,
+      id: giftMsgId,
       sender: {
         id: auth.currentUser?.uid || currentUser.id,
         displayName: currentUser.displayName,
@@ -1984,24 +2077,47 @@ export const PartyRoomsScreen: React.FC = () => {
 
     setChatItems((prev) => [...prev.slice(-149), giftMsg]);
 
-    sendPartyRoomMessage(activePartyRoom.id, {
-      sender: {
-        id: auth.currentUser?.uid || currentUser.id,
-        displayName: currentUser.displayName,
-        avatar: currentUser.avatar,
-        vipTier: currentUser.vipTier ?? 0,
-        level: currentUser.level ?? 0,
+    sendPartyRoomMessage(
+      activePartyRoom.id,
+      {
+        id: giftMsgId,
+        sender: {
+          id: auth.currentUser?.uid || currentUser.id,
+          displayName: currentUser.displayName,
+          avatar: currentUser.avatar,
+          vipTier: currentUser.vipTier ?? 0,
+          level: currentUser.level ?? 0,
+        },
+        text: giftMsg.text,
+        type: 'gift',
+        giftId: selectedGift.id,
+        giftName: selectedGift.name,
+        giftIcon: selectedGift.icon,
+        giftCoins: giftCost,
+        quantity: 1,
+        recipientId,
+        recipientName: recipient,
       },
-      text: giftMsg.text,
-      type: 'gift',
-      giftName: selectedGift.name,
-      giftIcon: selectedGift.icon,
-      giftCoins: giftCost,
-    }).catch(() => {});
+      activePartyRoom.sessionId
+    ).catch(() => {});
+
+    // Increment receivedCoins on targeted seated guest if recipient occupies a seat
+    const targetSeatIdx = (activePartyRoom.seats || []).findIndex(
+      (s) => s.user && s.user.id === recipientId
+    );
+    if (targetSeatIdx !== -1) {
+      const updatedSeats = activePartyRoom.seats.map((s, idx) =>
+        idx === targetSeatIdx
+          ? { ...s, receivedCoins: (Number(s.receivedCoins) || 0) + giftCost }
+          : s
+      );
+      updatePartyRoomFields(activePartyRoom.id, { seats: updatedSeats }).catch(() => {});
+    }
 
     // Dynamically update Party Room Leaderboard
     setPartyGivers((prev) => {
-      const existingIdx = prev.findIndex((g) => g.user.id === currentUser.id);
+      const mySenderId = auth.currentUser?.uid || currentUser.id;
+      const existingIdx = prev.findIndex((g) => g.user.id === mySenderId || g.user.id === currentUser.id);
       let updated: PartyLeaderboardEntry[];
       if (existingIdx !== -1) {
         updated = prev.map((g, idx) =>
@@ -2019,7 +2135,7 @@ export const PartyRoomsScreen: React.FC = () => {
         updated = [
           ...prev,
           {
-            user: currentUser,
+            user: { ...currentUser, id: mySenderId },
             totalCoins: giftCost,
             giftCount: 1,
             lastGiftName: selectedGift.name,
@@ -2164,7 +2280,7 @@ export const PartyRoomsScreen: React.FC = () => {
           spawnHeart(e.clientX + 10, e.clientY - 20);
           if (Date.now() - lastHeartSentAtRef.current > 180) {
             lastHeartSentAtRef.current = Date.now();
-            if (activePartyRoom?.id) sendLiveHeart('party', activePartyRoom.id).catch((err) => console.warn('[Party heart send]', err));
+            if (activePartyRoom?.id) sendLiveHeart('party', activePartyRoom.id, activePartyRoom.sessionId).catch((err) => console.warn('[Party heart send]', err));
           }
         }}
         onTouchStart={handleScreenTouchOrClick}
@@ -2264,7 +2380,7 @@ export const PartyRoomsScreen: React.FC = () => {
                     e.stopPropagation();
                     spawnHeart();
                     if (activePartyRoom?.id) {
-                      sendLiveHeart('party', activePartyRoom.id).catch((err) => console.warn('[Party hearts]', err));
+                      sendLiveHeart('party', activePartyRoom.id, activePartyRoom.sessionId).catch((err) => console.warn('[Party hearts]', err));
                     }
                   }}
                   className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-pink-500/15 border border-pink-400/40 text-pink-200 hover:bg-pink-500/25 active:scale-95 transition-all cursor-pointer shrink-0"
@@ -2384,6 +2500,15 @@ export const PartyRoomsScreen: React.FC = () => {
             >
               <Palette className="w-3.5 h-3.5 text-[#EC4899]" />
             </button>}
+
+            {/* Real-Time Network Latency Monitor (Host Only, Party Agora RTC) */}
+            {isHost && activePartyRoom?.id && (
+              <NetworkLatencyMonitor
+                mode="party_room"
+                sessionId={activePartyRoom.id}
+                enabled={isHost}
+              />
+            )}
 
             {/* Refresh Party Room & Voice */}
             <RefreshScopeButton

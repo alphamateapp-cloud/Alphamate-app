@@ -105,6 +105,7 @@
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
+        "sessionId": { "type": "string", "maxLength": 128 },
         "title": { "type": "string", "maxLength": 128 },
         "hostId": { "type": "string", "maxLength": 128 },
         "hostName": { "type": "string", "maxLength": 64 },
@@ -120,7 +121,7 @@
     },
     "RoomMessage": {
       "title": "RoomMessage",
-      "description": "Chat and gift message within a Party Room",
+      "description": "Chat and gift message within a Party Room session",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
@@ -130,6 +131,13 @@
         "senderAvatar": { "type": "string", "maxLength": 1024 },
         "text": { "type": "string", "maxLength": 500 },
         "type": { "type": "string", "maxLength": 32 },
+        "giftId": { "type": "string", "maxLength": 64 },
+        "giftName": { "type": "string", "maxLength": 80 },
+        "giftIcon": { "type": "string", "maxLength": 32 },
+        "giftCoins": { "type": "number" },
+        "quantity": { "type": "number" },
+        "recipientId": { "type": "string", "maxLength": 128 },
+        "recipientName": { "type": "string", "maxLength": 128 },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "roomId", "senderId", "senderName", "text"]
@@ -689,6 +697,18 @@
     "/partyRooms/{roomId}/heartEvents/{eventId}": {
       "schema": "HeartEvent",
       "description": "Double-tap heart events inside a party room"
+    },
+    "/partyRooms/{roomId}/sessions/{sessionId}/messages/{messageId}": {
+      "schema": "RoomMessage",
+      "description": "Session-isolated chat & gift messages inside an open Party Room session"
+    },
+    "/partyRooms/{roomId}/sessions/{sessionId}/stats/{statId}": {
+      "schema": "HeartStat",
+      "description": "Session-isolated heart counter inside an open Party Room session"
+    },
+    "/partyRooms/{roomId}/sessions/{sessionId}/heartEvents/{eventId}": {
+      "schema": "HeartEvent",
+      "description": "Session-isolated double-tap heart events inside an open Party Room session"
     },
     "/partyRooms/{roomId}/voiceParticipants/{userId}": {
       "schema": "VoiceParticipant",

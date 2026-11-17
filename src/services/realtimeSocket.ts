@@ -31,6 +31,7 @@ export type RoomSocketEvent =
       type: 'room:state_init';
       roomType: 'live' | 'party';
       roomId: string;
+      roomSessionId?: string;
       heartCount: number;
       viewers: RealtimeViewerProfile[];
       count: number;
@@ -39,6 +40,7 @@ export type RoomSocketEvent =
       type: 'room:viewers';
       roomType: 'live' | 'party';
       roomId: string;
+      roomSessionId?: string;
       viewers: RealtimeViewerProfile[];
       count: number;
     }
@@ -46,6 +48,7 @@ export type RoomSocketEvent =
       type: 'room:heart';
       roomType: 'live' | 'party';
       roomId: string;
+      roomSessionId?: string;
       senderId: string;
       heartCount: number;
       eventId: string;
@@ -55,6 +58,7 @@ export type RoomSocketEvent =
       type: 'room:signal';
       roomType: 'live' | 'party';
       roomId: string;
+      roomSessionId?: string;
       senderId: string;
       signal: Record<string, any>;
       ts: number;
@@ -96,6 +100,7 @@ class RealtimeSocketService {
     roomId: string;
     profile: RealtimeViewerProfile;
     initialHeartCount?: number;
+    roomSessionId?: string;
   } | null = null;
 
   private pendingOutbox: Array<Record<string, any>> = [];
@@ -277,6 +282,9 @@ class RealtimeSocketService {
         ...(typeof this.activeJoinedRoom.initialHeartCount === 'number'
           ? { initialHeartCount: this.activeJoinedRoom.initialHeartCount }
           : {}),
+        ...(this.activeJoinedRoom.roomSessionId
+          ? { roomSessionId: this.activeJoinedRoom.roomSessionId }
+          : {}),
       });
     }
     const queue = this.pendingOutbox.splice(0, this.pendingOutbox.length);
@@ -381,16 +389,18 @@ class RealtimeSocketService {
     roomType: 'live' | 'party',
     roomId: string,
     profile: RealtimeViewerProfile,
-    initialHeartCount?: number
+    initialHeartCount?: number,
+    roomSessionId?: string
   ): void {
     if (!roomId) return;
-    this.activeJoinedRoom = { roomType, roomId, profile, initialHeartCount };
+    this.activeJoinedRoom = { roomType, roomId, profile, initialHeartCount, roomSessionId };
     this.sendAuthed({
       type: 'room:join',
       roomType,
       roomId,
       profile,
       ...(typeof initialHeartCount === 'number' ? { initialHeartCount } : {}),
+      ...(roomSessionId ? { roomSessionId } : {}),
     });
   }
 
@@ -404,9 +414,14 @@ class RealtimeSocketService {
     }
   }
 
-  public sendHeartTap(roomType: 'live' | 'party', roomId: string): void {
+  public sendHeartTap(roomType: 'live' | 'party', roomId: string, roomSessionId?: string): void {
     if (!roomId) return;
-    this.sendAuthed({ type: 'room:heart', roomType, roomId });
+    this.sendAuthed({
+      type: 'room:heart',
+      roomType,
+      roomId,
+      ...(roomSessionId ? { roomSessionId } : {}),
+    });
   }
 
   public sendRoomSignal(roomType: 'live' | 'party', roomId: string, signal: Record<string, any>): void {

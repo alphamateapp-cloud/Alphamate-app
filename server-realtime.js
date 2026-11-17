@@ -74,6 +74,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
       if (existingId !== keepStreamId && entry.data?.host?.id === hostUid) {
         clearHostDisconnectTimer(existingId);
         activeLiveStreams.delete(existingId);
+        rooms.delete(`live:${existingId}`);
         broadcastAll({ type: 'live:remove', streamId: existingId });
       }
     }
@@ -84,6 +85,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     for (const [existingId, entry] of Array.from(activePartyRooms.entries())) {
       if (existingId !== keepRoomId && entry.data?.host?.id === hostUid) {
         activePartyRooms.delete(existingId);
+        rooms.delete(`party:${existingId}`);
         broadcastAll({ type: 'party:remove', roomId: existingId });
       }
     }
@@ -95,6 +97,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
       room = {
         viewers: new Map(),
         heartCount: 0,
+        sessionId: undefined,
       };
       rooms.set(roomKey, room);
     }
@@ -258,6 +261,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     },
     removePartyRoom(roomId) {
       if (!isValidId(roomId)) return;
+      rooms.delete(`party:${roomId}`);
       if (activePartyRooms.delete(roomId)) {
         broadcastAll({ type: 'party:remove', roomId });
       }
@@ -361,6 +365,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         if (existing && existing.host?.id && existing.host.id !== uid) return;
         clearHostDisconnectTimer(streamId);
         activeLiveStreams.delete(streamId);
+        rooms.delete(`live:${streamId}`);
         broadcastAll({ type: 'live:remove', streamId });
         break;
       }
@@ -371,6 +376,14 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         const existing = activePartyRooms.get(room.id)?.data;
         const now = Date.now();
         const liveViewers = getRoomViewerList(`party:${room.id}`);
+        const incomingSessionId = typeof room.sessionId === 'string' && isValidId(room.sessionId) ? room.sessionId : undefined;
+        if (incomingSessionId) {
+          const roomState = getOrCreateRoom(`party:${room.id}`);
+          if (roomState.sessionId && roomState.sessionId !== incomingSessionId) {
+            roomState.heartCount = 0;
+          }
+          roomState.sessionId = incomingSessionId;
+        }
         if (!existing) {
           if (room.host?.id !== uid) return;
           removeOtherPartyRoomsForHost(uid, room.id);
@@ -423,6 +436,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         const existing = activePartyRooms.get(roomId)?.data;
         if (existing && existing.host?.id && existing.host.id !== uid) return;
         activePartyRooms.delete(roomId);
+        rooms.delete(`party:${roomId}`);
         broadcastAll({ type: 'party:remove', roomId });
         break;
       }
@@ -433,7 +447,17 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         if (!roomType || !isValidId(roomId)) return;
         const roomKey = `${roomType}:${roomId}`;
         const room = getOrCreateRoom(roomKey);
-        if (typeof msg.initialHeartCount === 'number' && msg.initialHeartCount > room.heartCount) {
+        const incomingSessionId =
+          roomType === 'party' && typeof msg.roomSessionId === 'string' && isValidId(msg.roomSessionId)
+            ? msg.roomSessionId
+            : undefined;
+        let sessionWasReset = false;
+        if (incomingSessionId && room.sessionId !== incomingSessionId) {
+          room.heartCount = 0;
+          room.sessionId = incomingSessionId;
+          sessionWasReset = true;
+        }
+        if (!sessionWasReset && typeof msg.initialHeartCount === 'number' && msg.initialHeartCount > room.heartCount) {
           room.heartCount = Math.floor(msg.initialHeartCount);
         }
 
@@ -459,6 +483,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
           type: 'room:state_init',
           roomType,
           roomId,
+          ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
           heartCount: room.heartCount,
           viewers,
           count,
@@ -492,11 +517,19 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         if (!roomType || !isValidId(roomId)) return;
         const roomKey = `${roomType}:${roomId}`;
         const room = getOrCreateRoom(roomKey);
+        const incomingSessionId =
+          roomType === 'party' && typeof msg.roomSessionId === 'string' && isValidId(msg.roomSessionId)
+            ? msg.roomSessionId
+            : undefined;
+        if (incomingSessionId && room.sessionId && incomingSessionId !== room.sessionId) {
+          break;
+        }
         room.heartCount += 1;
         const eventPayload = {
           type: 'room:heart',
           roomType,
           roomId,
+          ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
           senderId: uid,
           heartCount: room.heartCount,
           eventId: `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,

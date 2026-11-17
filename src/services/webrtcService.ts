@@ -2368,6 +2368,68 @@ class RealtimeSfuStreamingEngine {
     this.setBroadcastState(streamId, { isVideoOn: prev.isVideoOn, isMicOn });
   }
 
+  public async getHostNetworkLatencyStats(streamId: string): Promise<{
+    rttMs: number | null;
+    packetLossPct: number | null;
+    connectionState: string;
+  }> {
+    const hostSession = this.hostSfuSessions.get(streamId);
+    if (!hostSession || hostSession.isClosed) {
+      return { rttMs: null, packetLossPct: null, connectionState: 'idle' };
+    }
+    const pc = hostSession.pc;
+    const connectionState = String(pc.connectionState || pc.iceConnectionState || 'unknown');
+    if (pc.connectionState === 'closed') {
+      return { rttMs: null, packetLossPct: null, connectionState: 'closed' };
+    }
+    try {
+      const stats = await pc.getStats();
+      let candidateRttMs: number | null = null;
+      let remoteRttMs: number | null = null;
+      let totalLost = 0;
+      let totalReceived = 0;
+      let maxFractionLost: number | null = null;
+
+      stats.forEach((report: any) => {
+        if (
+          report.type === 'candidate-pair' &&
+          (report.nominated || report.state === 'succeeded') &&
+          typeof report.currentRoundTripTime === 'number' &&
+          Number.isFinite(report.currentRoundTripTime)
+        ) {
+          candidateRttMs = Math.round(report.currentRoundTripTime * 1000);
+        }
+        if (report.type === 'remote-inbound-rtp') {
+          if (typeof report.roundTripTime === 'number' && Number.isFinite(report.roundTripTime)) {
+            remoteRttMs = Math.round(report.roundTripTime * 1000);
+          }
+          if (typeof report.fractionLost === 'number' && Number.isFinite(report.fractionLost)) {
+            const pct = Math.max(0, Math.min(100, report.fractionLost * 100));
+            maxFractionLost = maxFractionLost === null ? pct : Math.max(maxFractionLost, pct);
+          }
+          if (typeof report.packetsLost === 'number') {
+            totalLost += Math.max(0, report.packetsLost);
+          }
+          if (typeof report.packetsReceived === 'number') {
+            totalReceived += Math.max(0, report.packetsReceived);
+          }
+        }
+      });
+
+      const rttMs = candidateRttMs ?? remoteRttMs;
+      const computedLoss =
+        totalLost + totalReceived > 0
+          ? Math.round((totalLost / (totalLost + totalReceived)) * 1000) / 10
+          : null;
+      const packetLossPct =
+        maxFractionLost !== null ? Math.round(maxFractionLost * 10) / 10 : computedLoss;
+
+      return { rttMs, packetLossPct, connectionState };
+    } catch {
+      return { rttMs: null, packetLossPct: null, connectionState };
+    }
+  }
+
   public stopHostBroadcast(streamId: string, keepalive: boolean = false): Promise<void> {
     if (keepalive) {
       return this._stopHostBroadcastInternal(streamId, true);

@@ -177,8 +177,8 @@ service cloud.firestore {
 
     // Connection testing
     match /test/{docId} {
-      allow read: if true;
-      allow write: if false;
+      allow get: if docId == 'connection';
+      allow list, write: if false;
     }
 
     // Server-only Email OTP Challenges & Multi-Account Device Switch Sessions
@@ -616,6 +616,51 @@ service cloud.firestore {
       allow read, write: if isOwner(userId);
     }
 
+    function isPartyHost(roomId) {
+      return isSignedIn()
+        && isValidId(roomId)
+        && exists(/databases/$(database)/documents/partyRooms/$(roomId))
+        && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.host.id == request.auth.uid;
+    }
+
+    function isValidPartyHeartStat(data) {
+      return data.keys().hasAll(['count', 'updatedAt'])
+        && data.keys().hasOnly(['count', 'updatedAt'])
+        && data.count is number
+        && data.count >= 1
+        && data.updatedAt == request.time;
+    }
+
+    function isValidPartyHeartEvent(data) {
+      return data.keys().hasAll(['senderId', 'createdAt'])
+        && data.keys().hasOnly(['senderId', 'createdAt'])
+        && data.senderId == request.auth.uid
+        && data.createdAt == request.time;
+    }
+
+    function isValidPartyRoomMessage(data) {
+      return data.keys().hasAll(['senderId', 'sender', 'text', 'type', 'createdAt'])
+        && data.keys().hasOnly([
+          'senderId', 'sender', 'text', 'type', 'createdAt',
+          'giftId', 'giftName', 'giftIcon', 'giftCoins', 'quantity', 'recipientId', 'recipientName'
+        ])
+        && data.senderId == request.auth.uid
+        && data.sender is map
+        && data.sender.id == request.auth.uid
+        && data.sender.displayName is string && data.sender.displayName.size() <= 128
+        && data.sender.avatar is string && data.sender.avatar.size() <= 65000
+        && data.text is string && data.text.size() <= 2000
+        && data.type in ['room', 'host', 'gift', 'system']
+        && data.createdAt == request.time
+        && (!('giftId' in data) || (data.giftId is string && data.giftId.size() <= 64))
+        && (!('giftName' in data) || (data.giftName is string && data.giftName.size() <= 128))
+        && (!('giftIcon' in data) || (data.giftIcon is string && data.giftIcon.size() <= 512))
+        && (!('giftCoins' in data) || (data.giftCoins is number && data.giftCoins >= 0 && data.giftCoins <= 50000000))
+        && (!('quantity' in data) || (data.quantity is number && data.quantity >= 1 && data.quantity <= 9999))
+        && (!('recipientId' in data) || (data.recipientId is string && data.recipientId.size() <= 128))
+        && (!('recipientName' in data) || (data.recipientName is string && data.recipientName.size() <= 128));
+    }
+
     // Party rooms
     match /partyRooms/{roomId} {
       allow get: if isValidId(roomId) && (isSignedIn() || resource.data.isActive == true);
@@ -629,27 +674,61 @@ service cloud.firestore {
       allow delete: if isSignedIn() && isValidId(roomId) && resource.data.host.id == request.auth.uid;
 
       match /stats/{statId} {
-        allow read: if isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true;
-        allow create: if isSignedIn() && statId == 'hearts' && request.resource.data.count == 1;
-        allow update: if isSignedIn() && statId == 'hearts'
+        allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+        allow create: if isSignedIn() && isValidId(roomId) && statId == 'hearts' && isValidPartyHeartStat(request.resource.data) && request.resource.data.count == 1;
+        allow update: if isSignedIn() && isValidId(roomId) && statId == 'hearts'
+          && isValidPartyHeartStat(request.resource.data)
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
           && request.resource.data.count == resource.data.count + 1;
+        allow delete: if isValidId(statId) && isPartyHost(roomId);
       }
       match /heartEvents/{eventId} {
-        allow read: if isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true;
-        allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
-        allow update, delete: if false;
+        allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+        allow create: if isSignedIn() && isValidId(roomId) && isValidId(eventId) && isValidPartyHeartEvent(request.resource.data);
+        allow update: if false;
+        allow delete: if isValidId(eventId) && isPartyHost(roomId);
       }
 
       match /messages/{messageId} {
-        allow read: if isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true;
+        allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
         allow create: if isSignedIn()
           && isValidId(roomId)
           && isValidId(messageId)
-          && request.resource.data.sender.id == request.auth.uid
-          && request.resource.data.text is string
-          && request.resource.data.text.size() <= 2000;
-        allow update, delete: if false;
+          && isValidPartyRoomMessage(request.resource.data);
+        allow update: if false;
+        allow delete: if isValidId(messageId) && isPartyHost(roomId);
+      }
+
+      match /sessions/{sessionId} {
+        allow read, write: if false;
+
+        match /stats/{statId} {
+          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+          allow create: if isSignedIn() && isValidId(roomId) && isValidId(sessionId) && statId == 'hearts' && isValidPartyHeartStat(request.resource.data) && request.resource.data.count == 1;
+          allow update: if isSignedIn() && isValidId(roomId) && isValidId(sessionId) && statId == 'hearts'
+            && isValidPartyHeartStat(request.resource.data)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
+            && request.resource.data.count == resource.data.count + 1;
+          allow delete: if isValidId(sessionId) && isValidId(statId) && isPartyHost(roomId);
+        }
+
+        match /heartEvents/{eventId} {
+          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+          allow create: if isSignedIn() && isValidId(roomId) && isValidId(sessionId) && isValidId(eventId) && isValidPartyHeartEvent(request.resource.data);
+          allow update: if false;
+          allow delete: if isValidId(sessionId) && isValidId(eventId) && isPartyHost(roomId);
+        }
+
+        match /messages/{messageId} {
+          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+          allow create: if isSignedIn()
+            && isValidId(roomId)
+            && isValidId(sessionId)
+            && isValidId(messageId)
+            && isValidPartyRoomMessage(request.resource.data);
+          allow update: if false;
+          allow delete: if isValidId(sessionId) && isValidId(messageId) && isPartyHost(roomId);
+        }
       }
 
       match /signals/{signalId} {
@@ -769,7 +848,15 @@ service cloud.firestore {
 
       // Reels Comments subcollection
       match /comments/{commentId} {
-        allow read: if true;
+        allow read: if (
+          exists(/databases/$(database)/documents/reels/$(reelId))
+          && get(/databases/$(database)/documents/reels/$(reelId)).data.status == 'active'
+          && get(/databases/$(database)/documents/reels/$(reelId)).data.visibility == 'public'
+        ) || (
+          isSignedIn()
+          && exists(/databases/$(database)/documents/reels/$(reelId))
+          && get(/databases/$(database)/documents/reels/$(reelId)).data.uid == request.auth.uid
+        );
         allow create: if isSignedIn()
           && request.resource.data.uid == request.auth.uid
           && request.resource.data.text is string

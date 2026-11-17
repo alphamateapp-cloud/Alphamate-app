@@ -4900,6 +4900,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setPartyRooms((prev) => prev.map((r) => (r.id === nextRoom.id ? nextRoom : r)));
       realtimeSocket.announcePartyRoom({
         id: nextRoom.id,
+        ...(nextRoom.sessionId ? { sessionId: nextRoom.sessionId } : {}),
         host: nextRoom.host,
         title: nextRoom.title,
         level: nextRoom.level,
@@ -4931,22 +4932,30 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       agoraPartyEngine.stopPartyVoice(roomToClose.id).catch(() => {});
 
       if (shouldDelete) {
-        removedPartyUntilRef.current.set(roomToClose.id, Date.now());
+        const targetsMap = new Map<string, PartyRoom>();
+        targetsMap.set(roomToClose.id, roomToClose);
         partyRooms.forEach((r) => {
-          if (r.host?.id === uid) {
-            removedPartyUntilRef.current.set(r.id, Date.now());
-            realtimeSocket.removePartyRoom(r.id);
-            deletePartyRoomFromFirestore(r.id).catch(() => {});
+          if (r.host?.id === uid && !targetsMap.has(r.id)) {
+            targetsMap.set(r.id, r);
           }
         });
-        realtimeSocket.removePartyRoom(roomToClose.id);
-        deletePartyRoomFromFirestore(roomToClose.id).catch(() => {});
-        if (auth.currentUser?.uid) {
-          purgeStaleHostCardsInFirestore(auth.currentUser.uid, {
-            keepPartyId: null,
-            keepLiveId: activeStreamIdRef.current,
-          }).catch(() => {});
-        }
+        const deletePromises: Array<Promise<void>> = [];
+        targetsMap.forEach((r) => {
+          removedPartyUntilRef.current.set(r.id, Date.now());
+          realtimeSocket.removePartyRoom(r.id);
+          deletePromises.push(deletePartyRoomFromFirestore(r.id, r.sessionId).catch(() => {}));
+        });
+        Promise.all(deletePromises)
+          .then(() => {
+            if (auth.currentUser?.uid) {
+              return purgeStaleHostCardsInFirestore(auth.currentUser.uid, {
+                keepPartyId: null,
+                keepLiveId: activeStreamIdRef.current,
+              });
+            }
+            return undefined;
+          })
+          .catch(() => {});
         setPartyRooms((prev) =>
           prev.filter((r) => r.id !== roomToClose.id && r.host?.id !== uid)
         );
@@ -4958,7 +4967,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const safeSeats = Array.isArray(roomToClose.seats) ? roomToClose.seats : [];
 
         if (isOwnerHost) {
-          // Host left without closing: Host Seat becomes empty and viewer count drops to actual remaining viewers (0 if empty)
+          // Host left without closing: Host Seat becomes empty, all session data/entries/gifts remain preserved
           const updatedRoom: PartyRoom = {
             ...roomToClose,
             seats: safeSeats,
@@ -4968,6 +4977,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setPartyRooms((prev) => prev.map((r) => (r.id === roomToClose.id ? updatedRoom : r)));
           realtimeSocket.announcePartyRoom({
             id: roomToClose.id,
+            ...(roomToClose.sessionId ? { sessionId: roomToClose.sessionId } : {}),
             isHostPresent: false,
             activeViewers: nextViewers,
             lastSeenAtMs: Date.now(),
@@ -4994,6 +5004,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setPartyRooms((prev) => prev.map((r) => (r.id === roomToClose.id ? updatedRoom : r)));
           realtimeSocket.announcePartyRoom({
             id: roomToClose.id,
+            ...(roomToClose.sessionId ? { sessionId: roomToClose.sessionId } : {}),
             seats: vacatedSeats,
             activeViewers: nextViewers,
           });
@@ -5018,7 +5029,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: 'Please sign in first to host a Party Room.' };
     }
 
-    // Enforce strictly ONE Party Room per host: if host already has an active room, enter that existing room
+    // Enforce strictly ONE Party Room per host: if host already has an open (not closed) room, re-enter with preserved entries
     const existingMyRoom = partyRooms.find(
       (r) => r.isActive !== false && r.host?.id === firebaseUid
     );
@@ -5030,18 +5041,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const canonicalId = getCanonicalPartyRoomId(firebaseUid);
     removedPartyUntilRef.current.delete(canonicalId);
 
+    // Fresh room after permanent close: assign brand-new sessionId and zero out all seats, gifting & moderation lists
+    const freshSessionId = `ps_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const rawSeats = Array.isArray(room.seats) ? room.seats : [];
+    const cleanSeats = rawSeats.map((s, idx) => ({
+      seatIndex: Number.isFinite(Number(s?.seatIndex)) ? Number(s.seatIndex) : idx,
+      user: null,
+      isMuted: false,
+      isHostMuted: false,
+      isLocked: false,
+      isSpeaking: false,
+      receivedCoins: 0,
+    }));
+
     const normalizedRoom: PartyRoom = {
       ...room,
       id: canonicalId,
+      sessionId: freshSessionId,
       isActive: true,
       isHostPresent: true,
       activeViewers: 1,
-      seats: Array.isArray(room.seats) ? room.seats : [],
+      totalGiftCoins: 0,
+      moderatorIds: [],
+      kickedUserIds: [],
+      blockedUserIds: [],
+      seats: cleanSeats,
       host: { ...room.host, id: firebaseUid },
     };
     try {
       realtimeSocket.announcePartyRoom(normalizedRoom);
-      await syncPartyRoomToFirestore(normalizedRoom);
+      await syncPartyRoomToFirestore(normalizedRoom, { overwrite: true });
       purgeStaleHostCardsInFirestore(firebaseUid, {
         keepPartyId: canonicalId,
         keepLiveId: activeStreamIdRef.current,

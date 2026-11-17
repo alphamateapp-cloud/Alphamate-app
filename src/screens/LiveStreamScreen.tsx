@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { useApp } from '../context/AppContext';
 import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
+import { NetworkLatencyMonitor } from '../components/common/NetworkLatencyMonitor';
 import { VIRTUAL_GIFTS } from '../data/mockData';
 import { Gift } from '../types';
 import {
@@ -1795,6 +1796,15 @@ export const LiveStreamScreen: React.FC = () => {
               {activeRole === 'host' ? <Radio className="w-3 h-3 text-emerald-400" /> : <Eye className="w-3 h-3 text-cyan-400" />}
               <span className="hidden xs:inline">{activeRole === 'host' ? 'Host' : 'Viewer'}</span>
             </button>
+          )}
+
+          {/* Real-Time Network Latency Monitor (Host Only, Solo WebRTC) */}
+          {isHost && activeStream?.id && (
+            <NetworkLatencyMonitor
+              mode="solo_live"
+              sessionId={activeStream.id}
+              enabled={isHost}
+            />
           )}
 
           {/* Scoped Broadcast Refresh Button (never closes broadcast) */}

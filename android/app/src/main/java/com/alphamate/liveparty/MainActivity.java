@@ -18,6 +18,7 @@ public class MainActivity extends BridgeActivity {
             // FirebaseInitProvider handles default initialization when google-services.json resources exist
         }
         registerPlugin(KeepScreenOnPlugin.class);
+        registerPlugin(BatteryStatusPlugin.class);
         registerPlugin(NativeGoogleAuthPlugin.class);
         registerPlugin(AgoraPartyPlugin.class);
         super.onCreate(savedInstanceState);

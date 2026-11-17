@@ -43,6 +43,7 @@ public class AgoraPartyPlugin extends Plugin {
     private volatile boolean userMuted = true;
     private volatile boolean mutedForAudioFocus = false;
     private volatile boolean desiredSpeakerphone = true;
+    private volatile int lastMeasuredRttMs = -1;
     private final AtomicBoolean joining = new AtomicBoolean(false);
 
     private AudioFocusRequest audioFocusRequest = null;
@@ -220,6 +221,23 @@ public class AgoraPartyPlugin extends Plugin {
             }
             data.put("speakers", arr);
             notifyListeners("audioVolume", data);
+        }
+
+        @Override
+        public void onRtcStats(RtcStats stats) {
+            if (stats != null && stats.lastmileDelay >= 0) {
+                lastMeasuredRttMs = stats.lastmileDelay;
+            }
+        }
+
+        @Override
+        public void onNetworkQuality(int uid, int txQuality, int rxQuality) {
+            if (uid != 0) return;
+            JSObject data = new JSObject();
+            data.put("txQuality", txQuality);
+            data.put("rxQuality", rxQuality);
+            data.put("rttMs", lastMeasuredRttMs);
+            notifyListeners("networkQuality", data);
         }
     };
 

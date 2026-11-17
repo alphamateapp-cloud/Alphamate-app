@@ -11,6 +11,7 @@ export type AgoraPartyNativeEventName =
   | 'requestToken'
   | 'audioRouteChanged'
   | 'audioFocusChanged'
+  | 'networkQuality'
   | 'error';
 
 export interface AgoraPartyNativePlugin {

@@ -66,6 +66,13 @@ class AgoraPartyEngine {
   private reconnectAttempt = 0;
   private inflightTokenRefresh: Promise<string | null> | null = null;
   private activeVoicePreset: VoiceFilterPresetId = 'normal';
+  private networkStats = {
+    txQuality: 0,
+    rxQuality: 0,
+    rttMs: null as number | null,
+    connectionState: 'idle',
+    updatedAtMs: 0,
+  };
 
   // Web Agora fallback state (used only when NOT running in native Android Capacitor)
   private webClient: any = null;
@@ -456,14 +463,17 @@ class AgoraPartyEngine {
         if (state === 3) {
           this.reconnectAttempt = 0;
           this.clearReconnectTimer();
+          this.networkStats.connectionState = 'connected';
           this.callbacks.onConnectionStateChange?.('connected');
           return;
         }
         if (state === 2) {
+          this.networkStats.connectionState = 'connecting';
           this.callbacks.onConnectionStateChange?.('connecting');
           return;
         }
         if (state === 4) {
+          this.networkStats.connectionState = 'reconnecting';
           this.callbacks.onConnectionStateChange?.('reconnecting');
           return;
         }
@@ -477,8 +487,22 @@ class AgoraPartyEngine {
           return;
         }
         if (state === 1 || state === 5) {
+          this.networkStats.connectionState = 'disconnected';
           this.scheduleReconnect(`Agora connection state ${state} (reason ${reason})`);
         }
+      }),
+      await agoraPartyNative.addListener('networkQuality', (e) => {
+        if (this.manualStop || this.roomId !== roomId) return;
+        const tx = Number(e?.txQuality ?? 0);
+        const rx = Number(e?.rxQuality ?? 0);
+        const rtt = typeof e?.rttMs === 'number' && e.rttMs >= 0 ? Math.round(e.rttMs) : null;
+        this.networkStats = {
+          txQuality: Number.isFinite(tx) ? tx : 0,
+          rxQuality: Number.isFinite(rx) ? rx : 0,
+          rttMs: rtt ?? this.networkStats.rttMs,
+          connectionState: this.networkStats.connectionState === 'idle' ? 'connected' : this.networkStats.connectionState,
+          updatedAtMs: Date.now(),
+        };
       }),
       await agoraPartyNative.addListener('tokenWillExpire', () => {
         void this.renewSessionToken(roomId, true);
@@ -637,16 +661,40 @@ class AgoraPartyEngine {
       if (curState === 'CONNECTED') {
         this.reconnectAttempt = 0;
         this.clearReconnectTimer();
+        this.networkStats.connectionState = 'connected';
         this.callbacks.onConnectionStateChange?.('connected');
       } else if (curState === 'CONNECTING') {
+        this.networkStats.connectionState = 'connecting';
         this.callbacks.onConnectionStateChange?.('connecting');
       } else if (curState === 'RECONNECTING') {
+        this.networkStats.connectionState = 'reconnecting';
         this.callbacks.onConnectionStateChange?.('reconnecting');
       } else if (curState === 'DISCONNECTED') {
+        this.networkStats.connectionState = 'disconnected';
         if (reason !== 'LEAVE') {
           this.scheduleReconnect(`Web Agora disconnected (${reason || 'network'})`);
         }
       }
+    });
+
+    client.on('network-quality', (stats: { uplinkNetworkQuality?: number; downlinkNetworkQuality?: number }) => {
+      if (this.manualStop || this.roomId !== roomId) return;
+      let measuredRtt: number | null = null;
+      try {
+        const rtcStats = client.getRTCStats?.();
+        if (typeof rtcStats?.RTT === 'number' && Number.isFinite(rtcStats.RTT) && rtcStats.RTT >= 0) {
+          measuredRtt = Math.round(rtcStats.RTT);
+        }
+      } catch {
+        // ignore
+      }
+      this.networkStats = {
+        txQuality: Number(stats?.uplinkNetworkQuality ?? 0),
+        rxQuality: Number(stats?.downlinkNetworkQuality ?? 0),
+        rttMs: measuredRtt ?? this.networkStats.rttMs,
+        connectionState: this.networkStats.connectionState === 'idle' ? 'connected' : this.networkStats.connectionState,
+        updatedAtMs: Date.now(),
+      };
     });
 
     client.on('token-privilege-will-expire', () => {
@@ -1044,6 +1092,13 @@ class AgoraPartyEngine {
       this.userId = null;
       this.canPublish = false;
       this.muted = true;
+      this.networkStats = {
+        txQuality: 0,
+        rxQuality: 0,
+        rttMs: null,
+        connectionState: 'idle',
+        updatedAtMs: 0,
+      };
       if (resetCallbacks) {
         this.callbacks = {};
         this.currentOptions = {};
@@ -1114,6 +1169,29 @@ class AgoraPartyEngine {
       }
     });
     return active;
+  }
+
+  public getNetworkLatencyStats(roomId: string): {
+    rttMs: number | null;
+    txQuality: number;
+    rxQuality: number;
+    connectionState: string;
+    updatedAtMs: number;
+  } {
+    if (!roomId || this.roomId !== roomId) {
+      return { rttMs: null, txQuality: 0, rxQuality: 0, connectionState: 'idle', updatedAtMs: 0 };
+    }
+    if (!agoraPartyNative.isAvailable() && this.webClient && this.webJoined) {
+      try {
+        const rtcStats = this.webClient.getRTCStats?.();
+        if (typeof rtcStats?.RTT === 'number' && Number.isFinite(rtcStats.RTT) && rtcStats.RTT >= 0) {
+          this.networkStats.rttMs = Math.round(rtcStats.RTT);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    return { ...this.networkStats };
   }
 
   public async setPartyVoiceFilter(_roomId: string, preset: VoiceFilterPresetId): Promise<VoiceFilterPresetId> {
