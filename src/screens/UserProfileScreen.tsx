@@ -7,9 +7,12 @@ import { TopAchievementsModal } from '../components/modals/TopAchievementsModal'
 import { VipAvatarFrame } from '../components/brand/VipAvatarFrame';
 import { copyToClipboard } from '../utils/clipboard';
 import { compressImage } from '../utils/imageCompressor';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import { LevelBadgeTag } from '../components/brand/LevelBadgeTag';
 import { UserBadgeStrip } from '../components/badges/UserBadgeIcon';
 import { ProfileBadgeShowcase } from '../components/badges/UserBadgesModal';
+import { VerificationTicksInfoModal } from '../components/badges/VerificationTicks';
+import { VerificationBadge } from '../components/badges/VerificationBadge';
 import {
   Crown,
   Copy,
@@ -24,7 +27,6 @@ import {
   Video,
   Gift as GiftIcon,
   Flame,
-  ShieldCheck,
   Camera,
   Sparkles,
   Coins,
@@ -109,6 +111,8 @@ export const UserProfileScreen: React.FC = () => {
     savedAccounts,
     maxSavedAccounts,
     setShowAccountSwitcherModal,
+    isEmailVerified,
+    hostAgencyMembership,
   } = useApp();
 
   // Navigation & Modal states: Videos, Posts, Liked, Saved, Private
@@ -117,6 +121,17 @@ export const UserProfileScreen: React.FC = () => {
   const [showEditModal, setShowEditModal] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
   const [showCoverModal, setShowCoverModal] = useState(false);
+  const [showVerificationInfoModal, setShowVerificationInfoModal] = useState(false);
+
+  const isGreenTickActive = Boolean(
+    isEmailVerified ||
+      currentUser.isAccountVerified ||
+      currentUser.greenTick ||
+      currentUser.emailOtpVerified ||
+      currentUser.emailVerified ||
+      currentUser.authProvider === 'google'
+  );
+  const isBlueTickActive = Boolean(currentUser.isVerified);
   const [showJoinAgencyModal, setShowJoinAgencyModal] = useState(false);
   const [showTopAchievementsModal, setShowTopAchievementsModal] = useState(false);
   const [showShortcutModal, setShowShortcutModal] = useState<{
@@ -251,11 +266,11 @@ export const UserProfileScreen: React.FC = () => {
         onMouseEnter={() => setIsCoverPaused(true)}
         onMouseLeave={() => setIsCoverPaused(false)}
       >
-        {currentUser.coverImage ? (
+        {safeImageSrc(currentUser.coverImage) ? (
           /* Custom Uploaded User Cover */
           <div className="relative w-full h-full">
             <img
-              src={currentUser.coverImage}
+              src={safeImageSrc(currentUser.coverImage)}
               alt="Profile Cover"
               className="w-full h-full object-cover"
             />
@@ -375,27 +390,27 @@ export const UserProfileScreen: React.FC = () => {
         )}
 
         {/* Ambient Top Shadow Bar for Navigation Controls */}
-        <div className="absolute top-0 inset-x-0 h-16 bg-gradient-to-b from-black/80 via-black/30 to-transparent z-20 px-4 flex items-center justify-between">
-          <div className="flex items-center gap-2">
+        <div className="absolute top-0 inset-x-0 h-16 bg-gradient-to-b from-black/80 via-black/30 to-transparent z-20 px-3 sm:px-4 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 sm:gap-2 min-w-0">
             <img
               src="/alpha-mate-logo-emblem.png"
               alt="Alpha Mate"
-              className="w-7 h-7 object-contain drop-shadow"
+              className="w-7 h-7 object-contain drop-shadow shrink-0"
             />
-            <span className="text-xs font-black tracking-widest text-white uppercase drop-shadow">
+            <span className="hidden min-[360px]:inline text-xs font-black tracking-widest text-white uppercase drop-shadow truncate">
               ALPHA MATE
             </span>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 shrink-0">
             {/* Switch Account (Up to 5 IDs) button */}
             <button
               type="button"
               onClick={() => setShowAccountSwitcherModal(true)}
-              className="min-h-[38px] px-2.5 py-1 rounded-full bg-black/55 hover:bg-black/80 border border-[#EC4899]/40 text-white text-[11px] font-bold backdrop-blur-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-lg"
+              className="min-h-[36px] px-2.5 py-1 rounded-full bg-black/55 hover:bg-black/80 border border-[#EC4899]/40 text-white text-[11px] font-bold backdrop-blur-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-lg whitespace-nowrap shrink-0"
               title="Switch or Add Account (Up to 5)"
             >
-              <Users className="w-3.5 h-3.5 text-[#EC4899]" />
+              <Users className="w-3.5 h-3.5 text-[#EC4899] shrink-0" />
               <span>Accounts ({Math.max(1, savedAccounts.length)}/{maxSavedAccounts})</span>
             </button>
 
@@ -403,10 +418,10 @@ export const UserProfileScreen: React.FC = () => {
             <button
               type="button"
               onClick={() => setShowCoverModal(true)}
-              className="min-h-[38px] px-2.5 py-1 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white text-[11px] font-bold backdrop-blur-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-lg"
+              className="min-h-[36px] px-2.5 py-1 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white text-[11px] font-bold backdrop-blur-md flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer shadow-lg whitespace-nowrap shrink-0"
               title="Change Cover"
             >
-              <Camera className="w-3.5 h-3.5 text-[#C084FC]" />
+              <Camera className="w-3.5 h-3.5 text-[#C084FC] shrink-0" />
               <span className="hidden sm:inline">Edit Cover</span>
             </button>
 
@@ -414,7 +429,7 @@ export const UserProfileScreen: React.FC = () => {
             <button
               type="button"
               onClick={() => setCurrentScreen('settings')}
-              className="w-9 h-9 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white backdrop-blur-md flex items-center justify-center transition-all cursor-pointer shadow-lg"
+              className="w-9 h-9 rounded-full bg-black/50 hover:bg-black/80 border border-white/20 text-zinc-200 hover:text-white backdrop-blur-md flex items-center justify-center transition-all cursor-pointer shadow-lg shrink-0"
               title="Settings"
             >
               <Settings className="w-4 h-4" />
@@ -433,8 +448,8 @@ export const UserProfileScreen: React.FC = () => {
         <div className="rounded-3xl p-5 bg-[#120B22]/90 backdrop-blur-xl border border-[#A855F7]/30 shadow-2xl shadow-[#7928CA]/20">
           {/* Top row inside card: Avatar with VIP Frame & Action Buttons + Hero Level Badge Tag */}
           <div className="flex items-start justify-between -mt-12 sm:-mt-14 gap-3">
-            {/* Circular Avatar with Glowing VIP Frame (Camera badge removed as requested) */}
-            <div className="relative group shrink-0">
+            {/* Circular Avatar with Glowing VIP Frame + Absolutely Positioned VerificationBadge */}
+            <div className="relative group shrink-0 mb-2">
               <VipAvatarFrame
                 avatarUrl={currentUser.avatar}
                 vipTier={currentUser.vipTier}
@@ -443,12 +458,21 @@ export const UserProfileScreen: React.FC = () => {
               />
 
               {/* Online Pulse Dot */}
-              <div className="absolute top-1 right-1 flex items-center">
+              <div className="absolute top-1 right-1 flex items-center z-20">
                 <span className="relative flex h-3.5 w-3.5">
                   <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                   <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500 border-2 border-[#120B22]" />
                 </span>
               </div>
+
+              {/* Dynamic Green (Verified) & Blue (Respected) Badges anchored directly to the avatar */}
+              <VerificationBadge
+                isVerified={isGreenTickActive}
+                isRespected={isBlueTickActive}
+                size="lg"
+                position="bottom-center"
+                onClick={() => setShowVerificationInfoModal(true)}
+              />
             </div>
 
             {/* Right Column: Edit & Share Buttons + Compact Level Badge Tag */}
@@ -487,15 +511,29 @@ export const UserProfileScreen: React.FC = () => {
                   type="button"
                   onClick={() => setShowJoinAgencyModal(true)}
                   className={`px-2.5 py-1 rounded-xl text-[10.5px] font-black tracking-wide flex items-center gap-1 shadow-md active:scale-95 transition-all cursor-pointer ${
-                    currentUser.agencyTag
+                    hostAgencyMembership.isActiveMember
                       ? 'bg-gradient-to-r from-amber-400 to-amber-600 text-black border border-amber-300 shadow-amber-500/20'
+                      : hostAgencyMembership.pendingRequest
+                      ? 'bg-amber-400/20 text-amber-200 border border-amber-400/50 hover:bg-amber-400/30'
                       : 'bg-gradient-to-r from-[#7928CA]/90 to-[#EC4899]/90 text-white border border-white/20 hover:brightness-110'
                   }`}
-                  title={currentUser.agencyTag ? `Bound to ${currentUser.agencyName || 'Agency'}` : 'Join an Official Host Agency'}
+                  title={
+                    hostAgencyMembership.isActiveMember
+                      ? `Active Member of ${hostAgencyMembership.agencyName || 'Official Host Agency'}`
+                      : hostAgencyMembership.pendingRequest
+                      ? `Pending Application for ${hostAgencyMembership.pendingRequest.agencyName || 'Host Agency'}`
+                      : 'Join an Official Host Agency'
+                  }
                 >
                   <Users className="w-3 h-3" />
                   <span>
-                    {currentUser.agencyTag ? `Agency: [${currentUser.agencyTag}]` : 'Join Agency 🌟'}
+                    {hostAgencyMembership.isActiveMember
+                      ? hostAgencyMembership.agencyTag
+                        ? `Agency: [${hostAgencyMembership.agencyTag}]`
+                        : `Agency: ${hostAgencyMembership.agencyCode || 'Active'}`
+                      : hostAgencyMembership.pendingRequest
+                      ? 'Pending Agency ⏳'
+                      : 'Join Agency 🌟'}
                   </span>
                 </button>
               </div>
@@ -524,17 +562,13 @@ export const UserProfileScreen: React.FC = () => {
                   <span>{currentUser.activeHonorTitle}</span>
                 </div>
               )}
-              {currentUser.agencyTag && (
+              {hostAgencyMembership.isActiveMember && (hostAgencyMembership.agencyTag || hostAgencyMembership.agencyCode) && (
                 <div
-                  title={`Official Host bound to ${currentUser.agencyName || 'Agency'}`}
-                  className="flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-amber-600 text-black text-[9.5px] font-black tracking-wider uppercase shadow"
+                  title={`Official Host bound to ${hostAgencyMembership.agencyName || 'Host Agency'}`}
+                  onClick={() => setShowJoinAgencyModal(true)}
+                  className="flex items-center gap-0.5 px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-amber-600 text-black text-[9.5px] font-black tracking-wider uppercase shadow cursor-pointer"
                 >
-                  <span>[{currentUser.agencyTag}]</span>
-                </div>
-              )}
-              {currentUser.isVerified && (
-                <div title="Verified Alpha Creator">
-                  <ShieldCheck className="w-5 h-5 text-[#A855F7] fill-[#A855F7]/20" />
+                  <span>[{hostAgencyMembership.agencyTag || hostAgencyMembership.agencyCode}]</span>
                 </div>
               )}
               {currentUser.vipTier > 0 && (
@@ -599,6 +633,81 @@ export const UserProfileScreen: React.FC = () => {
               {currentUser.bio}
             </p>
 
+            {/* Real-Time Host Agency Affiliation / Pending / Rejected Status Card */}
+            {hostAgencyMembership.isActiveMember ? (
+              <div className="mt-3 p-3 rounded-2xl bg-gradient-to-r from-[#241042] via-[#1B0C34] to-[#130824] border border-amber-400/40 shadow-md flex items-center justify-between gap-2.5">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[9.5px] font-black uppercase tracking-wider text-amber-300">
+                      Official Host Agency
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[8.5px] font-black uppercase">
+                      Active
+                    </span>
+                  </div>
+                  <div className="text-xs sm:text-sm font-black text-white truncate mt-0.5">
+                    {hostAgencyMembership.agencyName || 'Assigned Host Agency'}
+                  </div>
+                  <div className="text-[10px] text-zinc-300 font-mono mt-0.5 truncate">
+                    ID: {hostAgencyMembership.agencyCode || hostAgencyMembership.agencyId}
+                    {hostAgencyMembership.ownerName ? ` • Owner: ${hostAgencyMembership.ownerName}` : ''}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setCurrentScreen('agency_management')}
+                    className="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 text-black text-[10px] font-black uppercase cursor-pointer hover:brightness-110 transition-all"
+                  >
+                    Portal
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowJoinAgencyModal(true)}
+                    className="px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 text-zinc-200 text-[10px] font-bold cursor-pointer transition-colors"
+                  >
+                    Info
+                  </button>
+                </div>
+              </div>
+            ) : hostAgencyMembership.pendingRequest ? (
+              <div
+                onClick={() => setShowJoinAgencyModal(true)}
+                className="mt-3 p-3 rounded-2xl bg-amber-500/15 border border-amber-400/40 flex items-center justify-between gap-2 cursor-pointer hover:bg-amber-500/20 transition-colors"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-amber-300">
+                      Host Agency Application Pending
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-zinc-200 truncate mt-0.5">
+                    {hostAgencyMembership.pendingRequest.agencyName || 'Host Agency'} — Awaiting Super Admin approval
+                  </p>
+                </div>
+                <span className="px-2 py-0.5 rounded-full bg-amber-400/25 border border-amber-400/50 text-amber-200 text-[9px] font-black uppercase shrink-0">
+                  Pending
+                </span>
+              </div>
+            ) : hostAgencyMembership.latestRejectedRequest ? (
+              <div
+                onClick={() => setShowJoinAgencyModal(true)}
+                className="mt-3 p-3 rounded-2xl bg-rose-500/15 border border-rose-500/40 flex items-center justify-between gap-2 cursor-pointer hover:bg-rose-500/20 transition-colors"
+              >
+                <div className="min-w-0">
+                  <span className="text-[10px] font-black uppercase tracking-wider text-rose-300 block">
+                    Host Agency Request Rejected
+                  </span>
+                  <p className="text-[10.5px] text-zinc-200 truncate mt-0.5">
+                    {hostAgencyMembership.latestRejectedRequest.rejectionReason ||
+                      'Tap to view status or apply to another active Host Agency'}
+                  </p>
+                </div>
+                <span className="px-2 py-0.5 rounded-full bg-rose-500/25 border border-rose-400/40 text-rose-200 text-[9px] font-black uppercase shrink-0">
+                  Rejected
+                </span>
+              </div>
+            ) : null}
 
             {/* Interactive Level & VIP Status Bar (Direct link to 1-100 Levels & 12 VIPs) */}
             <div
@@ -821,7 +930,7 @@ export const UserProfileScreen: React.FC = () => {
                     >
                       <div className="relative aspect-[3/4] overflow-hidden">
                         <img
-                          src={vid.thumbnail}
+                          src={safeImageSrc(vid.thumbnail, DEFAULT_AVATAR_URL)}
                           alt={vid.title}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                         />
@@ -884,7 +993,7 @@ export const UserProfileScreen: React.FC = () => {
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className="w-8 h-8 rounded-full overflow-hidden border border-[#A855F7]">
-                        <img src={currentUser.avatar} alt="" className="w-full h-full object-cover" />
+                        <img src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)} alt="" className="w-full h-full object-cover" />
                       </div>
                       <div>
                         <span className="text-xs font-bold text-white block">{currentUser.displayName}</span>
@@ -901,9 +1010,9 @@ export const UserProfileScreen: React.FC = () => {
                   </div>
 
                   {/* Post Content Display */}
-                  {post.attachedPhotoUrl ? (
+                  {safeImageSrc(post.attachedPhotoUrl) ? (
                     <div className="relative rounded-xl overflow-hidden aspect-[4/3] bg-black">
-                      <img src={post.attachedPhotoUrl} alt="" className="w-full h-full object-cover" />
+                      <img src={safeImageSrc(post.attachedPhotoUrl)} alt="" className="w-full h-full object-cover" />
                       {post.isTextOnPhoto && post.textContent && (
                         <div className="absolute inset-0 bg-black/45 backdrop-blur-[1px] flex items-center justify-center p-4">
                           <div className="rounded-xl bg-black/50 backdrop-blur-md border border-white/20 p-3 text-center">
@@ -954,7 +1063,7 @@ export const UserProfileScreen: React.FC = () => {
               <div className="p-4 rounded-2xl bg-[#140C26] border border-white/10 shadow-md">
                 <div className="flex items-center gap-2 mb-2">
                   <div className="w-8 h-8 rounded-full overflow-hidden border border-[#A855F7]">
-                    <img src={currentUser.avatar} alt="" className="w-full h-full object-cover" />
+                    <img src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)} alt="" className="w-full h-full object-cover" />
                   </div>
                   <div>
                     <span className="text-xs font-bold text-white block">{currentUser.displayName}</span>
@@ -998,7 +1107,7 @@ export const UserProfileScreen: React.FC = () => {
                     >
                       <div className="relative aspect-[3/4] overflow-hidden">
                         <img
-                          src={vid.thumbnail}
+                          src={safeImageSrc(vid.thumbnail, DEFAULT_AVATAR_URL)}
                           alt={vid.title}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                         />
@@ -1012,7 +1121,7 @@ export const UserProfileScreen: React.FC = () => {
                         {/* Video Creator info */}
                         <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-white text-[9.5px] font-medium border border-white/10">
                           <img
-                            src={vid.user.avatar}
+                            src={safeImageSrc(vid.user.avatar, DEFAULT_AVATAR_URL)}
                             alt=""
                             className="w-3.5 h-3.5 rounded-full object-cover"
                           />
@@ -1069,7 +1178,7 @@ export const UserProfileScreen: React.FC = () => {
                     >
                       <div className="relative aspect-[3/4] overflow-hidden">
                         <img
-                          src={vid.thumbnail}
+                          src={safeImageSrc(vid.thumbnail, DEFAULT_AVATAR_URL)}
                           alt={vid.title}
                           className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                         />
@@ -1083,7 +1192,7 @@ export const UserProfileScreen: React.FC = () => {
                         {/* Creator Info */}
                         <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-0.5 rounded-full bg-black/60 backdrop-blur-md text-white text-[9.5px] font-medium border border-white/10">
                           <img
-                            src={vid.user.avatar}
+                            src={safeImageSrc(vid.user.avatar, DEFAULT_AVATAR_URL)}
                             alt=""
                             className="w-3.5 h-3.5 rounded-full object-cover"
                           />
@@ -1135,7 +1244,7 @@ export const UserProfileScreen: React.FC = () => {
                   >
                     <div className="relative aspect-[3/4] overflow-hidden">
                       <img
-                        src={priv.thumbnail}
+                        src={safeImageSrc(priv.thumbnail, DEFAULT_AVATAR_URL)}
                         alt={priv.title}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
@@ -1309,6 +1418,16 @@ export const UserProfileScreen: React.FC = () => {
       <TopAchievementsModal
         isOpen={showTopAchievementsModal}
         onClose={() => setShowTopAchievementsModal(false)}
+      />
+
+      {/* Profile Dual-Tick Verification Info Modal (Green Auto + Blue Admin Respect) */}
+      <VerificationTicksInfoModal
+        isOpen={showVerificationInfoModal}
+        onClose={() => setShowVerificationInfoModal(false)}
+        displayName={currentUser.displayName}
+        isAccountVerified={isGreenTickActive}
+        isBlueTickVerified={isBlueTickActive}
+        isOwnProfile={true}
       />
     </div>
   );

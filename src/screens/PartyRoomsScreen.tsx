@@ -23,7 +23,7 @@ import { copyToClipboard } from '../utils/clipboard';
 import { uploadPartyRoomCover } from '../services/chatService';
 import { sendPartyRoomMessage, subscribeToPartyRoomMessages } from '../services/partyChatService';
 import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
-import { getHdImageUrl } from '../utils/imageHd';
+import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
 import {
   audioFilter,
@@ -197,6 +197,8 @@ export const PartyRoomsScreen: React.FC = () => {
     sendNotificationToUser,
     refreshScope,
     partyRefreshTick,
+    adminModerationState,
+    setActiveFeatureRestrictionModal,
   } = useApp();
 
   // Party Level: 1 = Basic (4 guest seats), 2 = Advanced (8 guest seats), 3 = Premium (15 guest seats)
@@ -563,6 +565,13 @@ export const PartyRoomsScreen: React.FC = () => {
   }, [partyRooms, activePartyRoom?.id, effectiveUserId]);
 
   const handleTryCreatePartyRoom = () => {
+    if (adminModerationState.isPartyRestricted && adminModerationState.partyRestriction) {
+      setActiveFeatureRestrictionModal({
+        scope: 'party',
+        detail: adminModerationState.partyRestriction,
+      });
+      return;
+    }
     const uid = auth.currentUser?.uid || currentUser.id;
     const existingMyRoom = partyRooms.find(
       (r) => r.isActive !== false && r.host?.id === uid
@@ -1719,7 +1728,7 @@ export const PartyRoomsScreen: React.FC = () => {
           uniqueId: p.uniqueId || baseHost?.uniqueId || p.userId,
           username: (p.displayName || baseHost?.username || 'user').replace(/\s+/g, ''),
           displayName: p.displayName || baseHost?.displayName || 'Alpha User',
-          avatar: p.avatar || baseHost?.avatar || '',
+          avatar: safeImageSrc(p.avatar || baseHost?.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
           bio: baseHost?.bio || 'Alpha Mate live party member',
           followersCount: baseHost?.followersCount || 0,
           followingCount: baseHost?.followingCount || 0,
@@ -1744,7 +1753,7 @@ export const PartyRoomsScreen: React.FC = () => {
           uniqueId: v.uniqueId || baseHost?.uniqueId || v.id,
           username: (v.displayName || baseHost?.username || 'user').replace(/\s+/g, ''),
           displayName: v.displayName || baseHost?.displayName || 'Alpha User',
-          avatar: v.avatar || baseHost?.avatar || '',
+          avatar: safeImageSrc(v.avatar || baseHost?.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
           bio: baseHost?.bio || 'Alpha Mate live party member',
           followersCount: baseHost?.followersCount || 0,
           followingCount: baseHost?.followingCount || 0,
@@ -1776,7 +1785,7 @@ export const PartyRoomsScreen: React.FC = () => {
           id: v.id,
           uniqueId: v.uniqueId || v.id,
           displayName: v.displayName || 'Alpha User',
-          avatar: v.avatar || '',
+          avatar: safeImageSrc(v.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
           level: Number(v.level ?? 0),
           vipTier: Number(v.vipTier ?? 0),
           isHost: isHostPeer,
@@ -1874,7 +1883,7 @@ export const PartyRoomsScreen: React.FC = () => {
                     uniqueId: sid,
                     username: String(message.sender?.displayName || 'user').replace(/\s+/g, '').toLowerCase() || 'user',
                     displayName: String(message.sender?.displayName || 'Supporter'),
-                    avatar: String(message.sender?.avatar || ''),
+                    avatar: safeImageSrc(message.sender?.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
                     bio: 'Alpha Mate Member',
                     followersCount: 0,
                     followingCount: 0,
@@ -2284,7 +2293,7 @@ export const PartyRoomsScreen: React.FC = () => {
           }
         }}
         onTouchStart={handleScreenTouchOrClick}
-        className="fixed inset-0 w-full h-[100dvh] max-h-[100dvh] pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)] bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
+        className="relative w-full h-full bg-[#080313] text-white flex flex-col justify-between overflow-hidden select-none z-40"
       >
         <PullToRefresh
           scrollContainerRef={partyRoomRootRef}
@@ -2318,7 +2327,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
         {/* Toast Alert Feedback */}
         {toastMessage && (
-          <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#180E2C]/95 border border-[#A855F7]/40 text-white text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-bounce pointer-events-none">
+          <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#180E2C]/95 border border-[#A855F7]/40 text-white text-xs font-bold shadow-2xl backdrop-blur-md flex items-center gap-2 animate-bounce pointer-events-none max-w-[calc(100%-2rem)]">
             <Sparkles className="w-3.5 h-3.5 text-[#EC4899]" />
             <span>{toastMessage}</span>
           </div>
@@ -2359,13 +2368,13 @@ export const PartyRoomsScreen: React.FC = () => {
             <div className="flex items-center gap-2 min-w-0">
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <img src={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar)} alt="Room cover" className="w-7 h-7 rounded-lg object-cover border border-[#EC4899]/50 shrink-0 shadow-sm" />
+                <img src={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar, DEFAULT_AVATAR_URL)} alt="Room cover" className="w-7 h-7 rounded-lg object-cover border border-[#EC4899]/50 shrink-0 shadow-sm" />
                 <Radio className="w-3.5 h-3.5 text-[#EC4899] animate-pulse shrink-0" />
                 <h2 className="text-xs sm:text-sm font-extrabold text-white truncate max-w-[120px] sm:max-w-[170px]">
                   {activePartyRoom.title || `${activePartyRoom.host.displayName}'s Party Room`}
                 </h2>
               </div>
-              <div className="flex items-center gap-1.5 text-[10px] text-zinc-400">
+              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] text-zinc-400">
                 <button
                   onClick={() => setShowViewersModal(true)}
                   className="flex items-center gap-1 text-[#C084FC] hover:text-white font-semibold cursor-pointer px-1.5 py-0.5 rounded-full bg-white/5 hover:bg-white/10 transition-colors"
@@ -2403,7 +2412,7 @@ export const PartyRoomsScreen: React.FC = () => {
                   <span className="text-[8.5px] font-black uppercase text-amber-300">Top</span>
                   {partyGivers[0] && (
                     <img
-                      src={partyGivers[0].user.avatar}
+                      src={safeImageSrc(partyGivers[0].user.avatar, DEFAULT_AVATAR_URL)}
                       alt="Top Giver"
                       className="w-3.5 h-3.5 rounded-full object-cover border border-amber-400/80 -mr-0.5"
                     />
@@ -2427,7 +2436,7 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
 
           {/* Right: Party Level Switcher (Lv 1 / Lv 2 / Lv 3) + Leaderboard + Background + Speaker + Share */}
-          <div className="flex items-center justify-end gap-1 sm:gap-1.5 w-full min-w-0">
+          <div className="flex flex-wrap items-center justify-end gap-1 sm:gap-1.5 w-full min-w-0">
             {/* Dynamic Level Switcher Capsule (1 Host + 4, 1 Host + 8, 1 Host + 15) */}
             {isHost && <div
               className="flex items-center p-0.5 rounded-full bg-[#180C2E]/90 border border-[#A855F7]/40 shadow-inner"
@@ -2869,7 +2878,7 @@ export const PartyRoomsScreen: React.FC = () => {
               >
                 {/* User Avatar */}
                 <img
-                  src={item.sender.avatar}
+                  src={safeImageSrc(item.sender.avatar, DEFAULT_AVATAR_URL)}
                   alt={item.sender.displayName}
                   className="w-5 h-5 rounded-full object-cover shrink-0 mt-0.5 border border-white/15"
                 />
@@ -4484,7 +4493,7 @@ export const PartyRoomsScreen: React.FC = () => {
                       <div className="flex items-center gap-3">
                         <div className="relative">
                           <img
-                            src={getHdImageUrl(room.coverImageUrl || room.host.avatar)}
+                            src={getHdImageUrl(room.coverImageUrl || room.host.avatar, DEFAULT_AVATAR_URL)}
                             alt={room.host.displayName}
                             className={`w-13 h-13 sm:w-14 sm:h-14 rounded-2xl object-cover shadow-md ${
                               isTop1 ? 'border-2 border-amber-400 shadow-amber-400/20' : 'border-2 border-[#EC4899] shadow-pink-500/20'
@@ -4535,7 +4544,7 @@ export const PartyRoomsScreen: React.FC = () => {
                           .map((seat, i) => (
                             <img
                               key={i}
-                              src={seat.user!.avatar}
+                              src={safeImageSrc(seat.user!.avatar, DEFAULT_AVATAR_URL)}
                               alt="Guest"
                               className="w-5 h-5 rounded-full object-cover border border-[#140C26]"
                             />
@@ -4583,7 +4592,7 @@ export const PartyRoomsScreen: React.FC = () => {
                     <div className="flex items-center gap-3">
                       <div className="relative">
                         <img
-                          src={getHdImageUrl(room.coverImageUrl || room.host.avatar)}
+                          src={getHdImageUrl(room.coverImageUrl || room.host.avatar, DEFAULT_AVATAR_URL)}
                           alt={room.host.displayName}
                           className="w-11 h-11 rounded-2xl object-cover border border-[#A855F7]"
                         />
@@ -4643,7 +4652,7 @@ export const PartyRoomsScreen: React.FC = () => {
                           .map((seat, i) => (
                             <img
                               key={i}
-                              src={seat.user!.avatar}
+                              src={safeImageSrc(seat.user!.avatar, DEFAULT_AVATAR_URL)}
                               alt="Guest"
                               className="w-5 h-5 rounded-full object-cover border-2 border-[#140C26]"
                             />
@@ -4741,7 +4750,7 @@ export const PartyRoomsScreen: React.FC = () => {
                     .finally(() => setIsUploadingRoomCover(false));
                 }} />
                 <button type="button" onClick={() => roomCoverInputRef.current?.click()} disabled={isUploadingRoomCover} className="w-full h-20 rounded-xl overflow-hidden border border-[#A855F7]/35 bg-[#0C061A] flex items-center gap-3 text-left">
-                  <img src={newRoomCover || currentUser.avatar} alt="Selected room cover" className="w-28 h-20 object-cover" />
+                  <img src={safeImageSrc(newRoomCover || currentUser.avatar, DEFAULT_AVATAR_URL)} alt="Selected room cover" className="w-28 h-20 object-cover" />
                   <span className="min-w-0"><span className="block text-xs font-bold text-white">{isUploadingRoomCover ? 'Uploading cover…' : newRoomCover ? 'Cover selected' : 'Use a room cover'}</span><span className="block text-[10px] text-zinc-400 mt-1">{newRoomCover ? 'Tap to change image' : 'Optional • Defaults to your profile photo'}</span></span>
                 </button>
               </div>

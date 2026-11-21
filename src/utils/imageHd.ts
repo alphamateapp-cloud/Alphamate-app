@@ -4,12 +4,31 @@
  * are loaded in crisp, full-resolution HD quality without blur or compression artifacts.
  */
 
-export function getHdImageUrl(url?: string): string {
-  if (!url || typeof url !== 'string') return '';
+export const DEFAULT_AVATAR_URL = '/alpha-mate-logo-emblem.png';
+
+/**
+ * Returns a trimmed, non-empty image/media URL or the provided fallback (or undefined).
+ * Guarantees an empty string ("") is never passed to an <img>, <video>, or <audio> src/poster attribute.
+ */
+export function safeImageSrc(url?: string | null, fallback?: string): string | undefined {
+  if (typeof url === 'string') {
+    const trimmed = url.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  if (typeof fallback === 'string') {
+    const trimmedFallback = fallback.trim();
+    if (trimmedFallback.length > 0) return trimmedFallback;
+  }
+  return undefined;
+}
+
+export function getHdImageUrl(url?: string | null, fallback?: string): string | undefined {
+  const clean = safeImageSrc(url, fallback);
+  if (!clean) return undefined;
 
   // If Unsplash image, upgrade to 1080p high quality with high sharpness
-  if (url.includes('images.unsplash.com')) {
-    let cleanUrl = url;
+  if (clean.includes('images.unsplash.com')) {
+    let cleanUrl = clean;
     if (cleanUrl.includes('w=')) {
       cleanUrl = cleanUrl.replace(/w=\d+/, 'w=1080');
     } else {
@@ -23,5 +42,5 @@ export function getHdImageUrl(url?: string): string {
     return cleanUrl;
   }
 
-  return url;
+  return clean;
 }

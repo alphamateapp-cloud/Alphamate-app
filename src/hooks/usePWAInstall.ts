@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { Capacitor } from '@capacitor/core';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -9,17 +10,20 @@ export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalled, setIsInstalled] = useState(false);
   const [isAndroid, setIsAndroid] = useState(false);
+  const [isIOS, setIsIOS] = useState(false);
 
   useEffect(() => {
-    // Detect standalone mode (already installed as PWA or native webview)
+    // Detect standalone mode (already installed as PWA or Capacitor native app)
     const isStandalone =
+      Capacitor.isNativePlatform() ||
       window.matchMedia('(display-mode: standalone)').matches ||
       (window.navigator as unknown as { standalone?: boolean }).standalone === true;
     setIsInstalled(isStandalone);
 
-    // Detect Android device
+    // Detect mobile platforms
     const userAgent = window.navigator.userAgent.toLowerCase();
     setIsAndroid(/android/.test(userAgent));
+    setIsIOS(/iphone|ipad|ipod/.test(userAgent));
 
     const handleBeforeInstallPrompt = (e: Event) => {
       e.preventDefault();
@@ -56,6 +60,7 @@ export function usePWAInstall() {
     isInstallable: !!deferredPrompt,
     isInstalled,
     isAndroid,
+    isIOS,
     install,
   };
 }

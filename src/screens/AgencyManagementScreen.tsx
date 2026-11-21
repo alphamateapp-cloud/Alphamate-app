@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   ChevronLeft,
   Coins,
@@ -42,10 +43,12 @@ import { AgencyOrderDetailsModal } from '../components/agency/AgencyOrderDetails
 import { AgencyPinSetupModal } from '../components/agency/AgencyPinSetupModal';
 import { ApplyAgencyModal } from '../components/modals/ApplyAgencyModal';
 import { AgencyOrder, HostMember, HostJoinRequest } from '../types';
+import { buildWhatsAppUrl, openExternalWhatsApp } from '../services/agencySyncService';
 
 export const AgencyManagementScreen: React.FC = () => {
   const {
     navigateBack,
+    currentUser,
     agencyProfile,
     agencyOrders,
     agencyTransactions,
@@ -53,6 +56,8 @@ export const AgencyManagementScreen: React.FC = () => {
     findUserByIdOrUsername,
     sendAgencyCoins,
     hostAgencyProfile,
+    hostAgencyMembership,
+    allHostAgencies,
     agencyHosts,
     hostJoinRequests,
     agencyApplications,
@@ -65,12 +70,17 @@ export const AgencyManagementScreen: React.FC = () => {
     rejectHostJoinRequest,
     removeHostFromAgency,
     updateHostAgencyProfile,
+    contactAgencyInApp,
     refreshScope,
   } = useApp();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Branch Selection: 'coin_seller' vs 'host_agency'
-  const [activeBranch, setActiveBranch] = useState<'coin_seller' | 'host_agency'>('coin_seller');
+  const [activeBranch, setActiveBranch] = useState<'coin_seller' | 'host_agency'>(() =>
+    !agencyProfile && (hostAgencyProfile || hostAgencyMembership.isActiveMember)
+      ? 'host_agency'
+      : 'coin_seller'
+  );
 
   // Sub tabs under Coin Seller Agency
   const [activeCoinSubTab, setActiveCoinSubTab] = useState<'orders' | 'send' | 'history' | 'settings'>('orders');
@@ -451,9 +461,127 @@ export const AgencyManagementScreen: React.FC = () => {
         />
         {activeBranch === 'host_agency' ? !hostAgencyProfile ? (
           /* =========================================================================
-             BRANCH 2 (UNAPPROVED): APPLY FOR HOST AGENCY + PENDING / REQUESTED STATUS
+             BRANCH 2 (NON-OWNER): APPROVED HOST MEMBER PORTAL + APPLY TO OPEN AGENCY
              ========================================================================= */
           <div className="space-y-4 animate-fade-in">
+            {/* Approved Host Agency Member Portal (shown ONLY after Super Admin approval) */}
+            {hostAgencyMembership.isActiveMember && (() => {
+              const assignedDoc = hostAgencyMembership.agencyId
+                ? allHostAgencies.find((a) => a.agencyId === hostAgencyMembership.agencyId) || null
+                : null;
+              const myHostStats = agencyHosts.find(
+                (h) => h.userId === currentUser.id || h.uniqueId === currentUser.uniqueId
+              );
+              const ownerWaUrl =
+                assignedDoc?.hasValidWhatsApp && assignedDoc.whatsappNumber
+                  ? buildWhatsAppUrl(
+                      assignedDoc.whatsappNumber,
+                      `Hello ${assignedDoc.ownerName || assignedDoc.agencyName}! I am ${currentUser.displayName} (ID: ${currentUser.uniqueId}), an active host in ${assignedDoc.agencyName}.`
+                    )
+                  : null;
+
+              return (
+                <div className="rounded-3xl p-5 bg-gradient-to-b from-[#2A0E4E] via-[#1B0A33] to-[#100520] border border-amber-400/50 shadow-[0_0_25px_rgba(245,158,11,0.15)] space-y-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-[9px] font-black uppercase tracking-wider">
+                          Active Host Member
+                        </span>
+                        {hostAgencyMembership.agencyTag && (
+                          <span className="px-2 py-0.5 rounded-lg bg-amber-400 text-black text-[9.5px] font-black uppercase tracking-wider shadow">
+                            [{hostAgencyMembership.agencyTag}]
+                          </span>
+                        )}
+                      </div>
+                      <h2 className="text-xl font-black text-white mt-1.5 truncate">
+                        {hostAgencyMembership.agencyName || 'Official Host Agency'}
+                      </h2>
+                      <p className="text-[11px] text-zinc-300 font-mono mt-0.5">
+                        Agency Code / ID: {hostAgencyMembership.agencyCode || hostAgencyMembership.agencyId}
+                      </p>
+                    </div>
+                    <div className="w-11 h-11 rounded-2xl bg-amber-400/20 border border-amber-400/40 text-amber-300 flex items-center justify-center shrink-0">
+                      <Award className="w-5 h-5" />
+                    </div>
+                  </div>
+
+                  {/* Membership & Owner Details */}
+                  <div className="grid grid-cols-2 gap-2.5 text-xs">
+                    <div className="p-3 rounded-2xl bg-black/35 border border-white/10">
+                      <span className="text-[9.5px] uppercase font-bold text-zinc-400 block">
+                        Membership Status
+                      </span>
+                      <span className="text-emerald-400 font-black mt-0.5 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Active Approved</span>
+                      </span>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-black/35 border border-white/10">
+                      <span className="text-[9.5px] uppercase font-bold text-zinc-400 block">
+                        Agency Owner
+                      </span>
+                      <span className="text-white font-bold mt-0.5 block truncate">
+                        {hostAgencyMembership.ownerName || assignedDoc?.ownerName || 'Official Owner'}
+                      </span>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-black/35 border border-white/10">
+                      <span className="text-[9.5px] uppercase font-bold text-zinc-400 block">
+                        Weekly Target
+                      </span>
+                      <span className="text-amber-300 font-mono font-bold mt-0.5 block">
+                        {myHostStats
+                          ? `${myHostStats.weeklyTargetDiamonds.toLocaleString()} 💎`
+                          : `${assignedDoc?.minWeeklyHours ?? 15} hrs/wk`}
+                      </span>
+                    </div>
+                    <div className="p-3 rounded-2xl bg-black/35 border border-white/10">
+                      <span className="text-[9.5px] uppercase font-bold text-zinc-400 block">
+                        Host Share
+                      </span>
+                      <span className="text-purple-200 font-mono font-bold mt-0.5 block">
+                        {100 - (myHostStats?.commissionRate ?? assignedDoc?.defaultCommissionRate ?? 15)}% Host
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Direct Owner Contact Buttons */}
+                  <div className="flex items-center gap-2 pt-1">
+                    {hostAgencyMembership.ownerUserId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void contactAgencyInApp({
+                            agencyId: hostAgencyMembership.agencyId || '',
+                            agencyName: hostAgencyMembership.agencyName || 'Host Agency',
+                            agencyCode: hostAgencyMembership.agencyCode,
+                            ownerUserId: hostAgencyMembership.ownerUserId || '',
+                            ownerName: hostAgencyMembership.ownerName || assignedDoc?.ownerName,
+                            ownerAvatar: assignedDoc?.ownerAvatar,
+                          });
+                        }}
+                        className="flex-1 h-10 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 text-black font-black text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 shadow cursor-pointer hover:brightness-110 transition-all"
+                      >
+                        <MessageCircle className="w-3.5 h-3.5" />
+                        <span>Contact Owner In-App</span>
+                      </button>
+                    )}
+
+                    {ownerWaUrl && (
+                      <button
+                        type="button"
+                        onClick={() => openExternalWhatsApp(ownerWaUrl)}
+                        className="px-3.5 h-10 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5" />
+                        <span>WhatsApp</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             <div className="rounded-3xl p-5 bg-gradient-to-b from-[#2A0E4E] via-[#1B0A33] to-[#100520] border border-[#A855F7]/45 shadow-xl space-y-4">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-center gap-3">
@@ -774,7 +902,7 @@ export const AgencyManagementScreen: React.FC = () => {
                             <div className="flex items-center gap-3 min-w-0">
                               <div className="relative shrink-0">
                                 <img
-                                  src={host.avatar}
+                                  src={safeImageSrc(host.avatar, DEFAULT_AVATAR_URL)}
                                   alt={host.displayName}
                                   className="w-12 h-12 rounded-2xl object-cover border border-purple-400/60 shadow"
                                 />
@@ -980,7 +1108,7 @@ export const AgencyManagementScreen: React.FC = () => {
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex items-center gap-3 min-w-0">
                             <img
-                              src={req.avatar}
+                              src={safeImageSrc(req.avatar, DEFAULT_AVATAR_URL)}
                               alt={req.displayName}
                               className="w-11 h-11 rounded-2xl object-cover border border-purple-400/60 shadow"
                             />
@@ -1423,7 +1551,7 @@ export const AgencyManagementScreen: React.FC = () => {
                         <div className="flex items-center gap-3 min-w-0">
                           <div className="relative shrink-0">
                             <img
-                              src={ord.buyerAvatar}
+                              src={safeImageSrc(ord.buyerAvatar, DEFAULT_AVATAR_URL)}
                               alt={ord.buyerName}
                               className="w-11 h-11 rounded-2xl object-cover border border-amber-400/60 shadow"
                             />
@@ -1474,11 +1602,13 @@ export const AgencyManagementScreen: React.FC = () => {
                           </div>
 
                           <div className="w-10 h-10 rounded-xl overflow-hidden border border-white/20 bg-black shrink-0 relative group-hover:border-amber-400">
-                            <img
-                              src={ord.receiptUrl}
-                              alt="Receipt slip"
-                              className="w-full h-full object-cover"
-                            />
+                            {safeImageSrc(ord.receiptUrl) && (
+                              <img
+                                src={safeImageSrc(ord.receiptUrl)}
+                                alt="Receipt slip"
+                                className="w-full h-full object-cover"
+                              />
+                            )}
                           </div>
                         </div>
                       </div>
@@ -1534,7 +1664,7 @@ export const AgencyManagementScreen: React.FC = () => {
                   <div className="p-3 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-between animate-fade-in">
                     <div className="flex items-center gap-2.5">
                       <img
-                        src={directUser.avatar}
+                        src={safeImageSrc(directUser.avatar, DEFAULT_AVATAR_URL)}
                         alt={directUser.displayName}
                         className="w-10 h-10 rounded-xl object-cover border border-emerald-400/70"
                       />
@@ -1661,7 +1791,7 @@ export const AgencyManagementScreen: React.FC = () => {
                       >
                         <div className="flex items-center gap-3 min-w-0">
                           <img
-                            src={tx.recipientAvatar}
+                            src={safeImageSrc(tx.recipientAvatar, DEFAULT_AVATAR_URL)}
                             alt={tx.recipientName}
                             className="w-10 h-10 rounded-xl object-cover border border-amber-400/40 shrink-0"
                           />
@@ -1802,7 +1932,7 @@ export const AgencyManagementScreen: React.FC = () => {
             <div className="p-3 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2.5 min-w-0">
                 <img
-                  src={approvingCandidate.avatar}
+                  src={safeImageSrc(approvingCandidate.avatar, DEFAULT_AVATAR_URL)}
                   alt={approvingCandidate.displayName}
                   className="w-11 h-11 rounded-2xl object-cover border border-purple-400/60 shadow shrink-0"
                 />
@@ -2003,7 +2133,7 @@ export const AgencyManagementScreen: React.FC = () => {
             <div className="p-3 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-between gap-3">
               <div className="flex items-center gap-2.5 min-w-0">
                 <img
-                  src={editingContractHost.avatar}
+                  src={safeImageSrc(editingContractHost.avatar, DEFAULT_AVATAR_URL)}
                   alt={editingContractHost.displayName}
                   className="w-10 h-10 rounded-2xl object-cover border border-purple-400/60 shadow shrink-0"
                 />
@@ -2169,7 +2299,7 @@ export const AgencyManagementScreen: React.FC = () => {
             {/* Host Card Preview */}
             <div className="p-3 rounded-2xl bg-white/5 border border-white/10 flex items-center gap-3">
               <img
-                src={releasingHost.avatar}
+                src={safeImageSrc(releasingHost.avatar, DEFAULT_AVATAR_URL)}
                 alt={releasingHost.displayName}
                 className="w-11 h-11 rounded-2xl object-cover border border-rose-400/50"
               />

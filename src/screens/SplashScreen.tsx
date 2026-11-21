@@ -47,7 +47,7 @@ export const SplashScreen: React.FC = () => {
   return (
     <div
       onClick={handleNextScreen}
-      className="relative flex h-full min-h-[100dvh] w-full cursor-pointer select-none flex-col items-center justify-center overflow-hidden bg-[#080510] px-5"
+      className="relative flex h-full w-full cursor-pointer select-none flex-col items-center justify-center overflow-hidden bg-[#080510] px-5"
       role="button"
       aria-label="Continue to Alpha Mate"
     >
@@ -92,7 +92,7 @@ export const SplashScreen: React.FC = () => {
       </div>
 
       {/* Existing tap-to-continue hint stays at the bottom */}
-      <div className="absolute bottom-[max(28px,env(safe-area-inset-bottom))] z-10 text-center text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500">
+      <div className="absolute bottom-7 z-10 text-center text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500">
         Tap anywhere to continue
       </div>
     </div>

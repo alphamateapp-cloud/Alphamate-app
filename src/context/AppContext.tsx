@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
 import { Capacitor } from '@capacitor/core';
+import { DEFAULT_AVATAR_URL } from '../utils/imageHd';
 import {
   ScreenType,
   MainTabType,
@@ -27,6 +28,8 @@ import {
   UserBadgeId,
   UserHistoricalStats,
   SavedDeviceAccount,
+  AdminModerationState,
+  AdminRestrictionDetail,
 } from '../types';
 import {
   CURRENT_USER,
@@ -94,9 +97,21 @@ import {
   adminAllocateAgencyCoinsInFirestore,
   updateApprovedAgencySettingsInFirestore,
   deductCoinSellerAgencyBalanceInFirestore,
+  submitHostAgencyRequestToFirestore,
+  subscribeToMyHostAgencyRequests,
+  subscribeToAgencyOwnerHostRequests,
+  subscribeToAllHostAgencyRequests,
+  reviewHostAgencyRequestInFirestore,
+  subscribeToAgencyHostMembers,
   SendNotificationParams,
   FirebaseUser,
 } from '../services/firebase';
+import {
+  normalizeOfficialAgencyDoc,
+  normalizeHostAgencyRequestDoc,
+  resolveUserHostAgencyMembership,
+  ResolvedHostAgencyMembership,
+} from '../services/agencySyncService';
 import type { OfficialAgency } from '../components/modals/AgencyContactModal';
 import {
   subscribeToActiveReels,
@@ -136,6 +151,11 @@ import {
   subscribeToMyFollowEdges,
   setUserFollowStateFirestore,
 } from '../services/userDirectoryService';
+import {
+  cacheCurrentUserSnippet,
+  clearCurrentUserSnippet,
+  getCachedCurrentUserSnippet,
+} from '../services/profileSnippetCache';
 import { buildDirectChatId } from '../services/chatService';
 import {
   requestAuthenticatedEmailOtp,
@@ -157,6 +177,15 @@ import {
   updateSavedDeviceAccountSessionData,
   removeSavedDeviceAccount,
 } from '../services/multiAccountService';
+import {
+  parseAdminModerationState,
+  resolveUserBlueTickVerified,
+  resolveUserGreenTickVerified,
+  mergeAndDeduplicateNotifications,
+  subscribeToUserAdminActionCollections,
+  markAdminActionItemRead,
+  buildProfileTransitionNotifications,
+} from '../services/adminModerationService';
 
 export type RefreshScope =
   | 'home'
@@ -486,6 +515,21 @@ interface AppContextType {
   setShowPushSettingsModal: (show: boolean) => void;
   sendNotificationToUser: (params: SendNotificationParams) => Promise<void>;
 
+  // Existing Admin Panel Actions – User-Side Moderation & Notification Integration
+  adminModerationState: AdminModerationState;
+  activeAdminWarning: NotificationItem | null;
+  dismissActiveAdminWarning: (markRead?: boolean) => void;
+  selectedAdminNotification: NotificationItem | null;
+  setSelectedAdminNotification: (item: NotificationItem | null) => void;
+  openAdminNotificationDetails: (item: NotificationItem) => void;
+  activeFeatureRestrictionModal: {
+    scope: 'live' | 'party';
+    detail: AdminRestrictionDetail;
+  } | null;
+  setActiveFeatureRestrictionModal: (
+    modal: { scope: 'live' | 'party'; detail: AdminRestrictionDetail } | null
+  ) => void;
+
   // Global & Weekly Leaderboard (Monthly-refreshing, >=100 users, up to 1 month archive)
   leaderboardMonthKey: string;
   leaderboardPreviousMonthKey: string;
@@ -568,8 +612,18 @@ interface AppContextType {
   hostAgencyProfile: HostAgencyProfile | null;
   agencyHosts: HostMember[];
   hostJoinRequests: HostJoinRequest[];
+  myHostAgencyRequests: HostJoinRequest[];
+  hostAgencyMembership: ResolvedHostAgencyMembership;
   agencyApplications: AgencyApplication[];
   allHostAgencies: HostAgencyProfile[];
+  contactAgencyInApp: (agency: {
+    agencyId: string;
+    agencyName: string;
+    agencyCode?: string;
+    ownerUserId: string;
+    ownerName?: string;
+    ownerAvatar?: string;
+  }) => Promise<{ success: boolean; message: string }>;
   updateHostAgencyProfile: (updates: Partial<HostAgencyProfile>) => void;
   setHostWeeklyTarget: (
     hostId: string,
@@ -590,7 +644,7 @@ interface AppContextType {
     targetHours: number,
     commissionRate: number
   ) => void;
-  rejectHostJoinRequest: (requestId: string) => { success: boolean; message: string };
+  rejectHostJoinRequest: (requestId: string, reason?: string) => { success: boolean; message: string };
   removeHostFromAgency: (
     hostId: string,
     reason?: string
@@ -601,7 +655,7 @@ interface AppContextType {
     whatsapp: string,
     experience: string,
     expectedHours: number
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
   submitAgencyApplication: (
     data: Omit<AgencyApplication, 'id' | 'status' | 'submittedAt'>
   ) => { success: boolean; message: string };
@@ -816,9 +870,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (authenticated) {
         localStorage.setItem('alphamate_current_user', JSON.stringify(user));
         localStorage.setItem('alphamate_is_authenticated', 'true');
+        void cacheCurrentUserSnippet(user);
       } else {
         localStorage.removeItem('alphamate_current_user');
         localStorage.setItem('alphamate_is_authenticated', 'false');
+        void clearCurrentUserSnippet();
       }
     } catch {
       // ignore
@@ -853,7 +909,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       vipTier: 0,
       coins: 0,
       diamonds: 0,
-      isVerified: verified,
+      isVerified: false,
+      isAccountVerified: isFirebaseUserVerified(fbUser),
+      greenTick: isFirebaseUserVerified(fbUser),
+      emailVerified: isFirebaseUserVerified(fbUser),
       hasPassword: hasPass,
       profileCompleted: false,
       familyCrew: 'Alpha Champions 👑',
@@ -886,6 +945,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           const hasPass =
             hasFirebasePasswordProvider(fbUser) || Boolean(remoteProfile?.hasPassword);
           const completed = remoteProfile ? isProfileRegistrationCompleted(remoteProfile) : false;
+          const resolvedGreenTick = verified || resolveUserGreenTickVerified(remoteProfile, false);
 
           const mergedUser: User = remoteProfile
             ? {
@@ -895,17 +955,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 email: (fbUser.email || remoteProfile.email || '').toLowerCase(),
                 displayName: remoteProfile.displayName || fbUser.displayName || 'Alpha Mate',
                 avatar: remoteProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
-                isVerified: verified || Boolean(remoteProfile.isVerified),
+                isVerified: resolveUserBlueTickVerified(remoteProfile, false),
+                isAccountVerified: resolvedGreenTick,
+                greenTick: resolvedGreenTick,
+                emailVerified: verified,
                 hasPassword: hasPass,
                 profileCompleted: completed,
               }
             : buildNewUserFromFirebase(fbUser, {
+                isVerified: false,
+                isAccountVerified: verified,
+                greenTick: verified,
+                emailVerified: verified,
                 hasPassword: hasPass,
                 profileCompleted: false,
               });
 
           if (!remoteProfile) {
-            await syncUserProfileToFirestore(mergedUser, { background: true }).catch(() => {});
+            await syncUserProfileToFirestore(mergedUser, {
+              background: true,
+              isNewUserDoc: true,
+            }).catch(() => {});
+          } else if (
+            resolvedGreenTick &&
+            (remoteProfile.greenTick !== true || remoteProfile.isAccountVerified !== true)
+          ) {
+            // Automatically backfill Green Tick on Firestore for already-verified accounts so other users see it too
+            syncUserProfileToFirestore(
+              {
+                id: fbUser.uid,
+                username: mergedUser.username,
+                displayName: mergedUser.displayName,
+                uniqueId: mergedUser.uniqueId,
+                avatar: mergedUser.avatar,
+                isAccountVerified: true,
+                greenTick: true,
+                emailVerified: verified,
+              },
+              { background: true }
+            ).catch(() => {});
           }
           if (remoteProfile?.notificationPreferences) {
             const hydratedPrefs = pushService.setLocalPreferences({
@@ -957,6 +1045,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               if (parsed?.id === fbUser.uid) cachedForSameUid = parsed;
             }
             if (!cachedForSameUid) {
+              const swSnippet = await getCachedCurrentUserSnippet().catch(() => null);
+              if (swSnippet && swSnippet.id === fbUser.uid) {
+                cachedForSameUid = {
+                  id: swSnippet.id,
+                  uniqueId: swSnippet.uniqueId,
+                  username: swSnippet.username,
+                  displayName: swSnippet.displayName,
+                  avatar: swSnippet.avatar,
+                  bio: swSnippet.bio,
+                  vipTier: swSnippet.vipTier,
+                  level: swSnippet.level,
+                  followersCount: swSnippet.followersCount,
+                  followingCount: swSnippet.followingCount,
+                  likesCount: swSnippet.likesCount,
+                  isVerified: swSnippet.isVerified,
+                  isAccountVerified: swSnippet.isAccountVerified,
+                  greenTick: swSnippet.isAccountVerified,
+                  isHost: swSnippet.isHost,
+                  country: swSnippet.country,
+                  countryFlag: swSnippet.countryFlag,
+                  activeFrame: swSnippet.activeFrame,
+                  activeHonorTitle: swSnippet.activeHonorTitle,
+                  familyCrew: swSnippet.familyCrew,
+                  equippedBadgeIds: swSnippet.equippedBadgeIds,
+                };
+              }
+            }
+            if (!cachedForSameUid) {
               const savedMatch = loadSavedDeviceAccounts().find((a) => a.uid === fbUser.uid);
               if (savedMatch) {
                 cachedForSameUid = {
@@ -978,12 +1094,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
           const verified = providerVerified || Boolean(cachedForSameUid?.emailOtpVerified);
           setIsEmailVerified(verified);
+          const fallbackGreenTick =
+            verified || resolveUserGreenTickVerified(cachedForSameUid as Record<string, any>, false);
           const fallbackUser: User = cachedForSameUid
             ? {
                 ...defaults,
                 ...cachedForSameUid,
                 id: fbUser.uid,
-                isVerified: verified || Boolean(cachedForSameUid.isVerified),
+                isVerified: resolveUserBlueTickVerified(cachedForSameUid as Record<string, any>, false),
+                isAccountVerified: fallbackGreenTick,
+                greenTick: fallbackGreenTick,
+                emailVerified: verified,
                 hasPassword:
                   hasFirebasePasswordProvider(fbUser) || Boolean(cachedForSameUid.hasPassword),
                 profileCompleted: isProfileRegistrationCompleted(cachedForSameUid),
@@ -1337,7 +1458,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               uniqueId: reel.creator?.uniqueId || reel.uid.slice(0, 8),
               username: reel.creator?.username || 'creator',
               displayName: reel.creator?.displayName || 'Alpha Creator',
-              avatar: reel.creator?.avatar || '',
+              avatar: reel.creator?.avatar || DEFAULT_AVATAR_URL,
               bio: '',
               followersCount: 0,
               followingCount: 0,
@@ -1349,10 +1470,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               coins: 0,
               diamonds: 0,
               isVerified: !!reel.creator?.isVerified,
+              isAccountVerified: !!reel.creator?.isAccountVerified,
+              greenTick: !!reel.creator?.isAccountVerified,
             },
             videoUrl: reel.videoUrl,
             videoKey: reel.videoKey,
-            thumbnail: reel.thumbnailUrl || reel.creator?.avatar || '',
+            thumbnail: reel.thumbnailUrl || reel.creator?.avatar || DEFAULT_AVATAR_URL,
             title: reel.title || reel.caption || 'Alpha Moment',
             description: reel.caption || '',
             tags: reel.tags || ['#AlphaMoments'],
@@ -1367,7 +1490,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }));
 
           const remoteIds = new Set(remotePosts.map((r) => r.id));
-          const localOnly = prevLocal.filter((p) => !remoteIds.has(p.id) && !p.videoKey);
+          const remoteUrls = new Set(remotePosts.map((r) => r.videoUrl).filter(Boolean));
+          const localOnly = prevLocal.filter(
+            (p) => !remoteIds.has(p.id) && !p.videoKey && (!p.videoUrl || !remoteUrls.has(p.videoUrl))
+          );
           return [...remotePosts, ...localOnly];
         });
       }
@@ -1717,7 +1843,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   // Notifications & 60/40 Gift Ledger
-  const [notifications, setNotifications] = useState<NotificationItem[]>(MOCK_NOTIFICATIONS);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(() =>
     pushService.getPreferences()
   );
@@ -1734,6 +1860,52 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const announcedLiveIdsRef = React.useRef<Set<string>>(new Set());
   const seenNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const notificationBootedRef = React.useRef<boolean>(false);
+
+  // Admin Moderation & Action Notification User-Side State
+  const [moderationClockMs, setModerationClockMs] = useState<number>(() => Date.now());
+  const [activeAdminWarning, setActiveAdminWarning] = useState<NotificationItem | null>(null);
+  const [selectedAdminNotification, setSelectedAdminNotification] = useState<NotificationItem | null>(null);
+  const [activeFeatureRestrictionModal, setActiveFeatureRestrictionModal] = useState<{
+    scope: 'live' | 'party';
+    detail: AdminRestrictionDetail;
+  } | null>(null);
+  const primaryNotifsRef = React.useRef<NotificationItem[]>([]);
+  const adminActionNotifsRef = React.useRef<NotificationItem[]>([]);
+  const transitionNotifsRef = React.useRef<NotificationItem[]>([]);
+  const dismissedWarningIdsRef = React.useRef<Set<string>>(new Set());
+  const prevModerationStateRef = React.useRef<{ uid: string; state: AdminModerationState } | null>(null);
+
+  const adminModerationState = useMemo<AdminModerationState>(
+    () => parseAdminModerationState(currentUser, moderationClockMs),
+    [currentUser, moderationClockMs]
+  );
+
+  const publishMergedNotifications = useCallback(() => {
+    setNotifications((prev) => {
+      const localOnly = prev.filter(
+        (p) =>
+          p.id.startsWith('local_notif_') &&
+          p.sourceCollection !== 'profile_transition'
+      );
+      return mergeAndDeduplicateNotifications([
+        primaryNotifsRef.current,
+        adminActionNotifsRef.current,
+        transitionNotifsRef.current,
+        localOnly,
+      ]);
+    });
+  }, []);
+
+  // Automatically restore temporary suspensions (Account / Live / Party) the moment expiry passes
+  useEffect(() => {
+    const nextExpiry = adminModerationState.nextExpiryMs;
+    if (!nextExpiry) return;
+    const delayMs = Math.min(Math.max(1000, nextExpiry - Date.now() + 300), 60000);
+    const timer = setTimeout(() => {
+      setModerationClockMs(Date.now());
+    }, delayMs);
+    return () => clearTimeout(timer);
+  }, [adminModerationState.nextExpiryMs, moderationClockMs]);
 
   // =========================================================================
   // HISTORICAL USER BADGE SYSTEM (Top Contributor, Gift King, Party Legend)
@@ -2112,17 +2284,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  // Real-time User Profile, Notifications & 60/40 Gift Ledger Subscriptions
+  // Real-time User Profile, Admin Moderation, Notifications & 60/40 Gift Ledger Subscriptions
   useEffect(() => {
     if (!firebaseUser?.uid || !isEmailVerified) {
       seenNotificationIdsRef.current.clear();
       notificationBootedRef.current = false;
+      primaryNotifsRef.current = [];
+      adminActionNotifsRef.current = [];
+      transitionNotifsRef.current = [];
+      dismissedWarningIdsRef.current.clear();
+      prevModerationStateRef.current = null;
+      setNotifications([]);
+      setActiveAdminWarning(null);
+      setSelectedAdminNotification(null);
+      setActiveFeatureRestrictionModal(null);
       return;
     }
 
     const uid = firebaseUser.uid;
     const isAdmin = firebaseUser.email?.toLowerCase() === 'alphamateapp@gmail.com';
     const sessionStartedAt = Date.now();
+    primaryNotifsRef.current = [];
+    adminActionNotifsRef.current = [];
+    transitionNotifsRef.current = [];
+    seenNotificationIdsRef.current.clear();
+    notificationBootedRef.current = false;
+    dismissedWarningIdsRef.current.clear();
+    setNotifications([]);
+    setActiveAdminWarning(null);
+
+    const dispatchIncomingAlert = (n: NotificationItem, isBoot: boolean) => {
+      if (seenNotificationIdsRef.current.has(n.id)) return;
+      seenNotificationIdsRef.current.add(n.id);
+
+      // Surface unread Official Admin Warnings immediately so the user can read and acknowledge them
+      if (
+        !n.isRead &&
+        (n.actionKind === 'admin_warning' || n.type === 'admin_warning') &&
+        !dismissedWarningIdsRef.current.has(n.id)
+      ) {
+        setActiveAdminWarning((prev) => {
+          if (prev && (prev.createdAtMs || 0) >= (n.createdAtMs || 0)) return prev;
+          return n;
+        });
+      }
+
+      if (isBoot) return;
+      const createdMs = n.createdAtMs || 0;
+      if (!n.isRead && createdMs >= sessionStartedAt - 30000) {
+        pushService.notifyForeground(
+          {
+            id: n.id,
+            title: n.actionTitle || n.title,
+            body: n.message,
+            data: {
+              type: n.type,
+              category: n.category,
+              screen: n.screen,
+              tab: n.tab,
+              roomId: n.roomId,
+              streamId: n.streamId,
+              reelId: n.reelId,
+              chatId: n.chatId,
+              senderId: n.senderId,
+              isAdminAction: n.isAdminAction,
+              notificationId: n.id,
+            },
+          },
+          Boolean(n.isAdminAction)
+        );
+      }
+    };
 
     const unsubProfile = subscribeToUserProfile(uid, (remoteProfile) => {
       if (!remoteProfile) return;
@@ -2146,107 +2378,368 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
         setNotificationPreferences(syncedPrefs);
       }
-      setCurrentUser((prev) => ({
-        ...prev,
-        coins: typeof remoteProfile.coins === 'number' ? remoteProfile.coins : prev.coins,
-        diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
-        heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
-        notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
-        equippedBadgeIds: Array.isArray(remoteProfile.equippedBadgeIds)
-          ? remoteProfile.equippedBadgeIds
-          : prev.equippedBadgeIds,
-      }));
+
+      setCurrentUser((prev) => {
+        const resolvedBlueTick = resolveUserBlueTickVerified(remoteProfile, prev.isVerified);
+        const resolvedGreenTick = resolveUserGreenTickVerified(
+          remoteProfile,
+          Boolean(prev.isAccountVerified || prev.greenTick || isEmailVerified)
+        );
+        const updatedUser: User = {
+          ...prev,
+          coins: typeof remoteProfile.coins === 'number' ? remoteProfile.coins : prev.coins,
+          diamonds: typeof remoteProfile.diamonds === 'number' ? remoteProfile.diamonds : prev.diamonds,
+          heldDiamonds: typeof remoteProfile.heldDiamonds === 'number' ? remoteProfile.heldDiamonds : prev.heldDiamonds,
+          notificationPreferences: remoteProfile.notificationPreferences || prev.notificationPreferences,
+          equippedBadgeIds: Array.isArray(remoteProfile.equippedBadgeIds)
+            ? remoteProfile.equippedBadgeIds
+            : prev.equippedBadgeIds,
+          // Sync Blue Tick (Admin Respect Badge) & Green Tick (Auto Account Verification) immediately
+          isVerified: resolvedBlueTick,
+          isAccountVerified: resolvedGreenTick,
+          greenTick: resolvedGreenTick,
+          emailOtpVerified:
+            typeof remoteProfile.emailOtpVerified === 'boolean'
+              ? remoteProfile.emailOtpVerified
+              : prev.emailOtpVerified,
+          blueTick: remoteProfile.blueTick,
+          hasBlueTick: remoteProfile.hasBlueTick,
+          verificationStatus: remoteProfile.verificationStatus,
+          verificationUpdatedAt: remoteProfile.verificationUpdatedAt,
+          verificationReason: remoteProfile.verificationReason,
+          // Sync all Admin moderation & restriction fields in real time
+          accountStatus: remoteProfile.accountStatus ?? prev.accountStatus,
+          isBlocked: remoteProfile.isBlocked,
+          blocked: remoteProfile.blocked,
+          isBanned: remoteProfile.isBanned,
+          banned: remoteProfile.banned,
+          blockReason: remoteProfile.blockReason,
+          blockedAt: remoteProfile.blockedAt,
+          blockedBy: remoteProfile.blockedBy,
+          isSuspended: remoteProfile.isSuspended,
+          suspended: remoteProfile.suspended,
+          suspensionReason: remoteProfile.suspensionReason,
+          suspensionDuration: remoteProfile.suspensionDuration,
+          suspendedAt: remoteProfile.suspendedAt,
+          suspendedUntil: remoteProfile.suspendedUntil,
+          suspensionExpiresAt: remoteProfile.suspensionExpiresAt,
+          isPermanentSuspension: remoteProfile.isPermanentSuspension,
+          liveDisabled: remoteProfile.liveDisabled,
+          liveSuspended: remoteProfile.liveSuspended,
+          liveRestricted: remoteProfile.liveRestricted,
+          liveAccess: remoteProfile.liveAccess,
+          canGoLive: remoteProfile.canGoLive,
+          liveRestrictionReason: remoteProfile.liveRestrictionReason,
+          liveSuspendedUntil: remoteProfile.liveSuspendedUntil,
+          partyDisabled: remoteProfile.partyDisabled,
+          partySuspended: remoteProfile.partySuspended,
+          partyRestricted: remoteProfile.partyRestricted,
+          partyAccess: remoteProfile.partyAccess,
+          canJoinParty: remoteProfile.canJoinParty,
+          canCreateParty: remoteProfile.canCreateParty,
+          partyRestrictionReason: remoteProfile.partyRestrictionReason,
+          partySuspendedUntil: remoteProfile.partySuspendedUntil,
+          moderation: remoteProfile.moderation ?? null,
+          restrictions: remoteProfile.restrictions ?? null,
+          latestWarning: remoteProfile.latestWarning ?? null,
+          warnings: Array.isArray(remoteProfile.warnings) ? remoteProfile.warnings : undefined,
+          lastAdminAction: remoteProfile.lastAdminAction ?? null,
+          // Sync Super Admin-managed Host Agency membership fields in real time
+          agencyId:
+            typeof remoteProfile.agencyId === 'string' && remoteProfile.agencyId.trim()
+              ? remoteProfile.agencyId.trim()
+              : typeof remoteProfile.hostAgencyId === 'string' && remoteProfile.hostAgencyId.trim()
+              ? remoteProfile.hostAgencyId.trim()
+              : undefined,
+          agencyName:
+            typeof remoteProfile.agencyName === 'string' && remoteProfile.agencyName.trim()
+              ? remoteProfile.agencyName.trim()
+              : typeof remoteProfile.hostAgencyName === 'string' && remoteProfile.hostAgencyName.trim()
+              ? remoteProfile.hostAgencyName.trim()
+              : undefined,
+          agencyCode:
+            typeof remoteProfile.agencyCode === 'string' && remoteProfile.agencyCode.trim()
+              ? remoteProfile.agencyCode.trim()
+              : typeof remoteProfile.hostAgencyCode === 'string' && remoteProfile.hostAgencyCode.trim()
+              ? remoteProfile.hostAgencyCode.trim()
+              : undefined,
+          agencyTag:
+            typeof remoteProfile.agencyTag === 'string' && remoteProfile.agencyTag.trim()
+              ? remoteProfile.agencyTag.trim()
+              : typeof remoteProfile.hostAgencyTag === 'string' && remoteProfile.hostAgencyTag.trim()
+              ? remoteProfile.hostAgencyTag.trim()
+              : undefined,
+          hostAgencyStatus:
+            typeof remoteProfile.hostAgencyStatus === 'string' && remoteProfile.hostAgencyStatus.trim()
+              ? remoteProfile.hostAgencyStatus.trim()
+              : undefined,
+          agencyOwnerId:
+            typeof remoteProfile.agencyOwnerId === 'string' && remoteProfile.agencyOwnerId.trim()
+              ? remoteProfile.agencyOwnerId.trim()
+              : undefined,
+          agencyOwnerName:
+            typeof remoteProfile.agencyOwnerName === 'string' && remoteProfile.agencyOwnerName.trim()
+              ? remoteProfile.agencyOwnerName.trim()
+              : undefined,
+          agencyJoinedAt:
+            typeof remoteProfile.agencyJoinedAt === 'string' && remoteProfile.agencyJoinedAt.trim()
+              ? remoteProfile.agencyJoinedAt.trim()
+              : undefined,
+          isAgencyHost:
+            typeof remoteProfile.isAgencyHost === 'boolean'
+              ? remoteProfile.isAgencyHost
+              : Boolean(remoteProfile.agencyId || remoteProfile.hostAgencyId),
+        };
+        void cacheCurrentUserSnippet(updatedUser);
+        return updatedUser;
+      });
     });
 
     const unsubNotifs = subscribeToUserNotifications(uid, (remoteItems) => {
-      const typedItems = remoteItems as NotificationItem[];
-      setNotifications((prev) => {
-        const remoteIds = new Set(typedItems.map((i) => i.id));
-        const localOnly = prev.filter((p) => !remoteIds.has(p.id) && p.id.startsWith('local_notif_'));
-        return [...typedItems, ...localOnly];
-      });
+      const typedItems = (remoteItems as NotificationItem[]).filter(
+        (item) => !item.recipientId || item.recipientId === uid
+      );
+      primaryNotifsRef.current = typedItems;
+      publishMergedNotifications();
 
-      if (!notificationBootedRef.current) {
-        typedItems.forEach((n) => seenNotificationIdsRef.current.add(n.id));
+      const isBoot = !notificationBootedRef.current;
+      if (isBoot) {
         notificationBootedRef.current = true;
-        return;
       }
+      typedItems.forEach((n) => dispatchIncomingAlert(n, isBoot));
+    });
 
-      typedItems.forEach((n) => {
-        if (!seenNotificationIdsRef.current.has(n.id)) {
-          seenNotificationIdsRef.current.add(n.id);
-          const createdMs = n.createdAtMs || 0;
-          if (!n.isRead && createdMs >= sessionStartedAt - 15000) {
-            pushService.notifyForeground({
+    let disposed = false;
+    const secondaryUnsubs: Array<() => void> = [];
+
+    const secondaryTimer = window.setTimeout(() => {
+      if (disposed) return;
+
+      secondaryUnsubs.push(
+        subscribeToUserAdminActionCollections(uid, (adminItems) => {
+          const scopedItems = adminItems.filter(
+            (item) => !item.recipientId || item.recipientId === uid
+          );
+          adminActionNotifsRef.current = scopedItems;
+          publishMergedNotifications();
+
+          scopedItems.forEach((n) => dispatchIncomingAlert(n, !notificationBootedRef.current));
+        })
+      );
+
+      secondaryUnsubs.push(
+        subscribeToGiftTransactions({ userId: uid, isAdmin }, (remoteGifts) => {
+          const normalized = remoteGifts as GiftTransactionRecord[];
+          setGiftTransactions((prev) => {
+            const remoteIds = new Set(normalized.map((g) => g.id));
+            const localDemoOnly = prev.filter((g) => !remoteIds.has(g.id) && g.id.startsWith('local_gift_'));
+            const merged = [...normalized, ...localDemoOnly];
+            try {
+              localStorage.setItem('alphamate_gift_transactions', JSON.stringify(merged.slice(0, 100)));
+            } catch {}
+            return merged;
+          });
+        })
+      );
+
+      secondaryUnsubs.push(
+        subscribeToRealUsers(
+          (usersList) => {
+            setRealUsers(usersList);
+            setRegisteredUsers(usersList);
+          },
+          undefined,
+          { maxUsers: 80, forceRefresh: userSyncRefreshEpoch > 0 }
+        )
+      );
+
+      secondaryUnsubs.push(
+        subscribeToMyFollowEdges(uid, (edges) => {
+          setFollowingUserIds(edges.followingIds);
+          setFollowerUserIds(edges.followerIds);
+        })
+      );
+
+      secondaryUnsubs.push(
+        isAdmin
+          ? subscribeToAllAgencyApplications((apps) => {
+              setAgencyApplications(apps as AgencyApplication[]);
+            })
+          : subscribeToMyAgencyApplications(uid, (apps) => {
+              setAgencyApplications(apps as AgencyApplication[]);
+            })
+      );
+
+      secondaryUnsubs.push(
+        subscribeToApprovedAgencies((docs) => {
+          setApprovedAgencyDocs(docs);
+        })
+      );
+
+      secondaryUnsubs.push(
+        subscribeToMyHostAgencyRequests(uid, (rawReqs) => {
+          const normalized = rawReqs
+            .map((r) => normalizeHostAgencyRequestDoc(r))
+            .filter((r): r is HostJoinRequest => Boolean(r));
+          setMyHostAgencyRequests(normalized);
+        })
+      );
+
+      if (isAdmin) {
+        secondaryUnsubs.push(
+          subscribeToAllHostAgencyRequests((rawReqs) => {
+            const normalized = rawReqs
+              .map((r) => normalizeHostAgencyRequestDoc(r))
+              .filter((r): r is HostJoinRequest => Boolean(r));
+            setHostJoinRequests(normalized);
+          })
+        );
+      }
+    }, 300);
+
+    return () => {
+      disposed = true;
+      window.clearTimeout(secondaryTimer);
+      unsubProfile();
+      unsubNotifs();
+      secondaryUnsubs.forEach((u) => {
+        try {
+          u();
+        } catch {
+          // ignore cleanup errors
+        }
+      });
+    };
+  }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified, userSyncRefreshEpoch, publishMergedNotifications]);
+
+  // Real-time Moderation State Transition Enforcement & Restoration Notifications
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (!uid || !isEmailVerified) return;
+
+    const prevEntry = prevModerationStateRef.current;
+    if (prevEntry && prevEntry.uid === uid) {
+      const transitions = buildProfileTransitionNotifications(
+        prevEntry.state,
+        adminModerationState,
+        uid
+      );
+      if (transitions.length > 0) {
+        transitionNotifsRef.current = mergeAndDeduplicateNotifications([
+          transitions,
+          transitionNotifsRef.current,
+        ]);
+        publishMergedNotifications();
+        transitions.forEach((n) => {
+          pushService.notifyForeground(
+            {
               id: n.id,
-              title: n.title,
+              title: n.actionTitle || n.title,
               body: n.message,
               data: {
                 type: n.type,
-                category: n.category,
-                screen: n.screen,
-                tab: n.tab,
-                roomId: n.roomId,
-                streamId: n.streamId,
-                reelId: n.reelId,
-                chatId: n.chatId,
-                senderId: n.senderId,
+                screen: 'notifications',
+                isAdminAction: true,
+                notificationId: n.id,
               },
-            });
-          }
-        }
-      });
-    });
-
-    const unsubGifts = subscribeToGiftTransactions({ userId: uid, isAdmin }, (remoteGifts) => {
-      const normalized = remoteGifts as GiftTransactionRecord[];
-      setGiftTransactions((prev) => {
-        const remoteIds = new Set(normalized.map((g) => g.id));
-        const localDemoOnly = prev.filter((g) => !remoteIds.has(g.id) && g.id.startsWith('local_gift_'));
-        const merged = [...normalized, ...localDemoOnly];
-        try {
-          localStorage.setItem('alphamate_gift_transactions', JSON.stringify(merged.slice(0, 100)));
-        } catch {}
-        return merged;
-      });
-    });
-
-    const unsubUsers = subscribeToRealUsers(
-      (usersList) => {
-        setRealUsers(usersList);
-        setRegisteredUsers(usersList);
-      },
-      undefined,
-      { maxUsers: 80, forceRefresh: userSyncRefreshEpoch > 0 }
-    );
-
-    const unsubFollows = subscribeToMyFollowEdges(uid, (edges) => {
-      setFollowingUserIds(edges.followingIds);
-      setFollowerUserIds(edges.followerIds);
-    });
-
-    const unsubAgencyApps = isAdmin
-      ? subscribeToAllAgencyApplications((apps) => {
-          setAgencyApplications(apps as AgencyApplication[]);
-        })
-      : subscribeToMyAgencyApplications(uid, (apps) => {
-          setAgencyApplications(apps as AgencyApplication[]);
+            },
+            true
+          );
         });
+      }
+    }
+    prevModerationStateRef.current = { uid, state: adminModerationState };
 
-    const unsubApprovedAgencies = subscribeToApprovedAgencies((docs) => {
-      setApprovedAgencyDocs(docs);
-    });
+    // Also surface profile-embedded latestWarning if unread and not yet dismissed
+    const profWarn = adminModerationState.latestWarning;
+    if (profWarn && !profWarn.isRead && !dismissedWarningIdsRef.current.has(profWarn.id)) {
+      const warnItem: NotificationItem = {
+        id: profWarn.id,
+        type: 'admin_warning',
+        category: 'walletAndSystem',
+        recipientId: uid,
+        senderId: 'alpha_mate_admin',
+        senderName: profWarn.adminLabel,
+        title: profWarn.title || 'OFFICIAL ADMIN WARNING',
+        message: profWarn.message,
+        isRead: false,
+        createdAtMs: profWarn.createdAtMs,
+        timestamp: 'Just now',
+        isAdminAction: true,
+        actionKind: 'admin_warning',
+        actionType: 'admin_warning',
+        actionTitle: 'OFFICIAL ADMIN WARNING',
+        actionTaken: 'Official Admin Warning Issued',
+        reason: profWarn.reason,
+        adminName: profWarn.adminName,
+        adminLabel: profWarn.adminLabel,
+        adminEmail: profWarn.adminEmail,
+        adminMessage: profWarn.message,
+        currentStatus: adminModerationState.currentAccountStatusLabel,
+        restrictionScope: 'warning',
+        actionDateMs: profWarn.createdAtMs,
+        sourceCollection: 'profile_transition',
+        dedupKey: `admin_warning:${profWarn.reason.toLowerCase().slice(0, 48)}:${Math.floor(profWarn.createdAtMs / 15000)}`,
+      };
+      transitionNotifsRef.current = mergeAndDeduplicateNotifications([
+        [warnItem],
+        transitionNotifsRef.current,
+      ]);
+      publishMergedNotifications();
+      setActiveAdminWarning((prev) => prev || warnItem);
+    }
 
-    return () => {
-      unsubProfile();
-      unsubNotifs();
-      unsubGifts();
-      unsubUsers();
-      unsubFollows();
-      unsubAgencyApps();
-      unsubApprovedAgencies();
-    };
-  }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified, userSyncRefreshEpoch]);
+    // Enforce active session termination when Admin restricts Account, Live, or Party in real time
+    if (adminModerationState.isAccountBlocked || adminModerationState.isAccountSuspended) {
+      if (activeStreamRef.current) {
+        p2pStreamingEngine.stopHostBroadcast(activeStreamRef.current.id, true).catch(() => {});
+        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(activeStreamRef.current.id, true).catch(() => {});
+        setActiveStream(null);
+      }
+      if (activePartyRoomRef.current) {
+        agoraPartyEngine.stopPartyVoice(activePartyRoomRef.current.id, true).catch(() => {});
+        setActivePartyRoom(null);
+        setUserSeatIndex(null);
+        setIsMicMuted(false);
+      }
+      setActiveConversation(null);
+      return;
+    }
+
+    if (adminModerationState.isLiveRestricted && adminModerationState.liveRestriction) {
+      if (activeStreamRef.current) {
+        const s = activeStreamRef.current;
+        realtimeSocket.leaveRoom('live', s.id);
+        p2pStreamingEngine.stopHostBroadcast(s.id, true).catch(() => {});
+        p2pStreamingEngine.unsubscribeFromRemoteBroadcast(s.id, true).catch(() => {});
+        if (s.host?.id === uid) {
+          deleteLiveStreamFromFirestore(s.id).catch(() => {});
+        }
+        setActiveStream(null);
+        setCurrentScreenState('home');
+        setActiveFeatureRestrictionModal({
+          scope: 'live',
+          detail: adminModerationState.liveRestriction,
+        });
+      }
+    }
+
+    if (adminModerationState.isPartyRestricted && adminModerationState.partyRestriction) {
+      if (activePartyRoomRef.current) {
+        const r = activePartyRoomRef.current;
+        realtimeSocket.leaveRoom('party', r.id);
+        agoraPartyEngine.stopPartyVoice(r.id, true).catch(() => {});
+        setActivePartyRoom(null);
+        setUserSeatIndex(null);
+        setIsMicMuted(false);
+        setCurrentScreenState('home');
+        setActiveFeatureRestrictionModal({
+          scope: 'party',
+          detail: adminModerationState.partyRestriction,
+        });
+      }
+    }
+  }, [adminModerationState, firebaseUser?.uid, isEmailVerified, publishMergedNotifications]);
 
   const updateNotificationPreferences = async (prefs: NotificationPreferences) => {
     const uid =
@@ -2455,79 +2948,111 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
+  const normalizedAgencies = useMemo(() => {
+    return approvedAgencyDocs
+      .map((docItem) => normalizeOfficialAgencyDoc(docItem))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item));
+  }, [approvedAgencyDocs]);
+
+  // Strictly Active Coin Seller Agencies ONLY (never Host Agencies, never Hold/Suspended)
   const officialCoinSellerProfiles: CoinSellerAgencyProfile[] = useMemo(() => {
     const activeUid = firebaseUser?.uid || currentUser.id;
-    return approvedAgencyDocs
-      .filter((docItem) => docItem?.type === 'coin_seller' && docItem?.status !== 'suspended')
-      .map((docItem) => {
+    return normalizedAgencies
+      .filter((item) => item.type === 'coin_seller' && item.status === 'active')
+      .map((item) => {
         const storedPin =
-          docItem.ownerUserId === activeUid
-            ? getStoredAgencyPin(activeUid, String(docItem.agencyId))
+          item.ownerUserId === activeUid
+            ? getStoredAgencyPin(activeUid, item.agencyId)
             : '';
         return {
-          agencyId: String(docItem.agencyId),
-          agencyName: String(docItem.agencyName || 'Official Coin Agency'),
-          agencyCode: String(docItem.agencyCode || 'AM-EX'),
-          badge: String(docItem.badge || 'Diamond Certified Official'),
-          ownerUserId: String(docItem.ownerUserId || ''),
-          ownerName: docItem.ownerName ? String(docItem.ownerName) : undefined,
-          agencyBalance: Math.max(0, Number(docItem.agencyBalance) || 0),
+          agencyId: item.agencyId,
+          agencyName: item.agencyName,
+          agencyCode: item.agencyCode,
+          badge: item.badge || 'Official Coin Seller Agency',
+          logo: item.logo,
+          ownerUserId: item.ownerUserId,
+          ownerName: item.ownerName,
+          ownerUniqueId: item.ownerUniqueId,
+          ownerAvatar: item.ownerAvatar,
+          agencyBalance: item.agencyBalance,
           pin: storedPin,
-          isPinSet: Boolean(storedPin) || Boolean(docItem.isPinSet),
-          whatsappNumber: String(docItem.whatsappNumber || ''),
-          whatsappDisplay: String(docItem.whatsappDisplay || docItem.whatsappNumber || ''),
-          isOfficial: Boolean(docItem.isOfficial ?? true),
-          slogan: String(docItem.slogan || 'Official Coin Seller Agency.'),
-          status: docItem.status === 'suspended' ? 'suspended' : 'active',
-          paymentMethods: Array.isArray(docItem.paymentMethods) ? docItem.paymentMethods : undefined,
-          rates: Array.isArray(docItem.rates) ? docItem.rates : undefined,
+          isPinSet: Boolean(storedPin) || item.isPinSet,
+          whatsappNumber: item.whatsappNumber,
+          whatsappDisplay: item.whatsappDisplay,
+          hasValidWhatsApp: item.hasValidWhatsApp,
+          isOfficial: item.isOfficial,
+          slogan: item.slogan,
+          status: item.status,
+          paymentMethods: item.paymentMethods,
+          rates: item.rates,
         };
       });
-  }, [approvedAgencyDocs, firebaseUser?.uid, currentUser.id, getStoredAgencyPin]);
+  }, [normalizedAgencies, firebaseUser?.uid, currentUser.id, getStoredAgencyPin]);
 
   const officialCoinSellerAgencies: OfficialAgency[] = useMemo(() => {
     return officialCoinSellerProfiles
-      .filter((p) => p.status !== 'suspended')
+      .filter((p) => p.status === 'active')
       .map((p) => ({
         id: p.agencyId,
+        agencyCode: p.agencyCode,
         name: p.agencyName,
-        tagline: p.slogan,
-        logo: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?auto=format&fit=crop&w=400&q=80',
+        tagline: p.slogan || 'Official Coin Seller Agency',
+        logo: p.logo || '',
         badge: 'Diamond Certified',
         badgeColor: '#F59E0B',
+        ownerUserId: p.ownerUserId,
+        ownerName: p.ownerName,
+        ownerAvatar: p.ownerAvatar,
         whatsappNumber: p.whatsappNumber,
         whatsappDisplay: p.whatsappDisplay,
+        hasValidWhatsApp: Boolean(p.hasValidWhatsApp),
+        status: p.status || 'active',
+        agencyBalance: p.agencyBalance,
         rating: 5.0,
         ordersCompleted: p.agencyBalance > 0 ? 'Official Stock Active' : 'Official Licensed',
-        bonusOffer: `Available Stock: ${p.agencyBalance.toLocaleString()} Coins`,
-        avgDeliveryTime: 'Direct WhatsApp Delivery',
-        paymentMethods: p.paymentMethods && p.paymentMethods.length > 0 ? p.paymentMethods : ['WhatsApp Direct'],
+        bonusOffer:
+          p.agencyBalance > 0
+            ? `Available Stock: ${p.agencyBalance.toLocaleString()} Coins`
+            : 'Official Coin Seller Agency',
+        avgDeliveryTime: 'Active',
+        paymentMethods:
+          p.paymentMethods && p.paymentMethods.length > 0
+            ? p.paymentMethods
+            : p.hasValidWhatsApp
+            ? ['In-App Chat', 'WhatsApp Direct']
+            : ['In-App Chat'],
         rates: p.rates && p.rates.length > 0 ? p.rates : [],
       }));
   }, [officialCoinSellerProfiles]);
 
+  // Strictly Active Host Agencies ONLY (never Coin Seller Agencies, never Hold/Suspended)
   const allHostAgencies: HostAgencyProfile[] = useMemo(() => {
-    return approvedAgencyDocs
-      .filter((docItem) => docItem?.type === 'host_agency' && docItem?.status !== 'suspended')
-      .map((docItem) => ({
-        agencyId: String(docItem.agencyId),
-        agencyName: String(docItem.agencyName || 'Official Host Agency'),
-        agencyCode: String(docItem.agencyCode || 'AM-HT'),
-        agencyTag: String(docItem.agencyTag || 'VIP'),
-        tagColor: docItem.tagColor ? String(docItem.tagColor) : '#F59E0B',
-        badge: String(docItem.badge || 'Diamond Certified Host Agency'),
-        ownerUserId: String(docItem.ownerUserId || ''),
-        ownerName: docItem.ownerName ? String(docItem.ownerName) : undefined,
-        whatsappNumber: String(docItem.whatsappNumber || ''),
-        whatsappDisplay: String(docItem.whatsappDisplay || docItem.whatsappNumber || ''),
-        defaultCommissionRate: Number(docItem.defaultCommissionRate) || 15,
-        minWeeklyHours: Number(docItem.minWeeklyHours) || 15,
-        slogan: String(docItem.slogan || 'Official live talent and host agency.'),
-        isOfficial: Boolean(docItem.isOfficial ?? true),
-        activeHostsCount: Number(docItem.activeHostsCount) || 0,
-        status: docItem.status === 'suspended' ? 'suspended' : 'active',
+    return normalizedAgencies
+      .filter((item) => item.type === 'host_agency' && item.status === 'active')
+      .map((item) => ({
+        agencyId: item.agencyId,
+        agencyName: item.agencyName,
+        agencyCode: item.agencyCode,
+        agencyTag: item.agencyTag,
+        tagColor: item.tagColor,
+        badge: item.badge || 'Official Host Agency',
+        logo: item.logo,
+        ownerUserId: item.ownerUserId,
+        ownerName: item.ownerName,
+        ownerUniqueId: item.ownerUniqueId,
+        ownerAvatar: item.ownerAvatar,
+        whatsappNumber: item.whatsappNumber,
+        whatsappDisplay: item.whatsappDisplay,
+        hasValidWhatsApp: item.hasValidWhatsApp,
+        defaultCommissionRate: item.defaultCommissionRate,
+        minWeeklyHours: item.minWeeklyHours,
+        slogan: item.slogan,
+        isOfficial: item.isOfficial,
+        activeHostsCount: item.totalHosts,
+        totalHosts: item.totalHosts,
+        status: item.status,
       }));
-  }, [approvedAgencyDocs]);
+  }, [normalizedAgencies]);
 
   // Only expose an active agency profile if the currently signed-in user OWNS an Admin-approved agency
   const agencyProfile: CoinSellerAgencyProfile | null = useMemo(() => {
@@ -2837,20 +3362,77 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
-  const [hostJoinRequests, setHostJoinRequests] = useState<HostJoinRequest[]>(() => {
-    try {
-      const saved = localStorage.getItem('alphamate_host_join_requests');
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.filter((r: HostJoinRequest) => !String(r?.userId || '').endsWith('_demo'));
-        }
-      }
-    } catch {
-      // ignore
-    }
-    return [];
-  });
+  const [hostJoinRequests, setHostJoinRequests] = useState<HostJoinRequest[]>([]);
+  const [myHostAgencyRequests, setMyHostAgencyRequests] = useState<HostJoinRequest[]>([]);
+
+  const hostAgencyMembership = useMemo(
+    () => resolveUserHostAgencyMembership(currentUser, myHostAgencyRequests, allHostAgencies),
+    [currentUser, myHostAgencyRequests, allHostAgencies]
+  );
+
+  // Real-time Host Agency Owner listeners: incoming agency_requests + Super Admin-approved host members
+  useEffect(() => {
+    const ownerUid = firebaseUser?.uid;
+    const ownedAgencyId = hostAgencyProfile?.agencyId;
+    if (!ownerUid || !ownedAgencyId || !isEmailVerified) return;
+
+    const unsubReqs = subscribeToAgencyOwnerHostRequests(ownerUid, ownedAgencyId, (rawReqs) => {
+      const normalized = rawReqs
+        .map((r) => normalizeHostAgencyRequestDoc(r))
+        .filter((r): r is HostJoinRequest => Boolean(r));
+      setHostJoinRequests(normalized);
+    });
+
+    const unsubMembers = subscribeToAgencyHostMembers(ownedAgencyId, (memberDocs) => {
+      setAgencyHosts((prev) => {
+        const prevByUid = new Map(prev.map((h) => [h.userId, h]));
+        const firestoreHosts: HostMember[] = memberDocs.map((docData) => {
+          const uid = String(docData.id || docData.uid || '');
+          const existing = prevByUid.get(uid);
+          return {
+            id: existing?.id || `host_member_${uid}`,
+            userId: uid,
+            uniqueId: String(docData.uniqueId || existing?.uniqueId || ''),
+            displayName: String(docData.displayName || existing?.displayName || 'Alpha Mate Host'),
+            username: String(docData.username || existing?.username || ''),
+            avatar: String(docData.avatar || existing?.avatar || DEFAULT_AVATAR_URL),
+            level: Number(docData.level || existing?.level || 1),
+            agencyId: ownedAgencyId,
+            agencyName: hostAgencyProfile.agencyName,
+            agencyTag: hostAgencyProfile.agencyTag,
+            weeklyTargetDiamonds: existing?.weeklyTargetDiamonds ?? 500000,
+            currentProgressDiamonds: existing?.currentProgressDiamonds ?? Number(docData.diamonds || 0),
+            targetStatus: existing?.targetStatus ?? 'pending',
+            weeklyHoursStreamed: existing?.weeklyHoursStreamed ?? 0,
+            weeklyTargetHours: existing?.weeklyTargetHours ?? hostAgencyProfile.minWeeklyHours,
+            weeklyEarnings: existing?.weeklyEarnings ?? 0,
+            commissionRate: existing?.commissionRate ?? hostAgencyProfile.defaultCommissionRate,
+            isLive: Boolean(docData.isLive ?? existing?.isLive),
+            joinedDate:
+              typeof docData.agencyJoinedAt === 'string' && docData.agencyJoinedAt
+                ? new Date(docData.agencyJoinedAt).toLocaleDateString()
+                : existing?.joinedDate || 'Active Member',
+            resignationRequested: existing?.resignationRequested,
+            resignationReason: existing?.resignationReason,
+          };
+        });
+        return firestoreHosts;
+      });
+    });
+
+    return () => {
+      unsubReqs();
+      unsubMembers();
+    };
+  }, [
+    firebaseUser?.uid,
+    isEmailVerified,
+    hostAgencyProfile?.agencyId,
+    hostAgencyProfile?.agencyName,
+    hostAgencyProfile?.agencyTag,
+    hostAgencyProfile?.minWeeklyHours,
+    hostAgencyProfile?.defaultCommissionRate,
+  ]);
 
   const saveAgencyHosts = (hosts: HostMember[]) => {
     setAgencyHosts(hosts);
@@ -2943,64 +3525,118 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     commissionRate = 15,
     targetHours?: number
   ): { success: boolean; message: string } => {
-    if (!hostAgencyProfile) {
-      return { success: false, message: 'Approved Host Agency ownership required.' };
-    }
+    const isAdminUser =
+      (firebaseUser?.email || '').toLowerCase() === 'alphamateapp@gmail.com' ||
+      currentUser.id === 'user_admin';
     const req = hostJoinRequests.find((r) => r.id === requestId);
     if (!req) return { success: false, message: 'Request not found' };
 
-    const alreadyBound = agencyHosts.some((h) => h.userId === req.userId);
-    if (alreadyBound) {
-      return { success: false, message: 'This host is already bound to an agency!' };
+    const targetAgency =
+      hostAgencyProfile ||
+      allHostAgencies.find((a) => a.agencyId === req.agencyId) ||
+      null;
+
+    if (!isAdminUser && !hostAgencyProfile) {
+      return { success: false, message: 'Approved Host Agency ownership or Admin access required.' };
     }
 
-    const newHost: HostMember = {
-      id: `host_member_${Date.now()}`,
-      userId: req.userId,
-      uniqueId: req.uniqueId,
-      displayName: req.displayName,
-      username: req.username,
-      avatar: req.avatar,
-      level: req.level,
-      agencyId: hostAgencyProfile.agencyId,
-      agencyName: hostAgencyProfile.agencyName,
-      agencyTag: hostAgencyProfile.agencyTag,
-      weeklyTargetDiamonds: targetDiamonds,
-      currentProgressDiamonds: 0,
-      targetStatus: 'pending',
-      weeklyHoursStreamed: 0,
-      weeklyTargetHours: targetHours || req.expectedHours || hostAgencyProfile.minWeeklyHours,
-      weeklyEarnings: 0,
-      commissionRate,
-      isLive: false,
-      joinedDate: 'Joined just now',
-    };
+    const resolvedAgencyId = req.agencyId || targetAgency?.agencyId || '';
+    const resolvedAgencyName = req.agencyName || targetAgency?.agencyName || 'Official Host Agency';
+    const resolvedAgencyCode = req.agencyCode || targetAgency?.agencyCode || '';
+    const resolvedAgencyTag = req.agencyTag || targetAgency?.agencyTag || 'HOST';
+    const resolvedOwnerId = req.agencyOwnerId || targetAgency?.ownerUserId || firebaseUser?.uid || '';
+    const resolvedOwnerName = targetAgency?.ownerName || currentUser.displayName;
 
-    saveAgencyHosts([newHost, ...agencyHosts]);
-
-    if (currentUser.id === req.userId || currentUser.uniqueId === req.uniqueId) {
-      updateUserProfile({
-        agencyId: hostAgencyProfile.agencyId,
-        agencyName: hostAgencyProfile.agencyName,
-        agencyTag: hostAgencyProfile.agencyTag,
-        isAgencyHost: true,
-      });
+    const alreadyBound = agencyHosts.some((h) => h.userId === req.userId);
+    if (!alreadyBound && resolvedAgencyId) {
+      const newHost: HostMember = {
+        id: `host_member_${req.userId || Date.now()}`,
+        userId: req.userId,
+        uniqueId: req.uniqueId,
+        displayName: req.displayName,
+        username: req.username,
+        avatar: req.avatar,
+        level: req.level,
+        agencyId: resolvedAgencyId,
+        agencyName: resolvedAgencyName,
+        agencyTag: resolvedAgencyTag,
+        weeklyTargetDiamonds: targetDiamonds,
+        currentProgressDiamonds: 0,
+        targetStatus: 'pending',
+        weeklyHoursStreamed: 0,
+        weeklyTargetHours: targetHours || req.expectedHours || targetAgency?.minWeeklyHours || 15,
+        weeklyEarnings: 0,
+        commissionRate,
+        isLive: false,
+        joinedDate: 'Joined just now',
+      };
+      saveAgencyHosts([newHost, ...agencyHosts]);
     }
 
     saveHostJoinRequests(
       hostJoinRequests.map((r) => (r.id === requestId ? { ...r, status: 'approved' as const } : r))
     );
 
+    reviewHostAgencyRequestInFirestore(
+      {
+        id: req.id,
+        applicantUid: req.applicantUid || req.userId,
+        userId: req.userId,
+        agencyId: resolvedAgencyId,
+        agencyName: resolvedAgencyName,
+        agencyCode: resolvedAgencyCode,
+        agencyTag: resolvedAgencyTag,
+        agencyOwnerId: resolvedOwnerId,
+      },
+      'approve',
+      {
+        ownerName: resolvedOwnerName,
+        syncUserDoc: isAdminUser,
+      }
+    ).catch((err) => {
+      console.warn('Firestore host agency request approval failed:', err);
+    });
+
     return {
       success: true,
-      message: `${req.displayName} approved and bound to [${hostAgencyProfile.agencyTag}] successfully!`,
+      message: `${req.displayName} approved for ${resolvedAgencyName} [${resolvedAgencyTag}]!`,
     };
   };
 
-  const rejectHostJoinRequest = (requestId: string): { success: boolean; message: string } => {
+  const rejectHostJoinRequest = (
+    requestId: string,
+    reason = 'Application was not approved at this time.'
+  ): { success: boolean; message: string } => {
+    const isAdminUser =
+      (firebaseUser?.email || '').toLowerCase() === 'alphamateapp@gmail.com' ||
+      currentUser.id === 'user_admin';
+    const req = hostJoinRequests.find((r) => r.id === requestId);
     saveHostJoinRequests(
-      hostJoinRequests.map((r) => (r.id === requestId ? { ...r, status: 'rejected' as const } : r))
+      hostJoinRequests.map((r) =>
+        r.id === requestId ? { ...r, status: 'rejected' as const, rejectionReason: reason } : r
+      )
     );
+    if (req) {
+      reviewHostAgencyRequestInFirestore(
+        {
+          id: req.id,
+          applicantUid: req.applicantUid || req.userId,
+          userId: req.userId,
+          agencyId: req.agencyId,
+          agencyName: req.agencyName,
+          agencyCode: req.agencyCode,
+          agencyTag: req.agencyTag,
+          agencyOwnerId: req.agencyOwnerId,
+        },
+        'reject',
+        {
+          rejectionReason: reason,
+          syncUserDoc: isAdminUser,
+        }
+      ).catch((err) => {
+        console.warn('Firestore host agency request rejection failed:', err);
+      });
+    }
     return { success: true, message: 'Host application has been rejected.' };
   };
 
@@ -3012,15 +3648,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!target) return { success: false, message: 'Host not found' };
 
     saveAgencyHosts(agencyHosts.filter((h) => h.id !== hostId && h.userId !== hostId));
-
-    if (currentUser.id === target.userId || currentUser.uniqueId === target.uniqueId) {
-      updateUserProfile({
-        agencyId: undefined,
-        agencyName: undefined,
-        agencyTag: undefined,
-        isAgencyHost: false,
-      });
-    }
 
     return { success: true, message: `${target.displayName} has been released from the agency.` };
   };
@@ -3040,48 +3667,113 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   };
 
-  const submitHostJoinRequest = (
+  const submitHostJoinRequest = async (
     agencyId: string,
     whatsapp: string,
     experience: string,
     expectedHours: number
-  ): { success: boolean; message: string } => {
-    if (currentUser.agencyId || currentUser.agencyTag) {
+  ): Promise<{ success: boolean; message: string }> => {
+    const uid = firebaseUser?.uid;
+    if (!uid || !isEmailVerified) {
       return {
         success: false,
-        message: `You are already bound to ${currentUser.agencyName || 'an agency'} [${currentUser.agencyTag}]. A host cannot join multiple agencies. Please submit resignation first.`,
+        message: 'Please sign in with a verified Alpha Mate account before applying to a Host Agency.',
       };
     }
 
-    const targetAgency = allHostAgencies.find((a) => a.agencyId === agencyId);
+    if (hostAgencyMembership.isActiveMember) {
+      return {
+        success: false,
+        message: `You are already an active member of ${hostAgencyMembership.agencyName || 'an Official Host Agency'}.`,
+      };
+    }
+
+    const existingPending = myHostAgencyRequests.find((r) => r.status === 'pending');
+    if (existingPending) {
+      return {
+        success: false,
+        message: `You already have a Pending Application for ${existingPending.agencyName || 'a Host Agency'}. Please wait for Super Admin approval.`,
+      };
+    }
+
+    const targetAgency = allHostAgencies.find(
+      (a) => a.agencyId === agencyId && a.status === 'active'
+    );
     if (!targetAgency) {
       return {
         success: false,
-        message: 'No active Official Host Agency is selected or available yet.',
+        message: 'Selected Host Agency is no longer active or available.',
       };
     }
 
-    const newReq: HostJoinRequest = {
-      id: `hreq_${Date.now()}`,
-      userId: currentUser.id,
+    const nowMs = Date.now();
+    const requestId = `hreq_${uid.slice(0, 8)}_${nowMs}`;
+
+    try {
+      await submitHostAgencyRequestToFirestore({
+        id: requestId,
+        applicantUid: uid,
+        userDocId: uid,
+        uniqueId: currentUser.uniqueId,
+        displayName: currentUser.displayName,
+        username: currentUser.username,
+        avatar: currentUser.avatar || DEFAULT_AVATAR_URL,
+        level: currentUser.level || 1,
+        agencyId: targetAgency.agencyId,
+        agencyName: targetAgency.agencyName,
+        agencyCode: targetAgency.agencyCode,
+        agencyTag: targetAgency.agencyTag,
+        agencyOwnerId: targetAgency.ownerUserId,
+        whatsapp: whatsapp.trim(),
+        experience: experience.trim() || 'Aspiring live host ready to meet weekly targets',
+        expectedHours,
+        createdAt: new Date(nowMs).toISOString(),
+        createdAtMs: nowMs,
+      });
+    } catch (err: any) {
+      return {
+        success: false,
+        message:
+          typeof err?.message === 'string' && err.message.trim()
+            ? err.message
+            : 'Could not submit application. Please try again.',
+      };
+    }
+
+    // Optimistically reflect strictly as PENDING — NEVER activate membership on submit
+    const optimisticReq: HostJoinRequest = {
+      id: requestId,
+      applicantUid: uid,
+      userId: uid,
+      userDocId: uid,
       uniqueId: currentUser.uniqueId,
       displayName: currentUser.displayName,
       username: currentUser.username,
-      avatar: currentUser.avatar,
-      level: currentUser.level,
+      avatar: currentUser.avatar || DEFAULT_AVATAR_URL,
+      level: currentUser.level || 1,
       agencyId: targetAgency.agencyId,
-      whatsapp,
-      experience,
+      agencyName: targetAgency.agencyName,
+      agencyCode: targetAgency.agencyCode,
+      agencyTag: targetAgency.agencyTag,
+      agencyOwnerId: targetAgency.ownerUserId,
+      agencyType: 'Host Agency',
+      whatsapp: whatsapp.trim(),
+      experience: experience.trim() || 'Aspiring live host ready to meet weekly targets',
       expectedHours,
       appliedDate: 'Just now',
+      createdAt: new Date(nowMs).toISOString(),
+      createdAtMs: nowMs,
       status: 'pending',
     };
 
-    saveHostJoinRequests([newReq, ...hostJoinRequests]);
+    setMyHostAgencyRequests((prev) => {
+      if (prev.some((r) => r.id === optimisticReq.id)) return prev;
+      return [optimisticReq, ...prev];
+    });
 
     return {
       success: true,
-      message: `Application submitted to ${targetAgency.agencyName}! The agency owner will review and contact you on WhatsApp.`,
+      message: `Application submitted to ${targetAgency.agencyName}! Status is now Pending Super Admin approval.`,
     };
   };
 
@@ -3370,7 +4062,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       vipTier: 0,
       coins: 1000,
       diamonds: 100,
-      isVerified: data.authProvider === 'google',
+      isVerified: false,
+      isAccountVerified: data.authProvider === 'google',
+      greenTick: data.authProvider === 'google',
       familyCrew: 'Alpha Champions 👑',
       isHost: false,
     };
@@ -3465,18 +4159,27 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             displayName: existingProfile.displayName || fbUser.displayName || 'Alpha Mate',
             email: (fbUser.email || existingProfile.email || '').toLowerCase(),
             avatar: existingProfile.avatar || fbUser.photoURL || CURRENT_USER.avatar,
-            isVerified: true,
+            isVerified: resolveUserBlueTickVerified(existingProfile, false),
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
             hasPassword: hasPass,
             profileCompleted: completed,
           }
         : buildNewUserFromFirebase(fbUser, {
-            isVerified: true,
+            isVerified: false,
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
             hasPassword: hasPass,
             profileCompleted: false,
             authProvider: 'google',
           });
 
-      syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
+      syncUserProfileToFirestore(userObj, {
+        background: true,
+        isNewUserDoc: !existingProfile,
+      }).catch(() => {});
       setIsAddingAccount(false);
       setAddingAccountReturnUid(null);
       setFirebaseUser(fbUser);
@@ -3531,13 +4234,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...remoteProfile,
             id: fbUser.uid,
             email: (fbUser.email || remoteProfile.email || cleanEmail).toLowerCase(),
-            isVerified: verified,
+            isVerified: resolveUserBlueTickVerified(remoteProfile, false),
+            isAccountVerified: verified || resolveUserGreenTickVerified(remoteProfile, false),
+            greenTick: verified || resolveUserGreenTickVerified(remoteProfile, false),
+            emailVerified: verified,
             hasPassword: true,
             profileCompleted: completed,
           }
         : buildNewUserFromFirebase(fbUser, {
             email: cleanEmail,
-            isVerified: verified,
+            isVerified: false,
+            isAccountVerified: verified,
+            greenTick: verified,
+            emailVerified: verified,
             hasPassword: true,
             profileCompleted: false,
           });
@@ -3591,13 +4300,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         username: data.username.trim().toLowerCase(),
         displayName: data.displayName.trim() || data.username.trim(),
         email: data.email.trim().toLowerCase(),
-        isVerified: verified,
+        isVerified: false,
         hasPassword: true,
         profileCompleted: false,
         authProvider: 'email',
       });
 
-      await syncUserProfileToFirestore(newUser);
+      await syncUserProfileToFirestore(newUser, { isNewUserDoc: true });
       saveUserSession(newUser, verified);
 
       if (!verified) {
@@ -3721,7 +4430,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...existingProfile,
             id: fbUser.uid,
             email: cleanEmail,
-            isVerified: true,
+            isVerified: resolveUserBlueTickVerified(existingProfile, false),
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
             emailOtpVerified: true,
             emailOtpVerifiedAt: existingProfile.emailOtpVerifiedAt || verifiedAtIso,
             hasPassword: true,
@@ -3729,7 +4441,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         : buildNewUserFromFirebase(fbUser, {
             email: cleanEmail,
-            isVerified: true,
+            isVerified: false,
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
             emailOtpVerified: true,
             emailOtpVerifiedAt: verifiedAtIso,
             hasPassword: true,
@@ -3737,7 +4452,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             authProvider: 'email',
           });
 
-      await syncUserProfileToFirestore(userObj).catch((err) => {
+      await syncUserProfileToFirestore(userObj, { isNewUserDoc: !existingProfile }).catch((err) => {
         console.warn('Initial Firestore profile write warning:', err);
       });
 
@@ -3863,7 +4578,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       dob: data.dob,
       age: Number(data.age),
       bio: cleanBio || '🌟 Alpha Mate Official Member | LIVE • PARTY • SOCIAL 💜',
-      isVerified: true,
+      isVerified: Boolean(currentUser.isVerified),
       hasPassword: true,
       profileCompleted: true,
       lastNameChangeDate: currentUser.lastNameChangeDate || nowIso,
@@ -3981,7 +4696,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       level: targetSlot.level,
       ...(remoteProfile || {}),
       id: switchedFbUser.uid,
-      isVerified: true,
+      isVerified: resolveUserBlueTickVerified(remoteProfile, false),
       hasPassword: hasPass,
       profileCompleted: completed,
     };
@@ -4081,10 +4796,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...buildNewUserFromFirebase(refreshed),
             ...remoteProfile,
             id: refreshed.uid,
-            isVerified: true,
+            isVerified: resolveUserBlueTickVerified(remoteProfile, false),
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
             profileCompleted: isProfileRegistrationCompleted(remoteProfile),
           }
-        : buildNewUserFromFirebase(refreshed, { isVerified: true, profileCompleted: false });
+        : buildNewUserFromFirebase(refreshed, {
+            isVerified: false,
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
+            profileCompleted: false,
+          });
       const restricted = isAccountRestrictedStatus(userObj.accountStatus);
       await syncUserProfileToFirestore(userObj, { background: true }).catch(() => {});
       if (!restricted) {
@@ -4208,7 +4932,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       ...(existingLocal || {}),
       id: refreshedFbUser?.uid || baseUser.id,
       email: (refreshedFbUser?.email || remoteProfile?.email || baseUser.email || '').toLowerCase(),
-      isVerified: true,
+      isVerified: resolveUserBlueTickVerified(remoteProfile, Boolean(existingLocal?.isVerified)),
+      isAccountVerified: true,
+      greenTick: true,
+      emailVerified: true,
       emailOtpVerified: true,
       emailOtpVerifiedAt: verifiedAtIso,
       profileCompleted: remoteProfile ? isProfileRegistrationCompleted(remoteProfile) : false,
@@ -4278,14 +5005,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             ...remoteProfile,
             id: fbUser.uid,
             email: (fbUser.email || remoteProfile.email || email).toLowerCase(),
-            isVerified: true,
+            isVerified: resolveUserBlueTickVerified(remoteProfile, false),
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
             emailOtpVerified: true,
             emailOtpVerifiedAt: remoteProfile.emailOtpVerifiedAt || verifiedAtIso,
             profileCompleted: isProfileRegistrationCompleted(remoteProfile),
           }
         : buildNewUserFromFirebase(fbUser, {
             email: email.trim().toLowerCase(),
-            isVerified: true,
+            isVerified: false,
+            isAccountVerified: true,
+            greenTick: true,
+            emailVerified: true,
             emailOtpVerified: true,
             emailOtpVerifiedAt: verifiedAtIso,
             profileCompleted: false,
@@ -4465,6 +5198,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const openLiveStream = (stream: LiveStream) => {
+    if (adminModerationState.isLiveRestricted && adminModerationState.liveRestriction) {
+      setActiveFeatureRestrictionModal({
+        scope: 'live',
+        detail: adminModerationState.liveRestriction,
+      });
+      return;
+    }
     setActiveGiftBanner(null);
     if (activePartyRoom) {
       realtimeSocket.leaveRoom('party', activePartyRoom.id);
@@ -4482,6 +5222,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const publishLiveStream = async (publishedStream: LiveStream) => {
+    if (adminModerationState.isLiveRestricted && adminModerationState.liveRestriction) {
+      setActiveFeatureRestrictionModal({
+        scope: 'live',
+        detail: adminModerationState.liveRestriction,
+      });
+      return;
+    }
     const hostId = publishedStream.host?.id || auth.currentUser?.uid || currentUser.id;
     removedLiveUntilRef.current.delete(publishedStream.id);
 
@@ -4870,6 +5617,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, []);
 
   const openPartyRoom = (room: PartyRoom) => {
+    if (adminModerationState.isPartyRestricted && adminModerationState.partyRestriction) {
+      setActiveFeatureRestrictionModal({
+        scope: 'party',
+        detail: adminModerationState.partyRestriction,
+      });
+      return;
+    }
     setActiveGiftBanner(null);
     if (activeStream) {
       realtimeSocket.leaveRoom('live', activeStream.id);
@@ -5024,6 +5778,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const createPartyRoom = async (
     room: PartyRoom
   ): Promise<{ success: boolean; alreadyExists?: boolean; room?: PartyRoom; error?: string }> => {
+    if (adminModerationState.isPartyRestricted && adminModerationState.partyRestriction) {
+      setActiveFeatureRestrictionModal({
+        scope: 'party',
+        detail: adminModerationState.partyRestriction,
+      });
+      return {
+        success: false,
+        error: `YOUR PARTY ACCESS HAS BEEN RESTRICTED. Reason: ${adminModerationState.partyRestriction.reason}`,
+      };
+    }
     const firebaseUid = auth.currentUser?.uid;
     if (!firebaseUid) {
       return { success: false, error: 'Please sign in first to host a Party Room.' };
@@ -5250,7 +6014,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         displayName: targetUser.displayName || 'Alpha Mate User',
         username: targetUser.username || '',
         uniqueId: targetUser.uniqueId || '',
-        avatar: targetUser.avatar || '',
+        avatar: targetUser.avatar || DEFAULT_AVATAR_URL,
       },
       lastMessage: 'Selected for chat',
       lastTimestamp: 'Just now',
@@ -5261,6 +6025,82 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setActiveConversation(convToOpen);
     setCurrentScreen('chat_conversation');
+  };
+
+  const contactAgencyInApp = async (agency: {
+    agencyId: string;
+    agencyName: string;
+    agencyCode?: string;
+    ownerUserId: string;
+    ownerName?: string;
+    ownerAvatar?: string;
+  }): Promise<{ success: boolean; message: string }> => {
+    const ownerUid = String(agency.ownerUserId || '').trim();
+    if (!ownerUid) {
+      return {
+        success: false,
+        message: 'This agency has no linked owner account for in-app messaging yet.',
+      };
+    }
+
+    const myUid = auth.currentUser?.uid || currentUser.id;
+    if (ownerUid === myUid) {
+      return {
+        success: false,
+        message: 'You are the owner of this official agency.',
+      };
+    }
+
+    const pool = realUsers.length > 0 ? realUsers : registeredUsers;
+    let targetUser: User | null =
+      pool.find((u) => u.id === ownerUid) || null;
+
+    if (!targetUser) {
+      try {
+        const fetched = await getUserProfileFromFirestore(ownerUid);
+        if (fetched) {
+          targetUser = {
+            ...CURRENT_USER,
+            ...fetched,
+            id: ownerUid,
+            displayName:
+              (fetched.displayName as string) ||
+              agency.ownerName ||
+              agency.agencyName,
+            username:
+              (fetched.username as string) ||
+              (agency.agencyCode ? agency.agencyCode.toLowerCase() : 'agency'),
+            uniqueId: (fetched.uniqueId as string) || agency.agencyCode || '',
+            avatar:
+              (fetched.avatar as string) ||
+              agency.ownerAvatar ||
+              DEFAULT_AVATAR_URL,
+          };
+        }
+      } catch {
+        // Fallback below uses canonical ownerUserId + agency metadata
+      }
+    }
+
+    const resolvedUser: User = targetUser || {
+      ...CURRENT_USER,
+      id: ownerUid,
+      uniqueId: agency.agencyCode || '',
+      username: (agency.agencyCode || 'agency').toLowerCase(),
+      displayName: agency.ownerName || agency.agencyName,
+      avatar: agency.ownerAvatar || DEFAULT_AVATAR_URL,
+      bio: `Official Representative — ${agency.agencyName}`,
+      isVerified: true,
+      agencyId: agency.agencyId,
+      agencyName: agency.agencyName,
+      agencyCode: agency.agencyCode,
+    };
+
+    await startDirectMessage(resolvedUser);
+    return {
+      success: true,
+      message: `Opened in-app chat with ${resolvedUser.displayName}.`,
+    };
   };
 
   const sendMessage = (convId: string, text: string, imageUrl?: string) => {
@@ -5672,20 +6512,61 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const markNotificationRead = (id: string) => {
+    const matched = notifications.find((n) => n.id === id);
+    primaryNotifsRef.current = primaryNotifsRef.current.map((n) =>
+      n.id === id ? { ...n, isRead: true } : n
+    );
+    adminActionNotifsRef.current = adminActionNotifsRef.current.map((n) =>
+      n.id === id ? { ...n, isRead: true } : n
+    );
+    transitionNotifsRef.current = transitionNotifsRef.current.map((n) =>
+      n.id === id ? { ...n, isRead: true } : n
+    );
     setNotifications((prev) => prev.map((n) => (n.id === id ? { ...n, isRead: true } : n)));
-    if (firebaseUser?.uid && !id.startsWith('notif_') && !id.startsWith('local_notif_')) {
-      markFirestoreNotificationRead(firebaseUser.uid, id).catch(() => {});
+    if (firebaseUser?.uid && !id.startsWith('notif_') && !id.startsWith('local_')) {
+      if (matched && matched.sourceCollection && matched.sourceCollection !== 'notifications') {
+        markAdminActionItemRead(firebaseUser.uid, matched).catch(() => {});
+      } else {
+        markFirestoreNotificationRead(firebaseUser.uid, id).catch(() => {});
+      }
     }
   };
 
+  const dismissActiveAdminWarning = (markRead = true) => {
+    if (activeAdminWarning) {
+      dismissedWarningIdsRef.current.add(activeAdminWarning.id);
+      if (markRead) {
+        markNotificationRead(activeAdminWarning.id);
+      }
+    }
+    setActiveAdminWarning(null);
+  };
+
+  const openAdminNotificationDetails = (item: NotificationItem) => {
+    if (!item.isRead) {
+      markNotificationRead(item.id);
+    }
+    setSelectedAdminNotification(item);
+  };
+
   const markAllNotificationsRead = () => {
-    const unreadIds = notifications.filter((n) => !n.isRead).map((n) => n.id);
+    const unreadItems = notifications.filter((n) => !n.isRead);
+    primaryNotifsRef.current = primaryNotifsRef.current.map((n) => ({ ...n, isRead: true }));
+    adminActionNotifsRef.current = adminActionNotifsRef.current.map((n) => ({ ...n, isRead: true }));
+    transitionNotifsRef.current = transitionNotifsRef.current.map((n) => ({ ...n, isRead: true }));
     setNotifications((prev) => prev.map((n) => ({ ...n, isRead: true })));
     if (firebaseUser?.uid) {
-      const fsIds = unreadIds.filter((id) => !id.startsWith('notif_') && !id.startsWith('local_notif_'));
+      const fsIds = unreadItems
+        .filter((n) => (!n.sourceCollection || n.sourceCollection === 'notifications') && !n.id.startsWith('notif_') && !n.id.startsWith('local_'))
+        .map((n) => n.id);
       if (fsIds.length > 0) {
         markAllFirestoreNotificationsRead(firebaseUser.uid, fsIds).catch(() => {});
       }
+      unreadItems
+        .filter((n) => n.sourceCollection === 'adminActions' || n.sourceCollection === 'warnings')
+        .forEach((n) => {
+          markAdminActionItemRead(firebaseUser.uid, n).catch(() => {});
+        });
     }
   };
 
@@ -5946,6 +6827,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         showPushSettingsModal,
         setShowPushSettingsModal,
         sendNotificationToUser,
+        adminModerationState,
+        activeAdminWarning,
+        dismissActiveAdminWarning,
+        selectedAdminNotification,
+        setSelectedAdminNotification,
+        openAdminNotificationDetails,
+        activeFeatureRestrictionModal,
+        setActiveFeatureRestrictionModal,
         leaderboardMonthKey,
         leaderboardPreviousMonthKey,
         leaderboardWeekKey,
@@ -5998,8 +6887,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         hostAgencyProfile,
         agencyHosts,
         hostJoinRequests,
+        myHostAgencyRequests,
+        hostAgencyMembership,
         agencyApplications,
         allHostAgencies,
+        contactAgencyInApp,
         updateHostAgencyProfile,
         setHostWeeklyTarget,
         updateHostCommission,

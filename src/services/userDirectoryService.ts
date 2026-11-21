@@ -20,7 +20,16 @@ import {
   OperationType,
   sendFirestoreNotification,
 } from './firebase';
+import {
+  cacheProfileSnippetsBatch,
+  getCachedProfileDirectory,
+  snippetToUser,
+} from './profileSnippetCache';
 import { User } from '../types';
+import {
+  resolveUserBlueTickVerified,
+  resolveUserGreenTickVerified,
+} from './adminModerationService';
 
 const DEFAULT_AVATAR =
   'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=400&q=80';
@@ -58,7 +67,10 @@ export function mapFirestoreDocToUser(docId: string, data: Record<string, any>):
     vipTier: Math.max(0, Number(data.vipTier ?? 0)),
     coins: Number(data.coins || 0),
     diamonds: Number(data.diamonds || 0),
-    isVerified: Boolean(data.isVerified),
+    isVerified: resolveUserBlueTickVerified(data, false),
+    isAccountVerified: resolveUserGreenTickVerified(data, false),
+    greenTick: resolveUserGreenTickVerified(data, false),
+    emailOtpVerified: Boolean(data.emailOtpVerified),
     familyCrew: typeof data.familyCrew === 'string' ? data.familyCrew : undefined,
     isHost: Boolean(data.isHost),
     country: typeof data.country === 'string' ? data.country : undefined,
@@ -118,19 +130,35 @@ export function subscribeToRealUsers(
   const forceRefresh =
     typeof maxUsersOrOptions === 'object' ? Boolean(maxUsersOrOptions?.forceRefresh) : false;
 
+  let cancelled = false;
   const cached = readCachedRealUsers();
   if (cached && cached.users.length > 0) {
     onUpdate(cached.users);
+    void cacheProfileSnippetsBatch(cached.users);
+  } else {
+    // Hydrate immediately from Service Worker Cache Storage for instant cold-boot / offline browsing
+    getCachedProfileDirectory()
+      .then((snippets) => {
+        if (cancelled || snippets.length === 0) return;
+        const hydrated = snippets.map(snippetToUser);
+        if (!memoryUsersCache || memoryUsersCache.users.length === 0) {
+          memoryUsersCache = { users: hydrated, fetchedAt: 0 };
+        }
+        onUpdate(hydrated);
+      })
+      .catch(() => {});
   }
 
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
   const isCacheFresh =
     Boolean(cached && cached.users.length > 0 && Date.now() - cached.fetchedAt < REAL_USERS_CACHE_TTL_MS);
 
-  if (!forceRefresh && (isCacheFresh || isFirestoreQuotaExceeded())) {
-    return () => {};
+  if (isOffline || (!forceRefresh && (isCacheFresh || isFirestoreQuotaExceeded()))) {
+    return () => {
+      cancelled = true;
+    };
   }
 
-  let cancelled = false;
   const q = query(collection(db, 'users'), limit(maxUsers));
   getDocs(q)
     .then((snapshot) => {
@@ -143,6 +171,7 @@ export function subscribeToRealUsers(
       });
       parsed.sort((a, b) => a.displayName.localeCompare(b.displayName));
       writeCachedRealUsers(parsed);
+      void cacheProfileSnippetsBatch(parsed);
       onUpdate(parsed);
     })
     .catch((err) => {
@@ -175,7 +204,13 @@ export async function searchAllRealUsers(
   const term = rawQuery.trim().toLowerCase().replace(/^@/, '');
   const excludeUid = options?.excludeUid || auth.currentUser?.uid || '';
   const maxResults = options?.maxResults || 100;
-  const cached = options?.cachedUsers || readCachedRealUsers()?.users || [];
+  let cached = options?.cachedUsers || readCachedRealUsers()?.users || [];
+  if (cached.length === 0) {
+    const swSnippets = await getCachedProfileDirectory().catch(() => []);
+    if (swSnippets.length > 0) {
+      cached = swSnippets.map(snippetToUser);
+    }
+  }
 
   const matchesTerm = (u: User) => {
     if (!term) return true;
@@ -194,7 +229,8 @@ export async function searchAllRealUsers(
     }
   });
 
-  if (auth.currentUser?.uid && !isFirestoreQuotaExceeded()) {
+  const isOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+  if (!isOffline && auth.currentUser?.uid && !isFirestoreQuotaExceeded()) {
     try {
       const usersRef = collection(db, 'users');
       const handleSearchErr = (err: unknown) => {

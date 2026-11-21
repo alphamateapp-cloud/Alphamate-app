@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   ArrowLeft,
   ShieldAlert,
@@ -303,7 +304,7 @@ export const DeleteAccountScreen: React.FC = () => {
             <section className="rounded-2xl bg-[#120B22] border border-white/10 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-center gap-3 min-w-0">
                 <img
-                  src={currentUser.avatar}
+                  src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                   alt={currentUser.displayName}
                   className="w-12 h-12 rounded-2xl object-cover border border-[#A855F7]/50 shrink-0"
                 />

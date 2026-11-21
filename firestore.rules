@@ -33,6 +33,117 @@ service cloud.firestore {
         && request.auth.token.email == 'alphamateapp@gmail.com';
     }
 
+    function adminProtectedUserFields() {
+      return [
+        'isBlocked', 'blocked', 'isBanned', 'banned', 'blockReason', 'banReason',
+        'blockedAt', 'blockedAtMs', 'blockedBy', 'blockedByName', 'blockMessage',
+        'isSuspended', 'suspended', 'suspensionReason', 'suspendReason',
+        'suspensionDuration', 'suspensionHours', 'suspensionDays',
+        'suspendedAt', 'suspendedAtMs', 'suspensionStartAt',
+        'suspendedUntil', 'suspensionExpiresAt', 'suspensionExpiry',
+        'isPermanentSuspension', 'permanentSuspension', 'suspensionMessage', 'suspendedBy',
+        'liveDisabled', 'liveSuspended', 'liveRestricted', 'liveBanned',
+        'liveAccess', 'canGoLive', 'liveRestrictionReason', 'liveSuspensionReason',
+        'liveRestrictionDuration', 'liveSuspendedAt', 'liveSuspendedUntil',
+        'liveExpiresAt', 'liveRestrictionMessage', 'liveRestrictedBy',
+        'partyDisabled', 'partySuspended', 'partyRestricted', 'partyBanned',
+        'partyAccess', 'canJoinParty', 'canCreateParty', 'partyRestrictionReason',
+        'partySuspensionReason', 'partyRestrictionDuration', 'partyRestrictedAt',
+        'partySuspendedUntil', 'partyExpiresAt', 'partyRestrictionMessage', 'partyRestrictedBy',
+        'moderation', 'restrictions', 'warnings', 'latestWarning', 'activeWarning',
+        'lastAdminAction', 'adminActions',
+        'isVerified', 'blueTick', 'hasBlueTick', 'verificationStatus',
+        'verificationReason', 'verificationUpdatedAt', 'verificationUpdatedBy',
+        'verifiedBy', 'verifiedAt',
+        'agencyId', 'hostAgencyId', 'agencyName', 'hostAgencyName',
+        'agencyCode', 'hostAgencyCode', 'agencyTag', 'hostAgencyTag',
+        'hostAgencyStatus', 'isAgencyHost', 'agencyOwnerId', 'agencyOwnerName',
+        'agencyJoinedAt'
+      ];
+    }
+
+    function adminProtectedUserFieldsExceptIsVerified() {
+      return [
+        'isBlocked', 'blocked', 'isBanned', 'banned', 'blockReason', 'banReason',
+        'blockedAt', 'blockedAtMs', 'blockedBy', 'blockedByName', 'blockMessage',
+        'isSuspended', 'suspended', 'suspensionReason', 'suspendReason',
+        'suspensionDuration', 'suspensionHours', 'suspensionDays',
+        'suspendedAt', 'suspendedAtMs', 'suspensionStartAt',
+        'suspendedUntil', 'suspensionExpiresAt', 'suspensionExpiry',
+        'isPermanentSuspension', 'permanentSuspension', 'suspensionMessage', 'suspendedBy',
+        'liveDisabled', 'liveSuspended', 'liveRestricted', 'liveBanned',
+        'liveAccess', 'canGoLive', 'liveRestrictionReason', 'liveSuspensionReason',
+        'liveRestrictionDuration', 'liveSuspendedAt', 'liveSuspendedUntil',
+        'liveExpiresAt', 'liveRestrictionMessage', 'liveRestrictedBy',
+        'partyDisabled', 'partySuspended', 'partyRestricted', 'partyBanned',
+        'partyAccess', 'canJoinParty', 'canCreateParty', 'partyRestrictionReason',
+        'partySuspensionReason', 'partyRestrictionDuration', 'partyRestrictedAt',
+        'partySuspendedUntil', 'partyExpiresAt', 'partyRestrictionMessage', 'partyRestrictedBy',
+        'moderation', 'restrictions', 'warnings', 'latestWarning', 'activeWarning',
+        'lastAdminAction', 'adminActions',
+        'blueTick', 'hasBlueTick', 'verificationStatus',
+        'verificationReason', 'verificationUpdatedAt', 'verificationUpdatedBy',
+        'verifiedBy', 'verifiedAt',
+        'agencyId', 'hostAgencyId', 'agencyName', 'hostAgencyName',
+        'agencyCode', 'hostAgencyCode', 'agencyTag', 'hostAgencyTag',
+        'hostAgencyStatus', 'isAgencyHost', 'agencyOwnerId', 'agencyOwnerName',
+        'agencyJoinedAt'
+      ];
+    }
+
+    function isClientAllowedUserCreate(data) {
+      return !data.keys().hasAny(adminProtectedUserFieldsExceptIsVerified())
+        && (!('isVerified' in data) || data.isVerified == false)
+        && (!('accountStatus' in data) || data.accountStatus in ['active', 'deactivated', 'pending_deletion']);
+    }
+
+    function isClientAllowedUserUpdate() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(adminProtectedUserFields())
+        && (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['accountStatus'])
+          || (
+            (!('accountStatus' in resource.data) || !(resource.data.accountStatus in ['blocked', 'banned', 'suspended']))
+            && request.resource.data.accountStatus in ['active', 'deactivated', 'pending_deletion']
+          )
+        );
+    }
+
+    function isUserDocHardBlocked(userData) {
+      return userData != null && (
+        userData.isBlocked == true
+        || userData.blocked == true
+        || userData.isBanned == true
+        || userData.banned == true
+        || userData.accountStatus in ['blocked', 'banned']
+        || userData.isPermanentSuspension == true
+        || userData.permanentSuspension == true
+      );
+    }
+
+    function isCurrentUserAllowedForLive() {
+      return !exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        || (
+          !isUserDocHardBlocked(get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+          && !(
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.liveDisabled == true
+            && !('liveExpiresAt' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+            && !('liveSuspendedUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+          )
+        );
+    }
+
+    function isCurrentUserAllowedForParty() {
+      return !exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        || (
+          !isUserDocHardBlocked(get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+          && !(
+            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.partyDisabled == true
+            && !('partyExpiresAt' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+            && !('partySuspendedUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
+          )
+        );
+    }
+
     function isValidAccountDeletionRequest(data) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'type', 'status', 'requestedAt', 'updatedAt'])
         && data.keys().hasOnly([
@@ -194,9 +305,12 @@ service cloud.firestore {
     match /users/{userId} {
       allow get: if isSignedIn();
       allow list: if isSignedIn();
-      allow create: if isOwner(userId) && isValidId(userId);
-      allow update: if isOwner(userId)
-        || isOfficialAdmin()
+      allow create: if isValidId(userId) && (
+        isOfficialAdmin()
+        || (isOwner(userId) && isClientAllowedUserCreate(request.resource.data))
+      );
+      allow update: if isOfficialAdmin()
+        || (isOwner(userId) && isValidId(userId) && isClientAllowedUserUpdate())
         || (
           isSignedIn()
           && isValidId(userId)
@@ -210,23 +324,88 @@ service cloud.firestore {
         );
       allow delete: if false;
 
-      // Per-user real-time notifications inbox
+      // Per-user real-time notifications inbox (includes Official Admin Action notifications)
       match /notifications/{notificationId} {
-        allow get: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
-        allow list: if isOwner(userId);
+        allow get: if isValidId(userId) && isValidId(notificationId) && (isOwner(userId) || isOfficialAdmin());
+        allow list: if isOwner(userId) || isOfficialAdmin();
         allow create: if isSignedIn()
           && isValidId(userId)
           && isValidId(notificationId)
-          && request.resource.data.senderId == request.auth.uid
-          && request.resource.data.recipientId == userId
-          && isValidNotification(request.resource.data);
+          && (
+            isOfficialAdmin()
+            || (
+              request.resource.data.senderId == request.auth.uid
+              && request.resource.data.recipientId == userId
+              && isValidNotification(request.resource.data)
+            )
+          );
         allow update: if isValidId(userId)
           && isValidId(notificationId)
-          && isOwner(userId)
-          && isValidNotification(request.resource.data)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt'])
-          && request.resource.data.isRead is bool;
-        allow delete: if isValidId(userId) && isValidId(notificationId) && isOwner(userId);
+          && (
+            isOfficialAdmin()
+            || (
+              isOwner(userId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt', 'acknowledged', 'acknowledgedAt'])
+              && (!('isRead' in request.resource.data) || request.resource.data.isRead is bool)
+              && (!('readAt' in request.resource.data) || (request.resource.data.readAt is string && request.resource.data.readAt.size() <= 64))
+              && (!('acknowledged' in request.resource.data) || request.resource.data.acknowledged is bool)
+              && (!('acknowledgedAt' in request.resource.data) || (request.resource.data.acknowledgedAt is string && request.resource.data.acknowledgedAt.size() <= 64))
+            )
+          );
+        allow delete: if isValidId(userId)
+          && isValidId(notificationId)
+          && (
+            isOfficialAdmin()
+            || (
+              isOwner(userId)
+              && !('isAdminAction' in resource.data && resource.data.isAdminAction == true)
+              && !(resource.data.type in [
+                'admin_action', 'admin_warning', 'moderation', 'verification',
+                'account_blocked', 'account_suspended', 'live_restricted',
+                'party_restricted', 'access_restored'
+              ])
+            )
+          );
+      }
+
+      // Per-user Official Admin Actions log (read & mark read by affected user; write only by Official Admin)
+      match /adminActions/{actionId} {
+        allow get: if isValidId(userId) && isValidId(actionId) && (isOwner(userId) || isOfficialAdmin());
+        allow list: if isOwner(userId) || isOfficialAdmin();
+        allow create, delete: if isValidId(userId) && isValidId(actionId) && isOfficialAdmin();
+        allow update: if isValidId(userId)
+          && isValidId(actionId)
+          && (
+            isOfficialAdmin()
+            || (
+              isOwner(userId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt', 'acknowledged', 'acknowledgedAt'])
+              && (!('isRead' in request.resource.data) || request.resource.data.isRead is bool)
+              && (!('readAt' in request.resource.data) || (request.resource.data.readAt is string && request.resource.data.readAt.size() <= 64))
+              && (!('acknowledged' in request.resource.data) || request.resource.data.acknowledged is bool)
+              && (!('acknowledgedAt' in request.resource.data) || (request.resource.data.acknowledgedAt is string && request.resource.data.acknowledgedAt.size() <= 64))
+            )
+          );
+      }
+
+      // Per-user Official Admin Warnings history (read & mark read by affected user; write only by Official Admin)
+      match /warnings/{warningId} {
+        allow get: if isValidId(userId) && isValidId(warningId) && (isOwner(userId) || isOfficialAdmin());
+        allow list: if isOwner(userId) || isOfficialAdmin();
+        allow create, delete: if isValidId(userId) && isValidId(warningId) && isOfficialAdmin();
+        allow update: if isValidId(userId)
+          && isValidId(warningId)
+          && (
+            isOfficialAdmin()
+            || (
+              isOwner(userId)
+              && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt', 'acknowledged', 'acknowledgedAt'])
+              && (!('isRead' in request.resource.data) || request.resource.data.isRead is bool)
+              && (!('readAt' in request.resource.data) || (request.resource.data.readAt is string && request.resource.data.readAt.size() <= 64))
+              && (!('acknowledged' in request.resource.data) || request.resource.data.acknowledged is bool)
+              && (!('acknowledgedAt' in request.resource.data) || (request.resource.data.acknowledgedAt is string && request.resource.data.acknowledgedAt.size() <= 64))
+            )
+          );
       }
 
       // Per-user historical achievement counters and earned/equipped User Badges
@@ -244,6 +423,24 @@ service cloud.firestore {
           && request.resource.data.uid == resource.data.uid;
         allow delete: if false;
       }
+    }
+
+    // Top-level Official Admin Moderation Actions log (strict per-UID read isolation; Official Admin write only)
+    match /adminActions/{actionId} {
+      allow get: if isValidId(actionId) && (
+        isOfficialAdmin()
+        || (
+          isSignedIn()
+          && resource != null
+          && (resource.data.targetUserId == request.auth.uid || resource.data.userId == request.auth.uid)
+        )
+      );
+      allow list: if isOfficialAdmin()
+        || (
+          isSignedIn()
+          && (resource.data.targetUserId == request.auth.uid || resource.data.userId == request.auth.uid)
+        );
+      allow create, update, delete: if isValidId(actionId) && isOfficialAdmin();
     }
 
     function isValidFollowEdge(data, edgeId) {
@@ -338,9 +535,10 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'agencyId', 'type', 'agencyName', 'agencyCode', 'agencyTag', 'tagColor',
-          'badge', 'ownerUserId', 'ownerName', 'agencyBalance', 'isPinSet',
-          'whatsappNumber', 'whatsappDisplay', 'defaultCommissionRate', 'minWeeklyHours',
-          'slogan', 'isOfficial', 'activeHostsCount', 'paymentMethods', 'rates',
+          'badge', 'logo', 'ownerUserId', 'ownerName', 'ownerUniqueId', 'ownerAvatar',
+          'agencyBalance', 'isPinSet', 'whatsappNumber', 'whatsappDisplay',
+          'defaultCommissionRate', 'minWeeklyHours', 'slogan', 'isOfficial',
+          'activeHostsCount', 'totalHosts', 'paymentMethods', 'rates',
           'status', 'createdAt', 'createdAtMs', 'updatedAt'
         ])
         && isNonEmptyString(data.agencyId, 1, 128)
@@ -350,8 +548,11 @@ service cloud.firestore {
         && (!('agencyTag' in data) || (data.agencyTag is string && data.agencyTag.size() <= 16))
         && (!('tagColor' in data) || (data.tagColor is string && data.tagColor.size() <= 32))
         && (!('badge' in data) || (data.badge is string && data.badge.size() <= 80))
+        && (!('logo' in data) || (data.logo is string && data.logo.size() <= 2048))
         && isNonEmptyString(data.ownerUserId, 1, 128)
         && (!('ownerName' in data) || (data.ownerName is string && data.ownerName.size() <= 128))
+        && (!('ownerUniqueId' in data) || (data.ownerUniqueId is string && data.ownerUniqueId.size() <= 64))
+        && (!('ownerAvatar' in data) || (data.ownerAvatar is string && data.ownerAvatar.size() <= 2048))
         && data.agencyBalance is number && data.agencyBalance >= 0 && data.agencyBalance <= 1000000000
         && (!('isPinSet' in data) || data.isPinSet is bool)
         && isNonEmptyString(data.whatsappNumber, 3, 64)
@@ -361,12 +562,55 @@ service cloud.firestore {
         && isNonEmptyString(data.slogan, 1, 300)
         && data.isOfficial is bool
         && (!('activeHostsCount' in data) || (data.activeHostsCount is number && data.activeHostsCount >= 0 && data.activeHostsCount <= 100000))
+        && (!('totalHosts' in data) || (data.totalHosts is number && data.totalHosts >= 0 && data.totalHosts <= 100000))
         && (!('paymentMethods' in data) || (data.paymentMethods is list && data.paymentMethods.size() <= 12))
         && (!('rates' in data) || (data.rates is list && data.rates.size() <= 12))
-        && data.status in ['active', 'suspended']
+        && data.status in ['active', 'Active', 'ACTIVE', 'suspended', 'Suspended', 'hold', 'Hold']
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.createdAtMs is number
         && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidHostAgencyRequest(data) {
+      return data.keys().hasAll([
+          'id', 'applicantUid', 'userId', 'userDocId', 'agencyId', 'agencyName',
+          'agencyType', 'status', 'createdAt', 'createdAtMs'
+        ])
+        && data.keys().hasOnly([
+          'id', 'applicantUid', 'userId', 'userDocId', 'uniqueId', 'displayName',
+          'applicantName', 'username', 'avatar', 'level', 'agencyId', 'agencyName',
+          'agencyCode', 'agencyTag', 'agencyOwnerId', 'agencyType', 'requestedAgencyType',
+          'whatsapp', 'experience', 'expectedHours', 'status', 'rejectionReason',
+          'reviewedAt', 'reviewedBy', 'createdAt', 'appliedAt', 'createdAtMs', 'updatedAt'
+        ])
+        && isNonEmptyString(data.id, 1, 128)
+        && isNonEmptyString(data.applicantUid, 1, 128)
+        && isNonEmptyString(data.userId, 1, 128)
+        && isNonEmptyString(data.userDocId, 1, 128)
+        && (!('uniqueId' in data) || (data.uniqueId is string && data.uniqueId.size() <= 64))
+        && (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 128))
+        && (!('applicantName' in data) || (data.applicantName is string && data.applicantName.size() <= 128))
+        && (!('username' in data) || (data.username is string && data.username.size() <= 64))
+        && (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 2048))
+        && (!('level' in data) || (data.level is number && data.level >= 0 && data.level <= 200))
+        && isNonEmptyString(data.agencyId, 1, 128)
+        && isNonEmptyString(data.agencyName, 1, 128)
+        && (!('agencyCode' in data) || (data.agencyCode is string && data.agencyCode.size() <= 64))
+        && (!('agencyTag' in data) || (data.agencyTag is string && data.agencyTag.size() <= 16))
+        && (!('agencyOwnerId' in data) || (data.agencyOwnerId is string && data.agencyOwnerId.size() <= 128))
+        && data.agencyType == 'Host Agency'
+        && (!('requestedAgencyType' in data) || data.requestedAgencyType == 'Host Agency')
+        && (!('whatsapp' in data) || (data.whatsapp is string && data.whatsapp.size() <= 64))
+        && (!('experience' in data) || (data.experience is string && data.experience.size() <= 1000))
+        && (!('expectedHours' in data) || (data.expectedHours is number && data.expectedHours >= 0 && data.expectedHours <= 168))
+        && data.status in ['Pending', 'Approved', 'Rejected', 'pending', 'approved', 'rejected']
+        && (!('rejectionReason' in data) || (data.rejectionReason is string && data.rejectionReason.size() <= 500))
+        && (!('reviewedAt' in data) || (data.reviewedAt is string && data.reviewedAt.size() <= 64))
+        && (!('reviewedBy' in data) || (data.reviewedBy is string && data.reviewedBy.size() <= 128))
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && (!('appliedAt' in data) || (data.appliedAt is string && data.appliedAt.size() <= 64))
+        && data.createdAtMs is number
+        && (!('updatedAt' in data) || (data.updatedAt is string && data.updatedAt.size() <= 64));
     }
 
     // Coin Seller & Host Agency License Applications (Never auto-approved client-side)
@@ -392,20 +636,24 @@ service cloud.firestore {
       allow delete: if false;
     }
 
-    // Official Admin-Approved Agencies (zero pre-seeded coins; only Official Admin can create or add coin stock)
+    // Official Admin-Approved Agencies (Active Coin Seller & Host Agencies readable in real time; Hold/Suspended restricted)
     match /agencies/{agencyId} {
       allow get: if isValidId(agencyId)
         && isSignedIn()
         && (
           resource == null
-          || resource.data.status == 'active'
+          || resource.data.status in ['active', 'Active', 'ACTIVE']
           || resource.data.ownerUserId == request.auth.uid
+          || resource.data.ownerId == request.auth.uid
+          || resource.data.ownerUid == request.auth.uid
           || isOfficialAdmin()
         );
       allow list: if isSignedIn()
         && (
-          resource.data.status == 'active'
+          resource.data.status in ['active', 'Active', 'ACTIVE']
           || resource.data.ownerUserId == request.auth.uid
+          || resource.data.ownerId == request.auth.uid
+          || resource.data.ownerUid == request.auth.uid
           || isOfficialAdmin()
         );
       allow create: if isValidId(agencyId)
@@ -435,6 +683,51 @@ service cloud.firestore {
             )
           )
         );
+      allow delete: if false;
+    }
+
+    // Shared Host Agency Join Requests (Submitted strictly as Pending; membership activated only by Super Admin approval)
+    match /agency_requests/{requestId} {
+      allow get: if isValidId(requestId)
+        && isSignedIn()
+        && (
+          isOfficialAdmin()
+          || (
+            resource != null
+            && (
+              resource.data.applicantUid == request.auth.uid
+              || resource.data.userId == request.auth.uid
+              || resource.data.agencyOwnerId == request.auth.uid
+            )
+          )
+        );
+      allow list: if isSignedIn()
+        && (
+          isOfficialAdmin()
+          || resource.data.applicantUid == request.auth.uid
+          || resource.data.userId == request.auth.uid
+          || resource.data.agencyOwnerId == request.auth.uid
+        );
+      allow create: if isValidId(requestId)
+        && isSignedIn()
+        && isValidHostAgencyRequest(request.resource.data)
+        && request.resource.data.id == requestId
+        && request.resource.data.applicantUid == request.auth.uid
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.userDocId == request.auth.uid
+        && request.resource.data.status == 'Pending';
+      allow update: if isValidId(requestId)
+        && isSignedIn()
+        && (isOfficialAdmin() || resource.data.agencyOwnerId == request.auth.uid)
+        && isValidHostAgencyRequest(request.resource.data)
+        && request.resource.data.applicantUid == resource.data.applicantUid
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.agencyId == resource.data.agencyId
+        && request.resource.data.agencyType == resource.data.agencyType
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'rejectionReason', 'reviewedAt', 'reviewedBy', 'updatedAt'
+        ])
+        && request.resource.data.status in ['Approved', 'Rejected', 'approved', 'rejected'];
       allow delete: if false;
     }
 
@@ -665,13 +958,20 @@ service cloud.firestore {
     match /partyRooms/{roomId} {
       allow get: if isValidId(roomId) && (isSignedIn() || resource.data.isActive == true);
       allow list: if isSignedIn() || resource.data.isActive == true;
-      allow create: if isSignedIn() && isValidId(roomId) && request.resource.data.host.id == request.auth.uid;
+      allow create: if isSignedIn()
+        && isValidId(roomId)
+        && request.resource.data.host.id == request.auth.uid
+        && isCurrentUserAllowedForParty();
       allow update: if isSignedIn() && isValidId(roomId) && (
-        resource.data.host.id == request.auth.uid
+        isOfficialAdmin()
+        || resource.data.host.id == request.auth.uid
         || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds)
-        || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seats', 'updatedAt', 'activeViewers', 'totalGiftCoins', 'lastSeenAtMs'])
+        || (
+          isCurrentUserAllowedForParty()
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seats', 'updatedAt', 'activeViewers', 'totalGiftCoins', 'lastSeenAtMs'])
+        )
       );
-      allow delete: if isSignedIn() && isValidId(roomId) && resource.data.host.id == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(roomId) && (isOfficialAdmin() || resource.data.host.id == request.auth.uid);
 
       match /stats/{statId} {
         allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
@@ -761,16 +1061,18 @@ service cloud.firestore {
       allow create: if isSignedIn()
         && isValidId(streamId)
         && request.resource.data.host.id == request.auth.uid
+        && isCurrentUserAllowedForLive()
         && (!('lastHeartbeat' in request.resource.data) || request.resource.data.lastHeartbeat == request.time);
       allow update: if isSignedIn() && isValidId(streamId) && (
-        (resource.data.host.id == request.auth.uid
+        isOfficialAdmin()
+        || (resource.data.host.id == request.auth.uid
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastHeartbeat'])
               || request.resource.data.lastHeartbeat == request.time))
         || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds
             && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastHeartbeat', 'lastHeartbeatMs']))
         || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount', 'totalGiftCoins', 'updatedAt'])
       );
-      allow delete: if isSignedIn() && isValidId(streamId) && resource.data.host.id == request.auth.uid;
+      allow delete: if isSignedIn() && isValidId(streamId) && (isOfficialAdmin() || resource.data.host.id == request.auth.uid);
 
       match /stats/{statId} {
         allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;

@@ -352,7 +352,7 @@ export const NetworkLatencyMonitor: React.FC<NetworkLatencyMonitorProps> = ({
         <div
           role="status"
           aria-live="polite"
-          className="fixed top-[max(5.5rem,calc(env(safe-area-inset-top,0px)+5rem))] left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-xs z-[65] pointer-events-auto animate-fade-in"
+          className="fixed top-[max(5.5rem,calc(var(--app-safe-top,0px)+5rem))] left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-xs z-[65] pointer-events-auto animate-fade-in"
         >
           <div
             className={`flex items-center justify-between gap-2 px-3 py-2 rounded-2xl backdrop-blur-md shadow-xl border text-[10px] ${

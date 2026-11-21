@@ -5,7 +5,9 @@ import {
   subscribeToAccountDeletionRequests,
   adminProcessAccountDeletionRequest,
 } from '../services/firebase';
-import { AccountDeletionRequest } from '../types';
+import { recordAdminModerationAction } from '../services/adminModerationService';
+import { AccountDeletionRequest, LiveStream } from '../types';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   Activity,
   Users,
@@ -37,6 +39,9 @@ export const AdminDashboard: React.FC = () => {
     openLiveStream,
     agencyApplications,
     reviewAgencyApplication,
+    hostJoinRequests,
+    approveHostJoinRequest,
+    rejectHostJoinRequest,
     officialCoinSellerProfiles,
     adminAllocateAgencyCoins,
     firebaseUser,
@@ -75,9 +80,31 @@ export const AdminDashboard: React.FC = () => {
   const totalHostDiamonds = giftTransactions.reduce((acc, g) => acc + (g.hostDiamonds || 0), 0);
   const totalAppShareCoins = giftTransactions.reduce((acc, g) => acc + (g.appShareCoins || 0), 0);
 
-  const handleAction = (type: string, hostName: string) => {
-    setActionNotice(`Admin action applied: [${type}] issued to ${hostName}. Notification sent to moderation log.`);
-    setTimeout(() => setActionNotice(null), 3500);
+  const handleAction = async (type: 'Warning' | 'Terminate', stream: LiveStream) => {
+    const targetUid = stream.host?.id;
+    const hostName = stream.host?.displayName || 'Host';
+    if (!targetUid) return;
+    const res = await recordAdminModerationAction({
+      targetUserId: targetUid,
+      actionKind: type === 'Warning' ? 'admin_warning' : 'live_suspended',
+      reason:
+        type === 'Warning'
+          ? `Broadcast moderation warning on "${stream.title}"`
+          : `Live stream "${stream.title}" terminated for guideline violation`,
+      adminMessage:
+        type === 'Warning'
+          ? 'Please follow Alpha Mate Live streaming guidelines during your broadcast.'
+          : 'Your live stream was terminated and Live access has been temporarily suspended for 24 hours.',
+      durationHours: type === 'Terminate' ? 24 : null,
+      isPermanent: false,
+      streamIdToClose: type === 'Terminate' ? stream.id : undefined,
+    });
+    setActionNotice(
+      res.success
+        ? `Admin action applied: [${type}] persisted and delivered to ${hostName}.`
+        : res.error || `Unable to deliver [${type}] to ${hostName}.`
+    );
+    setTimeout(() => setActionNotice(null), 4000);
   };
 
   const handleDeletionQueueAction = async (
@@ -252,7 +279,7 @@ export const AdminDashboard: React.FC = () => {
                         <td className="py-3">
                           <div className="flex items-center gap-2.5">
                             <img
-                              src={stream.host.avatar}
+                              src={safeImageSrc(stream.host.avatar, DEFAULT_AVATAR_URL)}
                               alt={stream.host.displayName}
                               className="w-8 h-8 rounded-full object-cover border border-[#A855F7]"
                             />
@@ -286,13 +313,13 @@ export const AdminDashboard: React.FC = () => {
                               Inspect
                             </button>
                             <button
-                              onClick={() => handleAction('Warning', stream.host.displayName)}
+                              onClick={() => handleAction('Warning', stream)}
                               className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 text-[10px] font-bold"
                             >
                               Warn
                             </button>
                             <button
-                              onClick={() => handleAction('Ban / Force Stop', stream.host.displayName)}
+                              onClick={() => handleAction('Terminate', stream)}
                               className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10px] font-bold"
                             >
                               Terminate
@@ -322,11 +349,13 @@ export const AdminDashboard: React.FC = () => {
 
               {/* Video Preview Box */}
               <div className="relative rounded-2xl overflow-hidden aspect-video bg-black border border-white/10 mb-3">
-                <img
-                  src={activeMonitorStream?.thumbnail}
-                  alt="Monitor"
-                  className="w-full h-full object-cover"
-                />
+                {safeImageSrc(activeMonitorStream?.thumbnail) && (
+                  <img
+                    src={safeImageSrc(activeMonitorStream?.thumbnail)}
+                    alt="Monitor"
+                    className="w-full h-full object-cover"
+                  />
+                )}
                 <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-black/70 text-[9px] font-mono text-white">
                   PID: {activeMonitorStream?.id}
                 </div>
@@ -472,6 +501,110 @@ export const AdminDashboard: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+
+        {/* Host Agency Join Requests (agency_requests) — Super Admin Approval Queue */}
+        <div className="rounded-3xl bg-[#120A24] border border-purple-500/25 p-5 shadow-xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2">
+              <Users className="w-5 h-5 text-purple-400" />
+              <div>
+                <h3 className="text-sm font-black text-white">Host Agency Join Requests</h3>
+                <p className="text-[11px] text-zinc-400">
+                  Real-time creator requests from Firestore agency_requests. Approving activates Host Agency membership on their profile.
+                </p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-purple-500/15 text-purple-300 text-xs font-bold border border-purple-500/30 font-mono">
+              {hostJoinRequests.filter((r) => r.status === 'pending').length} Pending
+            </span>
+          </div>
+
+          {hostJoinRequests.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-[#0B0616] border border-white/10 text-xs text-zinc-400">
+              No Host Agency join requests submitted yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-white/10 text-zinc-400 uppercase text-[10px]">
+                    <th className="pb-2.5">Applicant</th>
+                    <th className="pb-2.5">Selected Host Agency</th>
+                    <th className="pb-2.5">WhatsApp &amp; Hours</th>
+                    <th className="pb-2.5">Status</th>
+                    <th className="pb-2.5 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {hostJoinRequests.map((req) => (
+                    <tr key={req.id} className="hover:bg-white/5">
+                      <td className="py-3 font-bold text-white">
+                        <div>{req.displayName}</div>
+                        <div className="text-[10px] text-zinc-500 font-mono">ID: {req.uniqueId}</div>
+                      </td>
+                      <td className="py-3">
+                        <div className="font-bold text-zinc-200">{req.agencyName || req.agencyId}</div>
+                        {req.agencyCode && (
+                          <span className="text-[9.5px] font-mono text-amber-400">Code: {req.agencyCode}</span>
+                        )}
+                      </td>
+                      <td className="py-3 font-mono text-zinc-300">
+                        <div>{req.whatsapp}</div>
+                        <div className="text-[10px] text-zinc-500">{req.expectedHours} hrs/week</div>
+                      </td>
+                      <td className="py-3">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[9.5px] font-bold uppercase ${
+                            req.status === 'approved'
+                              ? 'bg-emerald-500/20 text-emerald-300'
+                              : req.status === 'rejected'
+                              ? 'bg-rose-500/20 text-rose-300'
+                              : 'bg-amber-400/20 text-amber-300'
+                          }`}
+                        >
+                          {req.status}
+                        </span>
+                      </td>
+                      <td className="py-3 text-right">
+                        {req.status === 'pending' ? (
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const res = rejectHostJoinRequest(
+                                  req.id,
+                                  'Request was declined by Alpha Mate Super Admin.'
+                                );
+                                setActionNotice(res.message);
+                                setTimeout(() => setActionNotice(null), 4000);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 text-[10.5px] font-bold cursor-pointer"
+                            >
+                              Reject
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const res = approveHostJoinRequest(req.id);
+                                setActionNotice(res.message);
+                                setTimeout(() => setActionNotice(null), 4000);
+                              }}
+                              className="px-3 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[10.5px] font-bold cursor-pointer border border-emerald-500/30"
+                            >
+                              Approve Host
+                            </button>
+                          </div>
+                        ) : (
+                          <span className="text-[10px] text-zinc-500 font-mono">Processed</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
 
         {/* Official Admin Coin Seller Stock Allocation */}

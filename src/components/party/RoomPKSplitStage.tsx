@@ -3,6 +3,7 @@ import { PartyRoom, PartySeat, User } from '../../types';
 import { OpponentRoomCandidate } from './RoomPKInviteModal';
 import { VipAvatarFrame } from '../brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../brand/LevelBadgeIcon';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 import {
   Swords,
   Crown,
@@ -272,7 +273,7 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
                           <div className="absolute -inset-1 rounded-full border border-emerald-400 animate-ping opacity-80 pointer-events-none" />
                         )}
                         <img
-                          src={seat.user!.avatar}
+                          src={safeImageSrc(seat.user!.avatar, DEFAULT_AVATAR_URL)}
                           alt={seat.user!.displayName}
                           className={`w-5 h-5 rounded-full object-cover border ${
                             seat.isSpeaking && !seat.isMuted ? 'border-emerald-400' : 'border-pink-400'
@@ -365,7 +366,7 @@ export const RoomPKSplitStage: React.FC<RoomPKSplitStageProps> = ({
                     <>
                       <div className="relative">
                         <img
-                          src={seat.user!.avatar}
+                          src={safeImageSrc(seat.user!.avatar, DEFAULT_AVATAR_URL)}
                           alt={seat.user!.displayName}
                           className="w-5 h-5 rounded-full object-cover border border-sky-400"
                         />

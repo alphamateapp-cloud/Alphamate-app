@@ -32,7 +32,9 @@ import { AccountRecoveryScreen } from './screens/AccountRecoveryScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { keepScreenAwake } from './services/keepScreenAwake';
+import { initDeviceDimensions } from './services/deviceDimensions';
 import { BatteryStatus } from './components/common/BatteryStatus';
+import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
 import { PushNotificationSettingsModal } from './components/modals/PushNotificationSettingsModal';
 import { GlobalWeeklyLeaderboardModal } from './components/leaderboard/GlobalWeeklyLeaderboard';
@@ -40,24 +42,24 @@ import { UserBadgesModal } from './components/badges/UserBadgesModal';
 import { PublicUserProfileModal } from './components/modals/PublicUserProfileModal';
 import { ProfileRegistrationModal } from './components/modals/ProfileRegistrationModal';
 import { AccountSwitcherModal } from './components/modals/AccountSwitcherModal';
+import { AdminActionModals } from './components/moderation/AdminActionModals';
+import {
+  ModerationGuard,
+  useAuthModerationStatus,
+  LIVE_RESTRICTED_SCREENS,
+  PARTY_RESTRICTED_SCREENS,
+} from './components/moderation/ModerationGuard';
 import {
   subscribeToFirestoreQuotaExceeded,
   FIRESTORE_PROJECT_ID,
   FIRESTORE_DATABASE_ID,
 } from './services/firebase';
 
-const PUBLIC_AUTH_SCREENS = new Set([
-  'splash',
-  'welcome',
-  'register',
-  'signin',
-  'privacy_policy',
-  'terms_conditions',
-  'delete_account',
-  'account_recovery',
-]);
-
-const AppContent: React.FC = () => {
+/**
+ * Keeps native platform integrations (screen wake lock, FCM push setup, Android StatusBar & hardware back button)
+ * active consistently across both unrestricted screens and moderation restriction screens.
+ */
+const NativePlatformBridge: React.FC = () => {
   const {
     currentScreen,
     setCurrentScreen,
@@ -67,34 +69,32 @@ const AppContent: React.FC = () => {
     activeStream,
     closePartyRoom,
     closeLiveStream,
-    activeConversation,
     navigateBack,
     currentUser,
-    isAuthenticated,
-    firebaseUser,
-    firebaseAuthLoading,
-    isEmailVerified,
-    refreshScope,
   } = useApp();
-  const mainTabScrollRef = useRef<HTMLDivElement>(null);
 
-  const isRestrictedLifecycleAccount = Boolean(
-    firebaseUser &&
-      isEmailVerified &&
-      (currentUser?.accountStatus === 'deactivated' ||
-        currentUser?.accountStatus === 'pending_deletion' ||
-        currentUser?.accountStatus === 'permanently_deleted')
+  const {
+    isSessionReadyAndAuthed,
+    isAccountAdminRestricted,
+    isLiveRestricted,
+    isPartyRestricted,
+  } = useAuthModerationStatus();
+
+  const isInUnrestrictedLiveSession = Boolean(
+    !isLiveRestricted &&
+      (activeStream !== null ||
+        currentScreen === 'live_stream' ||
+        currentScreen === 'pk_battle')
   );
-  const isSessionReadyAndAuthed = Boolean(isAuthenticated && firebaseUser && isEmailVerified && !isRestrictedLifecycleAccount);
+  const isInUnrestrictedPartySession = Boolean(
+    !isPartyRestricted && (activePartyRoom !== null || currentScreen === 'party_room')
+  );
 
   const shouldKeepScreenAwake = Boolean(
     deviceMode !== 'admin' &&
       isSessionReadyAndAuthed &&
-      (activePartyRoom !== null ||
-        activeStream !== null ||
-        currentScreen === 'party_room' ||
-        currentScreen === 'live_stream' ||
-        currentScreen === 'pk_battle')
+      !isAccountAdminRestricted &&
+      (isInUnrestrictedLiveSession || isInUnrestrictedPartySession)
   );
 
   useEffect(() => {
@@ -107,28 +107,9 @@ const AppContent: React.FC = () => {
     };
   }, []);
 
-  // Route guard: never allow unauthenticated or restricted accounts into protected main screens
-  useEffect(() => {
-    if (deviceMode === 'admin') return;
-    if (firebaseAuthLoading) return;
-    if (
-      isRestrictedLifecycleAccount &&
-      currentScreen !== 'account_recovery' &&
-      currentScreen !== 'delete_account' &&
-      currentScreen !== 'privacy_policy' &&
-      currentScreen !== 'terms_conditions'
-    ) {
-      setCurrentScreen('account_recovery');
-      return;
-    }
-    if (!isSessionReadyAndAuthed && !PUBLIC_AUTH_SCREENS.has(currentScreen)) {
-      setCurrentScreen('welcome');
-    }
-  }, [deviceMode, firebaseAuthLoading, isRestrictedLifecycleAccount, isSessionReadyAndAuthed, currentScreen, setCurrentScreen]);
-
   // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
   useEffect(() => {
-    if (!isSessionReadyAndAuthed || !currentUser?.id) return;
+    if (!isSessionReadyAndAuthed || isAccountAdminRestricted || !currentUser?.id) return;
     pushService
       .initialize({
         onToken: () => {
@@ -144,20 +125,50 @@ const AppContent: React.FC = () => {
         },
       })
       .catch(() => {});
-  }, [isSessionReadyAndAuthed, currentUser?.id, setCurrentScreen, setActiveTab]);
+  }, [
+    isSessionReadyAndAuthed,
+    isAccountAdminRestricted,
+    currentUser?.id,
+    setCurrentScreen,
+    setActiveTab,
+  ]);
+
+  // Universal Device Dimensions & Safe-Area Inset Synchronization (Android, iOS, PWA & Web)
+  useEffect(() => {
+    return initDeviceDimensions();
+  }, []);
 
   // Android Native Hardware Back Button & Status Bar Integration (Active on Native Android/iOS)
   useEffect(() => {
-    // Only invoke native bridge plugins if running inside Capacitor native shell
     if (!Capacitor.isNativePlatform()) return;
 
     try {
+      StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
       StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
       StatusBar.setBackgroundColor({ color: '#09070F' }).catch(() => {});
     } catch {}
 
     let listenerHandle: { remove: () => Promise<void> } | null = null;
     CapApp.addListener('backButton', ({ canGoBack }) => {
+      if (isAccountAdminRestricted) {
+        CapApp.minimizeApp().catch(() => {});
+        return;
+      }
+      if (isLiveRestricted && (LIVE_RESTRICTED_SCREENS.has(currentScreen) || activeStream !== null)) {
+        if (activeStream) closeLiveStream();
+        setActiveTab('home');
+        setCurrentScreen('home');
+        return;
+      }
+      if (
+        isPartyRestricted &&
+        (PARTY_RESTRICTED_SCREENS.has(currentScreen) || activePartyRoom !== null)
+      ) {
+        if (activePartyRoom) closePartyRoom(false);
+        setActiveTab('home');
+        setCurrentScreen('home');
+        return;
+      }
       if (activePartyRoom) {
         closePartyRoom(false);
         return;
@@ -186,69 +197,74 @@ const AppContent: React.FC = () => {
         listenerHandle.remove().catch(() => {});
       }
     };
-  }, [currentScreen, navigateBack, setCurrentScreen, activePartyRoom, activeStream, closePartyRoom, closeLiveStream]);
+  }, [
+    isAccountAdminRestricted,
+    isLiveRestricted,
+    isPartyRestricted,
+    currentScreen,
+    navigateBack,
+    setActiveTab,
+    setCurrentScreen,
+    activePartyRoom,
+    activeStream,
+    closePartyRoom,
+    closeLiveStream,
+  ]);
 
-  // If Admin Dashboard mode is chosen
+  return null;
+};
+
+const AppContent: React.FC = () => {
+  const {
+    currentScreen,
+    deviceMode,
+    activePartyRoom,
+    activeConversation,
+    refreshScope,
+  } = useApp();
+  const mainTabScrollRef = useRef<HTMLDivElement>(null);
+
+  // Admin Dashboard mode
   if (deviceMode === 'admin') {
     return <AdminDashboard />;
   }
 
-  // Full-screen overlay screens without bottom navigation
-  if (currentScreen === 'splash') {
-    return <SplashScreen />;
-  }
-  if (currentScreen === 'welcome') {
-    return <WelcomeScreen />;
-  }
-  if (currentScreen === 'register') {
-    return <RegisterScreen />;
-  }
-  if (currentScreen === 'signin') {
-    return <SignInScreen />;
-  }
-  if (currentScreen === 'privacy_policy') {
-    return <PrivacyPolicyScreen />;
-  }
-  if (currentScreen === 'terms_conditions') {
-    return <TermsConditionsScreen />;
-  }
-  if (currentScreen === 'delete_account') {
-    return <DeleteAccountScreen />;
-  }
-
-  // Prevent flashing protected screens while auth is unresolved or unauthenticated
-  if (firebaseAuthLoading) {
-    return <SplashScreen />;
-  }
-  if (isRestrictedLifecycleAccount || currentScreen === 'account_recovery') {
-    return firebaseUser ? <AccountRecoveryScreen /> : <WelcomeScreen />;
-  }
-  if (!isSessionReadyAndAuthed) {
-    return <WelcomeScreen />;
-  }
-  if (currentScreen === 'live_stream') {
-    return <LiveStreamScreen />;
-  }
-  if (currentScreen === 'pk_battle') {
-    return <PKBattleScreen />;
-  }
-  if (currentScreen === 'wallet') {
-    return <WalletScreen />;
-  }
-  if (currentScreen === 'levels') {
-    return <LevelSystemScreen />;
-  }
-  if (currentScreen === 'notifications') {
-    return <NotificationsScreen />;
-  }
-  if (currentScreen === 'search') {
-    return <SearchScreen />;
-  }
-  if (currentScreen === 'settings') {
-    return <SettingsScreen />;
-  }
-  if (currentScreen === 'agency_management') {
-    return <AgencyManagementScreen />;
+  // Public & legal full-screen views without bottom navigation
+  switch (currentScreen) {
+    case 'splash':
+      return <SplashScreen />;
+    case 'welcome':
+      return <WelcomeScreen />;
+    case 'register':
+      return <RegisterScreen />;
+    case 'signin':
+      return <SignInScreen />;
+    case 'privacy_policy':
+      return <PrivacyPolicyScreen />;
+    case 'terms_conditions':
+      return <TermsConditionsScreen />;
+    case 'delete_account':
+      return <DeleteAccountScreen />;
+    case 'account_recovery':
+      return <AccountRecoveryScreen />;
+    case 'live_stream':
+      return <LiveStreamScreen />;
+    case 'pk_battle':
+      return <PKBattleScreen />;
+    case 'wallet':
+      return <WalletScreen />;
+    case 'levels':
+      return <LevelSystemScreen />;
+    case 'notifications':
+      return <NotificationsScreen />;
+    case 'search':
+      return <SearchScreen />;
+    case 'settings':
+      return <SettingsScreen />;
+    case 'agency_management':
+      return <AgencyManagementScreen />;
+    default:
+      break;
   }
 
   // Inside party room full screen
@@ -266,7 +282,7 @@ const AppContent: React.FC = () => {
     currentScreen === 'moments' || currentScreen === 'upload';
 
   return (
-    <div className="relative w-full h-full max-h-[100dvh] bg-[#09070F] flex flex-col overflow-hidden">
+    <div className="relative w-full h-full bg-[#09070F] flex flex-col overflow-hidden">
       <div
         ref={mainTabScrollRef}
         className="flex-1 w-full overflow-y-auto overflow-x-hidden min-h-0 overscroll-contain"
@@ -278,7 +294,11 @@ const AppContent: React.FC = () => {
           />
         )}
         {currentScreen === 'home' && <HomeScreen />}
-        {currentScreen === 'party' && <PartyRoomsScreen />}
+        {currentScreen === 'party' && (
+          <ModerationGuard scope="party">
+            <PartyRoomsScreen />
+          </ModerationGuard>
+        )}
         {currentScreen === 'moments' && <MomentsScreen />}
         {currentScreen === 'store' && <StoreScreen />}
         {currentScreen === 'upload' && <VideoUploadScreen />}
@@ -339,8 +359,10 @@ export default function App() {
   return (
     <AppProvider>
       <DeviceFrame>
+        <NativePlatformBridge />
         <PushNotificationBanner />
         <BatteryStatus />
+        <OfflineIndicator />
         <GlobalFirestoreQuotaBanner />
         <GlobalPushSettingsHost />
         <GlobalWeeklyLeaderboardModal />
@@ -348,8 +370,11 @@ export default function App() {
         <PublicUserProfileModal />
         <ProfileRegistrationModal />
         <AccountSwitcherModal />
+        <AdminActionModals />
         <AppErrorBoundary>
-          <AppContent />
+          <ModerationGuard>
+            <AppContent />
+          </ModerationGuard>
         </AppErrorBoundary>
       </DeviceFrame>
     </AppProvider>
@@ -374,7 +399,7 @@ const GlobalFirestoreQuotaBanner: React.FC = () => {
   const consoleDbUrl = `https://console.firebase.google.com/project/${FIRESTORE_PROJECT_ID}/firestore/databases/${FIRESTORE_DATABASE_ID}/data?openUpgradeDialog=true`;
 
   return (
-    <div className="fixed top-4 inset-x-4 z-50 mx-auto max-w-md pointer-events-auto">
+    <div className="fixed top-[calc(var(--app-safe-top,0px)+12px)] inset-x-4 z-50 mx-auto max-w-md pointer-events-auto">
       <div className="rounded-2xl border border-amber-400/40 bg-[#23190B]/95 backdrop-blur-xl px-4 py-3 text-xs text-amber-100 shadow-2xl space-y-2">
         <div className="flex items-start justify-between gap-2">
           <div>

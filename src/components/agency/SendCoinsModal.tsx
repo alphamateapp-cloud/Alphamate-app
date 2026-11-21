@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { User } from '../../types';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 
 interface SendCoinsModalProps {
   isOpen: boolean;
@@ -186,7 +187,7 @@ export const SendCoinsModal: React.FC<SendCoinsModalProps> = ({
               <div className="flex items-center gap-3">
                 <div className="relative">
                   <img
-                    src={recipient.avatar}
+                    src={safeImageSrc(recipient.avatar, DEFAULT_AVATAR_URL)}
                     alt={recipient.displayName}
                     className="w-11 h-11 rounded-2xl object-cover border border-emerald-400/80 shadow"
                   />

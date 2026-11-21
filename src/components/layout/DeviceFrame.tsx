@@ -11,26 +11,34 @@ export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
 
   // Public legal & account deletion pages (/privacy, /terms, /delete-account) render cleanly as full responsive web/mobile pages
   if (currentScreen === 'privacy_policy' || currentScreen === 'terms_conditions' || currentScreen === 'delete_account') {
-    return <div className="w-full h-[100dvh] min-h-[100dvh] bg-[#09070F] overflow-hidden flex flex-col">{children}</div>;
+    return (
+      <div className="w-full h-[var(--app-viewport-height,100dvh)] min-h-[var(--app-viewport-height,100dvh)] bg-[#09070F] pt-[var(--app-safe-top)] pb-[var(--app-safe-bottom)] pl-[var(--app-safe-left)] pr-[var(--app-safe-right)] overflow-hidden flex flex-col">
+        {children}
+      </div>
+    );
   }
 
   // If in admin dashboard mode, the AdminDashboard screen handles the full layout
   if (deviceMode === 'admin') {
-    return <div className="w-full min-h-screen bg-[#07040D]">{children}</div>;
+    return (
+      <div className="w-full min-h-[var(--app-viewport-height,100dvh)] bg-[#07040D] pt-[var(--app-safe-top)] pb-[var(--app-safe-bottom)]">
+        {children}
+      </div>
+    );
   }
 
   // If responsive mode on desktop
   if (deviceMode === 'responsive') {
     return (
-      <div className="w-full h-[100dvh] bg-[#09070F] flex flex-col overflow-hidden">
+      <div className="w-full h-[var(--app-viewport-height,100dvh)] bg-[#09070F] pt-[var(--app-safe-top)] pb-[var(--app-safe-bottom)] pl-[var(--app-safe-left)] pr-[var(--app-safe-right)] flex flex-col overflow-hidden">
         {/* Top Desktop Helper Toolbar */}
         <div className="h-10 bg-[#0E081D] border-b border-[#A855F7]/20 px-4 flex items-center justify-between text-xs text-zinc-400 shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-emerald-400" />
-            <span className="font-semibold text-white">ALPHA MATE Responsive Mobile Shell</span>
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 shrink-0" />
+            <span className="font-semibold text-white truncate">ALPHA MATE Responsive Mobile Shell</span>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <button
               onClick={() => setDeviceMode('mobile')}
               className="px-2.5 py-1 rounded-lg bg-[#1F1338] text-white hover:bg-[#2C1C4E] flex items-center gap-1.5 cursor-pointer"
@@ -55,9 +63,9 @@ export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
     );
   }
 
-  // Default 'mobile' frame view (Sleek smartphone frame with dynamic island & status bar)
+  // Default 'mobile' frame view (Sleek smartphone frame on desktop, 100% safe-area full-screen on Android/iOS/mobile web)
   return (
-    <div className="h-[100dvh] min-h-[100dvh] w-full bg-[#05030A] flex flex-col items-center justify-center sm:py-4 p-0 overflow-hidden">
+    <div className="h-[var(--app-viewport-height,100dvh)] min-h-[var(--app-viewport-height,100dvh)] w-full bg-[#09070F] sm:bg-[#05030A] flex flex-col items-center justify-center sm:py-4 p-0 overflow-hidden">
       {/* Top Floating View Switcher (Visible ONLY on desktop viewports) */}
       <div className="hidden sm:flex items-center gap-2 mb-3 px-3 py-1.5 rounded-full bg-[#120B24]/90 border border-[#A855F7]/30 shadow-xl backdrop-blur-md">
         <button
@@ -89,8 +97,8 @@ export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
         </button>
       </div>
 
-      {/* Smartphone Outer Chassis — 100% full height & width on real mobile, constrained mockup on desktop */}
-      <div className="relative w-full sm:w-[412px] h-[100dvh] sm:h-[844px] sm:max-h-[94vh] sm:rounded-[44px] bg-[#09070F] sm:border-[8px] sm:border-[#1E1438] sm:ring-1 sm:ring-[#A855F7]/40 shadow-[0_20px_60px_-15px_rgba(121,40,202,0.4)] flex flex-col overflow-hidden">
+      {/* Smartphone Outer Chassis — 100% safe-area padded on real mobile, constrained mockup on desktop */}
+      <div className="relative w-full sm:w-[412px] h-full sm:h-[844px] sm:max-h-[94vh] sm:rounded-[44px] bg-[#09070F] pt-[var(--app-safe-top)] pb-[var(--app-safe-bottom)] pl-[var(--app-safe-left)] pr-[var(--app-safe-right)] sm:p-0 sm:border-[8px] sm:border-[#1E1438] sm:ring-1 sm:ring-[#A855F7]/40 shadow-[0_20px_60px_-15px_rgba(121,40,202,0.4)] flex flex-col overflow-hidden">
         {/* Hardware Status Bar (Only visible on desktop simulator frame, hidden on real phones to prevent double status bar) */}
         <div className="hidden sm:flex h-9 shrink-0 w-full bg-[#09070F] px-7 items-center justify-between text-[11px] font-bold text-zinc-300 select-none z-50">
           <span>9:41</span>
@@ -108,8 +116,8 @@ export const DeviceFrame: React.FC<DeviceFrameProps> = ({ children }) => {
           </div>
         </div>
 
-        {/* Screen Content — strictly overflow-hidden so individual screens control their scroll zones */}
-        <div className="flex-1 w-full overflow-hidden relative flex flex-col h-full min-h-0">
+        {/* Screen Content — strictly below device status bar and above navigation bar on every device */}
+        <div className="flex-1 w-full overflow-hidden relative flex flex-col min-h-0">
           {children}
         </div>
 

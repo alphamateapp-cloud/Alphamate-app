@@ -1,29 +1,36 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   ShieldCheck,
-  Sparkles,
   Coins,
   ChevronLeft,
   ChevronRight,
   MessageCircle,
-  Star,
+  MessageSquare,
   CheckCircle2,
-  Clock,
-  ArrowRight,
+  Hash,
   Zap,
 } from 'lucide-react';
 import { OfficialAgency, AgencyContactModal } from '../modals/AgencyContactModal';
 import { useApp } from '../../context/AppContext';
+import { buildWhatsAppUrl, openExternalWhatsApp } from '../../services/agencySyncService';
 
-// Legacy static export kept empty; Official Coin Seller Agencies come strictly from Admin-approved Firestore docs.
+// Legacy static export kept empty; Official Coin Seller Agencies come strictly from active Firestore docs.
 export const OFFICIAL_AGENCIES: OfficialAgency[] = [];
 
+const getAgencyInitials = (name: string): string => {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  if (words.length >= 2) return `${words[0][0]}${words[1][0]}`.toUpperCase();
+  return name.slice(0, 2).toUpperCase() || 'AM';
+};
+
 export const CoinSellerAgenciesCarousel: React.FC = () => {
-  const { officialCoinSellerAgencies } = useApp();
+  const { officialCoinSellerAgencies, contactAgencyInApp } = useApp();
   const agencies = officialCoinSellerAgencies;
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isPaused, setIsPaused] = useState(false);
   const [selectedAgency, setSelectedAgency] = useState<OfficialAgency | null>(null);
+  const [chatNotice, setChatNotice] = useState<string | null>(null);
+  const [openingChatId, setOpeningChatId] = useState<string | null>(null);
   const touchStartX = useRef<number | null>(null);
 
   useEffect(() => {
@@ -32,7 +39,7 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
     }
   }, [agencies.length, currentIndex]);
 
-  // Auto-scroll carousel every 4.5 seconds when 2+ approved agencies exist
+  // Auto-rotate carousel every 4.5 seconds when 2+ active Coin Seller Agencies exist
   useEffect(() => {
     if (isPaused || agencies.length <= 1) return;
 
@@ -73,53 +80,99 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
   };
 
   const currentAgency = agencies[currentIndex] || agencies[0];
+  const hasValidWhatsApp = Boolean(currentAgency.hasValidWhatsApp && currentAgency.whatsappNumber);
+  const canContactInApp = Boolean(currentAgency.ownerUserId);
 
   const handleDirectWhatsApp = (agency: OfficialAgency, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
-    const message = encodeURIComponent(
-      `Hello ${agency.name}! I want to purchase coins directly from your official agency on Alpha Mate. Please share your current packages and payment details.`
+    if (!agency.hasValidWhatsApp || !agency.whatsappNumber) return;
+    const url = buildWhatsAppUrl(
+      agency.whatsappNumber,
+      `Hello ${agency.name} (Code: ${agency.agencyCode})! I want to purchase coins directly from your Official Coin Seller Agency on Alpha Mate. Please share your current packages and payment details.`
     );
-    const cleanNumber = agency.whatsappNumber.replace(/[^0-9]/g, '');
-    window.open(`https://wa.me/${cleanNumber}?text=${message}`, '_blank', 'noopener,noreferrer');
+    if (url) {
+      openExternalWhatsApp(url);
+    }
+  };
+
+  const handleDirectInAppChat = async (agency: OfficialAgency, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setChatNotice(null);
+    if (!agency.ownerUserId) {
+      setSelectedAgency(agency);
+      return;
+    }
+    setOpeningChatId(agency.id);
+    try {
+      const res = await contactAgencyInApp({
+        agencyId: agency.id,
+        agencyName: agency.name,
+        agencyCode: agency.agencyCode,
+        ownerUserId: agency.ownerUserId,
+        ownerName: agency.ownerName,
+        ownerAvatar: agency.ownerAvatar,
+      });
+      if (!res.success) {
+        setChatNotice(res.message);
+        setTimeout(() => setChatNotice(null), 3200);
+      }
+    } finally {
+      setOpeningChatId(null);
+    }
   };
 
   return (
     <div className="pt-2 pb-3 px-4 select-none">
-      {/* Section Header */}
-      <div className="flex items-center justify-between mb-2">
-        <div className="flex items-center gap-1.5">
-          <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-amber-400 to-[#EC4899] flex items-center justify-center text-black shadow-sm">
-            <Coins className="w-3 h-3 text-white fill-current" />
+      {/* Official Section Heading & Subtitle */}
+      <div className="flex items-start justify-between gap-2 mb-2">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <div className="w-5 h-5 rounded-full bg-gradient-to-tr from-amber-400 to-[#EC4899] flex items-center justify-center text-white shadow-sm shrink-0">
+              <Coins className="w-3 h-3 fill-current" />
+            </div>
+            <h2 className="text-[11px] sm:text-xs font-black tracking-wide uppercase text-amber-300 leading-tight">
+              Be Alpha Mate — Official Coin Seller Agencies
+            </h2>
           </div>
-          <span className="text-[11px] font-black tracking-wider uppercase text-amber-300">
-            Official Coin Seller Agencies
-          </span>
-          <span className="px-1.5 py-0.2 rounded-full bg-amber-400/20 text-amber-300 text-[8.5px] font-black border border-amber-400/40">
-            DIRECT
-          </span>
+          <p className="text-[10px] text-zinc-400 mt-0.5 leading-snug pl-6">
+            These are the officially activated Coin Seller Agencies of Alpha Mate.
+          </p>
         </div>
 
-        {/* Slide Counter & Arrows */}
-        <div className="flex items-center gap-1 text-[10px] text-zinc-400 font-mono">
-          <span>{currentIndex + 1}/{agencies.length}</span>
-          <button
-            onClick={handlePrev}
-            className="w-5 h-5 rounded-full bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer transition-colors ml-1"
-            title="Previous Agency"
-          >
-            <ChevronLeft className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={handleNext}
-            className="w-5 h-5 rounded-full bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer transition-colors"
-            title="Next Agency"
-          >
-            <ChevronRight className="w-3.5 h-3.5" />
-          </button>
-        </div>
+        {/* Slide Counter & Rotation Controls */}
+        {agencies.length > 1 && (
+          <div className="flex items-center gap-1 text-[10px] text-zinc-400 font-mono shrink-0 pt-0.5">
+            <span>
+              {currentIndex + 1}/{agencies.length}
+            </span>
+            <button
+              type="button"
+              onClick={handlePrev}
+              className="w-5 h-5 rounded-full bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer transition-colors ml-0.5"
+              title="Previous Agency"
+            >
+              <ChevronLeft className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={handleNext}
+              className="w-5 h-5 rounded-full bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer transition-colors"
+              title="Next Agency"
+            >
+              <ChevronRight className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* Main Swipeable Interactive Card Deck */}
+      {/* Subtle feedback notice if self-chat or missing owner */}
+      {chatNotice && (
+        <div className="mb-2 px-3 py-1.5 rounded-xl bg-amber-500/15 border border-amber-400/40 text-amber-200 text-[10.5px] font-semibold">
+          {chatNotice}
+        </div>
+      )}
+
+      {/* Main Swipeable Rotating Interactive Card Deck */}
       <div
         onMouseEnter={() => setIsPaused(true)}
         onMouseLeave={() => setIsPaused(false)}
@@ -130,20 +183,29 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
       >
         {/* Animated Cyber-Gold Glowing Border Frame */}
         <div className="relative rounded-3xl p-[1.5px] bg-gradient-to-r from-amber-400 via-[#EC4899] to-[#7928CA] shadow-[0_0_25px_rgba(245,158,11,0.25)]">
-          <div className="relative rounded-[22px] bg-gradient-to-b from-[#1C0D33] via-[#120722] to-[#0B0415] p-3.5 sm:p-4 text-white overflow-hidden">
+          <div
+            key={currentAgency.id}
+            className="relative rounded-[22px] bg-gradient-to-b from-[#1C0D33] via-[#120722] to-[#0B0415] p-3.5 sm:p-4 text-white overflow-hidden animate-fade-in"
+          >
             {/* Ambient Lighting Accents */}
             <div className="absolute -top-12 -right-12 w-36 h-36 rounded-full bg-amber-500/15 blur-2xl pointer-events-none" />
             <div className="absolute -bottom-12 -left-12 w-36 h-36 rounded-full bg-[#EC4899]/15 blur-2xl pointer-events-none" />
 
-            {/* Top Row: Agency Logo + Name + Verified Badge + Delivery */}
-            <div className="flex items-start justify-between gap-3 mb-2.5">
+            {/* Top Row: Agency Logo/Monogram + Name + Official Coin Seller Agency Label + Active Status */}
+            <div className="flex items-start justify-between gap-2.5 mb-2.5">
               <div className="flex items-center gap-2.5 min-w-0">
                 <div className="relative shrink-0">
-                  <img
-                    src={currentAgency.logo}
-                    alt={currentAgency.name}
-                    className="w-11 h-11 rounded-2xl object-cover border-2 border-amber-400/90 shadow-md group-hover:scale-105 transition-transform"
-                  />
+                  {currentAgency.logo ? (
+                    <img
+                      src={currentAgency.logo}
+                      alt={currentAgency.name}
+                      className="w-11 h-11 rounded-2xl object-cover border-2 border-amber-400/90 shadow-md group-hover:scale-105 transition-transform"
+                    />
+                  ) : (
+                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-400 via-[#EC4899] to-[#7928CA] border-2 border-amber-300/90 shadow-md flex items-center justify-center text-white font-black text-sm group-hover:scale-105 transition-transform">
+                      {getAgencyInitials(currentAgency.name)}
+                    </div>
+                  )}
                   <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-emerald-500 border border-[#0B0415] flex items-center justify-center text-[8px] text-white font-black">
                     ✓
                   </div>
@@ -154,115 +216,109 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
                     <h3 className="text-xs sm:text-sm font-black text-white truncate group-hover:text-amber-300 transition-colors">
                       {currentAgency.name}
                     </h3>
-                    <span className="px-1.5 py-0.2 rounded-md bg-amber-400/20 text-amber-300 text-[8.5px] font-extrabold border border-amber-400/30 flex items-center gap-0.5">
-                      <ShieldCheck className="w-2.5 h-2.5" />
-                      <span>{currentAgency.badge}</span>
-                    </span>
                   </div>
 
-                  <p className="text-[10px] text-zinc-300 truncate mt-0.5 font-medium">
-                    {currentAgency.tagline}
-                  </p>
+                  <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                    <span className="px-1.5 py-0.5 rounded-md bg-amber-400/20 text-amber-300 text-[8.5px] font-extrabold border border-amber-400/30 inline-flex items-center gap-0.5">
+                      <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
+                      <span>Official Coin Seller Agency</span>
+                    </span>
+                    {currentAgency.agencyCode && (
+                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-mono text-zinc-300 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
+                        <Hash className="w-2.5 h-2.5 text-amber-400" />
+                        <span>{currentAgency.agencyCode}</span>
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              {/* Delivery Speed Badge */}
+              {/* Active Status Badge */}
               <div className="shrink-0 text-right">
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-extrabold text-[9px] flex items-center gap-1">
-                  <Clock className="w-2.5 h-2.5" />
-                  <span>{currentAgency.avgDeliveryTime}</span>
+                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-extrabold text-[9px] inline-flex items-center gap-1 uppercase">
+                  <CheckCircle2 className="w-2.5 h-2.5" />
+                  <span>Active</span>
                 </span>
               </div>
             </div>
 
-            {/* Middle Promo Highlight Banner: "Get coins from official agency direct" */}
-            <div className="mb-3 px-3 py-2 rounded-2xl bg-gradient-to-r from-amber-500/20 via-pink-500/15 to-purple-500/20 border border-amber-400/30 flex items-center justify-between">
-              <div className="flex items-center gap-2">
+            {/* Middle Promo Highlight Banner */}
+            <div className="mb-3 px-3 py-2 rounded-2xl bg-gradient-to-r from-amber-500/20 via-pink-500/15 to-purple-500/20 border border-amber-400/30 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <div className="w-6 h-6 rounded-lg bg-amber-400/30 flex items-center justify-center text-amber-300 shrink-0">
                   <Zap className="w-3.5 h-3.5 fill-current" />
                 </div>
-                <div className="leading-tight">
-                  <span className="text-[11px] font-black text-white block">
+                <div className="leading-tight min-w-0">
+                  <span className="text-[11px] font-black text-white block truncate">
                     Get coins from official agency direct
                   </span>
-                  <span className="text-[9.5px] text-amber-200 font-semibold">
-                    {currentAgency.bonusOffer}
+                  <span className="text-[9.5px] text-amber-200 font-semibold block truncate">
+                    {currentAgency.ownerName
+                      ? `Managed by ${currentAgency.ownerName} • ${currentAgency.bonusOffer}`
+                      : currentAgency.bonusOffer}
                   </span>
                 </div>
               </div>
 
-              <span className="text-[9px] px-2 py-0.5 rounded-full bg-amber-400 text-black font-black uppercase shadow tracking-wider shrink-0">
+              <span className="text-[8.5px] px-2 py-0.5 rounded-full bg-amber-400 text-black font-black uppercase shadow tracking-wider shrink-0">
                 OFFICIAL
               </span>
             </div>
 
-            {/* Bottom Row: Payment Methods + Direct WhatsApp CTA */}
-            <div className="flex items-center justify-between gap-2 pt-1 border-t border-white/10">
-              <div className="flex items-center gap-1 overflow-hidden">
-                <span className="text-[9px] font-bold text-zinc-400 shrink-0">Pay:</span>
-                <div className="flex items-center gap-1 truncate">
-                  {currentAgency.paymentMethods.slice(0, 3).map((pm) => (
-                    <span
-                      key={pm}
-                      className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-[8.5px] text-zinc-300 font-semibold shrink-0"
-                    >
-                      {pm}
-                    </span>
-                  ))}
-                  {currentAgency.paymentMethods.length > 3 && (
-                    <span className="text-[8.5px] text-zinc-400 font-bold">+1</span>
-                  )}
-                </div>
-              </div>
-
-              {/* Order In-App & WhatsApp Action Buttons */}
-              <div className="flex items-center gap-1.5 shrink-0">
+            {/* Bottom Row: Contact In-App & Contact on WhatsApp Action Buttons */}
+            <div className="pt-2 border-t border-white/10">
+              <div className={`grid gap-2 ${hasValidWhatsApp ? 'grid-cols-2' : 'grid-cols-1'}`}>
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedAgency(currentAgency);
-                  }}
-                  className="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 hover:from-amber-300 hover:to-amber-500 text-black font-black text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-md shadow-amber-500/25 active:scale-95 transition-all cursor-pointer"
+                  disabled={!canContactInApp || openingChatId === currentAgency.id}
+                  onClick={(e) => handleDirectInAppChat(currentAgency, e)}
+                  className="min-h-[36px] px-2.5 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 hover:from-amber-300 hover:to-amber-500 disabled:opacity-50 text-black font-black text-[10px] uppercase tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/25 active:scale-95 transition-all cursor-pointer"
                 >
-                  <Coins className="w-3 h-3 fill-current" />
-                  <span>Order 📝</span>
+                  <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">
+                    {openingChatId === currentAgency.id ? 'Opening Chat...' : 'Contact In-App'}
+                  </span>
                 </button>
 
-                <button
-                  type="button"
-                  onClick={(e) => handleDirectWhatsApp(currentAgency, e)}
-                  className="px-2.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-[10px] uppercase tracking-wider flex items-center gap-1 shadow-md shadow-emerald-500/30 active:scale-95 transition-all cursor-pointer"
-                >
-                  <MessageCircle className="w-3 h-3 fill-current" />
-                  <span>WhatsApp 💬</span>
-                </button>
+                {hasValidWhatsApp && (
+                  <button
+                    type="button"
+                    onClick={(e) => handleDirectWhatsApp(currentAgency, e)}
+                    className="min-h-[36px] px-2.5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-[10px] uppercase tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/30 active:scale-95 transition-all cursor-pointer"
+                  >
+                    <MessageCircle className="w-3.5 h-3.5 fill-current shrink-0" />
+                    <span className="truncate">Contact on WhatsApp</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
         </div>
 
         {/* Carousel Pagination Dots */}
-        <div className="flex items-center justify-center gap-1.5 mt-2">
-          {agencies.map((_, idx) => (
-            <button
-              key={idx}
-              onClick={(e) => {
-                e.stopPropagation();
-                setCurrentIndex(idx);
-              }}
-              className={`h-1.5 rounded-full transition-all cursor-pointer ${
-                idx === currentIndex
-                  ? 'w-6 bg-gradient-to-r from-amber-400 to-[#EC4899] shadow-sm'
-                  : 'w-1.5 bg-white/20 hover:bg-white/40'
-              }`}
-              title={`View Agency ${idx + 1}`}
-            />
-          ))}
-        </div>
+        {agencies.length > 1 && (
+          <div className="flex items-center justify-center gap-1.5 mt-2">
+            {agencies.map((ag, idx) => (
+              <button
+                key={ag.id}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setCurrentIndex(idx);
+                }}
+                className={`h-1.5 rounded-full transition-all cursor-pointer ${
+                  idx === currentIndex
+                    ? 'w-6 bg-gradient-to-r from-amber-400 to-[#EC4899] shadow-sm'
+                    : 'w-1.5 bg-white/20 hover:bg-white/40'
+                }`}
+                title={`View ${ag.name}`}
+              />
+            ))}
+          </div>
+        )}
       </div>
 
-      {/* Modal for In-Depth Agency Details, Rates & WhatsApp Direct Link */}
+      {/* Modal for In-Depth Agency Details, Rates & Direct Contact */}
       <AgencyContactModal
         isOpen={!!selectedAgency}
         onClose={() => setSelectedAgency(null)}

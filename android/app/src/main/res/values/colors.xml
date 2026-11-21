@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="colorPrimary">#7928CA</color>
+    <color name="colorPrimaryDark">#09070F</color>
+    <color name="colorAccent">#EC4899</color>
+    <color name="am_system_bar_bg">#09070F</color>
+</resources>

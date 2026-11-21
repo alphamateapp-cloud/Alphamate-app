@@ -283,7 +283,7 @@ export const BatteryStatus: React.FC<BatteryStatusProps> = ({ threshold = 10 }) 
     <div
       role="status"
       aria-live="polite"
-      className="fixed top-[max(3.5rem,calc(env(safe-area-inset-top,0px)+3rem))] left-1/2 -translate-x-1/2 w-[calc(100%-1.5rem)] max-w-sm z-[75] pointer-events-auto animate-fade-in"
+      className="fixed top-[max(3.5rem,calc(var(--app-safe-top,0px)+3rem))] left-1/2 -translate-x-1/2 w-[calc(100%-1.5rem)] max-w-sm z-[75] pointer-events-auto animate-fade-in"
     >
       <div
         className={`flex items-center gap-2.5 px-3 py-2.5 rounded-2xl backdrop-blur-md shadow-2xl border ${

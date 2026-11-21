@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { AlphaMateLogo } from '../brand/AlphaMateLogo';
 import { copyToClipboard } from '../../utils/clipboard';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 import {
   X,
   Share2,
@@ -99,7 +100,7 @@ export const ShareProfileModal: React.FC<ShareProfileModalProps> = ({ isOpen, on
           <div className="relative shrink-0">
             <div className="w-13 h-13 rounded-full p-[2px] bg-gradient-to-tr from-[#7928CA] via-[#EC4899] to-amber-400">
               <img
-                src={currentUser.avatar}
+                src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                 alt={currentUser.displayName}
                 className="w-full h-full rounded-full object-cover"
               />
@@ -169,7 +170,7 @@ export const ShareProfileModal: React.FC<ShareProfileModalProps> = ({ isOpen, on
                 >
                   <div className="relative">
                     <img
-                      src={conv.user.avatar}
+                      src={safeImageSrc(conv.user.avatar, DEFAULT_AVATAR_URL)}
                       alt={conv.user.displayName}
                       className="w-8 h-8 rounded-full object-cover"
                     />

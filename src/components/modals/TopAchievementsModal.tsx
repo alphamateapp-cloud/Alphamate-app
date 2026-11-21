@@ -15,6 +15,7 @@ import {
   ChevronRight,
 } from 'lucide-react';
 import { UserBadgeStrip } from '../badges/UserBadgeIcon';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 
 interface TopAchievementsModalProps {
   isOpen: boolean;
@@ -214,7 +215,7 @@ export const TopAchievementsModal: React.FC<TopAchievementsModalProps> = ({
             <div className="flex items-center gap-3 min-w-0">
               <div className="relative shrink-0">
                 <img
-                  src={currentUser.avatar}
+                  src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                   alt={currentUser.displayName}
                   className="w-12 h-12 rounded-full object-cover border-2 border-amber-400 shadow-md"
                 />

@@ -21,7 +21,18 @@
         "vipTier": { "type": "number" },
         "coins": { "type": "number" },
         "diamonds": { "type": "number" },
-        "accountStatus": { "type": "string", "enum": ["active", "deactivated", "pending_deletion", "permanently_deleted"] },
+        "accountStatus": { "type": "string", "enum": ["active", "deactivated", "pending_deletion", "permanently_deleted", "blocked", "banned", "suspended"] },
+        "isVerified": { "type": "boolean" },
+        "blueTick": { "type": "boolean" },
+        "verificationStatus": { "type": "string", "maxLength": 64 },
+        "isBlocked": { "type": "boolean" },
+        "isSuspended": { "type": "boolean" },
+        "liveDisabled": { "type": "boolean" },
+        "partyDisabled": { "type": "boolean" },
+        "moderation": { "type": "object" },
+        "restrictions": { "type": "object" },
+        "latestWarning": { "type": "object" },
+        "lastAdminAction": { "type": "object" },
         "deactivatedAt": { "type": "string", "format": "date-time" },
         "deletionRequestedAt": { "type": "string", "format": "date-time" },
         "scheduledPermanentDeletionAt": { "type": "string", "format": "date-time" },
@@ -39,6 +50,15 @@
         "lastUsernameChangeDate": { "type": "string", "format": "date-time" },
         "emailOtpVerified": { "type": "boolean" },
         "emailOtpVerifiedAt": { "type": "string", "format": "date-time" },
+        "agencyId": { "type": "string", "maxLength": 128 },
+        "agencyName": { "type": "string", "maxLength": 128 },
+        "agencyCode": { "type": "string", "maxLength": 64 },
+        "agencyTag": { "type": "string", "maxLength": 16 },
+        "hostAgencyStatus": { "type": "string", "maxLength": 32 },
+        "agencyOwnerId": { "type": "string", "maxLength": 128 },
+        "agencyOwnerName": { "type": "string", "maxLength": 128 },
+        "agencyJoinedAt": { "type": "string", "format": "date-time" },
+        "isAgencyHost": { "type": "boolean" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
@@ -55,11 +75,29 @@
         "senderAvatar": { "type": "string", "maxLength": 65000 },
         "type": {
           "type": "string",
-          "enum": ["live_on", "live_invite", "party_invite", "friend_request", "follow", "gift", "comment", "message", "like", "pk_invite", "wallet", "agency", "system"]
+          "enum": [
+            "live_on", "live_invite", "party_invite", "friend_request", "follow", "gift",
+            "comment", "message", "like", "pk_invite", "wallet", "agency", "system",
+            "admin_action", "admin_warning", "moderation", "verification",
+            "account_blocked", "account_suspended", "live_restricted",
+            "party_restricted", "access_restored"
+          ]
         },
         "category": { "type": "string", "maxLength": 64 },
         "title": { "type": "string", "maxLength": 160 },
         "message": { "type": "string", "maxLength": 600 },
+        "isAdminAction": { "type": "boolean" },
+        "actionKind": { "type": "string", "maxLength": 64 },
+        "actionLabel": { "type": "string", "maxLength": 160 },
+        "reason": { "type": "string", "maxLength": 1000 },
+        "adminName": { "type": "string", "maxLength": 128 },
+        "adminLabel": { "type": "string", "maxLength": 128 },
+        "adminMessage": { "type": "string", "maxLength": 2000 },
+        "durationLabel": { "type": "string", "maxLength": 128 },
+        "startsAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "isPermanent": { "type": "boolean" },
+        "accountAccessStatus": { "type": "string", "maxLength": 160 },
         "screen": { "type": "string", "maxLength": 64 },
         "tab": { "type": "string", "maxLength": 64 },
         "roomId": { "type": "string", "maxLength": 128 },
@@ -72,6 +110,50 @@
         "createdAtMs": { "type": "number" }
       },
       "required": ["recipientId", "senderId", "type", "title", "message", "isRead", "createdAt", "createdAtMs"]
+    },
+    "AdminActionRecord": {
+      "title": "AdminActionRecord",
+      "description": "Official Admin moderation action record synced from the Alpha Mate Admin Panel",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 64 },
+        "actionLabel": { "type": "string", "maxLength": 160 },
+        "title": { "type": "string", "maxLength": 160 },
+        "reason": { "type": "string", "maxLength": 1000 },
+        "message": { "type": "string", "maxLength": 2000 },
+        "adminName": { "type": "string", "maxLength": 128 },
+        "adminLabel": { "type": "string", "maxLength": 128 },
+        "durationLabel": { "type": "string", "maxLength": 128 },
+        "startsAt": { "type": "string", "format": "date-time" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "isPermanent": { "type": "boolean" },
+        "accountAccessStatus": { "type": "string", "maxLength": 160 },
+        "isRead": { "type": "boolean" },
+        "readAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" }
+      },
+      "required": ["action", "reason", "createdAt"]
+    },
+    "AdminWarningRecord": {
+      "title": "AdminWarningRecord",
+      "description": "Official Admin warning delivered to a user and preserved in warning history",
+      "type": "object",
+      "properties": {
+        "targetUserId": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 160 },
+        "message": { "type": "string", "maxLength": 2000 },
+        "reason": { "type": "string", "maxLength": 1000 },
+        "adminName": { "type": "string", "maxLength": 128 },
+        "adminLabel": { "type": "string", "maxLength": 128 },
+        "isRead": { "type": "boolean" },
+        "readAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" }
+      },
+      "required": ["message", "reason", "createdAt"]
     },
     "GiftTransaction": {
       "title": "GiftTransaction",
@@ -575,8 +657,11 @@
         "agencyTag": { "type": "string", "maxLength": 16 },
         "tagColor": { "type": "string", "maxLength": 32 },
         "badge": { "type": "string", "maxLength": 80 },
+        "logo": { "type": "string", "maxLength": 2048 },
         "ownerUserId": { "type": "string", "maxLength": 128 },
         "ownerName": { "type": "string", "maxLength": 128 },
+        "ownerUniqueId": { "type": "string", "maxLength": 64 },
+        "ownerAvatar": { "type": "string", "maxLength": 2048 },
         "agencyBalance": { "type": "number" },
         "isPinSet": { "type": "boolean" },
         "whatsappNumber": { "type": "string", "maxLength": 64 },
@@ -586,7 +671,8 @@
         "slogan": { "type": "string", "maxLength": 300 },
         "isOfficial": { "type": "boolean" },
         "activeHostsCount": { "type": "number" },
-        "status": { "type": "string", "enum": ["active", "suspended"] },
+        "totalHosts": { "type": "number" },
+        "status": { "type": "string", "enum": ["active", "Active", "suspended", "Suspended", "hold", "Hold"] },
         "createdAt": { "type": "string", "format": "date-time" },
         "createdAtMs": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -606,6 +692,50 @@
         "createdAt",
         "createdAtMs",
         "updatedAt"
+      ]
+    },
+    "HostAgencyRequest": {
+      "title": "HostAgencyRequest",
+      "description": "Creator application to join an officially activated Host Agency, synchronized with Super Admin",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "applicantUid": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "userDocId": { "type": "string", "maxLength": 128 },
+        "uniqueId": { "type": "string", "maxLength": 64 },
+        "displayName": { "type": "string", "maxLength": 128 },
+        "username": { "type": "string", "maxLength": 64 },
+        "avatar": { "type": "string", "maxLength": 2048 },
+        "level": { "type": "number" },
+        "agencyId": { "type": "string", "maxLength": 128 },
+        "agencyName": { "type": "string", "maxLength": 128 },
+        "agencyCode": { "type": "string", "maxLength": 64 },
+        "agencyTag": { "type": "string", "maxLength": 16 },
+        "agencyOwnerId": { "type": "string", "maxLength": 128 },
+        "agencyType": { "type": "string", "enum": ["Host Agency"] },
+        "whatsapp": { "type": "string", "maxLength": 64 },
+        "experience": { "type": "string", "maxLength": 1000 },
+        "expectedHours": { "type": "number" },
+        "status": { "type": "string", "enum": ["Pending", "Approved", "Rejected", "pending", "approved", "rejected"] },
+        "rejectionReason": { "type": "string", "maxLength": 500 },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "reviewedBy": { "type": "string", "maxLength": 128 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "applicantUid",
+        "userId",
+        "userDocId",
+        "agencyId",
+        "agencyName",
+        "agencyType",
+        "status",
+        "createdAt",
+        "createdAtMs"
       ]
     }
   },
@@ -632,7 +762,19 @@
     },
     "/users/{userId}/notifications/{notificationId}": {
       "schema": "Notification",
-      "description": "Real-time user notifications inbox scoped per recipient UID"
+      "description": "Real-time user notifications inbox scoped per recipient UID (including Official Admin Action notifications)"
+    },
+    "/users/{userId}/adminActions/{actionId}": {
+      "schema": "AdminActionRecord",
+      "description": "Per-user Official Admin moderation action records scoped to the affected user UID"
+    },
+    "/users/{userId}/warnings/{warningId}": {
+      "schema": "AdminWarningRecord",
+      "description": "Per-user Official Admin warnings history scoped to the affected user UID"
+    },
+    "/adminActions/{actionId}": {
+      "schema": "AdminActionRecord",
+      "description": "Top-level Official Admin moderation action audit log readable only by Official Admin and the affected target user"
     },
     "/users/{userId}/blockedUsers/{blockedId}": {
       "schema": "BlockedUser",
@@ -673,6 +815,10 @@
     "/agencies/{agencyId}": {
       "schema": "OfficialAgency",
       "description": "Admin-approved Official Coin Seller and Host Agencies"
+    },
+    "/agency_requests/{requestId}": {
+      "schema": "HostAgencyRequest",
+      "description": "Host Agency join applications submitted by users and approved or rejected by Super Admin"
     },
     "/leaderboardMonths/{monthKey}/entries/{userId}": {
       "schema": "LeaderboardEntry",

@@ -7,7 +7,7 @@ export const PKBattleScreen: React.FC = () => {
   const [isNotified, setIsNotified] = React.useState(false);
 
   return (
-    <div className="relative w-full h-full h-[100dvh] max-h-[100dvh] bg-gradient-to-b from-[#190A2E] via-[#0E061B] to-[#07030D] text-white flex flex-col justify-between overflow-hidden select-none">
+    <div className="relative w-full h-full bg-gradient-to-b from-[#190A2E] via-[#0E061B] to-[#07030D] text-white flex flex-col justify-between overflow-hidden select-none">
       {/* Top Bar */}
       <div className="relative z-30 pt-3 pb-3 px-4 flex items-center justify-between bg-black/40 backdrop-blur-md border-b border-[#A855F7]/20">
         <button

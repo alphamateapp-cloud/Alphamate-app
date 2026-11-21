@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { User } from '../../types';
 import { VipAvatarFrame } from '../brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../brand/LevelBadgeIcon';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 import {
   Trophy,
   Crown,
@@ -136,7 +137,7 @@ export const TopGiversLeaderboard: React.FC<TopGiversLeaderboardProps> = ({
 
                   {/* Avatar */}
                   <img
-                    src={giver.user.avatar}
+                    src={safeImageSrc(giver.user.avatar, DEFAULT_AVATAR_URL)}
                     alt={giver.user.displayName}
                     className="w-4 h-4 rounded-full object-cover shrink-0"
                   />
@@ -355,7 +356,7 @@ export const TopGiversLeaderboard: React.FC<TopGiversLeaderboardProps> = ({
                           </span>
                           <div className="relative shrink-0">
                             <img
-                              src={giver.user.avatar}
+                              src={safeImageSrc(giver.user.avatar, DEFAULT_AVATAR_URL)}
                               alt={giver.user.displayName}
                               className="w-9 h-9 rounded-full object-cover border border-white/10"
                             />
@@ -401,7 +402,7 @@ export const TopGiversLeaderboard: React.FC<TopGiversLeaderboardProps> = ({
               <div className="flex items-center justify-between p-2.5 rounded-2xl bg-gradient-to-r from-[#22123F] via-[#2A164D] to-[#1E0F38] border border-[#A855F7]/30 mb-2">
                 <div className="flex items-center gap-2.5">
                   <img
-                    src={currentUser.avatar}
+                    src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                     alt={currentUser.displayName}
                     className="w-8 h-8 rounded-full object-cover border border-amber-400"
                   />

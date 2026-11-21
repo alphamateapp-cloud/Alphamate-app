@@ -4,13 +4,14 @@ import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRe
 import { User } from '../types';
 import { searchAllRealUsers } from '../services/userDirectoryService';
 import { UserBadgeStrip } from '../components/badges/UserBadgeIcon';
+import { VerificationTicks } from '../components/badges/VerificationTicks';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   ArrowLeft,
   Search,
   UserPlus,
   UserCheck,
   MessageCircle,
-  ShieldCheck,
   Crown,
   Users,
   X,
@@ -221,7 +222,7 @@ export const SearchScreen: React.FC = () => {
                   <div className="flex items-center gap-3 min-w-0 flex-1">
                     <div className="relative shrink-0">
                       <img
-                        src={user.avatar}
+                        src={safeImageSrc(user.avatar, DEFAULT_AVATAR_URL)}
                         alt={user.displayName}
                         referrerPolicy="no-referrer"
                         className="w-12 h-12 rounded-full object-cover border border-[#A855F7]/50 bg-[#1F153B]"
@@ -238,9 +239,11 @@ export const SearchScreen: React.FC = () => {
                         <span className="text-xs sm:text-sm font-black text-white truncate max-w-[140px]">
                           {user.displayName}
                         </span>
-                        {user.isVerified && (
-                          <ShieldCheck className="w-3.5 h-3.5 text-[#A855F7] shrink-0" />
-                        )}
+                        <VerificationTicks
+                          isAccountVerified={Boolean(user.isAccountVerified || user.greenTick)}
+                          isBlueTickVerified={Boolean(user.isVerified)}
+                          size="sm"
+                        />
                         {user.vipTier > 0 && (
                           <span className="px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[9px] font-black border border-amber-500/30 flex items-center gap-0.5 shrink-0">
                             <Crown className="w-2.5 h-2.5" />

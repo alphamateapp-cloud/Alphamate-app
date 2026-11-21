@@ -2,6 +2,7 @@ import React from 'react';
 import { useApp } from '../../context/AppContext';
 import { AlphaMateLogo } from '../brand/AlphaMateLogo';
 import { Search, Bell } from 'lucide-react';
+import { PWAInstallButton } from '../common/PWAInstallButton';
 
 interface TopBarProps {
   onSearchClick?: () => void;
@@ -17,7 +18,7 @@ export const TopBar: React.FC<TopBarProps> = ({ onSearchClick, onNotificationsCl
   } = useApp();
 
   return (
-    <header className="sticky top-0 z-30 w-full bg-gradient-to-b from-[#09070F]/95 via-[#09070F]/60 to-transparent px-3.5 sm:px-4 pt-2 pb-1.5 flex items-center justify-between pointer-events-auto">
+    <header className="sticky top-0 z-30 w-full bg-gradient-to-b from-[#09070F]/95 via-[#09070F]/60 to-transparent px-3 sm:px-4 pt-2 pb-1.5 flex items-center justify-between gap-2 min-w-0 pointer-events-auto">
       {/* Zone 1: Alpha Mate Branding */}
       <div
         onClick={() => {
@@ -34,8 +35,9 @@ export const TopBar: React.FC<TopBarProps> = ({ onSearchClick, onNotificationsCl
         />
       </div>
 
-      {/* Zone 2: Action Icons (Search & Notification Bell) */}
+      {/* Zone 2: Action Icons (Install PWA, Search & Notification Bell) */}
       <div className="flex items-center gap-2 shrink-0">
+        <PWAInstallButton variant="compact" />
         {/* Search Icon */}
         <button
           onClick={onSearchClick || (() => setCurrentScreen('search'))}

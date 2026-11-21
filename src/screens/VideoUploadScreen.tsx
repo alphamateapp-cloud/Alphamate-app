@@ -4,6 +4,7 @@ import { p2pStreamingEngine } from '../services/webrtcService';
 import { compressImage } from '../utils/imageCompressor';
 import { playMusicSnippet, stopMusicSnippet } from '../utils/storeAudio';
 import { publishReel, MAX_VIDEO_SIZE_BYTES } from '../services/reelsService';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   UploadCloud,
   Film,
@@ -422,6 +423,12 @@ export const VideoUploadScreen: React.FC = () => {
             level: currentUser.level,
             vipTier: currentUser.vipTier,
             isVerified: currentUser.isVerified,
+            isAccountVerified: Boolean(
+              currentUser.isAccountVerified ||
+                currentUser.greenTick ||
+                currentUser.emailOtpVerified ||
+                currentUser.emailVerified
+            ),
           },
           onProgress: (pct) => setUploadProgress(pct),
         });
@@ -677,9 +684,9 @@ export const VideoUploadScreen: React.FC = () => {
               }`}
             >
               {/* If Photo is attached as background */}
-              {postAttachedPhoto && (
+              {safeImageSrc(postAttachedPhoto) && (
                 <div className="absolute inset-0 z-0">
-                  <img src={postAttachedPhoto} alt="Attached" className="w-full h-full object-cover" />
+                  <img src={safeImageSrc(postAttachedPhoto)} alt="Attached" className="w-full h-full object-cover" />
                   <div className="absolute inset-0 bg-black/55 backdrop-blur-[1px]" />
                 </div>
               )}
@@ -688,7 +695,7 @@ export const VideoUploadScreen: React.FC = () => {
               <div className="relative z-10 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <img
-                    src={currentUser.avatar}
+                    src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                     alt=""
                     className="w-8 h-8 rounded-full object-cover border-2 border-white/40 shadow-sm"
                   />

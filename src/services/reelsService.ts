@@ -140,6 +140,7 @@ export interface Reel {
     level?: number;
     vipTier?: number;
     isVerified?: boolean;
+    isAccountVerified?: boolean;
   };
   isLiked?: boolean;
 }
@@ -161,6 +162,7 @@ export interface UploadReelInput {
     level?: number;
     vipTier?: number;
     isVerified?: boolean;
+    isAccountVerified?: boolean;
   };
   onProgress?: (percent: number) => void;
 }
@@ -733,6 +735,7 @@ export async function saveReelMetadataToFirestore(
       level: Number(input.creator.level ?? 0),
       vipTier: Number(input.creator.vipTier ?? 0),
       isVerified: !!input.creator.isVerified,
+      isAccountVerified: !!input.creator.isAccountVerified,
     },
   };
 

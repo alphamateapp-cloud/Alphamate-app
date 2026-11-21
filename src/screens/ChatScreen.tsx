@@ -964,7 +964,7 @@ export const ChatScreen: React.FC = () => {
 
     return (
       <div className="relative flex h-full flex-1 min-h-0 w-full flex-col overflow-hidden bg-[#090510] text-white">
-        <header className="shrink-0 border-b border-purple-500/20 bg-[#130922]/95 px-3 pb-2.5 pt-[max(12px,env(safe-area-inset-top))]">
+        <header className="shrink-0 border-b border-purple-500/20 bg-[#130922]/95 px-3 py-2.5">
           <div className="flex items-center gap-2.5">
             <button
               type="button"
@@ -1371,7 +1371,7 @@ export const ChatScreen: React.FC = () => {
             void send();
           }}
           onClick={() => messageInputRef.current?.focus()}
-          className="flex shrink-0 items-center gap-2 border-t border-purple-400/25 bg-[#10091d] px-3 py-2.5 pb-[max(12px,env(safe-area-inset-bottom))]"
+          className="flex shrink-0 items-center gap-2 border-t border-purple-400/25 bg-[#10091d] px-3 py-2.5 pb-3"
         >
           <button
             type="button"
@@ -1449,7 +1449,7 @@ export const ChatScreen: React.FC = () => {
 
   return (
     <div className="min-h-full bg-[#090510] pb-28 text-white">
-      <header className="sticky top-0 z-10 border-b border-purple-500/15 bg-[#10091d]/95 px-4 pb-3 pt-[max(16px,env(safe-area-inset-top))] backdrop-blur-xl">
+      <header className="sticky top-0 z-10 border-b border-purple-500/15 bg-[#10091d]/95 px-4 pb-3 pt-3.5 backdrop-blur-xl">
         <div className="mb-4 flex items-center justify-between">
           <div>
             <h1 className="text-2xl font-black tracking-tight">Chats</h1>
@@ -1813,7 +1813,7 @@ export const ChatScreen: React.FC = () => {
         <div className="fixed inset-0 z-30 flex items-end bg-black/70" onClick={() => setShowNew(false)}>
           <div
             onClick={(e) => e.stopPropagation()}
-            className="flex max-h-[82dvh] w-full flex-col rounded-t-3xl border border-purple-400/30 bg-[#170d26] p-5 pb-[max(24px,env(safe-area-inset-bottom))]"
+            className="flex max-h-[82dvh] w-full flex-col rounded-t-3xl border border-purple-400/30 bg-[#170d26] p-5 pb-[max(24px,var(--app-safe-bottom,0px))]"
           >
             <div className="mb-3 flex items-center justify-between shrink-0">
               <div>
@@ -1897,7 +1897,7 @@ export const ChatScreen: React.FC = () => {
         <div className="fixed inset-0 z-40 flex items-end bg-black/70" onClick={() => setShowGroup(false)}>
           <div
             onClick={(e) => e.stopPropagation()}
-            className="max-h-[85dvh] w-full overflow-y-auto rounded-t-3xl border border-purple-400/30 bg-[#170d26] p-5 pb-[max(24px,env(safe-area-inset-bottom))]"
+            className="max-h-[85dvh] w-full overflow-y-auto rounded-t-3xl border border-purple-400/30 bg-[#170d26] p-5 pb-[max(24px,var(--app-safe-bottom,0px))]"
           >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-lg font-black">Create group</h2>

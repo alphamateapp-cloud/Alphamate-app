@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { PullToRefresh } from '../components/common/PullToRefresh';
+import { safeImageSrc } from '../utils/imageHd';
 import {
   ArrowLeft,
   Bell,
@@ -16,9 +17,15 @@ import {
   Heart,
   Users,
   ShieldCheck,
+  ShieldBan,
+  AlertTriangle,
+  CheckCircle2,
+  BadgeCheck,
+  Clock,
   DollarSign,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
 } from 'lucide-react';
 import {
   NOTIFICATION_CATEGORY_META,
@@ -26,7 +33,7 @@ import {
 } from '../services/pushNotificationService';
 import { NotificationCategoryKey, NotificationItem } from '../types';
 
-type FeedFilter = 'all' | 'live_party' | 'gifts' | 'social' | 'messages' | 'system';
+type FeedFilter = 'all' | 'admin' | 'live_party' | 'gifts' | 'social' | 'messages' | 'system';
 
 export const NotificationsScreen: React.FC = () => {
   const {
@@ -46,6 +53,7 @@ export const NotificationsScreen: React.FC = () => {
     partyRooms,
     openPartyRoom,
     refreshScope,
+    openAdminNotificationDetails,
   } = useApp();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
@@ -54,8 +62,43 @@ export const NotificationsScreen: React.FC = () => {
     notificationPreferences.enabled
   );
 
-  const getIcon = (type: string) => {
+  const getIcon = (type: string, actionKind?: string) => {
+    if (actionKind === 'account_blocked' || actionKind === 'live_suspended' || actionKind === 'party_restricted') {
+      return <ShieldBan className="w-4 h-4 text-rose-400" />;
+    }
+    if (actionKind === 'account_suspended' || actionKind === 'admin_warning') {
+      return <AlertTriangle className="w-4 h-4 text-amber-400" />;
+    }
+    if (
+      actionKind === 'account_unblocked' ||
+      actionKind === 'account_restored' ||
+      actionKind === 'live_restored' ||
+      actionKind === 'party_restored'
+    ) {
+      return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
+    }
+    if (
+      actionKind === 'verification_granted' ||
+      actionKind === 'verification_removed' ||
+      actionKind === 'verification_updated'
+    ) {
+      return <BadgeCheck className="w-4 h-4 text-sky-400" />;
+    }
     switch (type) {
+      case 'account_blocked':
+      case 'live_restricted':
+      case 'party_restricted':
+        return <ShieldBan className="w-4 h-4 text-rose-400" />;
+      case 'account_suspended':
+      case 'admin_warning':
+        return <AlertTriangle className="w-4 h-4 text-amber-400" />;
+      case 'access_restored':
+        return <CheckCircle2 className="w-4 h-4 text-emerald-400" />;
+      case 'verification':
+        return <BadgeCheck className="w-4 h-4 text-sky-400" />;
+      case 'admin_action':
+      case 'moderation':
+        return <ShieldCheck className="w-4 h-4 text-[#C084FC]" />;
       case 'live_on':
         return <Radio className="w-4 h-4 text-[#EC4899]" />;
       case 'party_invite':
@@ -127,6 +170,10 @@ export const NotificationsScreen: React.FC = () => {
   };
 
   const handleNotificationTap = (n: NotificationItem) => {
+    if (n.isAdminAction) {
+      openAdminNotificationDetails(n);
+      return;
+    }
     markNotificationRead(n.id);
 
     if (n.streamId) {
@@ -187,6 +234,7 @@ export const NotificationsScreen: React.FC = () => {
 
   const filteredNotifications = notifications.filter((n) => {
     if (activeFilter === 'all') return true;
+    if (activeFilter === 'admin') return Boolean(n.isAdminAction);
     const cat = getCategoryForNotificationType(n.type);
     if (activeFilter === 'live_party') {
       return cat === 'liveOn' || cat === 'partyInvites' || cat === 'pkBattles';
@@ -379,6 +427,7 @@ export const NotificationsScreen: React.FC = () => {
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-none">
           {[
             { id: 'all', label: 'All' },
+            { id: 'admin', label: 'Official Admin' },
             { id: 'live_party', label: 'Live & Party' },
             { id: 'gifts', label: 'Gifts 💎' },
             { id: 'social', label: 'Friends, Comments & Likes' },
@@ -410,52 +459,144 @@ export const NotificationsScreen: React.FC = () => {
               <Bell className="w-8 h-8 text-zinc-500 mx-auto" />
               <p className="text-xs font-bold text-zinc-300">No notifications in this category yet</p>
               <p className="text-[11px] text-zinc-500">
-                Live broadcasts, party invites, gifts, friend requests, messages, likes and comments appear here in real time.
+                Official Admin notices, Live broadcasts, party invites, gifts, friend requests, messages, likes and comments appear here in real time.
               </p>
             </div>
           ) : (
-            filteredNotifications.map((n) => (
-              <div
-                key={n.id}
-                onClick={() => handleNotificationTap(n)}
-                className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
-                  n.isRead
-                    ? 'bg-[#120A22] border-white/5 opacity-75 hover:opacity-100'
-                    : 'bg-[#180E2E] border-[#A855F7]/35 shadow-md'
-                }`}
-              >
-                <div className="flex items-start gap-3">
-                  {n.senderAvatar ? (
-                    <div className="relative shrink-0">
-                      <img
-                        src={n.senderAvatar}
-                        alt={n.senderName || 'User'}
-                        className="w-10 h-10 rounded-full object-cover border border-[#A855F7]/40"
-                      />
-                      <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-[#1B1033] border border-white/15 flex items-center justify-center">
-                        {getIcon(n.type)}
+            filteredNotifications.map((n) => {
+              const isAdmin = Boolean(n.isAdminAction);
+              const isWarning = n.actionKind === 'admin_warning' || n.type === 'admin_warning';
+              const isRestored =
+                n.type === 'access_restored' ||
+                n.actionKind === 'live_restored' ||
+                n.actionKind === 'party_restored' ||
+                n.actionKind === 'account_restored' ||
+                n.actionKind === 'account_unblocked';
+              const isSevere =
+                n.actionKind === 'account_blocked' ||
+                n.actionKind === 'account_suspended' ||
+                n.actionKind === 'live_suspended' ||
+                n.actionKind === 'party_restricted';
+
+              const cardStyle = isAdmin
+                ? isSevere
+                  ? n.isRead
+                    ? 'bg-[#1B0D18] border-rose-500/25 opacity-85 hover:opacity-100'
+                    : 'bg-[#220E1D] border-rose-500/50 shadow-lg shadow-rose-950/30'
+                  : isWarning
+                  ? n.isRead
+                    ? 'bg-[#1B140C] border-amber-500/25 opacity-85 hover:opacity-100'
+                    : 'bg-[#24190D] border-amber-400/50 shadow-lg shadow-amber-950/30'
+                  : isRestored
+                  ? n.isRead
+                    ? 'bg-[#0E1B16] border-emerald-500/25 opacity-85 hover:opacity-100'
+                    : 'bg-[#10241C] border-emerald-400/45 shadow-lg shadow-emerald-950/30'
+                  : n.isRead
+                  ? 'bg-[#141026] border-sky-500/25 opacity-85 hover:opacity-100'
+                  : 'bg-[#181330] border-sky-400/45 shadow-lg'
+                : n.isRead
+                ? 'bg-[#120A22] border-white/5 opacity-75 hover:opacity-100'
+                : 'bg-[#180E2E] border-[#A855F7]/35 shadow-md';
+
+              return (
+                <div
+                  key={n.id}
+                  onClick={() => handleNotificationTap(n)}
+                  className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${cardStyle}`}
+                >
+                  <div className="flex items-start gap-3">
+                    {safeImageSrc(n.senderAvatar) && !isAdmin ? (
+                      <div className="relative shrink-0">
+                        <img
+                          src={safeImageSrc(n.senderAvatar)}
+                          alt={n.senderName || 'User'}
+                          className="w-10 h-10 rounded-full object-cover border border-[#A855F7]/40"
+                        />
+                        <div className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-[#1B1033] border border-white/15 flex items-center justify-center">
+                          {getIcon(n.type, n.actionKind)}
+                        </div>
                       </div>
-                    </div>
-                  ) : (
-                    <div className="w-10 h-10 rounded-xl bg-[#231542] flex items-center justify-center shrink-0">
-                      {getIcon(n.type)}
-                    </div>
-                  )}
+                    ) : (
+                      <div
+                        className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 ${
+                          isAdmin
+                            ? isSevere
+                              ? 'bg-rose-500/20 border border-rose-400/35'
+                              : isWarning
+                              ? 'bg-amber-500/20 border border-amber-400/35'
+                              : isRestored
+                              ? 'bg-emerald-500/20 border border-emerald-400/35'
+                              : 'bg-sky-500/20 border border-sky-400/35'
+                            : 'bg-[#231542]'
+                        }`}
+                      >
+                        {getIcon(n.type, n.actionKind)}
+                      </div>
+                    )}
 
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className="text-xs font-bold text-white truncate">{n.title}</h4>
-                      <span className="text-[10px] text-zinc-500 shrink-0">{n.timestamp}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          {isAdmin && (
+                            <span
+                              className={`px-1.5 py-0.5 rounded-md text-[9px] font-black uppercase tracking-wider shrink-0 ${
+                                isSevere
+                                  ? 'bg-rose-500/25 text-rose-200'
+                                  : isWarning
+                                  ? 'bg-amber-500/25 text-amber-200'
+                                  : isRestored
+                                  ? 'bg-emerald-500/25 text-emerald-200'
+                                  : 'bg-sky-500/25 text-sky-200'
+                              }`}
+                            >
+                              {isWarning ? 'Warning' : 'Official Admin'}
+                            </span>
+                          )}
+                          <h4 className="text-xs font-bold text-white truncate">
+                            {n.actionTitle || n.title}
+                          </h4>
+                        </div>
+                        <span className="text-[10px] text-zinc-400 shrink-0">{n.timestamp}</span>
+                      </div>
+
+                      <p className="text-xs text-zinc-200 mt-1 leading-snug line-clamp-2">
+                        {n.message}
+                      </p>
+
+                      {isAdmin && (
+                        <div className="mt-2 pt-2 border-t border-white/10 space-y-1 text-[10.5px]">
+                          {n.reason && (
+                            <p className="text-zinc-300 truncate">
+                              <span className="text-zinc-400 font-semibold">Reason: </span>
+                              {n.reason}
+                            </p>
+                          )}
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-zinc-400">
+                            <span className="truncate">
+                              By <span className="text-zinc-200 font-semibold">{n.adminLabel || n.adminName || 'Alpha Mate Admin'}</span>
+                            </span>
+                            {n.duration && (
+                              <span className="inline-flex items-center gap-1 text-amber-300 font-semibold">
+                                <Clock className="w-3 h-3" />
+                                {n.duration}
+                              </span>
+                            )}
+                            <span className="inline-flex items-center gap-0.5 text-[#C084FC] font-bold ml-auto">
+                              <span>Full Details</span>
+                              <ChevronRight className="w-3 h-3" />
+                            </span>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <p className="text-xs text-zinc-300 mt-1 leading-snug">{n.message}</p>
+
+                    {!n.isRead && (
+                      <span className="w-2 h-2 rounded-full bg-[#EC4899] shrink-0 mt-1.5" />
+                    )}
                   </div>
-
-                  {!n.isRead && (
-                    <span className="w-2 h-2 rounded-full bg-[#EC4899] shrink-0 mt-1.5" />
-                  )}
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>

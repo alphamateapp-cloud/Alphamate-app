@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { PullToRefresh } from '../components/common/PullToRefresh';
 import { VideoPost, Gift, FriendStory } from '../types';
@@ -6,6 +6,8 @@ import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
 import { CreateStoryModal } from '../components/story/CreateStoryModal';
 import { StoryViewerModal } from '../components/story/StoryViewerModal';
+import { VerificationTicks } from '../components/badges/VerificationTicks';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   Plus,
   Heart,
@@ -30,7 +32,6 @@ import {
   ChevronUp,
   ChevronDown,
   Music,
-  ShieldCheck,
   Crown,
   Edit3,
   Trash2,
@@ -74,12 +75,15 @@ export const MomentsScreen: React.FC = () => {
 
   // Active top navigation tab: FOR YOU | FOLLOWING | TRENDING | SAVED
   const [activeTab, setActiveTab] = useState<'FOR YOU' | 'FOLLOWING' | 'TRENDING' | 'SAVED'>('FOR YOU');
-  const [isMuted, setIsMuted] = useState(true);
+  const [isMuted, setIsMuted] = useState(false);
 
   // Saved Videos/Posts state (persisted in session)
   const [savedVideoIds, setSavedVideoIds] = useState<Record<string, boolean>>({});
 
-  // Video playback states
+  // Strictly track the single currently visible moment so only its video & audio can play
+  const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
+
+  // Video playback states (manual pause overrides per video)
   const [isPlayingMap, setIsPlayingMap] = useState<Record<string, boolean>>({});
   const [showPlayPauseRipple, setShowPlayPauseRipple] = useState<{ id: string; playing: boolean } | null>(null);
 
@@ -108,6 +112,10 @@ export const MomentsScreen: React.FC = () => {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const containerRef = useRef<HTMLDivElement>(null);
+  const slideRefsMap = useRef<Map<string, HTMLDivElement>>(new Map());
+  const videoRefsMap = useRef<Map<string, HTMLVideoElement>>(new Map());
+  const viewedReelIdsRef = useRef<Set<string>>(new Set());
+  const scrollRafRef = useRef<number | null>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -115,19 +123,205 @@ export const MomentsScreen: React.FC = () => {
   };
 
   // Filter moments according to active tab
-  const filteredVideos = videos.filter((vid) => {
-    if (activeTab === 'SAVED') {
-      return !!savedVideoIds[vid.id];
+  const filteredVideos = useMemo(
+    () =>
+      videos.filter((vid) => {
+        if (activeTab === 'SAVED') {
+          return !!savedVideoIds[vid.id];
+        }
+        if (activeTab === 'TRENDING') {
+          return (vid.likes && vid.likes > 20000) || vid.feedCategory === 'Trending';
+        }
+        if (activeTab === 'FOLLOWING') {
+          return followingUserIds.includes(vid.user.id) || vid.feedCategory === 'Following';
+        }
+        // FOR YOU - shows all
+        return true;
+      }),
+    [videos, activeTab, savedVideoIds, followingUserIds]
+  );
+
+  const filteredVideoIdsKey = useMemo(
+    () => filteredVideos.map((v) => v.id).join('|'),
+    [filteredVideos]
+  );
+
+  // Ensure activeVideoId always points to a valid visible slide in the active tab
+  useEffect(() => {
+    if (filteredVideos.length === 0) {
+      setActiveVideoId(null);
+      return;
     }
-    if (activeTab === 'TRENDING') {
-      return (vid.likes && vid.likes > 20000) || vid.feedCategory === 'Trending';
+    setActiveVideoId((prev) => {
+      if (prev && filteredVideos.some((v) => v.id === prev)) return prev;
+      return filteredVideos[0].id;
+    });
+  }, [filteredVideoIdsKey, filteredVideos]);
+
+  // Reset scroll position to the first item when switching feed tabs
+  useEffect(() => {
+    if (containerRef.current) {
+      containerRef.current.scrollTop = 0;
     }
-    if (activeTab === 'FOLLOWING') {
-      return followingUserIds.includes(vid.user.id) || vid.feedCategory === 'Following';
+    setActiveVideoId(filteredVideos[0]?.id ?? null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // Observe which slide occupies the viewport so only that single video is active
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root || filteredVideos.length === 0) return;
+
+    if (typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        let bestId: string | null = null;
+        let bestRatio = 0;
+        entries.forEach((entry) => {
+          if (entry.isIntersecting && entry.intersectionRatio >= 0.55 && entry.intersectionRatio > bestRatio) {
+            const id = (entry.target as HTMLElement).dataset.momentId || null;
+            if (id) {
+              bestId = id;
+              bestRatio = entry.intersectionRatio;
+            }
+          }
+        });
+        if (bestId) {
+          setActiveVideoId(bestId);
+        }
+      },
+      {
+        root,
+        threshold: [0.55, 0.75, 0.9],
+      }
+    );
+
+    slideRefsMap.current.forEach((el) => {
+      observer.observe(el);
+    });
+
+    return () => observer.disconnect();
+  }, [filteredVideoIdsKey]);
+
+  // Sync activeVideoId from scroll snap offset (handles rapid swipes & chevron jumps reliably)
+  const handleFeedScroll = () => {
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = window.requestAnimationFrame(() => {
+      scrollRafRef.current = null;
+      const root = containerRef.current;
+      if (!root || filteredVideos.length === 0) return;
+      const slideHeight = root.clientHeight;
+      if (slideHeight <= 0) return;
+      const idx = Math.min(
+        filteredVideos.length - 1,
+        Math.max(0, Math.round(root.scrollTop / slideHeight))
+      );
+      const target = filteredVideos[idx];
+      if (target && target.id !== activeVideoId) {
+        setActiveVideoId(target.id);
+      }
+    });
+  };
+
+  // Clear any manual pause override whenever the user scrolls to a different video
+  useEffect(() => {
+    if (!activeVideoId) return;
+    setIsPlayingMap((prev) => {
+      if (prev[activeVideoId] === false) {
+        const next = { ...prev };
+        delete next[activeVideoId];
+        return next;
+      }
+      return prev;
+    });
+  }, [activeVideoId]);
+
+  // Strictly enforce single-video audio/playback isolation across the entire feed
+  useEffect(() => {
+    const isCoveredByStory = Boolean(viewingStoryFriend);
+    const isPageHidden = typeof document !== 'undefined' && document.hidden;
+
+    // Pass 1: Immediately mute and pause ALL non-active videos so audio can never overlap/mix
+    videoRefsMap.current.forEach((el, id) => {
+      if (id !== activeVideoId) {
+        el.muted = true;
+        if (!el.paused) {
+          el.pause();
+        }
+        if (el.currentTime > 0) {
+          try {
+            el.currentTime = 0;
+          } catch {
+            // ignore seek error before metadata loads
+          }
+        }
+      }
+    });
+
+    // Pass 2: Control ONLY the single active video
+    if (!activeVideoId) return;
+    const activeEl = videoRefsMap.current.get(activeVideoId);
+    if (!activeEl) return;
+
+    const shouldPlay =
+      !isPageHidden && !isCoveredByStory && isPlayingMap[activeVideoId] !== false;
+
+    if (!shouldPlay) {
+      activeEl.muted = true;
+      if (!activeEl.paused) {
+        activeEl.pause();
+      }
+      return;
     }
-    // FOR YOU - shows all
-    return true;
-  });
+
+    activeEl.muted = isMuted;
+    activeEl.volume = 1;
+    const playPromise = activeEl.play();
+    if (playPromise && typeof playPromise.catch === 'function') {
+      playPromise.catch(() => {
+        // Browser autoplay policy blocked unmuted autoplay before first user gesture:
+        // fall back cleanly to muted playback for ONLY this active video
+        if (!isMuted && videoRefsMap.current.get(activeVideoId) === activeEl) {
+          activeEl.muted = true;
+          setIsMuted(true);
+          activeEl.play().catch(() => {});
+        }
+      });
+    }
+  }, [activeVideoId, isMuted, isPlayingMap, viewingStoryFriend, filteredVideoIdsKey]);
+
+  // Pause and mute all videos when app goes to background or when leaving MomentsScreen
+  useEffect(() => {
+    const pauseAllVideos = () => {
+      videoRefsMap.current.forEach((el) => {
+        el.muted = true;
+        if (!el.paused) el.pause();
+      });
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        pauseAllVideos();
+      } else if (activeVideoId && !viewingStoryFriend && isPlayingMap[activeVideoId] !== false) {
+        const activeEl = videoRefsMap.current.get(activeVideoId);
+        if (activeEl) {
+          activeEl.muted = isMuted;
+          activeEl.play().catch(() => {});
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      if (scrollRafRef.current !== null) {
+        window.cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
+      }
+      pauseAllVideos();
+    };
+  }, [activeVideoId, isMuted, isPlayingMap, viewingStoryFriend]);
 
   // Real-time Firestore comments listener when drawer is open
   useEffect(() => {
@@ -299,21 +493,21 @@ export const MomentsScreen: React.FC = () => {
   };
 
   return (
-    <div className="relative w-full h-[calc(100vh-64px)] bg-black text-white overflow-hidden select-none">
+    <div className="relative w-full h-full bg-black text-white overflow-hidden select-none">
       {/* Toast Notification */}
       {toastMessage && (
-        <div className="fixed top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#1A1033]/95 border border-[#A855F7]/40 shadow-2xl backdrop-blur-md text-xs font-semibold text-white flex items-center gap-2 animate-bounce pointer-events-none">
-          <Sparkles className="w-3.5 h-3.5 text-[#EC4899]" />
-          <span>{toastMessage}</span>
+        <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#1A1033]/95 border border-[#A855F7]/40 shadow-2xl backdrop-blur-md text-xs font-semibold text-white flex items-center gap-2 animate-bounce pointer-events-none max-w-[calc(100%-2rem)]">
+          <Sparkles className="w-3.5 h-3.5 text-[#EC4899] shrink-0" />
+          <span className="truncate">{toastMessage}</span>
         </div>
       )}
 
       {/* =========================================================================
           TOP BAR OVERLAY: Transparent Branding, Tabs & Upload Button
           ========================================================================= */}
-      <div className="absolute top-0 inset-x-0 z-30 pointer-events-auto bg-gradient-to-b from-black/85 via-black/40 to-transparent px-3 pt-3 pb-6 flex items-center justify-between">
+      <div className="absolute top-0 inset-x-0 z-30 pointer-events-auto bg-gradient-to-b from-black/85 via-black/40 to-transparent px-2.5 sm:px-3 pt-2.5 pb-6 flex items-center justify-between gap-2">
         {/* Left: Alpha Mate Logo Emblem & Name */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 shrink-0">
           <img
             src="/alpha-mate-logo-emblem.png"
             alt="Alpha Mate"
@@ -325,7 +519,7 @@ export const MomentsScreen: React.FC = () => {
         </div>
 
         {/* Center: Transparent Navigation Tabs */}
-        <div className="flex items-center gap-3 sm:gap-5">
+        <div className="flex items-center justify-center gap-2.5 sm:gap-5 min-w-0 flex-1 overflow-x-auto scrollbar-none px-1">
           {(['FOR YOU', 'FOLLOWING', 'TRENDING', 'SAVED'] as const).map((tab) => {
             const isActive = activeTab === tab;
             const savedCount = Object.values(savedVideoIds).filter(Boolean).length;
@@ -334,7 +528,7 @@ export const MomentsScreen: React.FC = () => {
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
-                className={`relative pb-1 text-xs sm:text-sm font-black tracking-wider transition-all cursor-pointer focus:outline-none drop-shadow flex items-center gap-1 ${
+                className={`relative pb-1 text-[11px] sm:text-sm font-black tracking-wider transition-all cursor-pointer focus:outline-none drop-shadow flex items-center gap-1 whitespace-nowrap shrink-0 ${
                   isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
@@ -353,11 +547,25 @@ export const MomentsScreen: React.FC = () => {
         </div>
 
         {/* Right: Sound toggle ONLY */}
-        <div className="flex items-center">
+        <div className="flex items-center shrink-0">
           <button
             onClick={() => {
-              setIsMuted(!isMuted);
-              showToast(isMuted ? 'Sound Unmuted 🔊' : 'Sound Muted 🔇');
+              const nextMuted = !isMuted;
+              setIsMuted(nextMuted);
+              // Apply immediately inside user gesture so mobile browsers honor unmute for ONLY the active video
+              videoRefsMap.current.forEach((el, id) => {
+                if (id === activeVideoId) {
+                  el.muted = nextMuted;
+                  el.volume = 1;
+                  if (!nextMuted && isPlayingMap[id] !== false && el.paused) {
+                    el.play().catch(() => {});
+                  }
+                } else {
+                  el.muted = true;
+                  if (!el.paused) el.pause();
+                }
+              });
+              showToast(nextMuted ? 'Sound Muted 🔇' : 'Sound Unmuted 🔊');
             }}
             className="w-8 h-8 rounded-full bg-black/40 backdrop-blur-md border border-white/20 flex items-center justify-center text-white hover:bg-black/60 transition-colors cursor-pointer"
             title={isMuted ? 'Unmute' : 'Mute'}
@@ -406,6 +614,7 @@ export const MomentsScreen: React.FC = () => {
           ========================================================================= */}
       <div
         ref={containerRef}
+        onScroll={handleFeedScroll}
         className="w-full h-full overflow-y-scroll snap-y snap-mandatory scrollbar-none"
       >
         <PullToRefresh
@@ -445,15 +654,25 @@ export const MomentsScreen: React.FC = () => {
             )}
           </div>
         ) : (
-          filteredVideos.map((video) => {
+          filteredVideos.map((video, index) => {
             const isFollowing = followingUserIds.includes(video.user.id);
             const isSaved = !!savedVideoIds[video.id];
-            const isPlaying = isPlayingMap[video.id] !== false;
+            const isActiveSlide = video.id === activeVideoId;
+            const activeIndex = filteredVideos.findIndex((v) => v.id === activeVideoId);
+            const isAdjacentSlide = activeIndex >= 0 && Math.abs(index - activeIndex) <= 1;
             const commentsList = commentsMap[video.id] || [];
 
             return (
               <div
                 key={video.id}
+                data-moment-id={video.id}
+                ref={(el) => {
+                  if (el) {
+                    slideRefsMap.current.set(video.id, el);
+                  } else {
+                    slideRefsMap.current.delete(video.id);
+                  }
+                }}
                 className="relative w-full h-full snap-start snap-always bg-black flex items-center justify-center overflow-hidden"
               >
                 {/* 1. MEDIA PLAYER (Video or Photo Post) */}
@@ -469,10 +688,10 @@ export const MomentsScreen: React.FC = () => {
                       }`}
                     >
                       {/* Attached Photo Background */}
-                      {video.attachedPhotoUrl && (
+                      {safeImageSrc(video.attachedPhotoUrl) && (
                         <div className="absolute inset-0 z-0">
                           <img
-                            src={video.attachedPhotoUrl}
+                            src={safeImageSrc(video.attachedPhotoUrl)}
                             alt={video.title}
                             className="w-full h-full object-cover"
                           />
@@ -513,9 +732,9 @@ export const MomentsScreen: React.FC = () => {
                         </div>
                       )}
 
-                      {!video.textContent && (
+                      {!video.textContent && safeImageSrc(video.thumbnail) && (
                         <img
-                          src={video.thumbnail}
+                          src={safeImageSrc(video.thumbnail)}
                           alt={video.title}
                           className="w-full h-full object-cover"
                         />
@@ -525,25 +744,35 @@ export const MomentsScreen: React.FC = () => {
                       <div className="absolute inset-0 bg-gradient-to-t from-black via-black/20 to-black/40 pointer-events-none" />
                     </div>
                   ) : (
-                    /* Video Element */
+                    /* Video Element: strictly only the active visible video plays & emits its own audio */
                     <video
-                      src={video.videoUrl}
-                      poster={video.thumbnail}
+                      src={safeImageSrc(video.videoUrl)}
+                      poster={safeImageSrc(video.thumbnail)}
                       loop
-                      muted={isMuted}
-                      autoPlay
+                      muted={isMuted || !isActiveSlide}
                       playsInline
+                      preload={isActiveSlide || isAdjacentSlide ? 'auto' : 'metadata'}
                       className="w-full h-full object-cover"
                       onPlay={() => {
-                        incrementReelViews(video.id);
+                        if (isActiveSlide && !viewedReelIdsRef.current.has(video.id)) {
+                          viewedReelIdsRef.current.add(video.id);
+                          incrementReelViews(video.id);
+                        }
                       }}
                       ref={(el) => {
                         if (el) {
-                          if (isPlaying) {
-                            el.play().catch(() => {});
-                          } else {
-                            el.pause();
+                          videoRefsMap.current.set(video.id, el);
+                          if (!isActiveSlide) {
+                            el.muted = true;
+                            if (!el.paused) el.pause();
                           }
+                        } else {
+                          const prevEl = videoRefsMap.current.get(video.id);
+                          if (prevEl) {
+                            prevEl.muted = true;
+                            prevEl.pause();
+                          }
+                          videoRefsMap.current.delete(video.id);
                         }
                       }}
                     />
@@ -584,7 +813,7 @@ export const MomentsScreen: React.FC = () => {
                       title={`View ${video.user.displayName}'s profile`}
                     >
                       <img
-                        src={video.user.avatar}
+                        src={safeImageSrc(video.user.avatar, DEFAULT_AVATAR_URL)}
                         alt={video.user.displayName}
                         className="w-full h-full rounded-full object-cover bg-zinc-900"
                       />
@@ -728,9 +957,11 @@ export const MomentsScreen: React.FC = () => {
                     >
                       @{video.user.username}
                     </button>
-                    {video.user.isVerified && (
-                      <ShieldCheck className="w-4 h-4 text-[#A855F7] fill-[#A855F7]/30" />
-                    )}
+                    <VerificationTicks
+                      isAccountVerified={Boolean(video.user.isAccountVerified || video.user.greenTick)}
+                      isBlueTickVerified={Boolean(video.user.isVerified)}
+                      size="sm"
+                    />
                     {video.user.vipTier > 0 && (
                       <span className="flex items-center gap-0.5 px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 text-[9px] font-black border border-amber-500/40">
                         <Crown className="w-2.5 h-2.5" />
@@ -788,7 +1019,7 @@ export const MomentsScreen: React.FC = () => {
               <div className="flex items-center gap-2.5">
                 <div className="w-8 h-8 rounded-full overflow-hidden border border-[#A855F7]/40">
                   <img
-                    src={threeDotsVideo.user.avatar}
+                    src={safeImageSrc(threeDotsVideo.user.avatar, DEFAULT_AVATAR_URL)}
                     alt=""
                     className="w-full h-full object-cover"
                   />
@@ -1182,7 +1413,7 @@ export const MomentsScreen: React.FC = () => {
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md rounded-t-3xl sm:rounded-3xl bg-[#140C26] border border-[#A855F7]/35 p-5 pb-[max(24px,env(safe-area-inset-bottom))] shadow-2xl space-y-3"
+            className="w-full max-w-md rounded-t-3xl sm:rounded-3xl bg-[#140C26] border border-[#A855F7]/35 p-5 pb-[max(24px,var(--app-safe-bottom,0px))] shadow-2xl space-y-3"
           >
             <div className="flex items-center justify-between pb-2 border-b border-white/10">
               <div>

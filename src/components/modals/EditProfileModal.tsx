@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { compressImage } from '../../utils/imageCompressor';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 import {
   X,
   Camera,
@@ -220,7 +221,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({ isOpen, onCl
           <div className="flex flex-col items-center">
             <div className="relative group">
               <div className="w-22 h-22 rounded-full p-[2.5px] bg-gradient-to-tr from-[#7928CA] via-[#EC4899] to-[#F59E0B] shadow-lg shadow-[#7928CA]/30">
-                <img src={avatar} alt="Profile" className="w-full h-full rounded-full object-cover" />
+                <img src={safeImageSrc(avatar, DEFAULT_AVATAR_URL)} alt="Profile" className="w-full h-full rounded-full object-cover" />
               </div>
               <div className="absolute bottom-0 right-0 w-7 h-7 rounded-full bg-[#EC4899] border-2 border-[#140D27] flex items-center justify-center text-white shadow-md">
                 <Camera className="w-3.5 h-3.5" />

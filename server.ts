@@ -13,22 +13,43 @@ const PORT = Number(process.env.PORT || 3000);
 async function startServer() {
   const app = createApiApp();
 
+  const server = http.createServer(app);
+  server.requestTimeout = 0;
+  server.headersTimeout = 60_000;
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR !== 'true',
+        ws: { server },
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.join(__dirname, 'dist'), { maxAge: '1d', index: false }));
+    app.use(
+      express.static(path.join(__dirname, 'dist'), {
+        maxAge: '1d',
+        index: false,
+        setHeaders: (res, filePath) => {
+          if (
+            filePath.endsWith('sw.js') ||
+            filePath.endsWith('registerSW.js') ||
+            filePath.endsWith('manifest.webmanifest') ||
+            filePath.endsWith('manifest.json')
+          ) {
+            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          }
+        },
+      })
+    );
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(__dirname, 'dist', 'index.html'));
     });
   }
 
-  const server = http.createServer(app);
-  server.requestTimeout = 0;
-  server.headersTimeout = 60_000;
   attachRealtimeWebSocketServer(server, {
     app,
     verifyFirebaseIdToken: app.locals.verifyFirebaseIdToken,

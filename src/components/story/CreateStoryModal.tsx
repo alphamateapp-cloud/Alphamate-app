@@ -10,6 +10,7 @@ import {
   Smile,
 } from 'lucide-react';
 import { User } from '../../types';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 
 interface CreateStoryModalProps {
   currentUser: User;
@@ -121,7 +122,7 @@ export const CreateStoryModal: React.FC<CreateStoryModalProps> = ({
           {/* Story Preview Card */}
           <div className="relative w-full h-56 rounded-2xl overflow-hidden border border-white/10 shadow-lg group">
             <img
-              src={customImageUrl.trim() || selectedImage}
+              src={safeImageSrc(customImageUrl.trim() || selectedImage, DEFAULT_AVATAR_URL)}
               alt="Story Preview"
               className="w-full h-full object-cover"
             />
@@ -130,7 +131,7 @@ export const CreateStoryModal: React.FC<CreateStoryModalProps> = ({
             {/* Top Author Preview */}
             <div className="absolute top-3 left-3 flex items-center gap-2 z-10">
               <img
-                src={currentUser.avatar}
+                src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                 alt={currentUser.displayName}
                 className="w-7 h-7 rounded-full object-cover border border-white/40"
               />

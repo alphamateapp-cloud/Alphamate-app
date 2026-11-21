@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AgencyOrder } from '../../types';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 
 interface AgencyOrderDetailsModalProps {
   isOpen: boolean;
@@ -138,7 +139,7 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
             <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <img
-                  src={order.buyerAvatar}
+                  src={safeImageSrc(order.buyerAvatar, DEFAULT_AVATAR_URL)}
                   alt={order.buyerName}
                   className="w-11 h-11 rounded-2xl object-cover border border-amber-400/60 shadow"
                 />
@@ -206,11 +207,13 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
                 onClick={() => setShowSlipZoom(true)}
                 className="relative rounded-2xl overflow-hidden border border-white/20 bg-black/40 group cursor-pointer aspect-[16/9] flex items-center justify-center shadow-inner"
               >
-                <img
-                  src={order.receiptUrl}
-                  alt={`Receipt for ${order.orderNo}`}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                />
+                {safeImageSrc(order.receiptUrl) && (
+                  <img
+                    src={safeImageSrc(order.receiptUrl)}
+                    alt={`Receipt for ${order.orderNo}`}
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                  />
+                )}
                 <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/30 group-hover:opacity-90 transition-opacity flex items-center justify-center">
                   <div className="px-3 py-1.5 rounded-xl bg-black/60 backdrop-blur-md border border-white/20 text-white text-xs font-bold flex items-center gap-1.5 shadow-lg">
                     <Maximize2 className="w-3.5 h-3.5 text-amber-400" />
@@ -363,11 +366,13 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
             </div>
 
             <div className="mt-3 rounded-2xl overflow-hidden border border-white/10 max-h-[70vh] flex items-center justify-center bg-black">
-              <img
-                src={order.receiptUrl}
-                alt="Payment Slip Zoom"
-                className="max-h-[70vh] w-auto object-contain"
-              />
+              {safeImageSrc(order.receiptUrl) && (
+                <img
+                  src={safeImageSrc(order.receiptUrl)}
+                  alt="Payment Slip Zoom"
+                  className="max-h-[70vh] w-auto object-contain"
+                />
+              )}
             </div>
 
             <div className="mt-3 px-2 flex items-center justify-between text-[11px] text-zinc-300">

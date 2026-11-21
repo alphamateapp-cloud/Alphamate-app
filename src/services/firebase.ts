@@ -30,9 +30,12 @@ import { getFunctions } from 'firebase/functions';
 import {
   getFirestore,
   initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
   enableNetwork,
   doc,
   getDoc,
+  getDocFromCache,
   getDocFromServer,
   setDoc,
   updateDoc,
@@ -52,6 +55,10 @@ import {
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
+import {
+  normalizeNotificationDocument,
+  stripAdminProtectedUserFields,
+} from './adminModerationService';
 
 interface NativeGoogleAuthPluginContract {
   signIn(options: {
@@ -77,28 +84,49 @@ export const FIRESTORE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
 
 // CRITICAL: The app will break without passing firestoreDatabaseId
 function createFirestoreInstance() {
-  const isIframeOrPreview =
-    typeof window !== 'undefined' &&
-    (() => {
-      try {
-        return window.self !== window.top || window.location.hostname.endsWith('.run.app');
-      } catch {
-        return true;
-      }
-    })();
-  const useForceLongPolling = Capacitor.isNativePlatform() || isIframeOrPreview;
-  const settings = useForceLongPolling
+  // Use auto-detect long-polling on web/iframe so HTTP/2 streaming is preferred and
+  // long-polling is used automatically only when a proxy blocks streaming.
+  // Reserve forced long-polling strictly for Capacitor native WebViews.
+  const transportSettings = Capacitor.isNativePlatform()
     ? { experimentalForceLongPolling: true }
     : { experimentalAutoDetectLongPolling: true };
 
+  // Enable IndexedDB persistent local cache when available so profiles & feeds load
+  // instantaneously on cold boots or slow networks without failing on transient offline windows.
+  const canUseIndexedDb =
+    typeof window !== 'undefined' && typeof window.indexedDB !== 'undefined';
+
+  if (canUseIndexedDb) {
+    try {
+      return initializeFirestore(
+        app,
+        {
+          ...transportSettings,
+          localCache: persistentLocalCache({
+            tabManager: persistentMultipleTabManager(),
+          }),
+        },
+        firebaseConfig.firestoreDatabaseId
+      );
+    } catch {
+      // Fall through to memory cache if IndexedDB is restricted in a sandboxed iframe
+    }
+  }
+
   try {
-    return initializeFirestore(app, settings, firebaseConfig.firestoreDatabaseId);
+    return initializeFirestore(app, transportSettings, firebaseConfig.firestoreDatabaseId);
   } catch {
     return getFirestore(app, firebaseConfig.firestoreDatabaseId);
   }
 }
 
 export const db = createFirestoreInstance();
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    enableNetwork(db).catch(() => {});
+  });
+}
 // Use durable IndexedDB persistence in Capacitor Android so the Firebase JS SDK
 // keeps the same session after native Google Sign-In returns an ID token.
 function createFirebaseAuth() {
@@ -279,6 +307,11 @@ export function handleSnapshotListenerError(
     console.warn(`Firestore Quota Exceeded on listener (${path || 'unknown'}); keeping cached data active.`);
     return;
   }
+  if (isTransientFirestoreNetworkError(error)) {
+    const msg = error instanceof Error ? error.message : String(error);
+    console.warn(`Transient Firestore listener delay (${path || 'unknown'}): ${msg}`);
+    return;
+  }
   handleFirestoreError(error, operationType, path);
 }
 
@@ -312,7 +345,7 @@ export async function testConnection(): Promise<boolean> {
     try {
       await withFirestoreTimeout(
         getDocFromServer(doc(db, 'test', 'connection')),
-        8000,
+        12000,
         'Firestore connection check'
       );
       clearFirestoreQuotaExceeded();
@@ -829,7 +862,7 @@ function stripUndefinedFields<T>(value: T): T {
  */
 export async function syncUserProfileToFirestore(
   userData: any,
-  options?: { background?: boolean }
+  options?: { background?: boolean; isNewUserDoc?: boolean }
 ) {
   if (!userData?.id) return;
   if (options?.background && isFirestoreQuotaExceeded()) return;
@@ -850,7 +883,10 @@ export async function syncUserProfileToFirestore(
       rawProfile.coverImage = coverImage;
     }
 
-    const sanitizedProfile = stripUndefinedFields(rawProfile);
+    const roleProtectedProfile = stripAdminProtectedUserFields(rawProfile, {
+      isNewUserDoc: options?.isNewUserDoc,
+    });
+    const sanitizedProfile = stripUndefinedFields(roleProtectedProfile);
     await withFirestoreTimeout(
       setDoc(doc(db, 'users', userData.id), sanitizedProfile, { merge: true }),
       9000,
@@ -870,10 +906,11 @@ export async function syncUserProfileToFirestore(
  */
 export async function getUserProfileFromFirestore(userId: string) {
   const path = `users/${userId}`;
+  const userRef = doc(db, 'users', userId);
   try {
     const snap = await withFirestoreTimeout(
-      getDoc(doc(db, 'users', userId)),
-      9000,
+      getDoc(userRef),
+      15000,
       'Loading user profile'
     );
     return snap.exists() ? snap.data() : null;
@@ -881,6 +918,20 @@ export async function getUserProfileFromFirestore(userId: string) {
     if (isFirestoreQuotaExceededError(error)) {
       notifyFirestoreQuotaExceeded();
       console.warn(`Firestore quota reached loading profile (${path}); falling back to local cache.`);
+      throw error;
+    }
+    if (isTransientFirestoreNetworkError(error)) {
+      // Try Firestore IndexedDB local cache first before falling back to AppContext local/SW cache
+      try {
+        const cachedSnap = await getDocFromCache(userRef);
+        if (cachedSnap.exists()) {
+          return cachedSnap.data();
+        }
+      } catch {
+        // Not in Firestore local cache yet; let AppContext hydrate from localStorage/SW cache
+      }
+      const msg = error instanceof Error ? error.message : String(error);
+      console.warn(`Transient network delay loading profile (${path}): ${msg}; falling back to local cache.`);
       throw error;
     }
     handleFirestoreError(error, OperationType.GET, path);
@@ -2162,7 +2213,16 @@ export interface SendNotificationParams {
     | 'pk_invite'
     | 'wallet'
     | 'agency'
-    | 'system';
+    | 'system'
+    | 'admin_action'
+    | 'admin_warning'
+    | 'moderation'
+    | 'verification'
+    | 'account_blocked'
+    | 'account_suspended'
+    | 'live_restricted'
+    | 'party_restricted'
+    | 'access_restored';
   category?: string;
   title: string;
   message: string;
@@ -2190,6 +2250,15 @@ const VALID_NOTIFICATION_TYPES = new Set<SendNotificationParams['type']>([
   'wallet',
   'agency',
   'system',
+  'admin_action',
+  'admin_warning',
+  'moderation',
+  'verification',
+  'account_blocked',
+  'account_suspended',
+  'live_restricted',
+  'party_restricted',
+  'access_restored',
 ]);
 
 export async function sendFirestoreNotification(
@@ -2264,44 +2333,24 @@ export function subscribeToUserNotifications(
   onUpdate: (items: any[]) => void
 ) {
   const path = `users/${userId}/notifications`;
+  // Query without strict orderBy('createdAtMs') so documents written by the existing Admin Panel
+  // using Firestore Timestamp `createdAt` or `timestamp` are never silently excluded.
   const q = query(
     collection(db, 'users', userId, 'notifications'),
-    orderBy('createdAtMs', 'desc'),
-    limit(100)
+    limit(150)
   );
   return onSnapshot(
     q,
     (snapshot) => {
-      const list = snapshot.docs.map((docSnap) => {
-        const d = docSnap.data() as Record<string, any>;
-        return {
-          id: docSnap.id,
-          type: d.type || 'system',
-          category: d.category,
-          title: d.title || 'Alpha Mate',
-          message: d.message || '',
-          senderId: d.senderId,
-          senderName: d.senderName,
-          senderAvatar: d.senderAvatar,
-          recipientId: d.recipientId,
-          screen: d.screen,
-          tab: d.tab,
-          roomId: d.roomId,
-          streamId: d.streamId,
-          reelId: d.reelId,
-          chatId: d.chatId,
-          isRead: Boolean(d.isRead),
-          createdAtMs: Number(d.createdAtMs) || Date.now(),
-          timestamp: formatNotificationTimestamp(Number(d.createdAtMs)),
-          user: d.senderId
-            ? {
-                id: d.senderId,
-                displayName: d.senderName || 'Alpha Mate User',
-                avatar: d.senderAvatar || '',
-              }
-            : undefined,
-        };
-      });
+      const list = snapshot.docs
+        .map((docSnap) =>
+          normalizeNotificationDocument(
+            docSnap.id,
+            docSnap.data() as Record<string, any>,
+            'notifications'
+          )
+        )
+        .sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
       onUpdate(list);
     },
     (error) => {
@@ -2792,14 +2841,21 @@ export function subscribeToApprovedAgencies(
   const path = 'agencies';
   const q = query(
     collection(db, 'agencies'),
-    where('status', '==', 'active'),
+    where('status', 'in', ['active', 'Active', 'ACTIVE']),
     limit(150)
   );
   return onSnapshot(
     q,
     (snap) => {
       const items = snap.docs
-        .map((d) => ({ agencyId: d.id, ...d.data() }))
+        .map((d) => {
+          const data = d.data() || {};
+          return {
+            ...data,
+            id: d.id,
+            agencyId: String(data.agencyId || d.id),
+          };
+        })
         .sort((a: any, b: any) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0));
       onUpdate(items);
     },
@@ -2965,5 +3021,294 @@ export async function deductCoinSellerAgencyBalanceInFirestore(
   }
   return nextBalance;
 }
+
+export interface FirestoreHostAgencyRequestInput {
+  id: string;
+  applicantUid: string;
+  userDocId: string;
+  uniqueId: string;
+  displayName: string;
+  username: string;
+  avatar: string;
+  level: number;
+  agencyId: string;
+  agencyName: string;
+  agencyCode?: string;
+  agencyTag?: string;
+  agencyOwnerId?: string;
+  whatsapp?: string;
+  experience?: string;
+  expectedHours?: number;
+  createdAt?: string;
+  createdAtMs?: number;
+}
+
+/**
+ * Submits a Host Agency join request to the shared Firestore `agency_requests` collection.
+ * Always writes status='Pending'; membership only activates after Super Admin approval.
+ */
+export async function submitHostAgencyRequestToFirestore(
+  input: FirestoreHostAgencyRequestInput
+): Promise<void> {
+  const uid = auth.currentUser?.uid;
+  if (!uid) {
+    throw new Error('Please sign in with a verified account to request joining a Host Agency.');
+  }
+
+  // Server-backed duplicate pending request guard
+  try {
+    const existingSnap = await getDocs(
+      query(collection(db, 'agency_requests'), where('applicantUid', '==', uid), limit(30))
+    );
+    const hasPending = existingSnap.docs.some((d) => {
+      const status = String(d.data()?.status || '').trim().toLowerCase();
+      return status === 'pending';
+    });
+    if (hasPending) {
+      throw new Error('You already have a Pending Host Agency application awaiting Super Admin approval.');
+    }
+  } catch (err: any) {
+    if (err?.message?.includes('Pending Host Agency application')) {
+      throw err;
+    }
+    // If query fails transiently, proceed cautiously; client state already checked duplicates
+  }
+
+  const nowMs = Number(input.createdAtMs) || Date.now();
+  const nowIso = String(input.createdAt || new Date(nowMs).toISOString()).slice(0, 64);
+  const requestId = String(input.id).slice(0, 128);
+  const path = `agency_requests/${requestId}`;
+
+  const payload = stripUndefinedFields({
+    id: requestId,
+    applicantUid: uid,
+    userId: uid,
+    userDocId: String(input.userDocId || uid).slice(0, 128),
+    uniqueId: String(input.uniqueId || uid).slice(0, 64),
+    displayName: String(input.displayName || 'Alpha Mate Creator').slice(0, 128),
+    applicantName: String(input.displayName || 'Alpha Mate Creator').slice(0, 128),
+    username: String(input.username || 'creator').slice(0, 64),
+    avatar: sanitizeAvatarString(input.avatar || '').slice(0, 2048),
+    level: Math.max(0, Number(input.level) || 1),
+    agencyId: String(input.agencyId).trim().slice(0, 128),
+    agencyName: String(input.agencyName || 'Official Host Agency').trim().slice(0, 128),
+    agencyCode: input.agencyCode ? String(input.agencyCode).trim().slice(0, 64) : undefined,
+    agencyTag: input.agencyTag ? String(input.agencyTag).trim().slice(0, 16) : undefined,
+    agencyOwnerId: input.agencyOwnerId ? String(input.agencyOwnerId).trim().slice(0, 128) : undefined,
+    agencyType: 'Host Agency',
+    requestedAgencyType: 'Host Agency',
+    whatsapp: String(input.whatsapp || '').trim().slice(0, 64),
+    experience: String(input.experience || 'Creator applying to join Host Agency').trim().slice(0, 1000),
+    expectedHours: Math.max(0, Math.min(168, Number(input.expectedHours) || 15)),
+    status: 'Pending',
+    createdAt: nowIso,
+    appliedAt: nowIso,
+    createdAtMs: nowMs,
+  });
+
+  try {
+    await setDoc(doc(db, 'agency_requests', requestId), payload);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, path);
+  }
+}
+
+/**
+ * Real-time listener for the signed-in user's Host Agency join requests in `agency_requests`.
+ * Queries both `applicantUid` and `userId` and merges/deduplicates by document ID for full Super Admin compatibility.
+ */
+export function subscribeToMyHostAgencyRequests(
+  uid: string,
+  onUpdate: (requests: any[]) => void
+) {
+  if (!uid || !auth.currentUser) return () => {};
+  const path = 'agency_requests';
+  const byApplicant = new Map<string, any>();
+  const byUserId = new Map<string, any>();
+
+  const emit = () => {
+    const merged = new Map<string, any>();
+    byApplicant.forEach((v, k) => merged.set(k, v));
+    byUserId.forEach((v, k) => merged.set(k, v));
+    const list = Array.from(merged.values()).sort(
+      (a, b) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0)
+    );
+    onUpdate(list);
+  };
+
+  const unsub1 = onSnapshot(
+    query(collection(db, 'agency_requests'), where('applicantUid', '==', uid), limit(50)),
+    (snap) => {
+      byApplicant.clear();
+      snap.docs.forEach((d) => byApplicant.set(d.id, { id: d.id, ...d.data() }));
+      emit();
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+
+  const unsub2 = onSnapshot(
+    query(collection(db, 'agency_requests'), where('userId', '==', uid), limit(50)),
+    (snap) => {
+      byUserId.clear();
+      snap.docs.forEach((d) => byUserId.set(d.id, { id: d.id, ...d.data() }));
+      emit();
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+
+  return () => {
+    try { unsub1(); } catch {}
+    try { unsub2(); } catch {}
+  };
+}
+
+/**
+ * Real-time listener for Host Agency owners to see incoming join requests for their agency.
+ */
+export function subscribeToAgencyOwnerHostRequests(
+  ownerUid: string,
+  agencyId: string,
+  onUpdate: (requests: any[]) => void
+) {
+  if (!ownerUid || !agencyId || !auth.currentUser) return () => {};
+  const path = 'agency_requests';
+  const q = query(
+    collection(db, 'agency_requests'),
+    where('agencyOwnerId', '==', ownerUid),
+    limit(100)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((item: any) => !agencyId || String(item.agencyId || '') === agencyId)
+        .sort((a: any, b: any) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0));
+      onUpdate(list);
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
+/**
+ * Real-time listener for Official Admin to see all Host Agency join requests across `agency_requests`.
+ */
+export function subscribeToAllHostAgencyRequests(
+  onUpdate: (requests: any[]) => void
+) {
+  if (!auth.currentUser) return () => {};
+  const path = 'agency_requests';
+  const q = query(collection(db, 'agency_requests'), limit(200));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const list = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0));
+      onUpdate(list);
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
+/**
+ * Reviews a Host Agency join request in Firestore (`agency_requests`) and, when approved by Official Admin,
+ * updates the user's Firestore profile with canonical `agencyId`, `agencyName`, `agencyCode`, `hostAgencyStatus`.
+ */
+export async function reviewHostAgencyRequestInFirestore(
+  req: {
+    id: string;
+    applicantUid?: string;
+    userId: string;
+    agencyId: string;
+    agencyName?: string;
+    agencyCode?: string;
+    agencyTag?: string;
+    agencyOwnerId?: string;
+  },
+  action: 'approve' | 'reject',
+  options?: { rejectionReason?: string; ownerName?: string; syncUserDoc?: boolean }
+): Promise<void> {
+  const reviewer = auth.currentUser?.email || auth.currentUser?.uid || 'Admin';
+  const nowIso = new Date().toISOString();
+  const nextStatus = action === 'approve' ? 'Approved' : 'Rejected';
+  const reqRef = doc(db, 'agency_requests', req.id);
+
+  try {
+    await updateDoc(
+      reqRef,
+      stripUndefinedFields({
+        status: nextStatus,
+        reviewedAt: nowIso,
+        reviewedBy: reviewer,
+        rejectionReason:
+          action === 'reject'
+            ? String(options?.rejectionReason || 'Request declined during review.').slice(0, 500)
+            : undefined,
+      })
+    );
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `agency_requests/${req.id}`);
+  }
+
+  const targetUid = req.applicantUid || req.userId;
+  if (options?.syncUserDoc && targetUid) {
+    try {
+      if (action === 'approve') {
+        await updateDoc(
+          doc(db, 'users', targetUid),
+          stripUndefinedFields({
+            agencyId: req.agencyId,
+            agencyName: req.agencyName || 'Official Host Agency',
+            agencyCode: req.agencyCode,
+            agencyTag: req.agencyTag,
+            agencyOwnerId: req.agencyOwnerId,
+            agencyOwnerName: options.ownerName,
+            hostAgencyStatus: 'Active',
+            isAgencyHost: true,
+            agencyJoinedAt: nowIso,
+            updatedAt: nowIso,
+          })
+        );
+      } else {
+        await updateDoc(
+          doc(db, 'users', targetUid),
+          stripUndefinedFields({
+            hostAgencyStatus: 'Rejected',
+            updatedAt: nowIso,
+          })
+        );
+      }
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, `users/${targetUid}`);
+    }
+  }
+}
+
+/**
+ * Real-time listener for approved hosts belonging to a specific Host Agency (`users` where `agencyId == agencyId`).
+ */
+export function subscribeToAgencyHostMembers(
+  agencyId: string,
+  onUpdate: (members: any[]) => void
+) {
+  if (!agencyId || !auth.currentUser) return () => {};
+  const path = 'users';
+  const q = query(collection(db, 'users'), where('agencyId', '==', agencyId), limit(150));
+  return onSnapshot(
+    q,
+    (snap) => {
+      const members = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .filter((u: any) => {
+          const st = String(u.hostAgencyStatus || '').trim().toLowerCase();
+          return st !== 'rejected' && st !== 'pending' && st !== 'removed' && st !== 'inactive';
+        });
+      onUpdate(members);
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
 
 

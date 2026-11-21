@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { User } from '../../types';
 import { VipAvatarFrame } from '../brand/VipAvatarFrame';
 import { LevelBadgeIcon } from '../brand/LevelBadgeIcon';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 import {
   Trophy,
   Crown,
@@ -320,7 +321,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
                       </span>
                       <div className="relative shrink-0">
                         <img
-                          src={entry.user.avatar}
+                          src={safeImageSrc(entry.user.avatar, DEFAULT_AVATAR_URL)}
                           alt={entry.user.displayName}
                           className="w-9 h-9 rounded-full object-cover border border-white/10"
                         />
@@ -370,7 +371,7 @@ export const PartyLeaderboardModal: React.FC<PartyLeaderboardModalProps> = ({
           <div className="flex items-center justify-between p-2.5 rounded-2xl bg-gradient-to-r from-[#221040] via-[#2A144E] to-[#1C0D34] border border-[#A855F7]/30 mb-2">
             <div className="flex items-center gap-2.5 min-w-0">
               <img
-                src={currentUser.avatar}
+                src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                 alt={currentUser.displayName}
                 className="w-8 h-8 rounded-full object-cover border border-amber-400 shrink-0"
               />

@@ -8,6 +8,7 @@ import { PKComingSoonModal } from '../components/modals/PKComingSoonModal';
 import { CoinSellerAgenciesCarousel } from '../components/home/CoinSellerAgenciesCarousel';
 import { LiveStream, FriendStory } from '../types';
 import { auth, getCanonicalLiveStreamId } from '../services/firebase';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   Radio,
   Users,
@@ -45,6 +46,8 @@ export const HomeScreen: React.FC = () => {
     markStorySeen,
     openLeaderboard,
     followingUserIds,
+    adminModerationState,
+    setActiveFeatureRestrictionModal,
   } = useApp();
 
   const [activeCategory, setActiveCategory] = useState<'Live' | 'Following' | 'For You'>('Live');
@@ -146,7 +149,26 @@ export const HomeScreen: React.FC = () => {
     openLiveStream(myStream);
   };
 
+  const handleOpenGoLiveModal = () => {
+    if (adminModerationState.isLiveRestricted && adminModerationState.liveRestriction) {
+      setActiveFeatureRestrictionModal({
+        scope: 'live',
+        detail: adminModerationState.liveRestriction,
+      });
+      return;
+    }
+    setShowGoLiveModal(true);
+  };
+
   const handleStartBroadcast = () => {
+    if (adminModerationState.isLiveRestricted && adminModerationState.liveRestriction) {
+      setShowGoLiveModal(false);
+      setActiveFeatureRestrictionModal({
+        scope: 'live',
+        detail: adminModerationState.liveRestriction,
+      });
+      return;
+    }
     const fbUser = auth.currentUser;
     if (!fbUser) {
       setGoLiveAuthError('Sign in with Google or your Alpha Mate email account first to broadcast live.');
@@ -301,7 +323,7 @@ export const HomeScreen: React.FC = () => {
               }`}
             >
               <img
-                src={currentUser.avatar}
+                src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                 alt={currentUser.displayName}
                 className="w-full h-full rounded-full object-cover"
               />
@@ -362,7 +384,7 @@ export const HomeScreen: React.FC = () => {
                   }`}
                 >
                   <img
-                    src={friend.user.avatar}
+                    src={safeImageSrc(friend.user.avatar, DEFAULT_AVATAR_URL)}
                     alt={friend.user.displayName}
                     className="w-full h-full rounded-full object-cover"
                   />
@@ -452,7 +474,7 @@ export const HomeScreen: React.FC = () => {
                     {/* Thumbnail Container */}
                     <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#1E143B]">
                       <img
-                        src={stream.thumbnail}
+                        src={safeImageSrc(stream.thumbnail || stream.host.avatar, DEFAULT_AVATAR_URL)}
                         alt={stream.title}
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
@@ -499,7 +521,7 @@ export const HomeScreen: React.FC = () => {
                       <div className="absolute bottom-2 left-2 right-2 flex flex-col gap-1">
                         <div className="flex items-center gap-1.5">
                           <img
-                            src={stream.host.avatar}
+                            src={safeImageSrc(stream.host.avatar, DEFAULT_AVATAR_URL)}
                             alt={stream.host.displayName}
                             className={`w-5 h-5 rounded-full object-cover border ${
                               isTop1 ? 'border-amber-400' : 'border-[#EC4899]'
@@ -568,7 +590,7 @@ export const HomeScreen: React.FC = () => {
                 Be the first broadcaster to go live today and collect gifts from the Alpha Mate community!
               </p>
               <button
-                onClick={() => setShowGoLiveModal(true)}
+                onClick={handleOpenGoLiveModal}
                 className="px-5 py-2.5 rounded-full bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white text-xs font-bold shadow-lg shadow-purple-600/30 hover:scale-105 active:scale-95 transition-all cursor-pointer flex items-center gap-1.5"
               >
                 <Radio className="w-3.5 h-3.5" />
@@ -592,7 +614,7 @@ export const HomeScreen: React.FC = () => {
                   {/* Thumbnail Container */}
                   <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#1E143B]">
                     <img
-                      src={stream.thumbnail}
+                      src={safeImageSrc(stream.thumbnail || stream.host.avatar, DEFAULT_AVATAR_URL)}
                       alt={stream.title}
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                     />
@@ -624,7 +646,7 @@ export const HomeScreen: React.FC = () => {
                     <div className="absolute bottom-2 left-2 right-2 flex flex-col gap-1">
                       <div className="flex items-center gap-1.5">
                         <img
-                          src={stream.host.avatar}
+                          src={safeImageSrc(stream.host.avatar, DEFAULT_AVATAR_URL)}
                           alt={stream.host.displayName}
                           className="w-5 h-5 rounded-full object-cover border border-[#EC4899]"
                         />
@@ -654,9 +676,9 @@ export const HomeScreen: React.FC = () => {
       </div>
 
       {/* Floating "Go Live" Button */}
-      <div className="fixed bottom-20 right-4 sm:right-[max(1rem,calc(50%-185px))] z-30 pointer-events-auto">
+      <div className="fixed bottom-[calc(4.75rem+var(--app-safe-bottom,0px))] right-4 sm:right-[max(1rem,calc(50%-185px))] z-30 pointer-events-auto">
         <button
-          onClick={() => setShowGoLiveModal(true)}
+          onClick={handleOpenGoLiveModal}
           className="group flex items-center gap-2 pl-3 pr-3.5 sm:pl-3.5 sm:pr-4 py-2 sm:py-2.5 rounded-full bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-bold text-xs shadow-xl shadow-[#7928CA]/60 hover:shadow-[#A855F7]/80 hover:scale-105 active:scale-95 transition-all cursor-pointer"
         >
           <div className="w-5.5 h-5.5 sm:w-6 sm:h-6 rounded-full bg-white/20 flex items-center justify-center">

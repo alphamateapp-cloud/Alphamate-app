@@ -21,10 +21,10 @@ export const BottomNavigation: React.FC = () => {
     <nav
       role="navigation"
       aria-label="Main Navigation"
-      className="fixed bottom-0 left-0 right-0 z-40 max-w-md mx-auto pointer-events-auto"
+      className="relative shrink-0 w-full z-40 pointer-events-auto bg-[#0B0617]/95 backdrop-blur-xl border-t border-[#A855F7]/20 shadow-[0_-8px_30px_rgba(0,0,0,0.7)]"
     >
-      {/* 6-item Equal Width Bottom Bar with Safe Area Support */}
-      <div className="relative h-15 sm:h-16 bg-[#0B0617]/95 backdrop-blur-xl border-t border-[#A855F7]/20 px-0.5 sm:px-1 grid grid-cols-6 items-center shadow-[0_-8px_30px_rgba(0,0,0,0.7)] pb-[env(safe-area-inset-bottom)]">
+      {/* 6-item Equal Width Bottom Bar with Non-Overlapping Touch Targets */}
+      <div className="relative h-15 sm:h-16 px-0.5 sm:px-1 grid grid-cols-6 items-center">
         {tabs.map((tab) => {
           const isActive = activeTab === tab.id;
           const Icon = tab.icon;

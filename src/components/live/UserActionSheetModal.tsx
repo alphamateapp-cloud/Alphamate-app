@@ -6,6 +6,12 @@ import { copyToClipboard } from '../../utils/clipboard';
 import { subscribeToPublicUserProfile } from '../../services/firebase';
 import { fetchUserFollowCounts } from '../../services/userDirectoryService';
 import {
+  resolveUserBlueTickVerified,
+  resolveUserGreenTickVerified,
+} from '../../services/adminModerationService';
+import { VerificationTicks } from '../badges/VerificationTicks';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
+import {
   X,
   Gift,
   UserCheck,
@@ -124,7 +130,9 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
     displayName: String(liveProfile?.displayName || user.displayName || 'Alpha Mate'),
     username: String(liveProfile?.username || user.username || 'user'),
     uniqueId: String(liveProfile?.uniqueId || user.uniqueId || user.id),
-    avatar: String(liveProfile?.avatar || liveProfile?.photoURL || user.avatar || ''),
+    avatar:
+      safeImageSrc(liveProfile?.avatar || liveProfile?.photoURL || user.avatar, DEFAULT_AVATAR_URL) ||
+      DEFAULT_AVATAR_URL,
     bio: liveProfile?.bio !== undefined ? String(liveProfile.bio || '') : (user.bio || ''),
     level: Math.max(0, Number(liveProfile?.level ?? user.level ?? 0)),
     vipTier: Math.max(0, Number(liveProfile?.vipTier ?? user.vipTier ?? 0)),
@@ -137,7 +145,12 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
       0,
       Number(followCounts ? followCounts.followingCount : (liveProfile?.followingCount ?? user.followingCount ?? 0))
     ),
-    isVerified: liveProfile?.isVerified !== undefined ? Boolean(liveProfile.isVerified) : Boolean(user.isVerified),
+    isVerified: liveProfile
+      ? resolveUserBlueTickVerified(liveProfile, Boolean(user.isVerified))
+      : Boolean(user.isVerified),
+    isAccountVerified: liveProfile
+      ? resolveUserGreenTickVerified(liveProfile, Boolean(user.isAccountVerified || user.greenTick))
+      : resolveUserGreenTickVerified(user as Record<string, any>, false),
     country: liveProfile?.country ?? user.country,
     countryFlag: liveProfile?.countryFlag ?? user.countryFlag,
     familyCrew: liveProfile?.familyCrew ?? user.familyCrew,
@@ -224,11 +237,11 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                 {displayUser.countryFlag && (
                   <span className="text-xs" title={displayUser.country}>{displayUser.countryFlag}</span>
                 )}
-                {displayUser.isVerified && (
-                  <span className="w-3.5 h-3.5 rounded-full bg-[#EC4899] text-white text-[8px] font-black flex items-center justify-center">
-                    ✓
-                  </span>
-                )}
+                <VerificationTicks
+                  isAccountVerified={Boolean(displayUser.isAccountVerified || displayUser.greenTick)}
+                  isBlueTickVerified={Boolean(displayUser.isVerified)}
+                  size="sm"
+                />
               </div>
 
               {/* ID + 1-Click Copy */}

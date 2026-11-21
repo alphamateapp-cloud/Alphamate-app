@@ -67,7 +67,7 @@ import { LiveGiftComboCounter, LiveGiftComboState } from '../components/live/Liv
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
 import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } from '../services/liveHeartService';
-import { getHdImageUrl } from '../utils/imageHd';
+import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
 
 const GIFT_COMBO_WINDOW_MS = 4200;
@@ -389,7 +389,7 @@ export const LiveStreamScreen: React.FC = () => {
         : matchedViewer
         ? {
             ...matchedViewer,
-            avatar: matchedViewer.avatar || comment.avatar || '',
+            avatar: safeImageSrc(matchedViewer.avatar || comment.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
             level: Number(comment.level ?? matchedViewer.level ?? 0),
             vipTier: Number(comment.vipLevel ?? matchedViewer.vipTier ?? 0),
           }
@@ -618,7 +618,7 @@ export const LiveStreamScreen: React.FC = () => {
         uniqueId: raw.uniqueId || raw.id,
         username: raw.username || (raw.displayName || 'viewer').replace(/\s+/g, '_'),
         displayName: raw.displayName || 'Viewer',
-        avatar: raw.avatar || '',
+        avatar: safeImageSrc(raw.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
         bio: 'Alpha Mate live viewer',
         followersCount: 0,
         followingCount: 0,
@@ -1464,7 +1464,7 @@ export const LiveStreamScreen: React.FC = () => {
         }
       }}
       onTouchStart={handleScreenTouchOrClick}
-      className="relative w-full h-full h-[100dvh] max-h-[100dvh] bg-black text-white overflow-hidden flex flex-col justify-between select-none"
+      className="relative w-full h-full bg-black text-white overflow-hidden flex flex-col justify-between select-none"
     >
       <PullToRefresh
         scrollContainerRef={liveRootRef}
@@ -1537,7 +1537,7 @@ export const LiveStreamScreen: React.FC = () => {
           <div className="relative w-full h-full overflow-hidden bg-[#0A0614]">
             {/* Fullscreen Host Profile Picture (DP) */}
             <img
-              src={getHdImageUrl(activeStream.host.avatar)}
+              src={getHdImageUrl(activeStream.host.avatar, DEFAULT_AVATAR_URL)}
               alt={activeStream.host.displayName}
               className="w-full h-full object-cover object-center select-none"
             />
@@ -1679,9 +1679,9 @@ export const LiveStreamScreen: React.FC = () => {
       )}
 
       {/* Top Overlay Bar: Host Profile, Level, VIP, Follow, Viewer Count, Perspective Switcher, Close */}
-      <div className="relative z-30 pt-[calc(env(safe-area-inset-top,0px)+10px)] px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
+      <div className="relative z-30 pt-2.5 px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
         {/* Left Column: Host Capsule on top + Top Givers Leaderboard line directly underneath it */}
-        <div className="flex flex-col items-start gap-1 min-w-0 max-w-[62%] pointer-events-auto">
+        <div className="flex flex-col items-start gap-1 flex-1 min-w-0 max-w-[56%] sm:max-w-[60%] pointer-events-auto">
           {/* Host Capsule with VIP Avatar Frame, Name, Level & VIP */}
           <div
             onClick={() => {
@@ -1759,7 +1759,7 @@ export const LiveStreamScreen: React.FC = () => {
         </div>
 
         {/* Right Top Actions: Viewer Count, Perspective Switcher (Host <-> Viewer), Close */}
-        <div className="flex items-center gap-1 shrink-0 pointer-events-auto">
+        <div className="flex flex-wrap items-center justify-end gap-1 shrink-0 max-w-[44%] sm:max-w-none pointer-events-auto">
           {/* Audience Rush / Viewers Count */}
           <button
             onClick={() => setShowViewersModal(true)}
@@ -1827,7 +1827,7 @@ export const LiveStreamScreen: React.FC = () => {
       </div>
 
       {/* Bottom Live Stream Section: Comments Feed + Bottom Controls HUD (Tight Mobile Fit) */}
-      <div className="relative z-30 px-2.5 pb-[calc(env(safe-area-inset-bottom,0px)+8px)] shrink-0 flex flex-col justify-end pointer-events-auto">
+      <div className="relative z-30 px-2.5 pb-2.5 shrink-0 flex flex-col justify-end pointer-events-auto">
         {/* Live Chat Comments Header with Clear Chat for Host & Mod */}
         <div className="flex items-center justify-between mb-1 px-1">
           <span className="text-[9.5px] text-purple-200 font-bold flex items-center gap-1">

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   RotateCcw,
   Clock,
@@ -79,7 +80,7 @@ export const AccountRecoveryScreen: React.FC = () => {
         {/* User Card */}
         <div className="rounded-2xl bg-[#0B0617] border border-white/10 p-3.5 flex items-center gap-3">
           <img
-            src={currentUser.avatar}
+            src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
             alt={currentUser.displayName}
             className="w-11 h-11 rounded-2xl object-cover border border-[#A855F7]/40 shrink-0"
           />

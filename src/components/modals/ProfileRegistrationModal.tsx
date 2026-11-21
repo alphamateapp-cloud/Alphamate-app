@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
 import { compressImage } from '../../utils/imageCompressor';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 import {
   Camera,
   Image as ImageIcon,
@@ -319,7 +320,7 @@ export const ProfileRegistrationModal: React.FC = () => {
             <div className="flex items-center gap-4">
               <div className="relative w-20 h-20 rounded-full p-0.5 bg-gradient-to-tr from-[#7928CA] via-[#A855F7] to-[#EC4899] shrink-0">
                 <img
-                  src={avatar}
+                  src={safeImageSrc(avatar, DEFAULT_AVATAR_URL)}
                   alt="Profile DP"
                   referrerPolicy="no-referrer"
                   className="w-full h-full rounded-full object-cover bg-[#09070F]"

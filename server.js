@@ -12,8 +12,24 @@ const PORT = process.env.PORT || 3000;
 const app = createApiApp();
 
 // Serve the built app from the same Railway service when configured as a combined deployment.
-app.use(express.static(path.join(__dirname, 'dist'), { maxAge: '1d', index: false }));
+app.use(
+  express.static(path.join(__dirname, 'dist'), {
+    maxAge: '1d',
+    index: false,
+    setHeaders: (res, filePath) => {
+      if (
+        filePath.endsWith('sw.js') ||
+        filePath.endsWith('registerSW.js') ||
+        filePath.endsWith('manifest.webmanifest') ||
+        filePath.endsWith('manifest.json')
+      ) {
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      }
+    },
+  })
+);
 app.get('*', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 

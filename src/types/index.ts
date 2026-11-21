@@ -54,7 +54,12 @@ export interface User {
   chatBubble?: string;
   coins: number;
   diamonds: number;
+  /** Official Blue Tick (Respect Badge granted exclusively by Admin to Hosts & Gifters) */
   isVerified: boolean;
+  /** Automatic Green Tick (granted automatically upon account/email verification) */
+  isAccountVerified?: boolean;
+  greenTick?: boolean;
+  emailVerified?: boolean;
   profileCompleted?: boolean;
   hasPassword?: boolean;
   emailOtpVerified?: boolean;
@@ -70,12 +75,24 @@ export interface User {
   countryFlag?: string;
   agencyId?: string;
   agencyName?: string;
+  agencyCode?: string;
   agencyTag?: string;
+  hostAgencyStatus?: string;
+  agencyOwnerId?: string;
+  agencyOwnerName?: string;
+  agencyJoinedAt?: string;
   isAgencyHost?: boolean;
   heldDiamonds?: number;
   activeFrame?: string;
   activeHonorTitle?: string;
-  accountStatus?: 'active' | 'deactivated' | 'pending_deletion' | 'permanently_deleted';
+  accountStatus?:
+    | 'active'
+    | 'blocked'
+    | 'banned'
+    | 'suspended'
+    | 'deactivated'
+    | 'pending_deletion'
+    | 'permanently_deleted';
   deactivatedAt?: string | null;
   deletionRequestedAt?: string | null;
   scheduledPermanentDeletionAt?: string | null;
@@ -86,6 +103,115 @@ export interface User {
   pushPlatform?: 'android' | 'ios' | 'web';
   notificationPreferences?: NotificationPreferences;
   equippedBadgeIds?: UserBadgeId[];
+  // Admin Moderation & Verification fields (read-only on user side; managed by Admin Panel)
+  isBlocked?: boolean;
+  blocked?: boolean;
+  isBanned?: boolean;
+  banned?: boolean;
+  blockReason?: string | null;
+  blockedAt?: any;
+  blockedBy?: string | null;
+  isSuspended?: boolean;
+  suspended?: boolean;
+  suspensionReason?: string | null;
+  suspensionDuration?: string | number | null;
+  suspendedAt?: any;
+  suspendedUntil?: any;
+  suspensionExpiresAt?: any;
+  isPermanentSuspension?: boolean;
+  liveDisabled?: boolean;
+  liveSuspended?: boolean;
+  liveRestricted?: boolean;
+  liveAccess?: string;
+  canGoLive?: boolean;
+  liveRestrictionReason?: string | null;
+  liveSuspendedUntil?: any;
+  partyDisabled?: boolean;
+  partySuspended?: boolean;
+  partyRestricted?: boolean;
+  partyAccess?: string;
+  canJoinParty?: boolean;
+  canCreateParty?: boolean;
+  partyRestrictionReason?: string | null;
+  partySuspendedUntil?: any;
+  blueTick?: boolean;
+  hasBlueTick?: boolean;
+  verificationStatus?: string;
+  verificationUpdatedAt?: any;
+  verificationReason?: string | null;
+  moderation?: Record<string, any> | null;
+  restrictions?: Record<string, any> | null;
+  latestWarning?: Record<string, any> | null;
+  warnings?: Array<Record<string, any>>;
+  lastAdminAction?: Record<string, any> | null;
+}
+
+export type AdminActionKind =
+  | 'account_blocked'
+  | 'account_unblocked'
+  | 'account_suspended'
+  | 'account_restored'
+  | 'live_suspended'
+  | 'live_restored'
+  | 'party_restricted'
+  | 'party_restored'
+  | 'admin_warning'
+  | 'verification_granted'
+  | 'verification_removed'
+  | 'verification_updated'
+  | 'admin_action';
+
+export type AdminRestrictionScope = 'account' | 'live' | 'party' | 'warning' | 'verification' | 'general';
+
+export interface AdminRestrictionDetail {
+  isActive: boolean;
+  hasExpired?: boolean;
+  scope: AdminRestrictionScope;
+  actionKind: AdminActionKind;
+  title: string;
+  actionTaken: string;
+  reason: string;
+  adminName: string;
+  adminLabel: string;
+  adminEmail?: string;
+  adminMessage?: string;
+  duration?: string;
+  startedAtMs?: number | null;
+  expiresAtMs?: number | null;
+  isPermanent: boolean;
+  currentStatus: string;
+  actionId?: string;
+}
+
+export interface AdminWarningRecord {
+  id: string;
+  title: string;
+  message: string;
+  reason: string;
+  adminName: string;
+  adminLabel: string;
+  adminEmail?: string;
+  createdAtMs: number;
+  isRead?: boolean;
+}
+
+export interface AdminModerationState {
+  isAccountBlocked: boolean;
+  isAccountSuspended: boolean;
+  isLiveRestricted: boolean;
+  isPartyRestricted: boolean;
+  accountBlock: AdminRestrictionDetail | null;
+  accountSuspension: AdminRestrictionDetail | null;
+  liveRestriction: AdminRestrictionDetail | null;
+  partyRestriction: AdminRestrictionDetail | null;
+  latestWarning: AdminWarningRecord | null;
+  isVerified: boolean;
+  verificationStatus: string;
+  verificationReason?: string;
+  verificationAdminName?: string;
+  verificationUpdatedAtMs?: number | null;
+  nextExpiryMs: number | null;
+  currentAccountStatusLabel: string;
 }
 
 export interface SavedDeviceAccount {
@@ -371,7 +497,16 @@ export type NotificationEventType =
   | 'pk_invite'
   | 'wallet'
   | 'agency'
-  | 'system';
+  | 'system'
+  | 'admin_action'
+  | 'admin_warning'
+  | 'moderation'
+  | 'verification'
+  | 'account_blocked'
+  | 'account_suspended'
+  | 'live_restricted'
+  | 'party_restricted'
+  | 'access_restored';
 
 export interface NotificationItem {
   id: string;
@@ -394,6 +529,30 @@ export interface NotificationItem {
   createdAtMs?: number;
   isRead: boolean;
   actionUrl?: string;
+  // Admin Action & Moderation detail metadata
+  isAdminAction?: boolean;
+  actionKind?: AdminActionKind;
+  actionType?: string;
+  actionTitle?: string;
+  actionTaken?: string;
+  reason?: string;
+  adminName?: string;
+  adminLabel?: string;
+  adminEmail?: string;
+  adminMessage?: string;
+  duration?: string;
+  startedAt?: string;
+  startedAtMs?: number | null;
+  expiresAt?: string;
+  expiresAtMs?: number | null;
+  isPermanent?: boolean;
+  currentStatus?: string;
+  restrictionScope?: AdminRestrictionScope;
+  verificationStatus?: string;
+  actionDate?: string;
+  actionDateMs?: number;
+  sourceCollection?: 'notifications' | 'adminActions' | 'warnings' | 'profile_transition';
+  dedupKey?: string;
 }
 
 export interface GiftTransactionRecord {
@@ -476,17 +635,21 @@ export interface CoinSellerAgencyProfile {
   agencyId: string;
   agencyName: string;
   agencyCode: string;
+  logo?: string;
   badge: string;
   ownerUserId: string;
   ownerName?: string;
+  ownerUniqueId?: string;
+  ownerAvatar?: string;
   agencyBalance: number;
   pin: string;
   isPinSet: boolean;
   whatsappNumber: string;
   whatsappDisplay: string;
+  hasValidWhatsApp?: boolean;
   isOfficial: boolean;
   slogan: string;
-  status?: 'active' | 'suspended';
+  status?: 'active' | 'suspended' | 'hold' | 'inactive';
   paymentMethods?: string[];
   rates?: Array<{ amount: number; bonus: number; price: string }>;
 }
@@ -496,18 +659,23 @@ export interface HostAgencyProfile {
   agencyName: string;
   agencyCode: string;
   agencyTag: string; // e.g. "ROYAL"
+  logo?: string;
   tagColor?: string;
   badge: string;
   ownerUserId: string;
   ownerName?: string;
+  ownerUniqueId?: string;
+  ownerAvatar?: string;
   whatsappNumber: string;
   whatsappDisplay: string;
+  hasValidWhatsApp?: boolean;
   defaultCommissionRate: number; // percentage, e.g. 15
   minWeeklyHours: number;
   slogan: string;
   isOfficial: boolean;
   activeHostsCount?: number;
-  status?: 'active' | 'suspended';
+  totalHosts?: number;
+  status?: 'active' | 'suspended' | 'hold' | 'inactive';
 }
 
 export interface HostMember {
@@ -536,17 +704,29 @@ export interface HostMember {
 
 export interface HostJoinRequest {
   id: string;
+  applicantUid?: string;
   userId: string;
+  userDocId?: string;
   uniqueId: string;
   displayName: string;
   username: string;
   avatar: string;
   level: number;
   agencyId: string;
+  agencyName?: string;
+  agencyCode?: string;
+  agencyTag?: string;
+  agencyOwnerId?: string;
+  agencyType?: string;
   whatsapp: string;
   experience: string;
   expectedHours: number;
   appliedDate: string;
+  createdAt?: string;
+  createdAtMs?: number;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  rejectionReason?: string;
   status: 'pending' | 'approved' | 'rejected';
 }
 

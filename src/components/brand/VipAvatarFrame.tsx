@@ -1,6 +1,7 @@
 import React from 'react';
 import { Crown } from 'lucide-react';
 import { VipFrameSvg } from './VipFrameSvg';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 
 export interface VipAvatarFrameProps {
   avatarUrl: string;
@@ -272,17 +273,25 @@ export const VipAvatarFrame: React.FC<VipAvatarFrameProps> = ({
     },
   }[size];
 
+  const safeAvatarSrc = safeImageSrc(avatarUrl, DEFAULT_AVATAR_URL);
+
   // Fallback for non-VIP or Level 0
   if (!tierConfig || vipTier === 0) {
     return (
       <div className={`relative ${sizeStyles.container} shrink-0 flex items-center justify-center ${className}`}>
         <div className="w-[82%] h-[82%] rounded-full overflow-hidden bg-zinc-900 border border-white/10 shadow-sm">
           <img
-            src={avatarUrl}
+            src={safeAvatarSrc}
             alt="Avatar"
             className="w-full h-full object-cover"
             onError={(e) => {
-              (e.target as HTMLElement).style.display = 'none';
+              const target = e.currentTarget;
+              if (target.dataset.fallbackApplied) {
+                target.style.display = 'none';
+                return;
+              }
+              target.dataset.fallbackApplied = '1';
+              target.src = DEFAULT_AVATAR_URL;
             }}
           />
         </div>
@@ -317,12 +326,14 @@ export const VipAvatarFrame: React.FC<VipAvatarFrameProps> = ({
         className={`absolute ${sizeStyles.avatarSize} rounded-full overflow-hidden bg-zinc-950 z-0 flex items-center justify-center shadow-inner`}
       >
         <img
-          src={avatarUrl}
+          src={safeAvatarSrc}
           alt="Avatar"
           className="w-full h-full object-cover"
           onError={(e) => {
-            (e.target as HTMLImageElement).src =
-              'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=400&q=80';
+            const target = e.currentTarget;
+            if (target.dataset.fallbackApplied) return;
+            target.dataset.fallbackApplied = '1';
+            target.src = DEFAULT_AVATAR_URL;
           }}
         />
       </div>

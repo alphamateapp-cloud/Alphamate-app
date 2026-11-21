@@ -157,9 +157,33 @@ export function getCategoryForNotificationType(type?: string): NotificationCateg
     case 'wallet':
     case 'agency':
     case 'system':
+    case 'admin_action':
+    case 'admin_warning':
+    case 'moderation':
+    case 'verification':
+    case 'account_blocked':
+    case 'account_suspended':
+    case 'live_restricted':
+    case 'party_restricted':
+    case 'access_restored':
     default:
       return 'walletAndSystem';
   }
+}
+
+export function isOfficialAdminNotificationType(type?: string): boolean {
+  if (!type) return false;
+  return [
+    'admin_action',
+    'admin_warning',
+    'moderation',
+    'verification',
+    'account_blocked',
+    'account_suspended',
+    'live_restricted',
+    'party_restricted',
+    'access_restored',
+  ].includes(type);
 }
 
 const PREFS_STORAGE_KEY = 'alphamate_notification_prefs';
@@ -257,6 +281,7 @@ class PushNotificationService {
   }
 
   public isCategoryAllowed(type?: string): boolean {
+    if (isOfficialAdminNotificationType(type)) return true;
     const prefs = this.preferences || this.getPreferences();
     if (!prefs.enabled) return false;
     const categoryKey = getCategoryForNotificationType(type);

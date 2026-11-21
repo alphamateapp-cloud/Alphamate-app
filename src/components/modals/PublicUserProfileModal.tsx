@@ -4,7 +4,6 @@ import {
   UserPlus,
   UserCheck,
   MessageCircle,
-  ShieldCheck,
   Crown,
   Copy,
   Check,
@@ -18,6 +17,17 @@ import { subscribeToPublicUserProfile } from '../../services/firebase';
 import { subscribeToUserBadgeStats } from '../../services/badgeService';
 import { UserBadgeStrip } from '../badges/UserBadgeIcon';
 import { copyToClipboard } from '../../utils/clipboard';
+import {
+  cacheUserProfileSnippet,
+  getCachedUserProfileSnippet,
+} from '../../services/profileSnippetCache';
+import {
+  resolveUserBlueTickVerified,
+  resolveUserGreenTickVerified,
+} from '../../services/adminModerationService';
+import { VerificationTicksInfoModal } from '../badges/VerificationTicks';
+import { VerificationBadge } from '../badges/VerificationBadge';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 
 export const PublicUserProfileModal: React.FC = () => {
   const {
@@ -38,6 +48,7 @@ export const PublicUserProfileModal: React.FC = () => {
   });
   const [badgeIds, setBadgeIds] = useState<UserBadgeId[]>([]);
   const [liveProfile, setLiveProfile] = useState<Record<string, any> | null>(null);
+  const [showTicksInfo, setShowTicksInfo] = useState(false);
 
   useEffect(() => {
     if (!viewingPublicUser?.id) return;
@@ -48,6 +59,24 @@ export const PublicUserProfileModal: React.FC = () => {
       followersCount: Number(viewingPublicUser.followersCount ?? 0),
       followingCount: Number(viewingPublicUser.followingCount ?? 0),
     });
+
+    // Hydrate immediately from Service Worker Cache Storage for instant load & offline viewing
+    getCachedUserProfileSnippet(viewingPublicUser.id)
+      .then((snippet) => {
+        if (cancelled || !snippet) return;
+        setLiveProfile((prev) => prev || snippet);
+        if (Array.isArray(snippet.equippedBadgeIds) && snippet.equippedBadgeIds.length > 0) {
+          setBadgeIds((prev) => (prev.length > 0 ? prev : snippet.equippedBadgeIds || []));
+        }
+        setCounts((prev) => ({
+          followersCount: prev.followersCount || snippet.followersCount,
+          followingCount: prev.followingCount || snippet.followingCount,
+        }));
+      })
+      .catch(() => {});
+
+    // Cache the base snippet immediately so even quick previews remain available offline
+    void cacheUserProfileSnippet(viewingPublicUser);
 
     fetchUserFollowCounts(viewingPublicUser.id)
       .then((res) => {
@@ -66,6 +95,11 @@ export const PublicUserProfileModal: React.FC = () => {
         if (Array.isArray(data.equippedBadgeIds)) {
           setBadgeIds(data.equippedBadgeIds);
         }
+        void cacheUserProfileSnippet({
+          ...viewingPublicUser,
+          ...data,
+          id: viewingPublicUser.id,
+        });
       }
     });
 
@@ -89,14 +123,23 @@ export const PublicUserProfileModal: React.FC = () => {
     displayName: String(liveProfile?.displayName || viewingPublicUser.displayName || 'Alpha Mate'),
     username: String(liveProfile?.username || viewingPublicUser.username || 'user'),
     uniqueId: String(liveProfile?.uniqueId || viewingPublicUser.uniqueId || viewingPublicUser.id),
-    avatar: String(liveProfile?.avatar || liveProfile?.photoURL || viewingPublicUser.avatar || ''),
+    avatar:
+      safeImageSrc(
+        liveProfile?.avatar || liveProfile?.photoURL || viewingPublicUser.avatar,
+        DEFAULT_AVATAR_URL
+      ) || DEFAULT_AVATAR_URL,
     bio: liveProfile?.bio !== undefined ? String(liveProfile.bio || '') : (viewingPublicUser.bio || ''),
     level: Math.max(0, Number(liveProfile?.level ?? viewingPublicUser.level ?? 0)),
     vipTier: Math.max(0, Number(liveProfile?.vipTier ?? viewingPublicUser.vipTier ?? 0)),
-    isVerified:
-      liveProfile?.isVerified !== undefined
-        ? Boolean(liveProfile.isVerified)
-        : Boolean(viewingPublicUser.isVerified),
+    isVerified: liveProfile
+      ? resolveUserBlueTickVerified(liveProfile, Boolean(viewingPublicUser.isVerified))
+      : Boolean(viewingPublicUser.isVerified),
+    isAccountVerified: liveProfile
+      ? resolveUserGreenTickVerified(
+          liveProfile,
+          Boolean(viewingPublicUser.isAccountVerified || viewingPublicUser.greenTick)
+        )
+      : resolveUserGreenTickVerified(viewingPublicUser as Record<string, any>, false),
     countryFlag: liveProfile?.countryFlag ?? viewingPublicUser.countryFlag,
   };
 
@@ -157,18 +200,25 @@ export const PublicUserProfileModal: React.FC = () => {
         {/* Body */}
         <div className="px-5 pb-6 -mt-10 relative">
           <div className="flex items-end justify-between gap-3">
-            <div className="relative">
+            <div className="relative shrink-0 mb-1.5">
               <img
-                src={profileUser.avatar}
+                src={safeImageSrc(profileUser.avatar, DEFAULT_AVATAR_URL)}
                 alt={profileUser.displayName}
                 referrerPolicy="no-referrer"
                 className="w-20 h-20 rounded-full object-cover border-4 border-[#110A22] shadow-xl bg-[#1A1033]"
               />
               {profileUser.countryFlag && (
-                <span className="absolute bottom-0 right-0 text-base bg-[#110A22] rounded-full px-1">
+                <span className="absolute top-0 right-0 text-sm bg-[#110A22] rounded-full px-1 shadow">
                   {profileUser.countryFlag}
                 </span>
               )}
+              <VerificationBadge
+                isVerified={Boolean(profileUser.isAccountVerified)}
+                isRespected={Boolean(profileUser.isVerified)}
+                size="sm"
+                position="bottom-center"
+                onClick={() => setShowTicksInfo(true)}
+              />
             </div>
 
             {!isMe && (
@@ -214,9 +264,6 @@ export const PublicUserProfileModal: React.FC = () => {
           <div className="mt-3 space-y-1">
             <div className="flex items-center gap-1.5 flex-wrap">
               <h2 className="text-lg font-black text-white">{profileUser.displayName}</h2>
-              {profileUser.isVerified && (
-                <ShieldCheck className="w-4 h-4 text-[#A855F7]" />
-              )}
               {badgeIds.length > 0 && <UserBadgeStrip badgeIds={badgeIds} size="sm" />}
             </div>
 
@@ -284,6 +331,15 @@ export const PublicUserProfileModal: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <VerificationTicksInfoModal
+        isOpen={showTicksInfo}
+        onClose={() => setShowTicksInfo(false)}
+        displayName={profileUser.displayName}
+        isAccountVerified={Boolean(profileUser.isAccountVerified)}
+        isBlueTickVerified={Boolean(profileUser.isVerified)}
+        isOwnProfile={isMe}
+      />
     </div>
   );
 };

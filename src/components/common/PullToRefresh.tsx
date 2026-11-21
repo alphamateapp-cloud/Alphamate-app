@@ -248,7 +248,7 @@ export const PullToRefresh: React.FC<PullToRefreshProps> = ({
   const indicatorOverlay = showFloatingIndicator ? (
     <div
       aria-live="polite"
-      className="pointer-events-none fixed left-1/2 top-[calc(env(safe-area-inset-top,0px)+12px)] z-[85] -translate-x-1/2 transition-[transform,opacity] duration-200 ease-out"
+      className="pointer-events-none fixed left-1/2 top-[calc(var(--app-safe-top,0px)+12px)] z-[85] -translate-x-1/2 transition-[transform,opacity] duration-200 ease-out"
       style={{
         transform: `translateY(${Math.max(0, translateY)}px)`,
         opacity: status === 'done' || status === 'error' || status === 'refreshing' ? 1 : Math.min(1, progress * 1.25),

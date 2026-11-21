@@ -2,6 +2,7 @@ import React, { useRef, useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { PullToRefresh } from '../components/common/PullToRefresh';
 import { AlphaMateLogo } from '../components/brand/AlphaMateLogo';
+import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
 import {
   ArrowLeft,
   User,
@@ -24,8 +25,11 @@ import {
   Trash2,
   Users,
   Plus,
+  HardDrive,
 } from 'lucide-react';
 import { AndroidSetupModal } from '../components/modals/AndroidSetupModal';
+import { PWAInstallButton } from '../components/common/PWAInstallButton';
+import { clearProfileSnippetCache } from '../services/profileSnippetCache';
 
 export const SettingsScreen: React.FC = () => {
   const {
@@ -144,6 +148,31 @@ export const SettingsScreen: React.FC = () => {
           </div>
         </div>
 
+        {/* Offline Experience & App Install (Service Worker Cache) */}
+        <div>
+          <span className="text-[11px] font-bold uppercase tracking-wider text-violet-300 block px-1 mb-2 flex items-center gap-1.5">
+            <HardDrive className="w-3.5 h-3.5 text-[#A855F7]" />
+            <span>Offline Cache &amp; Web App</span>
+          </span>
+          <div className="rounded-2xl bg-[#140D26] border border-[#A855F7]/25 p-3.5 space-y-3">
+            <p className="text-[11px] text-zinc-300 leading-relaxed">
+              Core UI assets and recently viewed profile snippets are cached locally by the Service Worker for faster startup and offline viewing.
+            </p>
+            <PWAInstallButton variant="card" />
+            <button
+              type="button"
+              onClick={() => {
+                clearProfileSnippetCache()
+                  .then(() => showToast('Cached profile snippets cleared. Fresh profiles will load automatically.'))
+                  .catch(() => showToast('Unable to clear cached profiles right now.'));
+              }}
+              className="w-full py-2 px-3 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-white/10 text-[11px] font-semibold text-zinc-200 transition cursor-pointer"
+            >
+              Clear Cached Profile Snippets
+            </button>
+          </div>
+        </div>
+
         {/* Multi-Account System (Up to 5 Accounts Instant Switch) */}
         <div>
           <span className="text-[11px] font-bold uppercase tracking-wider text-[#C084FC] px-1 mb-2 flex items-center justify-between">
@@ -163,7 +192,7 @@ export const SettingsScreen: React.FC = () => {
             >
               <div className="flex items-center gap-3 min-w-0">
                 <img
-                  src={currentUser.avatar}
+                  src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
                   alt={currentUser.displayName}
                   referrerPolicy="no-referrer"
                   className="w-9 h-9 rounded-full object-cover border border-[#EC4899]/60 shrink-0"

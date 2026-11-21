@@ -14,6 +14,7 @@ import {
 import { FriendStory, StoryItem, User, LiveStream } from '../../types';
 import { LevelBadgeIcon } from '../brand/LevelBadgeIcon';
 import { VipAvatarFrame } from '../brand/VipAvatarFrame';
+import { safeImageSrc } from '../../utils/imageHd';
 
 interface StoryViewerModalProps {
   friend: FriendStory | null;
@@ -183,9 +184,9 @@ export const StoryViewerModal: React.FC<StoryViewerModalProps> = ({
       >
         {/* Story Background / Media */}
         <div className="absolute inset-0 z-0">
-          {currentStory.mediaUrl ? (
+          {safeImageSrc(currentStory.mediaUrl) ? (
             <img
-              src={currentStory.mediaUrl}
+              src={safeImageSrc(currentStory.mediaUrl)}
               alt="Story"
               className="w-full h-full object-cover"
             />
