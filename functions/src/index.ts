@@ -3,6 +3,7 @@ import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { getAuth } from 'firebase-admin/auth';
 import { getMessaging } from 'firebase-admin/messaging';
 import { onSchedule } from 'firebase-functions/v2/scheduler';
+import { onRequest } from 'firebase-functions/v2/https';
 import { onDocumentCreated } from 'firebase-functions/v2/firestore';
 import * as logger from 'firebase-functions/logger';
 import { createEmailOtpCloudFunctions } from './emailOtp';
@@ -35,6 +36,133 @@ export const sendEmailOtp = emailOtpCloudFunctions.sendEmailOtp;
 export const verifyEmailOtp = emailOtpCloudFunctions.verifyEmailOtp;
 export const sendLoginEmailOtp = emailOtpCloudFunctions.sendLoginEmailOtp;
 export const verifyLoginEmailOtp = emailOtpCloudFunctions.verifyLoginEmailOtp;
+
+/**
+ * Records authenticated device telemetry and server-observed IP activity.
+ * GPS coordinates are accepted only when the client explicitly reports location consent.
+ */
+export const recordDeviceSecurityActivity = onRequest(
+  { region: 'us-central1', cors: true, timeoutSeconds: 20, memory: '256MiB' },
+  async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    if (req.method !== 'POST') {
+      res.status(405).json({ error: 'Method not allowed' });
+      return;
+    }
+    try {
+      const authorization = String(req.headers.authorization || '');
+      const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+      if (!token) {
+        res.status(401).json({ error: 'Authentication required' });
+        return;
+      }
+      const decoded = await getAuth(app).verifyIdToken(token);
+      const uid = decoded.uid;
+      const body = (req.body || {}) as Record<string, any>;
+      const device = (body.device || {}) as Record<string, any>;
+      const installationId = String(device.installationId || '').slice(0, 128);
+      if (!installationId) {
+        res.status(400).json({ error: 'Missing installation identifier' });
+        return;
+      }
+
+      // Use the platform-provided request IP, never a client-supplied IP field.
+      const ip = String(req.ip || '').slice(0, 64);
+      const now = new Date().toISOString();
+      const nowMs = Date.now();
+      const userRef = db.collection('users').doc(uid);
+      const userSnap = await userRef.get();
+      const userData = userSnap.exists ? (userSnap.data() || {}) : {};
+
+      const activeDeviceBans = await db.collection('device_bans').limit(500).get();
+      const deviceBan = activeDeviceBans.docs.find((d) => {
+        const b = d.data();
+        return b.active !== false && (
+          String(b.target || b.deviceId || b.fingerprint || '') === installationId ||
+          String(b.target || b.deviceId || b.fingerprint || '') === String(device.model || '')
+        );
+      });
+      const activeIpBans = await db.collection('ip_bans').limit(500).get();
+      const ipBan = activeIpBans.docs.find((d) => {
+        const b = d.data();
+        return b.active !== false && String(b.target || b.ip || '') === ip;
+      });
+      const accountBanned = userData.isDeviceBanned === true ||
+        userData.isBlocked === true || userData.isBanned === true ||
+        userData.accountStatus === 'blocked' || userData.accountStatus === 'banned';
+      if (deviceBan || ipBan || accountBanned) {
+        res.status(403).json({ banned: true, message: 'Access restricted by Alpha Mate security.' });
+        return;
+      }
+
+      const location = body.locationConsent === true && body.location &&
+        Number.isFinite(Number(body.location.latitude)) &&
+        Number.isFinite(Number(body.location.longitude))
+        ? {
+            latitude: Number(body.location.latitude),
+            longitude: Number(body.location.longitude),
+            accuracy: Math.max(0, Number(body.location.accuracy || 0)),
+            source: 'device_gps',
+            capturedAt: now,
+          }
+        : null;
+
+      const deviceRecord = {
+        uid,
+        userId: uid,
+        installationId,
+        deviceId: installationId,
+        deviceFingerprint: installationId,
+        deviceModel: String(device.model || 'Unknown').slice(0, 160),
+        model: String(device.model || 'Unknown').slice(0, 160),
+        deviceBrand: String(device.brand || device.manufacturer || 'Unknown').slice(0, 100),
+        manufacturer: String(device.manufacturer || device.brand || 'Unknown').slice(0, 100),
+        deviceName: String(device.device || '').slice(0, 100),
+        androidVersion: String(device.androidVersion || '').slice(0, 40),
+        androidApi: Number(device.androidApi || 0),
+        appVersion: String(body.appVersion || '').slice(0, 40),
+        platform: String(body.platform || '').slice(0, 30),
+        ipAddress: ip,
+        lastIp: ip,
+        location,
+        locationConsent: body.locationConsent === true,
+        lastSeenAt: now,
+        lastSeenAtMs: nowMs,
+        lastLoginAt: now,
+        updatedAt: now,
+      };
+      await userRef.set({
+        deviceId: installationId,
+        deviceFingerprint: installationId,
+        deviceModel: deviceRecord.deviceModel,
+        deviceBrand: deviceRecord.deviceBrand,
+        androidVersion: deviceRecord.androidVersion,
+        appVersion: deviceRecord.appVersion,
+        platform: deviceRecord.platform,
+        ipAddress: ip,
+        lastIp: ip,
+        lastSeenAt: now,
+        lastSeenAtMs: nowMs,
+        lastLoginAt: now,
+        ...(location ? { lastKnownLocation: location, deviceLocation: location } : {}),
+      }, { merge: true });
+
+      const sessionRef = userRef.collection('deviceSessions').doc(installationId);
+      await sessionRef.set(deviceRecord, { merge: true });
+      await db.collection('security_events').add({
+        ...deviceRecord,
+        eventType: 'device_activity',
+        createdAt: now,
+        createdAtMs: nowMs,
+      });
+      res.status(200).json({ ok: true, deviceModel: deviceRecord.deviceModel, ipAddress: ip });
+    } catch (error: any) {
+      logger.warn('Device security activity rejected', { message: error?.message });
+      res.status(401).json({ error: 'Unable to verify security activity' });
+    }
+  }
+);
+
 
 function extractTimestampMs(data: Record<string, unknown>, ...keys: string[]): number | null {
   for (const key of keys) {

@@ -34,6 +34,7 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(NativeGoogleAuthPlugin.class);
         registerPlugin(AgoraPartyPlugin.class);
         registerPlugin(SystemInsetsPlugin.class);
+        registerPlugin(DeviceSecurityPlugin.class);
         super.onCreate(savedInstanceState);
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
         configureSafeAreaSystemBars();

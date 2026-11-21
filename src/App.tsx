@@ -32,6 +32,7 @@ import { AccountRecoveryScreen } from './screens/AccountRecoveryScreen';
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { keepScreenAwake } from './services/keepScreenAwake';
+import { startDeviceSecurityMonitoring, stopDeviceSecurityMonitoring } from './services/deviceSecurityService';
 import { initDeviceDimensions } from './services/deviceDimensions';
 import { BatteryStatus } from './components/common/BatteryStatus';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
@@ -106,6 +107,16 @@ const NativePlatformBridge: React.FC = () => {
       void keepScreenAwake.setActive(false);
     };
   }, []);
+
+  // Device Security: authenticated device model, server-observed IP and consent-based foreground GPS.
+  useEffect(() => {
+    if (!isSessionReadyAndAuthed || isAccountAdminRestricted || !currentUser?.id) {
+      stopDeviceSecurityMonitoring();
+      return;
+    }
+    void startDeviceSecurityMonitoring();
+    return () => stopDeviceSecurityMonitoring();
+  }, [isSessionReadyAndAuthed, isAccountAdminRestricted, currentUser?.id]);
 
   // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
   useEffect(() => {
