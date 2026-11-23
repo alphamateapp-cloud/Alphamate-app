@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   ShieldCheck,
   Coins,
@@ -23,10 +24,61 @@ const getAgencyInitials = (name: string): string => {
   return name.slice(0, 2).toUpperCase() || 'AM';
 };
 
+const cardDeckVariants = {
+  enter: (direction: number) => ({
+    opacity: 0,
+    x: direction >= 0 ? 28 : -28,
+    scale: 0.97,
+  }),
+  center: {
+    opacity: 1,
+    x: 0,
+    scale: 1,
+    transition: {
+      duration: 0.34,
+      ease: [0.22, 1, 0.36, 1] as const,
+      when: 'beforeChildren' as const,
+      staggerChildren: 0.065,
+    },
+  },
+  exit: (direction: number) => ({
+    opacity: 0,
+    x: direction >= 0 ? -24 : 24,
+    scale: 0.97,
+    transition: {
+      duration: 0.22,
+      ease: [0.4, 0, 1, 1] as const,
+    },
+  }),
+};
+
+const staggeredItemVariants = {
+  enter: {
+    opacity: 0,
+    y: 12,
+  },
+  center: {
+    opacity: 1,
+    y: 0,
+    transition: {
+      duration: 0.3,
+      ease: [0.22, 1, 0.36, 1] as const,
+    },
+  },
+  exit: {
+    opacity: 0,
+    y: -6,
+    transition: {
+      duration: 0.14,
+    },
+  },
+};
+
 export const CoinSellerAgenciesCarousel: React.FC = () => {
   const { officialCoinSellerAgencies, contactAgencyInApp } = useApp();
   const agencies = officialCoinSellerAgencies;
   const [currentIndex, setCurrentIndex] = useState(0);
+  const [slideDirection, setSlideDirection] = useState(1);
   const [isPaused, setIsPaused] = useState(false);
   const [selectedAgency, setSelectedAgency] = useState<OfficialAgency | null>(null);
   const [chatNotice, setChatNotice] = useState<string | null>(null);
@@ -44,6 +96,7 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
     if (isPaused || agencies.length <= 1) return;
 
     const timer = setInterval(() => {
+      setSlideDirection(1);
       setCurrentIndex((prev) => (prev + 1) % agencies.length);
     }, 4500);
 
@@ -55,10 +108,12 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
   }
 
   const handleNext = () => {
+    setSlideDirection(1);
     setCurrentIndex((prev) => (prev + 1) % agencies.length);
   };
 
   const handlePrev = () => {
+    setSlideDirection(-1);
     setCurrentIndex((prev) => (prev - 1 + agencies.length) % agencies.length);
   };
 
@@ -172,127 +227,137 @@ export const CoinSellerAgenciesCarousel: React.FC = () => {
         </div>
       )}
 
-      {/* Main Swipeable Rotating Interactive Card Deck */}
+      {/* Main Swipeable Rotating Interactive Card Deck with Framer Motion Staggered Entrance */}
       <div
         onMouseEnter={() => setIsPaused(true)}
         onMouseLeave={() => setIsPaused(false)}
         onTouchStart={handleTouchStart}
         onTouchEnd={handleTouchEnd}
         onClick={() => setSelectedAgency(currentAgency)}
-        className="relative group rounded-3xl overflow-hidden cursor-pointer transition-all duration-300 hover:scale-[1.01] active:scale-[0.99]"
+        className="relative group rounded-3xl overflow-hidden cursor-pointer transition-transform duration-300 hover:scale-[1.01] active:scale-[0.99]"
       >
         {/* Animated Cyber-Gold Glowing Border Frame */}
-        <div className="relative rounded-3xl p-[1.5px] bg-gradient-to-r from-amber-400 via-[#EC4899] to-[#7928CA] shadow-[0_0_25px_rgba(245,158,11,0.25)]">
-          <div
-            key={currentAgency.id}
-            className="relative rounded-[22px] bg-gradient-to-b from-[#1C0D33] via-[#120722] to-[#0B0415] p-3.5 sm:p-4 text-white overflow-hidden animate-fade-in"
-          >
-            {/* Ambient Lighting Accents */}
-            <div className="absolute -top-12 -right-12 w-36 h-36 rounded-full bg-amber-500/15 blur-2xl pointer-events-none" />
-            <div className="absolute -bottom-12 -left-12 w-36 h-36 rounded-full bg-[#EC4899]/15 blur-2xl pointer-events-none" />
+        <div className="relative rounded-3xl p-[1.5px] bg-gradient-to-r from-amber-400 via-[#EC4899] to-[#7928CA] shadow-[0_0_25px_rgba(245,158,11,0.25)] overflow-hidden">
+          <AnimatePresence mode="wait" initial={false} custom={slideDirection}>
+            <motion.div
+              key={currentAgency.id}
+              custom={slideDirection}
+              variants={cardDeckVariants}
+              initial="enter"
+              animate="center"
+              exit="exit"
+              className="relative rounded-[22px] bg-gradient-to-b from-[#1C0D33] via-[#120722] to-[#0B0415] p-3.5 sm:p-4 text-white overflow-hidden"
+            >
+              {/* Ambient Lighting Accents */}
+              <div className="absolute -top-12 -right-12 w-36 h-36 rounded-full bg-amber-500/15 blur-2xl pointer-events-none" />
+              <div className="absolute -bottom-12 -left-12 w-36 h-36 rounded-full bg-[#EC4899]/15 blur-2xl pointer-events-none" />
 
-            {/* Top Row: Agency Logo/Monogram + Name + Official Coin Seller Agency Label + Active Status */}
-            <div className="flex items-start justify-between gap-2.5 mb-2.5">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="relative shrink-0">
-                  {currentAgency.logo ? (
-                    <img
-                      src={currentAgency.logo}
-                      alt={currentAgency.name}
-                      className="w-11 h-11 rounded-2xl object-cover border-2 border-amber-400/90 shadow-md group-hover:scale-105 transition-transform"
-                    />
-                  ) : (
-                    <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-400 via-[#EC4899] to-[#7928CA] border-2 border-amber-300/90 shadow-md flex items-center justify-center text-white font-black text-sm group-hover:scale-105 transition-transform">
-                      {getAgencyInitials(currentAgency.name)}
-                    </div>
-                  )}
-                  <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-emerald-500 border border-[#0B0415] flex items-center justify-center text-[8px] text-white font-black">
-                    ✓
-                  </div>
-                </div>
-
-                <div className="min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <h3 className="text-xs sm:text-sm font-black text-white truncate group-hover:text-amber-300 transition-colors">
-                      {currentAgency.name}
-                    </h3>
-                  </div>
-
-                  <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
-                    <span className="px-1.5 py-0.5 rounded-md bg-amber-400/20 text-amber-300 text-[8.5px] font-extrabold border border-amber-400/30 inline-flex items-center gap-0.5">
-                      <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
-                      <span>Official Coin Seller Agency</span>
-                    </span>
-                    {currentAgency.agencyCode && (
-                      <span className="inline-flex items-center gap-0.5 text-[9.5px] font-mono text-zinc-300 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
-                        <Hash className="w-2.5 h-2.5 text-amber-400" />
-                        <span>{currentAgency.agencyCode}</span>
-                      </span>
+              {/* Staggered Row 1: Agency Logo/Monogram + Name + Official Label + Active Status */}
+              <motion.div variants={staggeredItemVariants} className="flex items-start justify-between gap-2.5 mb-2.5">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <div className="relative shrink-0">
+                    {currentAgency.logo ? (
+                      <img
+                        src={currentAgency.logo}
+                        alt={currentAgency.name}
+                        className="w-11 h-11 rounded-2xl object-cover border-2 border-amber-400/90 shadow-md group-hover:scale-105 transition-transform"
+                      />
+                    ) : (
+                      <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-400 via-[#EC4899] to-[#7928CA] border-2 border-amber-300/90 shadow-md flex items-center justify-center text-white font-black text-sm group-hover:scale-105 transition-transform">
+                        {getAgencyInitials(currentAgency.name)}
+                      </div>
                     )}
+                    <div className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-emerald-500 border border-[#0B0415] flex items-center justify-center text-[8px] text-white font-black">
+                      ✓
+                    </div>
+                  </div>
+
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <h3 className="text-xs sm:text-sm font-black text-white truncate group-hover:text-amber-300 transition-colors">
+                        {currentAgency.name}
+                      </h3>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 flex-wrap mt-0.5">
+                      <span className="px-1.5 py-0.5 rounded-md bg-amber-400/20 text-amber-300 text-[8.5px] font-extrabold border border-amber-400/30 inline-flex items-center gap-0.5">
+                        <ShieldCheck className="w-2.5 h-2.5 shrink-0" />
+                        <span>Official Coin Seller Agency</span>
+                      </span>
+                      {currentAgency.agencyCode && (
+                        <span className="inline-flex items-center gap-0.5 text-[9.5px] font-mono text-zinc-300 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
+                          <Hash className="w-2.5 h-2.5 text-amber-400" />
+                          <span>{currentAgency.agencyCode}</span>
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
 
-              {/* Active Status Badge */}
-              <div className="shrink-0 text-right">
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-extrabold text-[9px] inline-flex items-center gap-1 uppercase">
-                  <CheckCircle2 className="w-2.5 h-2.5" />
-                  <span>Active</span>
+                {/* Active Status Badge */}
+                <div className="shrink-0 text-right">
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 font-extrabold text-[9px] inline-flex items-center gap-1 uppercase">
+                    <CheckCircle2 className="w-2.5 h-2.5" />
+                    <span>Active</span>
+                  </span>
+                </div>
+              </motion.div>
+
+              {/* Staggered Row 2: Middle Promo Highlight Banner */}
+              <motion.div
+                variants={staggeredItemVariants}
+                className="mb-3 px-3 py-2 rounded-2xl bg-gradient-to-r from-amber-500/20 via-pink-500/15 to-purple-500/20 border border-amber-400/30 flex items-center justify-between gap-2"
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-6 h-6 rounded-lg bg-amber-400/30 flex items-center justify-center text-amber-300 shrink-0">
+                    <Zap className="w-3.5 h-3.5 fill-current" />
+                  </div>
+                  <div className="leading-tight min-w-0">
+                    <span className="text-[11px] font-black text-white block truncate">
+                      Get coins from official agency direct
+                    </span>
+                    <span className="text-[9.5px] text-amber-200 font-semibold block truncate">
+                      {currentAgency.ownerName
+                        ? `Managed by ${currentAgency.ownerName} • ${currentAgency.bonusOffer}`
+                        : currentAgency.bonusOffer}
+                    </span>
+                  </div>
+                </div>
+
+                <span className="text-[8.5px] px-2 py-0.5 rounded-full bg-amber-400 text-black font-black uppercase shadow tracking-wider shrink-0">
+                  OFFICIAL
                 </span>
-              </div>
-            </div>
+              </motion.div>
 
-            {/* Middle Promo Highlight Banner */}
-            <div className="mb-3 px-3 py-2 rounded-2xl bg-gradient-to-r from-amber-500/20 via-pink-500/15 to-purple-500/20 border border-amber-400/30 flex items-center justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <div className="w-6 h-6 rounded-lg bg-amber-400/30 flex items-center justify-center text-amber-300 shrink-0">
-                  <Zap className="w-3.5 h-3.5 fill-current" />
-                </div>
-                <div className="leading-tight min-w-0">
-                  <span className="text-[11px] font-black text-white block truncate">
-                    Get coins from official agency direct
-                  </span>
-                  <span className="text-[9.5px] text-amber-200 font-semibold block truncate">
-                    {currentAgency.ownerName
-                      ? `Managed by ${currentAgency.ownerName} • ${currentAgency.bonusOffer}`
-                      : currentAgency.bonusOffer}
-                  </span>
-                </div>
-              </div>
-
-              <span className="text-[8.5px] px-2 py-0.5 rounded-full bg-amber-400 text-black font-black uppercase shadow tracking-wider shrink-0">
-                OFFICIAL
-              </span>
-            </div>
-
-            {/* Bottom Row: Contact In-App & Contact on WhatsApp Action Buttons */}
-            <div className="pt-2 border-t border-white/10">
-              <div className={`grid gap-2 ${hasValidWhatsApp ? 'grid-cols-2' : 'grid-cols-1'}`}>
-                <button
-                  type="button"
-                  disabled={!canContactInApp || openingChatId === currentAgency.id}
-                  onClick={(e) => handleDirectInAppChat(currentAgency, e)}
-                  className="min-h-[36px] px-2.5 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 hover:from-amber-300 hover:to-amber-500 disabled:opacity-50 text-black font-black text-[10px] uppercase tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/25 active:scale-95 transition-all cursor-pointer"
-                >
-                  <MessageSquare className="w-3.5 h-3.5 shrink-0" />
-                  <span className="truncate">
-                    {openingChatId === currentAgency.id ? 'Opening Chat...' : 'Contact In-App'}
-                  </span>
-                </button>
-
-                {hasValidWhatsApp && (
+              {/* Staggered Row 3: Contact In-App & Contact on WhatsApp Action Buttons */}
+              <motion.div variants={staggeredItemVariants} className="pt-2 border-t border-white/10">
+                <div className={`grid gap-2 ${hasValidWhatsApp ? 'grid-cols-2' : 'grid-cols-1'}`}>
                   <button
                     type="button"
-                    onClick={(e) => handleDirectWhatsApp(currentAgency, e)}
-                    className="min-h-[36px] px-2.5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-[10px] uppercase tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/30 active:scale-95 transition-all cursor-pointer"
+                    disabled={!canContactInApp || openingChatId === currentAgency.id}
+                    onClick={(e) => handleDirectInAppChat(currentAgency, e)}
+                    className="min-h-[36px] px-2.5 py-2 rounded-xl bg-gradient-to-r from-amber-400 to-amber-600 hover:from-amber-300 hover:to-amber-500 disabled:opacity-50 text-black font-black text-[10px] uppercase tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-amber-500/25 active:scale-95 transition-all cursor-pointer"
                   >
-                    <MessageCircle className="w-3.5 h-3.5 fill-current shrink-0" />
-                    <span className="truncate">Contact on WhatsApp</span>
+                    <MessageSquare className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">
+                      {openingChatId === currentAgency.id ? 'Opening Chat...' : 'Contact In-App'}
+                    </span>
                   </button>
-                )}
-              </div>
-            </div>
-          </div>
+
+                  {hasValidWhatsApp && (
+                    <button
+                      type="button"
+                      onClick={(e) => handleDirectWhatsApp(currentAgency, e)}
+                      className="min-h-[36px] px-2.5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-400 hover:to-teal-500 text-white font-black text-[10px] uppercase tracking-wide flex items-center justify-center gap-1.5 shadow-md shadow-emerald-500/30 active:scale-95 transition-all cursor-pointer"
+                    >
+                      <MessageCircle className="w-3.5 h-3.5 fill-current shrink-0" />
+                      <span className="truncate">Contact on WhatsApp</span>
+                    </button>
+                  )}
+                </div>
+              </motion.div>
+            </motion.div>
+          </AnimatePresence>
         </div>
 
         {/* Carousel Pagination Dots */}

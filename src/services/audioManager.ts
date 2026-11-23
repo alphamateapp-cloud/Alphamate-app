@@ -498,6 +498,31 @@ class GiftAudioManager {
     return 'synth';
   }
 
+  public async playVipEntrySfx(vipTier: number): Promise<SfxPlaybackSource> {
+    if (this.isMuted) return 'muted';
+    const tier = Math.max(1, Math.min(12, Math.floor(Number(vipTier) || 3)));
+    const assetPath =
+      tier >= 9
+        ? '/audio/vip-entry-sovereign.mp3'
+        : tier >= 6
+        ? '/audio/vip-entry-imperial.mp3'
+        : '/audio/vip-entry-gold.mp3';
+
+    const cached = this.bufferCache.get(assetPath);
+    if (cached?.status !== 'missing') {
+      const buffer =
+        cached?.status === 'decoded'
+          ? cached.buffer
+          : await this.loadAndDecodeAsset(assetPath);
+      if (buffer && this.playDecodedBuffer(buffer, 0.85, 1)) {
+        return 'asset';
+      }
+    }
+
+    giftSoundEngine.playVipEntryFanfare(tier);
+    return 'synth';
+  }
+
   public stopAll(): void {
     this.activeSources.forEach((source) => {
       try {

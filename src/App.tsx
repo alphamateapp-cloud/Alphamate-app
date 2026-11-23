@@ -1,9 +1,11 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
+import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { PullToRefresh } from './components/common/PullToRefresh';
 import { Capacitor } from '@capacitor/core';
 import { App as CapApp } from '@capacitor/app';
 import { StatusBar, Style } from '@capacitor/status-bar';
+import { extractPartyRoomIdFromUrl } from './utils/partyDeepLink';
 import { DeviceFrame } from './components/layout/DeviceFrame';
 import { SplashScreen } from './screens/SplashScreen';
 import { WelcomeScreen } from './screens/WelcomeScreen';
@@ -61,18 +63,26 @@ import {
  * active consistently across both unrestricted screens and moderation restriction screens.
  */
 const NativePlatformBridge: React.FC = () => {
+  const { theme } = useTheme();
   const {
     currentScreen,
     setCurrentScreen,
     setActiveTab,
     deviceMode,
+    partyRooms,
     activePartyRoom,
+    openPartyRoom,
     activeStream,
     closePartyRoom,
     closeLiveStream,
     navigateBack,
     currentUser,
   } = useApp();
+
+  const [pendingDeepLinkPartyId, setPendingDeepLinkPartyId] = useState<string | null>(() => {
+    if (typeof window === 'undefined') return null;
+    return extractPartyRoomIdFromUrl(window.location.href);
+  });
 
   const {
     isSessionReadyAndAuthed,
@@ -149,15 +159,125 @@ const NativePlatformBridge: React.FC = () => {
     return initDeviceDimensions();
   }, []);
 
-  // Android Native Hardware Back Button & Status Bar Integration (Active on Native Android/iOS)
+  // Listen for incoming Party Room deep links (Web URL changes & Capacitor native appUrlOpen)
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleLocationCheck = () => {
+      const extracted = extractPartyRoomIdFromUrl(window.location.href);
+      if (extracted) {
+        setPendingDeepLinkPartyId(extracted);
+      }
+    };
+
+    window.addEventListener('popstate', handleLocationCheck);
+    window.addEventListener('hashchange', handleLocationCheck);
+
+    let appUrlHandle: { remove: () => Promise<void> } | null = null;
+    if (Capacitor.isNativePlatform()) {
+      CapApp.addListener('appUrlOpen', ({ url }) => {
+        const extracted = extractPartyRoomIdFromUrl(url);
+        if (extracted) {
+          setPendingDeepLinkPartyId(extracted);
+        }
+      })
+        .then((handle) => {
+          appUrlHandle = handle;
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      window.removeEventListener('popstate', handleLocationCheck);
+      window.removeEventListener('hashchange', handleLocationCheck);
+      if (appUrlHandle) {
+        appUrlHandle.remove().catch(() => {});
+      }
+    };
+  }, []);
+
+  // Auto-open the invited Party Room once the user is authenticated and rooms are synced
+  useEffect(() => {
+    if (!pendingDeepLinkPartyId) return;
+    if (!isSessionReadyAndAuthed || isAccountAdminRestricted || isPartyRestricted) return;
+    if (deviceMode === 'admin') return;
+
+    const clearDeepLinkUrlParams = () => {
+      try {
+        const currentUrl = new URL(window.location.href);
+        currentUrl.searchParams.delete('party');
+        currentUrl.searchParams.delete('partyRoom');
+        currentUrl.searchParams.delete('room');
+        currentUrl.searchParams.delete('ref');
+        const cleanSearch = currentUrl.searchParams.toString();
+        const nextUrl = `${currentUrl.pathname}${cleanSearch ? `?${cleanSearch}` : ''}${
+          currentUrl.hash.startsWith('#/party/') || currentUrl.hash.startsWith('#party/')
+            ? ''
+            : currentUrl.hash
+        }`;
+        window.history.replaceState({}, '', nextUrl);
+      } catch {
+        // Ignore history restrictions in sandboxed environments
+      }
+    };
+
+    if (activePartyRoom && activePartyRoom.id === pendingDeepLinkPartyId) {
+      clearDeepLinkUrlParams();
+      setPendingDeepLinkPartyId(null);
+      return;
+    }
+
+    const matchedRoom = partyRooms.find(
+      (r) =>
+        r.id === pendingDeepLinkPartyId ||
+        r.sessionId === pendingDeepLinkPartyId ||
+        r.host?.id === pendingDeepLinkPartyId
+    );
+
+    if (matchedRoom) {
+      openPartyRoom(matchedRoom);
+      clearDeepLinkUrlParams();
+      setPendingDeepLinkPartyId(null);
+      return;
+    }
+
+    // If room is no longer active after initial sync window, land cleanly on the Party lobby
+    const fallbackTimer = window.setTimeout(() => {
+      setActiveTab('party');
+      setCurrentScreen('party');
+      clearDeepLinkUrlParams();
+      setPendingDeepLinkPartyId(null);
+    }, 4500);
+
+    return () => window.clearTimeout(fallbackTimer);
+  }, [
+    pendingDeepLinkPartyId,
+    isSessionReadyAndAuthed,
+    isAccountAdminRestricted,
+    isPartyRestricted,
+    deviceMode,
+    partyRooms,
+    activePartyRoom,
+    openPartyRoom,
+    setActiveTab,
+    setCurrentScreen,
+  ]);
+
+  // Keep native Android/iOS Status Bar synchronized with global theme mode
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
-
     try {
       StatusBar.setOverlaysWebView({ overlay: false }).catch(() => {});
-      StatusBar.setStyle({ style: Style.Dark }).catch(() => {});
-      StatusBar.setBackgroundColor({ color: '#09070F' }).catch(() => {});
+      StatusBar.setStyle({ style: theme === 'dark' ? Style.Dark : Style.Light }).catch(() => {});
+      StatusBar.setBackgroundColor({ color: theme === 'dark' ? '#09070F' : '#F5F3FA' }).catch(
+        () => {}
+      );
     } catch {}
+  }, [theme]);
+
+  // Android Native Hardware Back Button Integration (Active on Native Android/iOS)
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
 
     let listenerHandle: { remove: () => Promise<void> } | null = null;
     CapApp.addListener('backButton', ({ canGoBack }) => {
@@ -293,7 +413,7 @@ const AppContent: React.FC = () => {
     currentScreen === 'moments' || currentScreen === 'upload';
 
   return (
-    <div className="relative w-full h-full bg-[#09070F] flex flex-col overflow-hidden">
+    <div className="relative w-full h-full bg-[#F5F3FA] dark:bg-[#09070F] flex flex-col overflow-hidden transition-colors duration-200">
       <div
         ref={mainTabScrollRef}
         className="flex-1 w-full overflow-y-auto overflow-x-hidden min-h-0 overscroll-contain"
@@ -368,27 +488,29 @@ class AppErrorBoundary extends React.Component<
 
 export default function App() {
   return (
-    <AppProvider>
-      <DeviceFrame>
-        <NativePlatformBridge />
-        <PushNotificationBanner />
-        <BatteryStatus />
-        <OfflineIndicator />
-        <GlobalFirestoreQuotaBanner />
-        <GlobalPushSettingsHost />
-        <GlobalWeeklyLeaderboardModal />
-        <UserBadgesModal />
-        <PublicUserProfileModal />
-        <ProfileRegistrationModal />
-        <AccountSwitcherModal />
-        <AdminActionModals />
-        <AppErrorBoundary>
-          <ModerationGuard>
-            <AppContent />
-          </ModerationGuard>
-        </AppErrorBoundary>
-      </DeviceFrame>
-    </AppProvider>
+    <ThemeProvider>
+      <AppProvider>
+        <DeviceFrame>
+          <NativePlatformBridge />
+          <PushNotificationBanner />
+          <BatteryStatus />
+          <OfflineIndicator />
+          <GlobalFirestoreQuotaBanner />
+          <GlobalPushSettingsHost />
+          <GlobalWeeklyLeaderboardModal />
+          <UserBadgesModal />
+          <PublicUserProfileModal />
+          <ProfileRegistrationModal />
+          <AccountSwitcherModal />
+          <AdminActionModals />
+          <AppErrorBoundary>
+            <ModerationGuard>
+              <AppContent />
+            </ModerationGuard>
+          </AppErrorBoundary>
+        </DeviceFrame>
+      </AppProvider>
+    </ThemeProvider>
   );
 }
 

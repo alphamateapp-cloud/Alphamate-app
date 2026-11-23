@@ -1073,8 +1073,11 @@ export async function syncPartyRoomToFirestore(room: any, options?: { overwrite?
       isActive: room.isActive !== false,
       roomStatus: room.isActive !== false ? 'ready' : 'ended',
       coverImageUrl: typeof room.coverImageUrl === 'string' && room.coverImageUrl.startsWith('https://') ? room.coverImageUrl : '',
-      backgroundTheme: room.backgroundTheme || 'from-[#1E103A] to-[#0A0614]',
+      backgroundTheme: room.backgroundTheme || 'royal_castle',
+      seatTheme: room.seatTheme || 'royal_gold_diya',
       nowPlaying: room.nowPlaying || '',
+      isMusicPlaying: typeof room.isMusicPlaying === 'boolean' ? room.isMusicPlaying : true,
+      musicTrackIndex: typeof room.musicTrackIndex === 'number' && Number.isFinite(room.musicTrackIndex) ? Math.max(0, Math.floor(room.musicTrackIndex)) : 0,
       moderatorIds: (room.moderatorIds || []).slice(0, 10),
       kickedUserIds: (room.kickedUserIds || []).slice(0, 100),
       blockedUserIds: (room.blockedUserIds || []).slice(0, 100),
@@ -1319,29 +1322,34 @@ export async function updatePartyRoomSeat(
         return { success: false, reason: 'USER_RESTRICTED' };
       }
 
-      const totalCapacity = room.level === 3 ? 15 : room.level === 1 ? 4 : 8;
+      const totalCapacity =
+        room.level === 4 ? 16 : room.level === 3 ? 12 : room.level === 1 ? 4 : 8;
       let seats = Array.isArray(room.seats) ? room.seats.map((seat: any) => ({ ...seat })) : [];
 
-      while (seats.length < totalCapacity) {
-        seats.push({
-          seatIndex: seats.length,
-          user: null,
-          isMuted: false,
-          isHostMuted: false,
-          isLocked: false,
-          isSpeaking: false,
-          receivedCoins: 0,
-        });
+      for (let idx = 0; idx < totalCapacity; idx++) {
+        if (!seats.some((s: any) => Number(s.seatIndex) === idx)) {
+          seats.push({
+            seatIndex: idx,
+            user: null,
+            isMuted: false,
+            isHostMuted: false,
+            isLocked: false,
+            isSpeaking: false,
+            receivedCoins: 0,
+          });
+        }
       }
 
       let target = seats.findIndex((seat: any) => Number(seat.seatIndex) === seatIndex);
       if (target < 0) {
+        const isVipSeat = seatIndex === 100;
         seats.push({
           seatIndex,
           user: null,
           isMuted: false,
           isHostMuted: false,
-          isLocked: false,
+          isLocked: isVipSeat,
+          isVipGuest: isVipSeat,
           isSpeaking: false,
           receivedCoins: 0,
         });
@@ -1421,12 +1429,25 @@ export async function togglePartySeatLockInFirestore(
       const room = snapshot.data() as any;
       const seats = Array.isArray(room.seats) ? room.seats.map((s: any) => ({ ...s })) : [];
       const target = seats.findIndex((s: any) => Number(s.seatIndex) === seatIndex);
-      if (target < 0) return { success: false };
-      seats[target] = {
-        ...seats[target],
-        isLocked,
-        ...(isLocked ? { user: null, isSpeaking: false, isMuted: false, isHostMuted: false } : {}),
-      };
+      if (target < 0) {
+        seats.push({
+          seatIndex,
+          user: null,
+          isMuted: false,
+          isHostMuted: false,
+          isLocked,
+          isSpeaking: false,
+          receivedCoins: 0,
+          ...(seatIndex === 100 ? { isVipGuest: true } : {}),
+        });
+      } else {
+        seats[target] = {
+          ...seats[target],
+          isLocked,
+          ...(seatIndex === 100 ? { isVipGuest: true } : {}),
+          ...(isLocked ? { user: null, isSpeaking: false, isMuted: false, isHostMuted: false } : {}),
+        };
+      }
       transaction.update(roomRef, { seats, updatedAt: new Date().toISOString() });
       return { success: true, seats };
     });

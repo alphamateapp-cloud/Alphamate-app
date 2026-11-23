@@ -21,7 +21,7 @@ interface RoomPKSplitStageProps {
   myRoom: PartyRoom;
   opponentRoom: OpponentRoomCandidate;
   mySeats: PartySeat[];
-  myPartyLevel: 1 | 2 | 3;
+  myPartyLevel: 1 | 2 | 3 | 4;
   myRoomScore: number;
   opponentRoomScore: number;
   timeLeft: number; // in seconds

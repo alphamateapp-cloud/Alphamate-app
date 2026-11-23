@@ -50,6 +50,12 @@ body {
   -webkit-tap-highlight-color: transparent;
   user-select: none;
   touch-action: manipulation;
+  transition: background-color 200ms ease, color 200ms ease;
+}
+
+html.light body {
+  background-color: #F5F3FA;
+  color: #140D26;
 }
 
 /* Custom subtle scrollbar */
@@ -76,6 +82,12 @@ body {
   border: 1px solid rgba(168, 85, 247, 0.15);
 }
 
+html.light .glass-panel {
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid rgba(121, 40, 202, 0.14);
+  box-shadow: 0 8px 24px -10px rgba(121, 40, 202, 0.14);
+}
+
 .glass-panel-elevated {
   background: rgba(28, 20, 52, 0.85);
   backdrop-filter: blur(20px);
@@ -84,12 +96,214 @@ body {
   box-shadow: 0 10px 30px -10px rgba(121, 40, 202, 0.3);
 }
 
+html.light .glass-panel-elevated {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid rgba(121, 40, 202, 0.18);
+  box-shadow: 0 12px 30px -12px rgba(121, 40, 202, 0.18);
+}
+
 .purple-glow {
   box-shadow: 0 0 25px rgba(168, 85, 247, 0.35);
 }
 
 .pink-glow {
   box-shadow: 0 0 25px rgba(236, 72, 153, 0.4);
+}
+
+/* =========================================================================
+   GLOBAL LIGHT THEME SURFACE & CONTRAST SYSTEM (html.light)
+   Ensures all screens seamlessly adapt between Dark and Light modes while
+   preserving vibrant brand gradients, badges, and dark media overlays.
+   ========================================================================= */
+html.light :not([data-keep-dark="true"]):where(
+  [class*="bg-[#09070F]"],
+  [class*="bg-[#090612]"],
+  [class*="bg-[#07040D]"],
+  [class*="bg-[#05030A]"],
+  [class*="bg-[#0B0617]"],
+  [class*="bg-[#0B0616]"],
+  [class*="bg-[#0E081D]"],
+  [class*="bg-[#0F0A20]"]
+):not([class*="dark:bg-"]) {
+  background-color: #F5F3FA;
+}
+
+html.light :not([data-keep-dark="true"]):where(
+  [class*="bg-[#140D26]"],
+  [class*="bg-[#140C26]"],
+  [class*="bg-[#140D27]"],
+  [class*="bg-[#140E28]"],
+  [class*="bg-[#140929]"],
+  [class*="bg-[#120A24]"],
+  [class*="bg-[#120B22]"],
+  [class*="bg-[#120B24]"],
+  [class*="bg-[#110A22]"],
+  [class*="bg-[#150A2B]"],
+  [class*="bg-[#160A2C]"],
+  [class*="bg-[#171030]"],
+  [class*="bg-[#170E2E]"],
+  [class*="bg-[#18102E]"],
+  [class*="bg-[#180E30]"],
+  [class*="bg-[#1A1133]"],
+  [class*="bg-[#1A1033]"],
+  [class*="bg-[#1C1236]"],
+  [class*="bg-[#1C1235]"],
+  [class*="bg-[#1E1438]"],
+  [class*="bg-[#1E1136]"],
+  [class*="bg-[#1F1235]"],
+  [class*="bg-[#1F1338]"]
+):not([class*="dark:bg-"]) {
+  background-color: #FFFFFF;
+  box-shadow: 0 2px 12px -4px rgba(88, 28, 135, 0.08);
+}
+
+html.light :not([data-keep-dark="true"]):where(
+  [class*="bg-[#251642]"],
+  [class*="bg-[#251545]"],
+  [class*="bg-[#2A184E]"],
+  [class*="bg-[#2C1C4E]"],
+  [class*="bg-[#341C63]"],
+  [class*="bg-[#39206B]"]
+):not([class*="dark:bg-"]) {
+  background-color: #EFE9FB;
+}
+
+html.light :not([data-keep-dark="true"]):where(
+  [class*="from-[#170E2E]"],
+  [class*="from-[#140D26]"],
+  [class*="from-[#120A24]"],
+  [class*="from-[#09070F]"]
+):not([class*="dark:"]) {
+  --tw-gradient-from: #FFFFFF;
+  --tw-gradient-via: #FAF7FF;
+  --tw-gradient-to: #F1EAFB;
+}
+
+html.light :not([data-keep-dark="true"]):where(
+  [class*="bg-white/[0.02]"],
+  [class*="bg-white/[0.03]"],
+  [class*="bg-white/[0.04]"],
+  [class*="bg-white/[0.05]"],
+  [class*="bg-white/[0.06]"],
+  [class*="bg-white/5"],
+  [class*="bg-white/10"]
+):not([class*="dark:bg-"]) {
+  background-color: rgba(121, 40, 202, 0.06);
+}
+
+html.light :not([data-keep-dark="true"]):where(
+  [class*="border-white/5"],
+  [class*="border-white/10"],
+  [class*="border-white/15"],
+  [class*="border-white/20"]
+):not([class*="dark:border-"]) {
+  border-color: rgba(121, 40, 202, 0.14);
+}
+
+html.light :not([data-keep-dark="true"]):where(
+  [class*="divide-white/5"],
+  [class*="divide-white/10"]
+) > :not(:first-child) {
+  border-color: rgba(121, 40, 202, 0.1);
+}
+
+html.light :not([data-keep-dark="true"]):where(
+  [class*="bg-zinc-800"],
+  [class*="bg-zinc-900"]
+):not([class*="dark:bg-"]) {
+  background-color: #EAE4F7;
+}
+
+/* Primary & secondary text contrast in Light Mode */
+html.light .text-white:not([class*="dark:text-"]):not([class*="bg-gradient-"]):not([class*="bg-[#7928CA]"]):not([class*="bg-[#EC4899]"]):not([class*="bg-[#A855F7]"]):not([class*="bg-rose-500"]):not([class*="bg-rose-600"]):not([class*="bg-emerald-500"]):not([class*="bg-emerald-600"]):not([class*="bg-amber-500"]):not([class*="bg-purple-600"]):not([class*="bg-pink-600"]):not([class*="bg-red-"]):not([class*="bg-blue-600"]):not([class~="bg-black"]) {
+  color: #140D26;
+}
+
+/* Keep crisp white text inside vibrant brand gradients, solid accent buttons, and dark media containers */
+html.light :where(
+  [data-keep-dark="true"],
+  [class~="bg-black"],
+  [class*="from-[#7928CA]"],
+  [class*="from-[#A855F7]"],
+  [class*="from-[#EC4899]"],
+  [class*="from-purple-"],
+  [class*="from-pink-"],
+  [class*="from-rose-"],
+  [class*="from-amber-"],
+  [class*="from-emerald-"],
+  [class*="from-indigo-"],
+  [class*="from-violet-"],
+  [class*="from-blue-"],
+  [class*="from-[#3B0764]"],
+  [class*="from-[#4C1D95]"],
+  [class*="from-[#701A75]"]
+) .text-white,
+html.light :where(
+  [data-keep-dark="true"],
+  [class~="bg-black"],
+  [class*="from-[#7928CA]"],
+  [class*="from-[#A855F7]"],
+  [class*="from-[#EC4899]"],
+  [class*="from-purple-"],
+  [class*="from-pink-"],
+  [class*="from-rose-"],
+  [class*="from-amber-"],
+  [class*="from-emerald-"],
+  [class*="from-indigo-"],
+  [class*="from-violet-"],
+  [class*="from-blue-"],
+  [class*="from-[#3B0764]"],
+  [class*="from-[#4C1D95]"],
+  [class*="from-[#701A75]"]
+).text-white {
+  color: #FFFFFF;
+}
+
+html.light :not([data-keep-dark="true"]) .text-zinc-200:not([class*="dark:text-"]),
+html.light :not([data-keep-dark="true"]) .text-zinc-300:not([class*="dark:text-"]) {
+  color: #3B3154;
+}
+
+html.light :not([data-keep-dark="true"]) .text-zinc-400:not([class*="dark:text-"]) {
+  color: #5E5278;
+}
+
+html.light :not([data-keep-dark="true"]) .text-zinc-500:not([class*="dark:text-"]) {
+  color: #6E628A;
+}
+
+html.light :not([data-keep-dark="true"]) :where(.text-\[\#C084FC\], .text-\[\#E9D5FF\]):not([class*="dark:text-"]) {
+  color: #7928CA;
+}
+
+html.light :not([data-keep-dark="true"]) :where(.text-emerald-300, .text-emerald-400):not([class*="dark:text-"]) {
+  color: #047857;
+}
+
+html.light :not([data-keep-dark="true"]) :where(.text-amber-300, .text-amber-400):not([class*="dark:text-"]) {
+  color: #B45309;
+}
+
+html.light :not([data-keep-dark="true"]) .text-sky-300:not([class*="dark:text-"]) {
+  color: #0369A1;
+}
+
+html.light :not([data-keep-dark="true"]) .text-rose-400:not([class*="dark:text-"]) {
+  color: #BE123C;
+}
+
+html.light :not([data-keep-dark="true"]) .text-violet-300:not([class*="dark:text-"]) {
+  color: #6D28D9;
+}
+
+html.light :where(
+  [data-keep-dark="true"],
+  [class~="bg-black"],
+  [class*="from-[#3B0764]"],
+  [class*="from-[#4C1D95]"],
+  [class*="from-[#701A75]"]
+) :where(.text-zinc-200, .text-zinc-300, .text-zinc-400) {
+  color: #D4D4D8;
 }
 
 /* Floating animation for live stream hearts */
@@ -388,3 +602,297 @@ body {
   animation: vipShimmer 2.5s ease-in-out infinite;
 }
 
+/* VIP Party Room Entry Banner (Compositor-Only transform & opacity) */
+@keyframes vipEntryBannerIn {
+  0% {
+    opacity: 0;
+    transform: translate3d(-28px, -6px, 0) scale(0.96);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes vipEntryBannerOut {
+  0% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(26px, -4px, 0) scale(0.97);
+  }
+}
+
+@keyframes vipEntrySheen {
+  0% {
+    transform: translate3d(-120%, 0, 0) skewX(-20deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.7;
+  }
+  80% {
+    opacity: 0.45;
+  }
+  100% {
+    transform: translate3d(240%, 0, 0) skewX(-20deg);
+    opacity: 0;
+  }
+}
+
+@keyframes vipEntryProgress {
+  0% {
+    transform: scaleX(1);
+  }
+  100% {
+    transform: scaleX(0);
+  }
+}
+
+.animate-vip-entry-in {
+  animation: vipEntryBannerIn 420ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-vip-entry-out {
+  animation: vipEntryBannerOut 320ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  will-change: transform, opacity;
+}
+
+.animate-vip-entry-sheen {
+  animation: vipEntrySheen 1350ms cubic-bezier(0.16, 1, 0.3, 1) 180ms 1 forwards;
+  will-change: transform, opacity;
+}
+
+.animate-vip-entry-progress {
+  transform-origin: left center;
+  animation: vipEntryProgress var(--vip-entry-duration, 4600ms) linear forwards;
+  will-change: transform;
+}
+
+/* =========================================================================
+   ALPHA MATE — 3 ANIMATED PARTY SEAT THEMES (Compositor-Only GPU Keyframes)
+   Synchronized across all seats in the Party Room
+   ========================================================================= */
+
+@keyframes seatOrbitSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes seatOrbitSpinReverse {
+  0% {
+    transform: rotate(360deg);
+  }
+  100% {
+    transform: rotate(0deg);
+  }
+}
+
+/* Theme 1: Royal Gold / Diya — Flickering flame & warm golden particles */
+@keyframes diyaFlameFlicker {
+  0%, 100% {
+    transform: scaleX(1) scaleY(1) rotate(0deg);
+    opacity: 0.96;
+  }
+  20% {
+    transform: scaleX(0.92) scaleY(1.1) rotate(-3deg);
+    opacity: 1;
+  }
+  42% {
+    transform: scaleX(1.06) scaleY(0.92) rotate(2.5deg);
+    opacity: 0.9;
+  }
+  65% {
+    transform: scaleX(0.95) scaleY(1.12) rotate(-2deg);
+    opacity: 1;
+  }
+  84% {
+    transform: scaleX(1.04) scaleY(0.96) rotate(2deg);
+    opacity: 0.94;
+  }
+}
+
+@keyframes diyaHaloPulse {
+  0%, 100% {
+    transform: scale(0.92);
+    opacity: 0.55;
+  }
+  50% {
+    transform: scale(1.16);
+    opacity: 0.92;
+  }
+}
+
+/* Theme 2: Royal Pink / Purple Lotus — Soft petal glow & pulsing aura */
+@keyframes lotusGlowPulse {
+  0%, 100% {
+    transform: scale(0.98);
+    opacity: 0.72;
+  }
+  50% {
+    transform: scale(1.04);
+    opacity: 1;
+  }
+}
+
+@keyframes lotusPetalSway {
+  0%, 100% {
+    transform: scale(1) translateY(0px);
+  }
+  50% {
+    transform: scale(1.035) translateY(-0.8px);
+  }
+}
+
+/* Theme 3: Diamond / Ice Blue — Rotating crystal glint & icy pulse */
+@keyframes diamondGlint {
+  0%, 100% {
+    transform: scale(0.65) rotate(0deg);
+    opacity: 0.35;
+  }
+  50% {
+    transform: scale(1.18) rotate(45deg);
+    opacity: 1;
+  }
+}
+
+/* Shared floating sparkle & gem twinkle across themes */
+@keyframes seatSparkleFloat {
+  0%, 100% {
+    transform: translateY(1.5px) scale(0.6);
+    opacity: 0.25;
+  }
+  50% {
+    transform: translateY(-2.5px) scale(1.15);
+    opacity: 1;
+  }
+}
+
+.animate-seat-orbit {
+  animation: seatOrbitSpin 5.2s linear infinite;
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  will-change: transform;
+}
+
+.animate-seat-orbit-slow {
+  animation: seatOrbitSpin 8.5s linear infinite;
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  will-change: transform;
+}
+
+.animate-seat-orbit-reverse {
+  animation: seatOrbitSpinReverse 7s linear infinite;
+  transform-box: view-box;
+  transform-origin: 80px 80px;
+  will-change: transform;
+}
+
+.animate-diya-flame {
+  animation: diyaFlameFlicker 1.15s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: 50% 88%;
+  will-change: transform, opacity;
+}
+
+.animate-diya-halo {
+  animation: diyaHaloPulse 1.4s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.animate-lotus-pulse {
+  animation: lotusGlowPulse 2.4s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.animate-lotus-sway {
+  animation: lotusPetalSway 3.1s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: 50% 90%;
+  will-change: transform;
+}
+
+.animate-diamond-glint {
+  animation: diamondGlint 2.1s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+.animate-seat-sparkle {
+  animation: seatSparkleFloat 2.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center;
+  will-change: transform, opacity;
+}
+
+/* Empty seat luxury sofa subtle breathing & velvet specular sheen */
+@keyframes sofaBreathe {
+  0%, 100% {
+    transform: translateY(0px) scale(1);
+  }
+  50% {
+    transform: translateY(-1.4px) scale(1.03);
+  }
+}
+
+@keyframes sofaShimmerSweep {
+  0% {
+    transform: translateX(-95px) skewX(-22deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.45;
+  }
+  55% {
+    opacity: 0.25;
+  }
+  100% {
+    transform: translateX(135px) skewX(-22deg);
+    opacity: 0;
+  }
+}
+
+.animate-sofa-breathe {
+  animation: sofaBreathe 3.2s ease-in-out infinite;
+  transform-box: fill-box;
+  transform-origin: center bottom;
+  will-change: transform;
+}
+
+.animate-sofa-shimmer {
+  animation: sofaShimmerSweep 3.8s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-vip-entry-in,
+  .animate-vip-entry-out,
+  .animate-vip-entry-sheen,
+  .animate-vip-entry-progress,
+  .animate-seat-orbit,
+  .animate-seat-orbit-slow,
+  .animate-seat-orbit-reverse,
+  .animate-diya-flame,
+  .animate-diya-halo,
+  .animate-lotus-pulse,
+  .animate-lotus-sway,
+  .animate-diamond-glint,
+  .animate-seat-sparkle,
+  .animate-sofa-breathe,
+  .animate-sofa-shimmer {
+    animation: none !important;
+  }
+}

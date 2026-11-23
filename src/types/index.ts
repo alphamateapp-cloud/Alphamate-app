@@ -303,6 +303,7 @@ export interface PartySeat {
   isSpeaking: boolean;
   isHost?: boolean;
   isCoHost?: boolean;
+  isVipGuest?: boolean;
   receivedCoins?: number;
 }
 
@@ -316,8 +317,11 @@ export interface PartyRoom {
   activeViewers: number;
   seats: PartySeat[];
   backgroundTheme: string;
+  seatTheme?: 'royal_gold_diya' | 'royal_purple_lotus' | 'diamond_ice_blue';
   nowPlaying?: string;
-  level?: 1 | 2 | 3;
+  isMusicPlaying?: boolean;
+  musicTrackIndex?: number;
+  level?: 1 | 2 | 3 | 4;
   isActive?: boolean;
   isHostPresent?: boolean;
   lastSeenAtMs?: number;
@@ -375,6 +379,87 @@ export type GiftCssAnimationClass =
 
 export type GiftRarityTier = 'common' | 'rare' | 'epic' | 'legendary' | 'mythic';
 
+export type AdvancedGiftFormat = 'webm' | 'mov' | 'mp4' | 'svg' | 'gif';
+
+export type GiftDisplayMode = 'transparent' | 'semi_transparent' | 'overlay_background';
+
+export type GiftTransparencyStatus =
+  | 'alpha_verified'
+  | 'alpha_limited_gif'
+  | 'opaque_no_alpha'
+  | 'unknown';
+
+export type GiftPlaybackPosition = 'center' | 'top' | 'bottom' | 'fullscreen';
+
+export type AdvancedGiftStatus = 'draft' | 'processing' | 'published' | 'disabled';
+
+export type GiftConversionStatus =
+  | 'not_needed'
+  | 'pending'
+  | 'converting'
+  | 'completed'
+  | 'failed'
+  | 'unsupported';
+
+export interface GiftMediaAnalysis {
+  format: AdvancedGiftFormat;
+  container?: string;
+  codec?: string;
+  pixFmt?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  durationSec?: number;
+  fileSizeBytes?: number;
+  hasAlpha: boolean;
+  hasAudio?: boolean;
+  audioCodec?: string | null;
+  transparencyStatus: GiftTransparencyStatus;
+  recommendedMode: GiftDisplayMode;
+  androidWebViewCompatible?: boolean;
+  warnings: string[];
+  svgFeatures?: {
+    hasSmil: boolean;
+    hasCssKeyframes: boolean;
+    unsupportedFeatures: string[];
+  };
+}
+
+export interface AdvancedGiftConfig {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  coins: number;
+  icon?: string;
+  thumbnailUrl?: string;
+  previewImageUrl?: string;
+  originalFileUrl: string;
+  optimizedFileUrl?: string;
+  animationUrl: string;
+  format: AdvancedGiftFormat;
+  displayMode: GiftDisplayMode;
+  transparencyStatus: GiftTransparencyStatus;
+  opacity: number; // 10..100
+  durationMs: number;
+  loop: boolean;
+  playbackSpeed: number; // 0.5..2.0
+  position: GiftPlaybackPosition;
+  scale: number; // 0.4..1.5
+  priority: number; // 1..100
+  enableParticles?: boolean;
+  enableSound?: boolean;
+  status: AdvancedGiftStatus;
+  conversionStatus: GiftConversionStatus;
+  conversionMessage?: string;
+  analysis?: GiftMediaAnalysis;
+  isTestGift?: boolean;
+  createdAt: string;
+  createdAtMs: number;
+  updatedAt: string;
+  createdBy?: string;
+}
+
 export interface Gift {
   id: string;
   name: string;
@@ -390,6 +475,9 @@ export interface Gift {
   durationMs?: number;
   triggersScreenShake?: boolean;
   description: string;
+  priority?: number;
+  isTestGift?: boolean;
+  advancedConfig?: AdvancedGiftConfig;
 }
 
 export interface ChatMessage {

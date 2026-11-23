@@ -54,7 +54,6 @@ service cloud.firestore {
         'lastAdminAction', 'adminActions',
         'isVerified', 'blueTick', 'hasBlueTick', 'verificationStatus',
         'deviceId', 'deviceFingerprint', 'deviceModel', 'deviceBrand', 'androidVersion', 'appVersion', 'platform', 'ipAddress', 'lastIp', 'lastSeenAt', 'lastSeenAtMs', 'lastLoginAt', 'lastKnownLocation',
-        'deviceId', 'deviceFingerprint', 'deviceModel', 'deviceBrand', 'androidVersion', 'appVersion', 'platform', 'ipAddress', 'lastIp', 'lastSeenAt', 'lastSeenAtMs', 'lastLoginAt', 'lastKnownLocation',
         'verificationReason', 'verificationUpdatedAt', 'verificationUpdatedBy',
         'verifiedBy', 'verifiedAt',
         'agencyId', 'hostAgencyId', 'agencyName', 'hostAgencyName',
@@ -113,13 +112,13 @@ service cloud.firestore {
 
     function isUserDocHardBlocked(userData) {
       return userData != null && (
-        userData.isBlocked == true
-        || userData.blocked == true
-        || userData.isBanned == true
-        || userData.banned == true
-        || userData.accountStatus in ['blocked', 'banned']
-        || userData.isPermanentSuspension == true
-        || userData.permanentSuspension == true
+        ('isBlocked' in userData && userData.isBlocked == true)
+        || ('blocked' in userData && userData.blocked == true)
+        || ('isBanned' in userData && userData.isBanned == true)
+        || ('banned' in userData && userData.banned == true)
+        || ('accountStatus' in userData && userData.accountStatus in ['blocked', 'banned'])
+        || ('isPermanentSuspension' in userData && userData.isPermanentSuspension == true)
+        || ('permanentSuspension' in userData && userData.permanentSuspension == true)
       );
     }
 
@@ -128,7 +127,8 @@ service cloud.firestore {
         || (
           !isUserDocHardBlocked(get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
           && !(
-            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.liveDisabled == true
+            'liveDisabled' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.liveDisabled == true
             && !('liveExpiresAt' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
             && !('liveSuspendedUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
           )
@@ -140,7 +140,8 @@ service cloud.firestore {
         || (
           !isUserDocHardBlocked(get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
           && !(
-            get(/databases/$(database)/documents/users/$(request.auth.uid)).data.partyDisabled == true
+            'partyDisabled' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.partyDisabled == true
             && !('partyExpiresAt' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
             && !('partySuspendedUntil' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data)
           )
@@ -916,6 +917,9 @@ service cloud.firestore {
       return isSignedIn()
         && isValidId(roomId)
         && exists(/databases/$(database)/documents/partyRooms/$(roomId))
+        && 'host' in get(/databases/$(database)/documents/partyRooms/$(roomId)).data
+        && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.host is map
+        && 'id' in get(/databases/$(database)/documents/partyRooms/$(roomId)).data.host
         && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.host.id == request.auth.uid;
     }
 
@@ -959,22 +963,50 @@ service cloud.firestore {
 
     // Party rooms
     match /partyRooms/{roomId} {
-      allow get: if isValidId(roomId) && (isSignedIn() || resource.data.isActive == true);
-      allow list: if isSignedIn() || resource.data.isActive == true;
+      allow get: if isValidId(roomId) && (isSignedIn() || (resource != null && 'isActive' in resource.data && resource.data.isActive == true));
+      allow list: if isSignedIn() || ('isActive' in resource.data && resource.data.isActive == true);
       allow create: if isSignedIn()
         && isValidId(roomId)
+        && 'host' in request.resource.data
+        && request.resource.data.host is map
+        && 'id' in request.resource.data.host
         && request.resource.data.host.id == request.auth.uid
         && isCurrentUserAllowedForParty();
       allow update: if isSignedIn() && isValidId(roomId) && (
         isOfficialAdmin()
-        || resource.data.host.id == request.auth.uid
-        || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds)
+        || (
+          'host' in resource.data
+          && resource.data.host is map
+          && 'id' in resource.data.host
+          && resource.data.host.id == request.auth.uid
+          && (
+            ('isActive' in request.resource.data && request.resource.data.isActive == false)
+            || isCurrentUserAllowedForParty()
+          )
+        )
+        || (
+          roomId == ('party_host_' + request.auth.uid)
+          && 'host' in request.resource.data
+          && request.resource.data.host is map
+          && 'id' in request.resource.data.host
+          && request.resource.data.host.id == request.auth.uid
+          && isCurrentUserAllowedForParty()
+        )
+        || (
+          'moderatorIds' in resource.data
+          && resource.data.moderatorIds is list
+          && request.auth.uid in resource.data.moderatorIds
+        )
         || (
           isCurrentUserAllowedForParty()
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['seats', 'updatedAt', 'activeViewers', 'totalGiftCoins', 'lastSeenAtMs'])
         )
       );
-      allow delete: if isSignedIn() && isValidId(roomId) && (isOfficialAdmin() || resource.data.host.id == request.auth.uid);
+      allow delete: if isSignedIn() && isValidId(roomId) && (
+        isOfficialAdmin()
+        || ('host' in resource.data && resource.data.host is map && 'id' in resource.data.host && resource.data.host.id == request.auth.uid)
+        || roomId == ('party_host_' + request.auth.uid)
+      );
 
       match /stats/{statId} {
         allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
@@ -1043,9 +1075,11 @@ service cloud.firestore {
         allow read: if isSignedIn();
         allow create, update, delete: if isSignedIn() && (
           request.auth.uid == userId
-          || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.host.id == request.auth.uid
+          || isPartyHost(roomId)
           || (
-            get(/databases/$(database)/documents/partyRooms/$(roomId)).data.moderatorIds is list
+            exists(/databases/$(database)/documents/partyRooms/$(roomId))
+            && 'moderatorIds' in get(/databases/$(database)/documents/partyRooms/$(roomId)).data
+            && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.moderatorIds is list
             && request.auth.uid in get(/databases/$(database)/documents/partyRooms/$(roomId)).data.moderatorIds
           )
         );
@@ -1059,23 +1093,39 @@ service cloud.firestore {
 
     // Live Streams (Solo Live & PK Battle broadcasts)
     match /liveStreams/{streamId} {
-      allow get: if isValidId(streamId) && (isSignedIn() || resource.data.isActive == true);
-      allow list: if isSignedIn() || resource.data.isActive == true;
+      allow get: if isValidId(streamId) && (isSignedIn() || (resource != null && 'isActive' in resource.data && resource.data.isActive == true));
+      allow list: if isSignedIn() || ('isActive' in resource.data && resource.data.isActive == true);
       allow create: if isSignedIn()
         && isValidId(streamId)
+        && 'host' in request.resource.data
+        && request.resource.data.host is map
+        && 'id' in request.resource.data.host
         && request.resource.data.host.id == request.auth.uid
         && isCurrentUserAllowedForLive()
         && (!('lastHeartbeat' in request.resource.data) || request.resource.data.lastHeartbeat == request.time);
       allow update: if isSignedIn() && isValidId(streamId) && (
         isOfficialAdmin()
-        || (resource.data.host.id == request.auth.uid
+        || (
+          'host' in resource.data
+          && resource.data.host is map
+          && 'id' in resource.data.host
+          && resource.data.host.id == request.auth.uid
           && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastHeartbeat'])
-              || request.resource.data.lastHeartbeat == request.time))
-        || (resource.data.moderatorIds is list && request.auth.uid in resource.data.moderatorIds
-            && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastHeartbeat', 'lastHeartbeatMs']))
+              || request.resource.data.lastHeartbeat == request.time)
+        )
+        || (
+          'moderatorIds' in resource.data
+          && resource.data.moderatorIds is list
+          && request.auth.uid in resource.data.moderatorIds
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastHeartbeat', 'lastHeartbeatMs'])
+        )
         || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['viewerCount', 'totalGiftCoins', 'updatedAt'])
       );
-      allow delete: if isSignedIn() && isValidId(streamId) && (isOfficialAdmin() || resource.data.host.id == request.auth.uid);
+      allow delete: if isSignedIn() && isValidId(streamId) && (
+        isOfficialAdmin()
+        || ('host' in resource.data && resource.data.host is map && 'id' in resource.data.host && resource.data.host.id == request.auth.uid)
+        || streamId == ('live_host_' + request.auth.uid)
+      );
 
       match /stats/{statId} {
         allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;
@@ -1168,6 +1218,69 @@ service cloud.firestore {
           && request.resource.data.text.size() <= 500;
         allow update, delete: if isSignedIn() && resource.data.uid == request.auth.uid;
       }
+    }
+
+    // Advanced Multi-Format Gift Animation Catalog (Admin-managed, metadata/URLs only — never raw binaries)
+    function isValidAdvancedGift(data, giftId) {
+      return data.keys().hasAll([
+          'id', 'name', 'coins', 'originalFileUrl', 'animationUrl', 'format',
+          'displayMode', 'transparencyStatus', 'opacity', 'durationMs', 'loop',
+          'playbackSpeed', 'position', 'scale', 'priority', 'status',
+          'conversionStatus', 'createdAt', 'createdAtMs', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'name', 'description', 'category', 'coins', 'icon',
+          'thumbnailUrl', 'previewImageUrl', 'originalFileUrl', 'optimizedFileUrl',
+          'animationUrl', 'format', 'displayMode', 'transparencyStatus', 'opacity',
+          'durationMs', 'loop', 'playbackSpeed', 'position', 'scale', 'priority',
+          'enableParticles', 'enableSound', 'status', 'conversionStatus',
+          'conversionMessage', 'analysis', 'isTestGift', 'createdAt', 'createdAtMs',
+          'updatedAt', 'createdBy'
+        ])
+        && data.id == giftId
+        && isNonEmptyString(data.name, 1, 100)
+        && (!('description' in data) || (data.description is string && data.description.size() <= 500))
+        && (!('category' in data) || (data.category is string && data.category.size() <= 64))
+        && data.coins is number && data.coins >= 1 && data.coins <= 10000000
+        && (!('icon' in data) || (data.icon is string && data.icon.size() <= 32))
+        && (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 2048))
+        && (!('previewImageUrl' in data) || (data.previewImageUrl is string && data.previewImageUrl.size() <= 2048))
+        && isNonEmptyString(data.originalFileUrl, 1, 2048)
+        && (!('optimizedFileUrl' in data) || (data.optimizedFileUrl is string && data.optimizedFileUrl.size() <= 2048))
+        && isNonEmptyString(data.animationUrl, 1, 2048)
+        && data.format in ['webm', 'mov', 'mp4', 'svg', 'gif']
+        && data.displayMode in ['transparent', 'semi_transparent', 'overlay_background']
+        && data.transparencyStatus in ['alpha_verified', 'alpha_limited_gif', 'opaque_no_alpha', 'unknown']
+        && data.opacity is number && data.opacity >= 10 && data.opacity <= 100
+        && data.durationMs is number && data.durationMs >= 1500 && data.durationMs <= 60000
+        && data.loop is bool
+        && data.playbackSpeed is number && data.playbackSpeed >= 0.5 && data.playbackSpeed <= 2.0
+        && data.position in ['center', 'top', 'bottom', 'fullscreen']
+        && data.scale is number && data.scale >= 0.4 && data.scale <= 1.5
+        && data.priority is number && data.priority >= 1 && data.priority <= 100
+        && (!('enableParticles' in data) || data.enableParticles is bool)
+        && (!('enableSound' in data) || data.enableSound is bool)
+        && data.status in ['draft', 'processing', 'published', 'disabled']
+        && data.conversionStatus in ['not_needed', 'pending', 'converting', 'completed', 'failed', 'unsupported']
+        && (!('conversionMessage' in data) || (data.conversionMessage is string && data.conversionMessage.size() <= 500))
+        && (!('analysis' in data) || data.analysis is map)
+        && (!('isTestGift' in data) || data.isTestGift is bool)
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.createdAtMs is number
+        && data.updatedAt is string && data.updatedAt.size() <= 64
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 128));
+    }
+
+    match /advancedGifts/{giftId} {
+      allow get: if isValidId(giftId) && (
+        isOfficialAdmin()
+        || (isSignedIn() && resource != null && resource.data.status == 'published')
+      );
+      allow list: if isOfficialAdmin() || isSignedIn();
+      allow create, update: if isValidId(giftId)
+        && isOfficialAdmin()
+        && isValidAdvancedGift(request.resource.data, giftId);
+      allow delete: if isValidId(giftId) && isOfficialAdmin();
     }
   }
 }

@@ -30,6 +30,7 @@ type StartOptions = PartyCallbacks & {
 };
 
 const MAX_RECONNECT_ATTEMPTS = 5;
+const TOKEN_FETCH_TIMEOUT_MS = 10_000;
 const SPEAKING_HOLD_MS = 450;
 const NATIVE_SPEAKING_VOLUME_THRESHOLD = 28; // 0..255 Agora Android scale (filters ambient room hum)
 const WEB_SPEAKING_VOLUME_THRESHOLD = 8; // 0..100 Agora Web SDK scale
@@ -58,6 +59,7 @@ class AgoraPartyEngine {
   private remoteUsers = new Map<number, PartyPresenceRecord>();
   private remoteMutedByUid = new Map<number, boolean>();
   private remoteSpeakingUntilMs = new Map<number, number>();
+  private lastEmittedLocalSpeaking = false;
   private speakingSweepTimer: ReturnType<typeof setInterval> | null = null;
 
   private manualStop = false;
@@ -77,6 +79,7 @@ class AgoraPartyEngine {
   // Web Agora fallback state (used only when NOT running in native Android Capacitor)
   private webClient: any = null;
   private webLocalAudioTrack: any = null;
+  private webRawMicStream: MediaStream | null = null;
   private webJoined = false;
   private webRemoteAudioTracks = new Map<number, any>();
 
@@ -133,6 +136,10 @@ class AgoraPartyEngine {
     const base = this.getResolvedApiBase();
     const idToken = await user.getIdToken(forceRefreshIdToken);
     let response: Response;
+    const abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+    const timeoutHandle = abortController
+      ? setTimeout(() => abortController.abort(), TOKEN_FETCH_TIMEOUT_MS)
+      : null;
     try {
       response = await fetch(`${base}/api/agora/party/rooms/${encodeURIComponent(roomId)}/token`, {
         method: 'POST',
@@ -144,14 +151,20 @@ class AgoraPartyEngine {
           wantPublish,
           mode: !wantPublish ? 'pk_listen' : 'party',
         }),
+        signal: abortController?.signal,
       });
     } catch (networkErr: any) {
+      const isTimeout = networkErr?.name === 'AbortError';
       throw Object.assign(
         new Error(
-          `Unable to reach Party Voice server (${networkErr?.message || 'network offline'}).`
+          isTimeout
+            ? 'Party Voice server timed out. Retrying connection…'
+            : `Unable to reach Party Voice server (${networkErr?.message || 'network offline'}).`
         ),
         { code: 'AGORA_BACKEND_UNREACHABLE' }
       );
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
     }
 
     const payload = await response.json().catch(() => ({}));
@@ -223,6 +236,7 @@ class AgoraPartyEngine {
   private emitSpeakingSnapshot() {
     const now = Date.now();
     const localSpeaking = this.isLocalSpeaking(now);
+    this.lastEmittedLocalSpeaking = localSpeaking;
     const remoteSpeakingIds = new Set<string>();
     this.remoteUsers.forEach((presence) => {
       if (presence.isSpeaking && !presence.isMuted && presence.userId) {
@@ -265,6 +279,7 @@ class AgoraPartyEngine {
     }
     this.localVolume = 0;
     this.localSpeakingUntilMs = 0;
+    this.lastEmittedLocalSpeaking = false;
     this.remoteSpeakingUntilMs.clear();
   }
 
@@ -272,18 +287,22 @@ class AgoraPartyEngine {
     if (this.speakingSweepTimer) clearInterval(this.speakingSweepTimer);
     this.speakingSweepTimer = setInterval(() => {
       const now = Date.now();
-      let changed = false;
+      let remoteChanged = false;
       this.remoteUsers.forEach((presence, uid) => {
         const holdUntil = this.remoteSpeakingUntilMs.get(uid) || 0;
         const shouldSpeak = !presence.isMuted && holdUntil > now;
         if (presence.isSpeaking !== shouldSpeak) {
           presence.isSpeaking = shouldSpeak;
           presence.lastSeenAtMs = now;
-          changed = true;
+          remoteChanged = true;
         }
       });
-      if (changed) {
+      const currentLocalSpeaking = this.isLocalSpeaking(now);
+      const localChanged = currentLocalSpeaking !== this.lastEmittedLocalSpeaking;
+      if (remoteChanged) {
         this.emitParticipants();
+      } else if (localChanged) {
+        this.emitSpeakingSnapshot();
       }
     }, 180);
   }
@@ -336,7 +355,8 @@ class AgoraPartyEngine {
     }
 
     this.reconnectAttempt = nextAttempt;
-    const delayMs = Math.min(20000, 1500 * Math.pow(2, nextAttempt - 1));
+    const baseDelayMs = Math.min(20000, 1500 * Math.pow(2, nextAttempt - 1));
+    const delayMs = baseDelayMs + Math.floor(Math.random() * 450);
     this.callbacks.onConnectionStateChange?.('reconnecting', {
       attempt: nextAttempt,
       maxAttempts: MAX_RECONNECT_ATTEMPTS,
@@ -800,12 +820,7 @@ class AgoraPartyEngine {
 
     if (payload.canPublish) {
       try {
-        const micTrack = await AgoraRTC.createMicrophoneAudioTrack({
-          encoderConfig: 'speech_standard',
-          AEC: true,
-          ANS: true,
-          AGC: true,
-        });
+        const micTrack = await this.createWebPublishedAudioTrack(AgoraRTC, this.activeVoicePreset);
         if (this.manualStop || this.roomId !== roomId || !this.canPublish) {
           try {
             micTrack.stop();
@@ -813,6 +828,7 @@ class AgoraPartyEngine {
           } catch {
             // ignore
           }
+          this.releaseWebRawMicStream();
           await this.switchWebClientToAudience(roomId, payload).catch(() => {});
           return;
         }
@@ -845,6 +861,27 @@ class AgoraPartyEngine {
         // ignore autoplay errors until next gesture
       }
     });
+  }
+
+  /**
+   * Called when the device regains network connectivity or returns to foreground.
+   * Resumes remote audio playback and heals disconnected voice sessions without
+   * disturbing healthy active calls.
+   */
+  public recoverConnectionIfNeeded(roomId: string, reason = 'Network recovery') {
+    if (this.manualStop || !roomId || this.roomId !== roomId || !this.userId) return;
+    this.resumeAudioPlayback();
+
+    const connState = this.networkStats.connectionState;
+    const isDisconnected =
+      connState === 'disconnected' ||
+      connState === 'failed' ||
+      (!agoraPartyNative.isAvailable() && this.webClient !== null && !this.webJoined);
+
+    if (isDisconnected && !this.reconnectTimer) {
+      this.reconnectAttempt = 0;
+      this.scheduleReconnect(reason);
+    }
   }
 
   public setPartySpeakingMode(
@@ -906,12 +943,10 @@ class AgoraPartyEngine {
 
         if (!this.webLocalAudioTrack) {
           try {
-            this.webLocalAudioTrack = await AgoraRTC.createMicrophoneAudioTrack({
-              encoderConfig: 'speech_standard',
-              AEC: true,
-              ANS: true,
-              AGC: true,
-            });
+            this.webLocalAudioTrack = await this.createWebPublishedAudioTrack(
+              AgoraRTC,
+              this.activeVoicePreset
+            );
           } catch (micErr: any) {
             this.canPublish = false;
             this.muted = true;
@@ -987,7 +1022,80 @@ class AgoraPartyEngine {
     }
   }
 
-  private async unpublishAndCloseWebLocalAudioTrack() {
+  private releaseWebRawMicStream() {
+    if (this.webRawMicStream) {
+      this.webRawMicStream.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // ignore
+        }
+      });
+      this.webRawMicStream = null;
+    }
+    audioFilter.dispose(false);
+  }
+
+  private async createWebPublishedAudioTrack(
+    AgoraRTC: any,
+    preset: VoiceFilterPresetId
+  ): Promise<any> {
+    if (preset === 'normal') {
+      this.releaseWebRawMicStream();
+      return AgoraRTC.createMicrophoneAudioTrack({
+        encoderConfig: 'speech_standard',
+        AEC: true,
+        ANS: true,
+        AGC: true,
+      });
+    }
+
+    const hasLiveRawTrack = Boolean(
+      this.webRawMicStream &&
+        this.webRawMicStream.getAudioTracks().some((track) => track.readyState === 'live')
+    );
+
+    if (!hasLiveRawTrack) {
+      if (this.webRawMicStream) {
+        this.webRawMicStream.getTracks().forEach((track) => {
+          try {
+            track.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      this.webRawMicStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    }
+
+    const processedStream = await audioFilter.attachInputStream(this.webRawMicStream!, {
+      preset,
+      isMuted: this.muted,
+    });
+    const processedTrack = processedStream.getAudioTracks()[0];
+
+    if (processedTrack && typeof AgoraRTC.createCustomAudioTrack === 'function') {
+      return AgoraRTC.createCustomAudioTrack({
+        mediaStreamTrack: processedTrack,
+        encoderConfig: 'speech_standard',
+      });
+    }
+
+    return AgoraRTC.createMicrophoneAudioTrack({
+      encoderConfig: 'speech_standard',
+      AEC: true,
+      ANS: true,
+      AGC: true,
+    });
+  }
+
+  private async unpublishAndCloseWebLocalAudioTrack(keepRawMicStream = false) {
     const trackedLocal = this.webLocalAudioTrack;
     const clientTracks =
       this.webClient && Array.isArray(this.webClient.localTracks)
@@ -1014,6 +1122,9 @@ class AgoraPartyEngine {
       }
     });
     this.webLocalAudioTrack = null;
+    if (!keepRawMicStream) {
+      this.releaseWebRawMicStream();
+    }
   }
 
   public stopPartyVoice(roomId?: string, force = false): Promise<void> {
@@ -1052,6 +1163,7 @@ class AgoraPartyEngine {
           }
           this.webLocalAudioTrack = null;
         }
+        this.releaseWebRawMicStream();
         this.webRemoteAudioTracks.forEach((track) => {
           try {
             track.stop();
@@ -1124,6 +1236,12 @@ class AgoraPartyEngine {
 
   public toggleMicrophone(enabled: boolean) {
     this.muted = !enabled || !this.canPublish;
+    audioFilter.setMuted(this.muted);
+    if (this.webRawMicStream) {
+      this.webRawMicStream.getAudioTracks().forEach((track) => {
+        track.enabled = !this.muted;
+      });
+    }
     if (this.muted) {
       this.localVolume = 0;
       this.localSpeakingUntilMs = 0;
@@ -1194,12 +1312,74 @@ class AgoraPartyEngine {
     return { ...this.networkStats };
   }
 
-  public async setPartyVoiceFilter(_roomId: string, preset: VoiceFilterPresetId): Promise<VoiceFilterPresetId> {
+  public async setPartyVoiceFilter(
+    roomId: string,
+    preset: VoiceFilterPresetId
+  ): Promise<VoiceFilterPresetId> {
     const applied = audioFilter.setPreset(preset);
     this.activeVoicePreset = applied;
+
     if (agoraPartyNative.isAvailable()) {
       await agoraPartyNative.setVoiceEffect(applied).catch(() => {});
+      return applied;
     }
+
+    // If user is previewing locally while not yet publishing, update the live preview DSP chain
+    if (
+      !this.webClient ||
+      !this.webJoined ||
+      !this.canPublish ||
+      this.listenOnly ||
+      this.roomId !== roomId
+    ) {
+      if (audioFilter.isLocalMonitorActive()) {
+        await audioFilter.updateStreamPreset(applied, undefined, { isMuted: false }).catch(() => {});
+      }
+      return applied;
+    }
+
+    // Hot-swap the live published Agora Web audio track with the real-time modulated audio stream
+    await this.enqueueOp(async () => {
+      if (
+        this.manualStop ||
+        this.roomId !== roomId ||
+        !this.webClient ||
+        !this.webJoined ||
+        !this.canPublish ||
+        this.listenOnly
+      ) {
+        return;
+      }
+
+      try {
+        const mod = await import('agora-rtc-sdk-ng');
+        const AgoraRTC = mod.default || mod;
+        const keepRawMic = applied !== 'normal';
+
+        await this.unpublishAndCloseWebLocalAudioTrack(keepRawMic);
+        if (this.manualStop || this.roomId !== roomId || !this.webClient || !this.webJoined) {
+          return;
+        }
+
+        const nextTrack = await this.createWebPublishedAudioTrack(AgoraRTC, applied);
+        if (this.manualStop || this.roomId !== roomId || !this.webClient || !this.webJoined) {
+          try {
+            nextTrack?.stop?.();
+            nextTrack?.close?.();
+          } catch {
+            // ignore
+          }
+          return;
+        }
+
+        this.webLocalAudioTrack = nextTrack;
+        await nextTrack.setMuted(this.muted);
+        await this.webClient.publish([nextTrack]);
+      } catch (err) {
+        console.warn('[AgoraPartyEngine] Voice filter hot-swap fallback:', err);
+      }
+    });
+
     return applied;
   }
 }

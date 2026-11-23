@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import { Gift } from '../../types';
 import { Sparkles, Flame, Volume2, VolumeX, Crown } from 'lucide-react';
 import { audioManager } from '../../services/audioManager';
 import { virtualGiftDatabase } from '../../services/virtual-gift-database';
+import { UniversalGiftPlayer } from './UniversalGiftPlayer';
 
 export interface ActiveGiftEvent {
   id: string;
@@ -21,11 +22,19 @@ export interface ActiveGiftEvent {
 interface GiftAnimationOverlayProps {
   currentEvent: ActiveGiftEvent | null;
   onComplete: () => void;
+  /**
+   * 7-Layer Live Room Rendering selector:
+   * - 'background': Layer 2 (z-[5]) BEHIND Host & Guest Seats (for overlay_background mode)
+   * - 'foreground': Layer 5 (z-[35]) ABOVE Host & Seats, BELOW Comments (z-40) & Controls (z-50)
+   * - 'both': default single-container fallback (Moments / standalone)
+   */
+  layer?: 'background' | 'foreground' | 'both';
 }
 
 export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   currentEvent,
   onComplete,
+  layer = 'both',
 }) => {
   const [isMuted, setIsMuted] = useState(() => audioManager.getIsMuted());
   const [shakeScreen, setShakeScreen] = useState(false);
@@ -33,10 +42,18 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   const [completedEventId, setCompletedEventId] = useState<string | null>(null);
   const completedIdsRef = useRef<Set<string>>(new Set());
 
+  const isAdvancedGift = Boolean(currentEvent?.gift?.advancedConfig);
+
   // Keep latest callback in a ref so parent re-renders (e.g. 1s stream clock / 80ms combo bar)
-  // NEVER reset the auto-dismiss timer!
+  // NEVER reset the auto-dismiss timer or interrupt running video animations!
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+
+  const handleUniversalGiftComplete = useCallback((finishedId: string) => {
+    completedIdsRef.current.add(finishedId);
+    setCompletedEventId(finishedId);
+    onCompleteRef.current();
+  }, []);
 
   const resolvedGift = useMemo(
     () => (currentEvent ? virtualGiftDatabase.resolveGiftMetadata(currentEvent.gift) : null),
@@ -56,7 +73,15 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
   useEffect(() => {
     const eventId = currentEvent?.id;
-    if (!eventId || !currentEvent || completedIdsRef.current.has(eventId)) {
+    // Advanced gifts manage their own lifecycle inside UniversalGiftPlayer.
+    // Legacy CSS gifts only run timers on 'foreground' or 'both' layers (never duplicate on 'background').
+    if (
+      !eventId ||
+      !currentEvent ||
+      isAdvancedGift ||
+      layer === 'background' ||
+      completedIdsRef.current.has(eventId)
+    ) {
       setIsExiting(false);
       setShakeScreen(false);
       return;
@@ -149,7 +174,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       window.removeEventListener('pageshow', checkWallClock);
       document.removeEventListener('visibilitychange', checkWallClock);
     };
-  }, [currentEvent?.id]);
+  }, [currentEvent?.id, isAdvancedGift, layer]);
 
   const handleToggleMute = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -186,6 +211,25 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       { x: '66%', y: '30%', border: 'border-purple-400', delay: '1.85s' },
     ];
   }, [currentEvent?.id]);
+
+  // Delegate Advanced Multi-Format Gifts (WebM / MOV / MP4 / SVG / GIF) to UniversalGiftPlayer
+  if (currentEvent && isAdvancedGift) {
+    if (currentEvent.id === completedEventId || completedIdsRef.current.has(currentEvent.id)) {
+      return null;
+    }
+    return (
+      <UniversalGiftPlayer
+        event={currentEvent}
+        layer={layer}
+        onComplete={handleUniversalGiftComplete}
+      />
+    );
+  }
+
+  // Legacy CSS gifts render on Foreground/Both layers only (never duplicated in Background layer)
+  if (layer === 'background') {
+    return null;
+  }
 
   if (
     !currentEvent ||

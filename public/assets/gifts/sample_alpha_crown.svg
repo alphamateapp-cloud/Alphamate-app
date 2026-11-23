@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" width="320" height="320">
+  <defs>
+    <linearGradient id="goldCrown" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FEF08A"/>
+      <stop offset="48%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#EC4899"/>
+    </linearGradient>
+    <radialGradient id="aura" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#FDE047" stop-opacity="0.55"/>
+      <stop offset="55%" stop-color="#A855F7" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <circle cx="160" cy="160" r="132" fill="url(#aura)">
+    <animate attributeName="r" values="112;138;112" dur="2.4s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="0.65;1;0.65" dur="2.4s" repeatCount="indefinite"/>
+  </circle>
+  <g transform="translate(160 160)">
+    <animateTransform attributeName="transform" type="rotate" from="0 0 0" to="360 0 0" dur="14s" repeatCount="indefinite" additive="sum"/>
+    <circle cx="0" cy="-114" r="6" fill="#FEF08A"/>
+    <circle cx="114" cy="0" r="5" fill="#F472B6"/>
+    <circle cx="0" cy="114" r="6" fill="#38BDF8"/>
+    <circle cx="-114" cy="0" r="5" fill="#C084FC"/>
+  </g>
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0 8;0 -10;0 8" dur="2.2s" repeatCount="indefinite"/>
+    <path d="M72 206 L58 112 L118 152 L160 82 L202 152 L262 112 L248 206 Z" fill="url(#goldCrown)" stroke="#FEF9C3" stroke-width="5" stroke-linejoin="round"/>
+    <rect x="74" y="210" width="172" height="22" rx="11" fill="#7928CA" stroke="#FDE047" stroke-width="3.5"/>
+    <circle cx="160" cy="74" r="11" fill="#FEF08A" stroke="#F59E0B" stroke-width="3"/>
+    <circle cx="56" cy="104" r="9" fill="#F472B6" stroke="#FEF9C3" stroke-width="2.5"/>
+    <circle cx="264" cy="104" r="9" fill="#38BDF8" stroke="#FEF9C3" stroke-width="2.5"/>
+    <polygon points="160,132 174,162 160,192 146,162" fill="#E0F2FE" stroke="#FFFFFF" stroke-width="2">
+      <animate attributeName="opacity" values="0.75;1;0.75" dur="1.4s" repeatCount="indefinite"/>
+    </polygon>
+  </g>
+</svg>

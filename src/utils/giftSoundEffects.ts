@@ -446,6 +446,148 @@ class GiftSoundEngine {
       osc.stop(st + 0.65);
     });
   }
+
+  /**
+   * Synthesized VIP Party Room Entrance Fanfare
+   * Three prestige acoustic tiers:
+   * - VIP 3–5 (Gold/Platinum): Luminous ascending royal harp chime
+   * - VIP 6–8 (Imperial Gem): Rich harmonic chord + crystalline chime cascade
+   * - VIP 9–12 (Sovereign Emperor): Grand warm chord bloom + celestial arpeggio shimmer
+   */
+  public playVipEntryFanfare(vipTier: number) {
+    if (this.isMuted) return;
+    try {
+      const ctx = this.getAudioContext();
+      if (!ctx) return;
+
+      const now = ctx.currentTime;
+      const tier = Math.max(1, Math.min(12, Math.floor(Number(vipTier) || 3)));
+
+      if (tier >= 9) {
+        // Sovereign Emperor Class (VIP 9-12): Regal velvet chord swell + crystalline cascade
+        this.playFilteredNoise(ctx, {
+          startTime: now,
+          duration: 0.45,
+          filterType: 'bandpass',
+          startFreq: 600,
+          endFreq: 2400,
+          peakGain: 0.06,
+        });
+
+        // Warm royal brass/pad fifth chord (A3, E4, A4)
+        [220, 329.63, 440].forEach((freq) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const filter = ctx.createBiquadFilter();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(freq, now);
+
+          filter.type = 'lowpass';
+          filter.frequency.setValueAtTime(1400, now);
+          filter.frequency.exponentialRampToValueAtTime(2600, now + 0.55);
+
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.linearRampToValueAtTime(0.085, now + 0.12);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 1.35);
+
+          osc.connect(filter);
+          filter.connect(gain);
+          gain.connect(this.getOutputNode(ctx));
+
+          osc.start(now);
+          osc.stop(now + 1.4);
+        });
+
+        // Ascending celestial shimmer arpeggio (C#5, E5, A5, C#6, E6)
+        [554.37, 659.25, 880, 1108.73, 1318.51].forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const st = now + 0.1 + idx * 0.085;
+
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, st);
+
+          gain.gain.setValueAtTime(0.001, st);
+          gain.gain.linearRampToValueAtTime(0.11, st + 0.02);
+          gain.gain.exponentialRampToValueAtTime(0.001, st + 0.85);
+
+          osc.connect(gain);
+          gain.connect(this.getOutputNode(ctx));
+
+          osc.start(st);
+          osc.stop(st + 0.9);
+        });
+      } else if (tier >= 6) {
+        // Imperial Gem Class (VIP 6-8): Shimmer whoosh + D major 9th crystal chimes
+        this.playFilteredNoise(ctx, {
+          startTime: now,
+          duration: 0.35,
+          filterType: 'highpass',
+          startFreq: 900,
+          endFreq: 2800,
+          peakGain: 0.045,
+        });
+
+        [293.66, 440].forEach((freq) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(freq, now);
+
+          gain.gain.setValueAtTime(0.001, now);
+          gain.gain.linearRampToValueAtTime(0.07, now + 0.09);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 1.05);
+
+          osc.connect(gain);
+          gain.connect(this.getOutputNode(ctx));
+
+          osc.start(now);
+          osc.stop(now + 1.1);
+        });
+
+        [587.33, 739.99, 880, 1174.66].forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const st = now + 0.08 + idx * 0.08;
+
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, st);
+
+          gain.gain.setValueAtTime(0.001, st);
+          gain.gain.linearRampToValueAtTime(0.1, st + 0.018);
+          gain.gain.exponentialRampToValueAtTime(0.001, st + 0.7);
+
+          osc.connect(gain);
+          gain.connect(this.getOutputNode(ctx));
+
+          osc.start(st);
+          osc.stop(st + 0.75);
+        });
+      } else {
+        // Royal Gold / Platinum Class (VIP 3-5): Crisp ascending luminous harp chime
+        [523.25, 659.25, 783.99, 1046.5].forEach((freq, idx) => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          const st = now + idx * 0.075;
+
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(freq, st);
+
+          gain.gain.setValueAtTime(0.001, st);
+          gain.gain.linearRampToValueAtTime(0.095, st + 0.015);
+          gain.gain.exponentialRampToValueAtTime(0.001, st + 0.62);
+
+          osc.connect(gain);
+          gain.connect(this.getOutputNode(ctx));
+
+          osc.start(st);
+          osc.stop(st + 0.65);
+        });
+      }
+    } catch {
+      // Fail gracefully if Web Audio is blocked prior to user interaction
+    }
+  }
 }
 
 export const giftSoundEngine = new GiftSoundEngine();

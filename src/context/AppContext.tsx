@@ -30,7 +30,16 @@ import {
   SavedDeviceAccount,
   AdminModerationState,
   AdminRestrictionDetail,
+  AdvancedGiftConfig,
 } from '../types';
+import {
+  DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
+  advancedGiftConfigToGift,
+  subscribeToAdvancedGifts,
+  saveAdvancedGiftToFirestore,
+  deleteAdvancedGiftFromFirestore,
+  validateGiftSendOnServer,
+} from '../services/giftAnimationEngine';
 import {
   CURRENT_USER,
   MOCK_CONVERSATIONS,
@@ -436,7 +445,7 @@ interface AppContextType {
   createPartyRoom: (
     room: PartyRoom
   ) => Promise<{ success: boolean; alreadyExists?: boolean; room?: PartyRoom; error?: string }>;
-  updateActivePartyRoomLevel: (level: 1 | 2 | 3) => void;
+  updateActivePartyRoomLevel: (level: 1 | 2 | 3 | 4) => void;
   toggleSeat: (seatIndex: number) => Promise<{ success: boolean; reason?: string }>;
   userSeatIndex: number | null;
   setUserSeatIndex: React.Dispatch<React.SetStateAction<number | null>>;
@@ -667,6 +676,12 @@ interface AppContextType {
     agencyId: string,
     coinsToAdd: number
   ) => Promise<{ success: boolean; message: string }>;
+
+  // Advanced Multi-Format Gift Animation Engine
+  advancedGifts: AdvancedGiftConfig[];
+  publishedCatalogGifts: Gift[];
+  saveAdvancedGift: (config: AdvancedGiftConfig) => Promise<{ success: boolean; message: string }>;
+  deleteAdvancedGift: (giftId: string) => Promise<{ success: boolean; message: string }>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -686,6 +701,64 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     return [];
   });
+
+  const [advancedGifts, setAdvancedGifts] = useState<AdvancedGiftConfig[]>([
+    DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
+  ]);
+
+  const publishedCatalogGifts = useMemo<Gift[]>(() => {
+    const publishedAdvanced = advancedGifts
+      .filter((cfg) => cfg.status === 'published' && Boolean(cfg.optimizedFileUrl || cfg.animationUrl || cfg.originalFileUrl))
+      .map(advancedGiftConfigToGift);
+    const usedIds = new Set(publishedAdvanced.map((g) => g.id));
+    const baseLegacy = VIRTUAL_GIFTS.filter((g) => !usedIds.has(g.id));
+    return [...publishedAdvanced, ...baseLegacy];
+  }, [advancedGifts]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeToAdvancedGifts((items) => {
+      setAdvancedGifts(items);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
+  const saveAdvancedGift = useCallback(
+    async (config: AdvancedGiftConfig): Promise<{ success: boolean; message: string }> => {
+      try {
+        await saveAdvancedGiftToFirestore(config);
+        setAdvancedGifts((prev) => {
+          const exists = prev.some((g) => g.id === config.id);
+          const next = exists ? prev.map((g) => (g.id === config.id ? config : g)) : [config, ...prev];
+          return next;
+        });
+        return { success: true, message: `Saved "${config.name}" (${config.status}).` };
+      } catch (err: any) {
+        return {
+          success: false,
+          message: err?.message || 'Unable to save gift configuration to Firestore.',
+        };
+      }
+    },
+    []
+  );
+
+  const deleteAdvancedGift = useCallback(
+    async (giftId: string): Promise<{ success: boolean; message: string }> => {
+      try {
+        await deleteAdvancedGiftFromFirestore(giftId);
+        setAdvancedGifts((prev) => prev.filter((g) => g.id !== giftId));
+        return { success: true, message: 'Gift animation removed.' };
+      } catch (err: any) {
+        return {
+          success: false,
+          message: err?.message || 'Unable to delete gift configuration.',
+        };
+      }
+    },
+    []
+  );
 
   // Per-scope refresh epochs (trigger targeted re-subscriptions without leaving active rooms/screens)
   const [discoveryRefreshEpoch, setDiscoveryRefreshEpoch] = useState(0);
@@ -1663,7 +1736,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     if (!activeGiftBanner) return;
     const coinsCost = Number(activeGiftBanner.gift.costInCoins ?? activeGiftBanner.gift.coins) || 10;
-    const ttlMs = coinsCost <= 100 ? 2000 : 7500;
+    const advDurationMs = activeGiftBanner.gift.advancedConfig?.durationMs;
+    const ttlMs = advDurationMs
+      ? Math.min(65_000, advDurationMs + 2000)
+      : coinsCost <= 100
+      ? 2000
+      : 7500;
     const bannerId = activeGiftBanner.id;
     const timer = setTimeout(() => {
       setActiveGiftBanner((prev) => (prev?.id === bannerId ? null : prev));
@@ -5333,12 +5411,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     meta?: { context?: 'live' | 'party' | 'moments' | 'pk' | 'demo'; roomId?: string; streamId?: string; reelId?: string }
   ): { success: boolean; hostDiamonds: number; appShareCoins: number; totalCoins: number } => {
     const qty = Math.max(1, Math.floor(quantity || 1));
-    const totalCoins = gift.coins * qty;
+    // Authoritative catalog price lookup to prevent client-side coin tampering
+    const authoritativeGift =
+      publishedCatalogGifts.find((g) => g.id === gift.id) ||
+      VIRTUAL_GIFTS.find((g) => g.id === gift.id) ||
+      gift;
+    const unitCoins = Math.max(1, Math.floor(authoritativeGift.coins || gift.coins || 1));
+    const totalCoins = unitCoins * qty;
     const hostDiamonds = Math.round(totalCoins * 0.6);
     const appShareCoins = totalCoins - hostDiamonds;
 
     if (coins < totalCoins) {
       return { success: false, hostDiamonds, appShareCoins, totalCoins };
+    }
+
+    if (firebaseUser?.uid && (meta?.roomId || meta?.streamId)) {
+      void validateGiftSendOnServer({
+        giftId: authoritativeGift.id,
+        unitCoins,
+        quantity: qty,
+        roomType: meta?.context === 'party' ? 'party' : 'live',
+        roomId: meta?.roomId || meta?.streamId || 'room',
+        recipientId: recipientHostId || activeStream?.host.id || activePartyRoom?.host.id || currentUser.id,
+      });
     }
 
     const context = meta?.context || 'live';
@@ -5878,7 +5973,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const updateActivePartyRoomLevel = (level: 1 | 2 | 3) => {
+  const updateActivePartyRoomLevel = (level: 1 | 2 | 3 | 4) => {
     if (!activePartyRoom) return;
     const updated: PartyRoom = { ...activePartyRoom, level };
     setActivePartyRoom(updated);
@@ -6905,6 +7000,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         submitAgencyApplication,
         reviewAgencyApplication,
         adminAllocateAgencyCoins,
+        advancedGifts,
+        publishedCatalogGifts,
+        saveAdvancedGift,
+        deleteAdvancedGift,
       }}
     >
       {children}

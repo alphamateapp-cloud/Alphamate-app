@@ -69,6 +69,7 @@ import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
 import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } from '../services/liveHeartService';
 import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
+import { enqueueByPriority } from '../services/giftAnimationEngine';
 
 const GIFT_COMBO_WINDOW_MS = 4200;
 
@@ -87,6 +88,7 @@ export const LiveStreamScreen: React.FC = () => {
     coins,
     addCoins,
     sendLiveGift,
+    publishedCatalogGifts,
     activeGiftBanner,
     clearActiveGiftBanner,
     currentUser,
@@ -166,10 +168,11 @@ export const LiveStreamScreen: React.FC = () => {
   const [inputComment, setInputComment] = useState('');
   const [showGiftDrawer, setShowGiftDrawer] = useState(false);
   const [showLuckyDrawModal, setShowLuckyDrawModal] = useState(false);
-  const [selectedGift, setSelectedGift] = useState<Gift>(VIRTUAL_GIFTS[0]);
+  const [selectedGift, setSelectedGift] = useState<Gift>(() => publishedCatalogGifts[0] || VIRTUAL_GIFTS[0]);
 
-  // Spectacular Visual Gift Animation & Rapid-Combo states (strictly scoped per streamId)
+  // Spectacular Visual Gift Animation, Priority Queue & Rapid-Combo states (strictly scoped per streamId)
   const [activeGiftAnimation, setActiveGiftAnimation] = useState<ActiveGiftEvent | null>(null);
+  const giftQueueRef = useRef<ActiveGiftEvent[]>([]);
   const [activeGiftCombo, setActiveGiftCombo] = useState<LiveGiftComboState | null>(null);
   const [comboRemainingMs, setComboRemainingMs] = useState<number>(0);
   const [giftQuantityMultiplier, setGiftQuantityMultiplier] = useState<number>(1);
@@ -183,8 +186,27 @@ export const LiveStreamScreen: React.FC = () => {
     lastTapAt: number;
   } | null>(null);
 
+  const enqueueLiveGiftAnimation = useCallback((incoming: ActiveGiftEvent) => {
+    setActiveGiftAnimation((current) => {
+      if (!current) {
+        return incoming;
+      }
+      // If same gift combo rapidly stacked by same sender, refresh combo smoothly; otherwise priority-queue
+      if (
+        current.gift.id === incoming.gift.id &&
+        current.senderName === incoming.senderName &&
+        !incoming.gift.advancedConfig
+      ) {
+        return incoming;
+      }
+      giftQueueRef.current = enqueueByPriority(giftQueueRef.current, incoming);
+      return current;
+    });
+  }, []);
+
   const handleGiftOverlayComplete = useCallback(() => {
-    setActiveGiftAnimation(null);
+    const nextQueued = giftQueueRef.current.shift() || null;
+    setActiveGiftAnimation(nextQueued);
   }, []);
 
   // Top Givers Leaderboard State for Current Broadcast Session
@@ -573,7 +595,7 @@ export const LiveStreamScreen: React.FC = () => {
           sigTs >= streamJoinedAtRef.current - 1500 &&
           Math.abs(now - sigTs) < 8000
         ) {
-          setActiveGiftAnimation({
+          enqueueLiveGiftAnimation({
             id: `ws_gift_${streamId}_${sigTs}_${Math.random().toString(36).slice(2, 7)}`,
             gift: sig.gift as Gift,
             senderName: String(sig.senderName || 'Viewer'),
@@ -1164,12 +1186,25 @@ export const LiveStreamScreen: React.FC = () => {
   }, [activeStream?.id, clearActiveGiftBanner]);
 
   // Parent-side wall-clock fail-safe: ensures Android WebView timer throttling never leaves a gift stuck
+  // while NEVER cutting off a full-duration advanced gift video (e.g. 10s WebM/MOV/MP4) early.
   useEffect(() => {
     if (!activeGiftAnimation) return;
     const coins = Number(
       activeGiftAnimation.gift?.costInCoins ?? activeGiftAnimation.gift?.coins ?? 0
     );
-    const maxMs = coins <= 100 ? 3000 : 8000;
+    const advConfig = activeGiftAnimation.gift?.advancedConfig;
+    const advDurationMs = advConfig?.durationMs || 0;
+    const analysisDurationMs =
+      advConfig?.analysis?.durationSec && Number.isFinite(advConfig.analysis.durationSec)
+        ? Math.ceil(advConfig.analysis.durationSec * 1000)
+        : 0;
+    const playbackSpeed = Math.min(2, Math.max(0.5, advConfig?.playbackSpeed ?? 1));
+    const effectiveAdvMs = Math.max(advDurationMs, analysisDurationMs);
+    const maxMs = effectiveAdvMs > 0
+      ? Math.min(72_000, Math.ceil(effectiveAdvMs / playbackSpeed) + 7000)
+      : coins <= 100
+      ? 3000
+      : 8000;
     const startedAt = Date.now();
     const eventId = activeGiftAnimation.id;
     let cleared = false;
@@ -1178,7 +1213,8 @@ export const LiveStreamScreen: React.FC = () => {
       if (cleared) return;
       if (force || Date.now() - startedAt >= maxMs) {
         cleared = true;
-        setActiveGiftAnimation((prev) => (prev?.id === eventId ? null : prev));
+        const nextQueued = giftQueueRef.current.shift() || null;
+        setActiveGiftAnimation((prev) => (prev?.id === eventId ? nextQueued : prev));
       }
     };
 
@@ -1255,7 +1291,7 @@ export const LiveStreamScreen: React.FC = () => {
 
     if (isCurrentStreamBanner && activeStream?.id) {
       seenGiftBannerIdsRef.current.add(activeGiftBanner.id);
-      setActiveGiftAnimation({
+      enqueueLiveGiftAnimation({
         id: `ext_gift_${activeGiftBanner.id}`,
         gift: activeGiftBanner.gift,
         senderName: activeGiftBanner.sender,
@@ -1269,7 +1305,7 @@ export const LiveStreamScreen: React.FC = () => {
       });
     }
     clearActiveGiftBanner();
-  }, [activeGiftBanner, activeStream?.id, clearActiveGiftBanner]);
+  }, [activeGiftBanner, activeStream?.id, clearActiveGiftBanner, enqueueLiveGiftAnimation]);
 
   // Enhanced Virtual Gift Sending Handler with Atomic Rapid Combos & Visual Animations
   const handleSendSelectedGift = (customMultiplier?: number, overrideGift?: Gift) => {
@@ -1347,8 +1383,8 @@ export const LiveStreamScreen: React.FC = () => {
       timestamp: now,
     });
 
-    // Trigger Scoped Gift Banner / Animation strictly for this streamId
-    setActiveGiftAnimation({
+    // Trigger Scoped Gift Banner / Animation strictly for this streamId via priority queue
+    enqueueLiveGiftAnimation({
       id: `gift_anim_${activeStream.id}_${now}_${Math.random().toString(36).slice(2, 7)}`,
       gift: giftToSend,
       senderName: currentUser.displayName,
@@ -1565,6 +1601,17 @@ export const LiveStreamScreen: React.FC = () => {
         )}
       </div>
 
+      {/* LAYER 2 (z-[5]): Background Gift Animation Layer for Mode 3 (Overlay/Background behind Host/UI) */}
+      <GiftAnimationOverlay
+        layer="background"
+        currentEvent={
+          activeGiftAnimation && activeGiftAnimation.streamId === activeStream.id
+            ? activeGiftAnimation
+            : null
+        }
+        onComplete={handleGiftOverlayComplete}
+      />
+
       {/* Floating Microphone Muted Indicator (Host or Viewer perspective) */}
       {!isMicActive && (
         <div className="absolute top-20 right-4 z-30 px-3 py-1 rounded-full bg-rose-600/90 text-white text-[11px] font-black flex items-center gap-1.5 shadow-lg border border-rose-400/40 animate-pulse">
@@ -1643,8 +1690,9 @@ export const LiveStreamScreen: React.FC = () => {
         ))}
       </div>
 
-      {/* Scoped Gift Banner (<=100 coins, 2s) & Big Gift Showcase (5-7.5s) ONLY for this activeStream.id */}
+      {/* LAYER 5 (z-[35]): Foreground Gift Animation Layer for Mode 1 (Transparent) & Mode 2 (Semi-Transparent) */}
       <GiftAnimationOverlay
+        layer="foreground"
         currentEvent={
           activeGiftAnimation && activeGiftAnimation.streamId === activeStream.id
             ? activeGiftAnimation
@@ -1678,8 +1726,8 @@ export const LiveStreamScreen: React.FC = () => {
         />
       )}
 
-      {/* Top Overlay Bar: Host Profile, Level, VIP, Follow, Viewer Count, Perspective Switcher, Close */}
-      <div className="relative z-30 pt-2.5 px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
+      {/* LAYER 7 (z-[45]): Top Overlay Bar: Host Profile, Level, VIP, Follow, Viewer Count, Close */}
+      <div className="relative z-[45] pt-2.5 px-2 sm:px-3 shrink-0 flex items-start justify-between gap-1.5 pointer-events-none">
         {/* Left Column: Host Capsule on top + Top Givers Leaderboard line directly underneath it */}
         <div className="flex flex-col items-start gap-1 flex-1 min-w-0 max-w-[56%] sm:max-w-[60%] pointer-events-auto">
           {/* Host Capsule with VIP Avatar Frame, Name, Level & VIP */}
@@ -1826,8 +1874,8 @@ export const LiveStreamScreen: React.FC = () => {
         </div>
       </div>
 
-      {/* Bottom Live Stream Section: Comments Feed + Bottom Controls HUD (Tight Mobile Fit) */}
-      <div className="relative z-30 px-2.5 pb-2.5 shrink-0 flex flex-col justify-end pointer-events-auto">
+      {/* LAYERS 6 & 7 (z-40 / z-50): Comments Feed & Bottom Controls HUD — NEVER obstructed by gift animations */}
+      <div className="relative z-40 px-2.5 pb-2.5 shrink-0 flex flex-col justify-end pointer-events-auto">
         {/* Live Chat Comments Header with Clear Chat for Host & Mod */}
         <div className="flex items-center justify-between mb-1 px-1">
           <span className="text-[9.5px] text-purple-200 font-bold flex items-center gap-1">
@@ -2127,12 +2175,14 @@ export const LiveStreamScreen: React.FC = () => {
               </div>
             </div>
 
-            {/* Gift Grid */}
+            {/* Gift Grid (Published Multi-Format Advanced Gifts + Standard Virtual Gifts) */}
             <div className="grid grid-cols-4 gap-2 py-3.5 max-h-64 overflow-y-auto">
-              {VIRTUAL_GIFTS.map((g) => {
+              {publishedCatalogGifts.map((g) => {
                 const isSelected = selectedGift.id === g.id;
-                const isMythic = g.coins >= 19999;
-                const isEpic = g.coins >= 1999 && !isMythic;
+                const isTestGift = Boolean(g.isTestGift || g.advancedConfig?.isTestGift);
+                const isAdvanced = Boolean(g.advancedConfig);
+                const isMythic = !isTestGift && g.coins >= 19999;
+                const isEpic = !isTestGift && g.coins >= 1999 && !isMythic;
                 return (
                   <div
                     key={g.id}
@@ -2140,9 +2190,21 @@ export const LiveStreamScreen: React.FC = () => {
                     className={`relative rounded-2xl p-2.5 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
                       isSelected
                         ? 'bg-gradient-to-b from-[#7928CA]/50 to-[#EC4899]/40 border-2 border-[#EC4899] shadow-[0_0_20px_rgba(236,72,153,0.4)] scale-105'
+                        : isTestGift
+                        ? 'bg-gradient-to-b from-cyan-950/70 to-[#1C1236] border border-cyan-400/45 hover:border-cyan-300'
                         : 'bg-[#1C1236] border border-white/5 hover:border-white/20'
                     }`}
                   >
+                    {isTestGift && (
+                      <span className="absolute -top-1.5 -right-1 px-1.5 rounded bg-gradient-to-r from-cyan-500 to-blue-600 text-[7px] font-black text-white shadow">
+                        TEST
+                      </span>
+                    )}
+                    {!isTestGift && isAdvanced && (
+                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-emerald-600/90 text-[6.5px] font-black text-white uppercase shadow">
+                        {g.advancedConfig?.format}
+                      </span>
+                    )}
                     {isMythic && (
                       <span className="absolute -top-1.5 -right-1 px-1 rounded bg-gradient-to-r from-red-600 to-amber-500 text-[7px] font-black text-white shadow">
                         MYTHIC

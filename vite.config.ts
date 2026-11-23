@@ -60,9 +60,9 @@ export default defineConfig(() => {
           skipWaiting: true,
           maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          globIgnores: ['**/assets/aistudio/**', '**/app-icon.png'],
+          globIgnores: ['**/assets/aistudio/**', '**/uploads/gifts/**', '**/app-icon.png'],
           navigateFallback: '/index.html',
-          navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/__/],
+          navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/__/, /^\/uploads\/gifts\//],
           runtimeCaching: [
             // Never cache real-time voice/video tokens, auth OTPs, uploads, or live rooms API
             {
@@ -154,7 +154,8 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: true,
+          // Avoid injecting @vite-plugin-pwa dev HMR client hooks when Vite HMR is disabled
+          enabled: process.env.DISABLE_HMR !== 'true',
           type: 'module',
           navigateFallback: 'index.html',
         },

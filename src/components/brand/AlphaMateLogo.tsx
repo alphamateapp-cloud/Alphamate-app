@@ -66,24 +66,20 @@ export const AlphaMateLogo: React.FC<AlphaMateLogoProps> = ({
       {showText && (
         <div className={`flex flex-col ${isVertical ? 'items-center mt-1' : 'justify-center'} leading-none`}>
           <span
-            className={`${dimensions.text} uppercase font-black text-white`}
+            className={`${dimensions.text} uppercase font-black text-[#140D26] dark:text-white`}
             style={{
-              textShadow: '0 2px 14px rgba(168, 85, 247, 0.6)',
               fontFamily: "'Plus Jakarta Sans', system-ui, sans-serif",
             }}
           >
             ALPHA{' '}
-            <span className="bg-gradient-to-r from-[#D8B4FE] via-[#EC4899] to-[#F43F5E] bg-clip-text text-transparent">
+            <span className="bg-gradient-to-r from-[#7928CA] via-[#EC4899] to-[#F43F5E] dark:from-[#D8B4FE] dark:via-[#EC4899] dark:to-[#F43F5E] bg-clip-text text-transparent">
               MATE
             </span>
           </span>
 
           {showTagline && (
             <span
-              className={`mt-1.5 font-bold tracking-[0.24em] text-[#C084FC] uppercase ${dimensions.tagline}`}
-              style={{
-                textShadow: '0 0 10px rgba(192, 132, 252, 0.5)',
-              }}
+              className={`mt-1.5 font-bold tracking-[0.24em] text-[#7928CA] dark:text-[#C084FC] uppercase ${dimensions.tagline}`}
             >
               LIVE • PARTY • SOCIAL
             </span>

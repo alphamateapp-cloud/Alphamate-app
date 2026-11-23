@@ -737,6 +737,67 @@
         "createdAt",
         "createdAtMs"
       ]
+    },
+    "AdvancedGift": {
+      "title": "AdvancedGift",
+      "description": "Admin-managed multi-format live gift animation configuration (WebM, MOV, MP4, SVG, GIF) with display mode and transparency metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 500 },
+        "category": { "type": "string", "maxLength": 64 },
+        "coins": { "type": "number" },
+        "icon": { "type": "string", "maxLength": 32 },
+        "thumbnailUrl": { "type": "string", "maxLength": 2048 },
+        "previewImageUrl": { "type": "string", "maxLength": 2048 },
+        "originalFileUrl": { "type": "string", "maxLength": 2048 },
+        "optimizedFileUrl": { "type": "string", "maxLength": 2048 },
+        "animationUrl": { "type": "string", "maxLength": 2048 },
+        "format": { "type": "string", "enum": ["webm", "mov", "mp4", "svg", "gif"] },
+        "displayMode": { "type": "string", "enum": ["transparent", "semi_transparent", "overlay_background"] },
+        "transparencyStatus": { "type": "string", "enum": ["alpha_verified", "alpha_limited_gif", "opaque_no_alpha", "unknown"] },
+        "opacity": { "type": "number" },
+        "durationMs": { "type": "number" },
+        "loop": { "type": "boolean" },
+        "playbackSpeed": { "type": "number" },
+        "position": { "type": "string", "enum": ["center", "top", "bottom", "fullscreen"] },
+        "scale": { "type": "number" },
+        "priority": { "type": "number" },
+        "enableParticles": { "type": "boolean" },
+        "enableSound": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["draft", "processing", "published", "disabled"] },
+        "conversionStatus": { "type": "string", "enum": ["not_needed", "pending", "converting", "completed", "failed", "unsupported"] },
+        "conversionMessage": { "type": "string", "maxLength": 500 },
+        "analysis": { "type": "object" },
+        "isTestGift": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "createdAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string", "maxLength": 128 }
+      },
+      "required": [
+        "id",
+        "name",
+        "coins",
+        "originalFileUrl",
+        "animationUrl",
+        "format",
+        "displayMode",
+        "transparencyStatus",
+        "opacity",
+        "durationMs",
+        "loop",
+        "playbackSpeed",
+        "position",
+        "scale",
+        "priority",
+        "status",
+        "conversionStatus",
+        "createdAt",
+        "createdAtMs",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -803,6 +864,10 @@
     "/giftTransactions/{txId}": {
       "schema": "GiftTransaction",
       "description": "60/40 gifting transactions (60% host Diamonds, 40% App share)"
+    },
+    "/advancedGifts/{giftId}": {
+      "schema": "AdvancedGift",
+      "description": "Admin-managed advanced multi-format gift animations and playback configurations"
     },
     "/accountDeletionRequests/{requestId}": {
       "schema": "AccountDeletionRequest",

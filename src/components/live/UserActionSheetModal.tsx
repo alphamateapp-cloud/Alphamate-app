@@ -394,7 +394,7 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-xs font-bold text-white flex items-center gap-1.5">
                       {isSeatMuted ? <MicOff className="w-3.5 h-3.5 text-rose-400" /> : <Mic className="w-3.5 h-3.5 text-emerald-400" />}
-                      <span>Seat {seatIndex + 1} Microphone</span>
+                      <span>{seatIndex === 100 ? 'VIP 1' : `Seat ${seatIndex + 1}`} Microphone</span>
                     </span>
                     <button
                       onClick={() => onToggleSeatMic(seatIndex)}
@@ -428,7 +428,9 @@ export const UserActionSheetModal: React.FC<UserActionSheetModalProps> = ({
                     <UserX className="w-4 h-4 text-orange-400" />
                     <span>Remove Seat</span>
                   </div>
-                  <span className="text-[9.5px] text-zinc-400">Seat #{seatIndex + 1} → Audience</span>
+                  <span className="text-[9.5px] text-zinc-400">
+                    {seatIndex === 100 ? 'VIP 1' : `Seat #${seatIndex + 1}`} → Audience
+                  </span>
                 </button>
               )}
 

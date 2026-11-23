@@ -658,6 +658,10 @@ public class AgoraPartyPlugin extends Plugin {
                 case "deep":
                     currentEngine.setAudioEffectPreset(Constants.VOICE_CHANGER_EFFECT_HULK);
                     break;
+                case "deep_echo":
+                    currentEngine.setAudioEffectPreset(Constants.ROOM_ACOUSTICS_KTV);
+                    currentEngine.setLocalVoicePitch(0.74);
+                    break;
                 case "echo":
                     currentEngine.setAudioEffectPreset(Constants.ROOM_ACOUSTICS_KTV);
                     break;

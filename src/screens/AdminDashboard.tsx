@@ -8,6 +8,7 @@ import {
 import { recordAdminModerationAction } from '../services/adminModerationService';
 import { AccountDeletionRequest, LiveStream } from '../types';
 import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
+import { AdvancedGiftManager } from '../components/admin/AdvancedGiftManager';
 import {
   Activity,
   Users,
@@ -29,6 +30,7 @@ import {
   Clock,
   RotateCcw,
   Trash2,
+  Sparkles,
 } from 'lucide-react';
 
 export const AdminDashboard: React.FC = () => {
@@ -55,6 +57,7 @@ export const AdminDashboard: React.FC = () => {
   const [processingRequestUid, setProcessingRequestUid] = useState<string | null>(null);
   const [stockAllocationInputs, setStockAllocationInputs] = useState<Record<string, string>>({});
   const [allocatingAgencyId, setAllocatingAgencyId] = useState<string | null>(null);
+  const [adminSection, setAdminSection] = useState<'overview' | 'gifts'>('overview');
 
   const isOfficialAdminUser = firebaseUser?.email?.toLowerCase() === 'alphamateapp@gmail.com';
 
@@ -162,14 +165,39 @@ export const AdminDashboard: React.FC = () => {
           </span>
         </div>
 
-        {/* Action Button: Switch back to Mobile Touch App */}
-        <div className="flex items-center gap-3">
+        {/* Admin Section Switcher + Mobile App Button */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-black/50 border border-white/10">
+            <button
+              type="button"
+              onClick={() => setAdminSection('overview')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                adminSection === 'overview'
+                  ? 'bg-[#7928CA] text-white shadow'
+                  : 'text-zinc-400 hover:text-white'
+              }`}
+            >
+              Overview
+            </button>
+            <button
+              type="button"
+              onClick={() => setAdminSection('gifts')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold inline-flex items-center gap-1.5 transition-all cursor-pointer ${
+                adminSection === 'gifts'
+                  ? 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow'
+                  : 'text-zinc-300 hover:text-white'
+              }`}
+            >
+              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+              <span>Advanced Gift Animation Manager</span>
+            </button>
+          </div>
           <button
             onClick={() => setDeviceMode('mobile')}
             className="flex items-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white font-bold text-xs shadow-lg shadow-[#7928CA]/30 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
           >
             <Smartphone className="w-4 h-4" />
-            <span>Switch to Mobile View</span>
+            <span className="hidden sm:inline">Switch to Mobile View</span>
           </button>
         </div>
       </header>
@@ -233,7 +261,12 @@ export const AdminDashboard: React.FC = () => {
           </div>
         </div>
 
+        {/* Dedicated Admin Section: Advanced Gift Animation Manager */}
+        <AdvancedGiftManager />
+
         {/* Split View: Live Stream Table + Audit Video Monitor */}
+        {adminSection === 'overview' && (
+          <div className="space-y-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Active Streams Table */}
           <div className="lg:col-span-2 rounded-3xl bg-[#120A24] border border-[#A855F7]/20 p-5 shadow-xl">
@@ -884,6 +917,8 @@ export const AdminDashboard: React.FC = () => {
             </div>
           )}
         </div>
+          </div>
+        )}
       </div>
     </div>
   );

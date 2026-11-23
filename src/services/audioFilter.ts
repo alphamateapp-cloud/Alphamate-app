@@ -1,13 +1,14 @@
 /**
  * Real-time Web Audio API Voice Modulation Engine for Alpha Mate Audio Party Rooms.
- * Transforms live microphone MediaStreams in real time (Robot, Chipmunk, Echo, Deep, Studio)
- * and outputs a processed MediaStream compatible with RTCRtpSender.replaceTrack().
+ * Transforms live microphone MediaStreams in real time (Robot, Chipmunk, Deep Echo, Concert Echo,
+ * Deep Bass, Studio Crisp) and outputs a processed MediaStream compatible with WebRTC & Agora Web.
  */
 
 export type VoiceFilterPresetId =
   | 'normal'
   | 'robot'
   | 'chipmunk'
+  | 'deep_echo'
   | 'echo'
   | 'deep'
   | 'studio';
@@ -19,6 +20,7 @@ export interface VoiceFilterPresetMeta {
   emoji: string;
   description: string;
   accentGradient: string;
+  tag?: string;
 }
 
 export const VOICE_FILTER_PRESETS: VoiceFilterPresetMeta[] = [
@@ -27,16 +29,17 @@ export const VOICE_FILTER_PRESETS: VoiceFilterPresetMeta[] = [
     label: 'Original Voice',
     shortLabel: 'Normal',
     emoji: '🎙️',
-    description: 'Natural uncompressed microphone audio',
+    description: 'Natural clear microphone audio',
     accentGradient: 'from-zinc-600 to-zinc-700',
   },
   {
     id: 'robot',
-    label: 'Cyber Robot',
+    label: 'Robot',
     shortLabel: 'Robot',
     emoji: '🤖',
     description: 'Metallic ring-modulated sci-fi vocoder',
     accentGradient: 'from-cyan-500 to-blue-600',
+    tag: 'Popular',
   },
   {
     id: 'chipmunk',
@@ -45,13 +48,23 @@ export const VOICE_FILTER_PRESETS: VoiceFilterPresetMeta[] = [
     emoji: '🐿️',
     description: 'Playful high-pitch (+8 semitones) shift',
     accentGradient: 'from-amber-400 to-pink-500',
+    tag: 'Fun',
+  },
+  {
+    id: 'deep_echo',
+    label: 'Deep Echo',
+    shortLabel: 'Deep Echo',
+    emoji: '🌌',
+    description: 'Deep bass pitch with dramatic hall echo',
+    accentGradient: 'from-violet-600 to-fuchsia-700',
+    tag: 'New',
   },
   {
     id: 'echo',
     label: 'Concert Echo',
     shortLabel: 'Echo',
     emoji: '🏔️',
-    description: 'Lush hall reflection & vocal feedback delay',
+    description: 'Lush arena reflection & vocal delay',
     accentGradient: 'from-purple-500 to-indigo-600',
   },
   {
@@ -78,12 +91,19 @@ export class AudioFilter {
   private ctx: AudioContext | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private destinationNode: MediaStreamAudioDestinationNode | null = null;
+  private masterGainNode: GainNode | null = null;
+  private monitorGainNode: GainNode | null = null;
+  private analyserNode: AnalyserNode | null = null;
+  private analyserData: Uint8Array<ArrayBuffer> | null = null;
+
   private processedStream: MediaStream | null = null;
   private activeInputStream: MediaStream | null = null;
+  private previewOwnedStream: MediaStream | null = null;
 
   private cleanupNodes: Array<() => void> = [];
   private activePreset: VoiceFilterPresetId = 'normal';
   private isMuted: boolean = false;
+  private localMonitorEnabled: boolean = false;
   private listeners = new Set<(preset: VoiceFilterPresetId) => void>();
 
   public getPreset(): VoiceFilterPresetId {
@@ -128,6 +148,100 @@ export class AudioFilter {
         track.enabled = !this.isMuted;
       });
     }
+  }
+
+  public isLocalMonitorActive(): boolean {
+    return this.localMonitorEnabled;
+  }
+
+  /**
+   * Returns a normalized 0..1 live microphone/processed audio level for UI metering.
+   */
+  public getLiveAudioLevel(): number {
+    if (!this.analyserNode || !this.analyserData) return 0;
+    try {
+      this.analyserNode.getByteTimeDomainData(this.analyserData);
+      let sumSquares = 0;
+      for (let i = 0; i < this.analyserData.length; i++) {
+        const normalized = (this.analyserData[i] - 128) / 128;
+        sumSquares += normalized * normalized;
+      }
+      const rms = Math.sqrt(sumSquares / this.analyserData.length);
+      return Math.min(1, rms * 3.4);
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Enables or disables local headphone/speaker preview monitoring so the user can hear
+   * their own modulated voice in real time. Automatically opens a temporary mic stream
+   * if no live broadcast input stream is attached yet.
+   */
+  public async setLocalMonitor(enabled: boolean): Promise<boolean> {
+    this.localMonitorEnabled = Boolean(enabled);
+
+    if (!this.localMonitorEnabled) {
+      if (this.monitorGainNode && this.ctx) {
+        this.monitorGainNode.gain.setTargetAtTime(0, this.ctx.currentTime, 0.02);
+      }
+      if (this.previewOwnedStream) {
+        const owned = this.previewOwnedStream;
+        this.previewOwnedStream = null;
+        if (this.activeInputStream === owned) {
+          this.teardownGraph(true);
+          this.activeInputStream = null;
+        }
+        owned.getTracks().forEach((t) => {
+          try {
+            t.stop();
+          } catch {
+            // ignore
+          }
+        });
+      }
+      return false;
+    }
+
+    // If a live stream is already attached and processed, unmute monitor bus
+    if (this.monitorGainNode && this.ctx) {
+      if (this.ctx.state === 'suspended') {
+        await this.ctx.resume().catch(() => {});
+      }
+      this.monitorGainNode.gain.setTargetAtTime(0.82, this.ctx.currentTime, 0.03);
+      return true;
+    }
+
+    // If a raw input stream exists (e.g. preset === 'normal' or live mic), build graph with monitor
+    if (this.activeInputStream) {
+      await this.attachInputStream(this.activeInputStream, {
+        preset: this.activePreset,
+        isMuted: false,
+        forceGraph: true,
+      });
+      return true;
+    }
+
+    // Otherwise acquire a temporary microphone stream strictly for live local voice preview
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      this.localMonitorEnabled = false;
+      throw new Error('Microphone preview is not supported on this device.');
+    }
+
+    const previewStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    this.previewOwnedStream = previewStream;
+    await this.attachInputStream(previewStream, {
+      preset: this.activePreset,
+      isMuted: false,
+      forceGraph: true,
+    });
+    return true;
   }
 
   private async ensureContext(): Promise<AudioContext | null> {
@@ -175,6 +289,34 @@ export class AudioFilter {
       this.destinationNode = null;
     }
 
+    if (this.masterGainNode) {
+      try {
+        this.masterGainNode.disconnect();
+      } catch {
+        // ignore
+      }
+      this.masterGainNode = null;
+    }
+
+    if (this.monitorGainNode) {
+      try {
+        this.monitorGainNode.disconnect();
+      } catch {
+        // ignore
+      }
+      this.monitorGainNode = null;
+    }
+
+    if (this.analyserNode) {
+      try {
+        this.analyserNode.disconnect();
+      } catch {
+        // ignore
+      }
+      this.analyserNode = null;
+      this.analyserData = null;
+    }
+
     if (stopOutputTracks && this.processedStream) {
       this.processedStream.getTracks().forEach((t) => {
         try {
@@ -189,11 +331,11 @@ export class AudioFilter {
 
   /**
    * Connects a raw microphone MediaStream through the currently selected Web Audio modulation graph.
-   * When preset is 'normal', returns the raw microphone MediaStream with zero extra latency.
+   * When preset is 'normal' and local monitoring is off, returns the raw MediaStream with zero extra latency.
    */
   public async attachInputStream(
     rawMicStream: MediaStream,
-    options?: { preset?: VoiceFilterPresetId; isMuted?: boolean }
+    options?: { preset?: VoiceFilterPresetId; isMuted?: boolean; forceGraph?: boolean }
   ): Promise<MediaStream> {
     if (options?.preset) {
       this.setPreset(options.preset);
@@ -202,9 +344,21 @@ export class AudioFilter {
       this.isMuted = options.isMuted;
     }
 
+    // If attaching an external live stream while a standalone preview mic was open, release preview mic
+    if (this.previewOwnedStream && rawMicStream !== this.previewOwnedStream) {
+      this.previewOwnedStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
+      this.previewOwnedStream = null;
+    }
+
     this.activeInputStream = rawMicStream;
 
-    if (this.activePreset === 'normal') {
+    if (this.activePreset === 'normal' && !options?.forceGraph && !this.localMonitorEnabled) {
       this.teardownGraph(true);
       rawMicStream.getAudioTracks().forEach((t) => {
         t.enabled = !this.isMuted;
@@ -217,7 +371,6 @@ export class AudioFilter {
       return rawMicStream;
     }
 
-    // Ensure raw track stays live while Web Audio processes it
     rawMicStream.getAudioTracks().forEach((t) => {
       t.enabled = !this.isMuted;
     });
@@ -238,12 +391,24 @@ export class AudioFilter {
       const masterGain = ctx.createGain();
       masterGain.gain.setValueAtTime(1.0, ctx.currentTime);
 
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+
+      const monitorGain = ctx.createGain();
+      monitorGain.gain.setValueAtTime(this.localMonitorEnabled ? 0.82 : 0, ctx.currentTime);
+
       masterCompressor.connect(masterGain);
+      masterGain.connect(analyser);
       masterGain.connect(destination);
+      masterGain.connect(monitorGain);
+      monitorGain.connect(ctx.destination);
 
       this.cleanupNodes.push(() => {
         masterCompressor.disconnect();
         masterGain.disconnect();
+        analyser.disconnect();
+        monitorGain.disconnect();
       });
 
       switch (this.activePreset) {
@@ -256,6 +421,9 @@ export class AudioFilter {
             formantGainDb: 5,
             highpassHz: 180,
           });
+          break;
+        case 'deep_echo':
+          this.buildDeepEchoChain(ctx, source, masterCompressor);
           break;
         case 'deep':
           this.buildPitchShiftChain(ctx, source, masterCompressor, 0.74, {
@@ -278,6 +446,10 @@ export class AudioFilter {
 
       this.sourceNode = source;
       this.destinationNode = destination;
+      this.masterGainNode = masterGain;
+      this.monitorGainNode = monitorGain;
+      this.analyserNode = analyser;
+      this.analyserData = new Uint8Array(analyser.fftSize);
       this.processedStream = destination.stream;
       this.processedStream.getAudioTracks().forEach((track) => {
         track.enabled = !this.isMuted;
@@ -299,11 +471,49 @@ export class AudioFilter {
     this.setPreset(preset);
     const input = rawMicStream || this.activeInputStream;
     if (!input) return null;
-    return this.attachInputStream(input, { preset, isMuted: options?.isMuted });
+    return this.attachInputStream(input, {
+      preset,
+      isMuted: options?.isMuted,
+      forceGraph: this.localMonitorEnabled,
+    });
   }
 
   /**
-   * Cyber Robot Voice:
+   * Deep Echo Voice:
+   * Chains the real-time deep pitch-down shifter (0.76x, rich bass warmth) into a spacious
+   * damped cavern echo network (125ms early reflection + 275ms feedback echo).
+   */
+  private buildDeepEchoChain(
+    ctx: AudioContext,
+    input: AudioNode,
+    output: AudioNode
+  ): void {
+    const pitchBus = ctx.createGain();
+    pitchBus.gain.setValueAtTime(1.05, ctx.currentTime);
+
+    this.buildPitchShiftChain(ctx, input, pitchBus, 0.76, {
+      formantHz: 170,
+      formantGainDb: 5.5,
+      highpassHz: 65,
+      lowpassHz: 3800,
+    });
+
+    this.buildEchoChain(ctx, pitchBus, output, {
+      earlyDelaySec: 0.125,
+      earlyGainValue: 0.34,
+      echoDelaySec: 0.275,
+      feedbackValue: 0.46,
+      wetGainValue: 0.58,
+      dampingHz: 2100,
+    });
+
+    this.cleanupNodes.push(() => {
+      pitchBus.disconnect();
+    });
+  }
+
+  /**
+   * Robot Voice:
    * High-pass cleanup + resonant bandpass + metallic ring modulation (52Hz sine carrier)
    * + tight 14ms comb delay for futuristic vocoder sheen.
    */
@@ -323,7 +533,6 @@ export class AudioFilter {
     bandpass.frequency.setValueAtTime(1050, now);
     bandpass.Q.setValueAtTime(1.4, now);
 
-    // Ring modulator stage: gain offset 0.55 + +/-0.45 carrier @ 52Hz
     const ringModGain = ctx.createGain();
     ringModGain.gain.setValueAtTime(0.55, now);
 
@@ -338,7 +547,6 @@ export class AudioFilter {
     carrierDepth.connect(ringModGain.gain);
     carrierOsc.start(now);
 
-    // Short metallic comb delay (14ms)
     const combDelay = ctx.createDelay(0.1);
     combDelay.delayTime.setValueAtTime(0.014, now);
     const combFeedback = ctx.createGain();
@@ -398,11 +606,10 @@ export class AudioFilter {
     }
   ): void {
     const now = ctx.currentTime;
-    const windowSec = 0.055; // 55ms grain window balances clarity and low latency
+    const windowSec = 0.055;
     const shiftRateHz = Math.abs(1 - pitchRatio) / windowSec;
     const shiftUp = pitchRatio >= 1;
 
-    // Build 1-cycle ramp & Hann window buffers (0..1 phase)
     const bufferSamples = 2048;
     const sampleRate = ctx.sampleRate;
 
@@ -412,10 +619,8 @@ export class AudioFilter {
       for (let i = 0; i < bufferSamples; i++) {
         const phase = (i / bufferSamples + offset) % 1;
         if (isGainWindow) {
-          // Smooth raised sine window (peaks at phase 0.5, 0 at wrap edges 0 & 1)
           data[i] = Math.sin(Math.PI * phase);
         } else {
-          // Pitch up = decreasing delay (windowSec -> 0); Pitch down = increasing delay (0 -> windowSec)
           data[i] = (shiftUp ? 1 - phase : phase) * windowSec;
         }
       }
@@ -506,13 +711,21 @@ export class AudioFilter {
   }
 
   /**
-   * Concert Echo:
-   * Crisp dry voice mixed with early reflection (115ms) and damped hall feedback delay (240ms).
+   * Echo / Hall Reflection Network:
+   * Crisp dry voice mixed with early reflection and damped hall feedback delay.
    */
   private buildEchoChain(
     ctx: AudioContext,
     input: AudioNode,
-    output: AudioNode
+    output: AudioNode,
+    params?: {
+      earlyDelaySec?: number;
+      earlyGainValue?: number;
+      echoDelaySec?: number;
+      feedbackValue?: number;
+      wetGainValue?: number;
+      dampingHz?: number;
+    }
   ): void {
     const now = ctx.currentTime;
 
@@ -524,22 +737,22 @@ export class AudioFilter {
     dryGain.gain.setValueAtTime(0.95, now);
 
     const earlyDelay = ctx.createDelay(0.5);
-    earlyDelay.delayTime.setValueAtTime(0.115, now);
+    earlyDelay.delayTime.setValueAtTime(params?.earlyDelaySec ?? 0.115, now);
     const earlyGain = ctx.createGain();
-    earlyGain.gain.setValueAtTime(0.28, now);
+    earlyGain.gain.setValueAtTime(params?.earlyGainValue ?? 0.28, now);
 
     const echoDelay = ctx.createDelay(1.0);
-    echoDelay.delayTime.setValueAtTime(0.24, now);
+    echoDelay.delayTime.setValueAtTime(params?.echoDelaySec ?? 0.24, now);
 
     const feedbackDamping = ctx.createBiquadFilter();
     feedbackDamping.type = 'lowpass';
-    feedbackDamping.frequency.setValueAtTime(2400, now);
+    feedbackDamping.frequency.setValueAtTime(params?.dampingHz ?? 2400, now);
 
     const feedbackGain = ctx.createGain();
-    feedbackGain.gain.setValueAtTime(0.42, now);
+    feedbackGain.gain.setValueAtTime(params?.feedbackValue ?? 0.42, now);
 
     const wetGain = ctx.createGain();
-    wetGain.gain.setValueAtTime(0.5, now);
+    wetGain.gain.setValueAtTime(params?.wetGainValue ?? 0.5, now);
 
     input.connect(highpass);
 
@@ -609,7 +822,18 @@ export class AudioFilter {
   }
 
   public dispose(resetPreset: boolean = false): void {
+    this.localMonitorEnabled = false;
     this.teardownGraph(true);
+    if (this.previewOwnedStream) {
+      this.previewOwnedStream.getTracks().forEach((t) => {
+        try {
+          t.stop();
+        } catch {
+          // ignore
+        }
+      });
+      this.previewOwnedStream = null;
+    }
     this.activeInputStream = null;
     if (resetPreset) {
       this.activePreset = 'normal';
