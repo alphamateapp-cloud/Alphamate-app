@@ -1,7 +1,6 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { VideoPost, FriendStory } from '../types';
-import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
 import { CreateStoryModal } from '../components/story/CreateStoryModal';
 import { StoryViewerModal } from '../components/story/StoryViewerModal';
@@ -43,7 +42,7 @@ import {
   addReelComment,
   subscribeToReelComments,
 } from '../services/reelsService';
-import { audioManager } from '../services/audioManager';
+import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 
 export const MomentsScreen: React.FC = () => {
   const {
@@ -57,6 +56,7 @@ export const MomentsScreen: React.FC = () => {
     followingUserIds,
     toggleFollowUser,
     sendLiveGift,
+    publishedCatalogGifts,
     coins,
     friendStories,
     myStories,
@@ -99,6 +99,7 @@ export const MomentsScreen: React.FC = () => {
 
   // Gift Modal state
   const [giftTargetPost, setGiftTargetPost] = useState<VideoPost | null>(null);
+  const [activeMomentGift, setActiveMomentGift] = useState<ActiveGiftEvent | null>(null);
 
   // Three-dots More Action Sheet state
   const [threeDotsVideo, setThreeDotsVideo] = useState<VideoPost | null>(null);
@@ -530,6 +531,11 @@ export const MomentsScreen: React.FC = () => {
 
   return (
     <div className="relative w-full h-full bg-black text-white overflow-hidden select-none">
+      <GiftAnimationOverlay
+        currentEvent={activeMomentGift}
+        layer="both"
+        onComplete={() => setActiveMomentGift(null)}
+      />
       {/* Toast Notification */}
       {toastMessage && (
         <div className="absolute top-14 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-full bg-[#1A1033]/95 border border-[#A855F7]/40 shadow-2xl backdrop-blur-md text-xs font-semibold text-white flex items-center gap-2 animate-bounce pointer-events-none max-w-[calc(100%-2rem)]">
@@ -1387,7 +1393,7 @@ export const MomentsScreen: React.FC = () => {
             </div>
 
             <div className="grid grid-cols-4 gap-2.5 py-4">
-              {VIRTUAL_GIFTS.slice(0, 4).map((g) => (
+              {publishedCatalogGifts.map((g) => (
                 <button
                   key={g.id}
                   onClick={() => {
@@ -1395,21 +1401,35 @@ export const MomentsScreen: React.FC = () => {
                       showToast(`Insufficient coins! You need ${g.coins.toLocaleString()} Coins.`);
                       return;
                     }
-                    sendLiveGift(g, giftTargetPost.user.id, 1, giftTargetPost.user.displayName, {
+                    const sent = sendLiveGift(g, giftTargetPost.user.id, 1, giftTargetPost.user.displayName, {
                       context: 'moments',
                       reelId: giftTargetPost.id,
                     });
-                    void audioManager.playGiftSfx(g);
+                    if (!sent) {
+                      showToast('Gift could not be sent. Please try again.');
+                      return;
+                    }
+                    setActiveMomentGift({
+                      id: `moment_gift_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                      gift: g,
+                      senderName: currentUser.displayName,
+                      senderAvatar: currentUser.avatar,
+                      senderVipTier: currentUser.vipTier ?? 0,
+                      recipientName: giftTargetPost.user.displayName,
+                      comboCount: 1,
+                      quantity: 1,
+                      timestamp: Date.now(),
+                    });
                     setGiftTargetPost(null);
-                    showToast(
-                      `Sent ${g.name} ${g.icon} to @${giftTargetPost.user.username}! 🎁✨`
-                    );
+                    showToast(`Sent ${g.name} ${g.icon} to @${giftTargetPost.user.username}! 🎁✨`);
                   }}
                   className="p-3 rounded-2xl bg-[#1E1238] border border-white/10 hover:border-[#EC4899] flex flex-col items-center justify-center cursor-pointer transition-all active:scale-95 shadow-md group"
                 >
-                  <span className="text-2xl mb-1 group-hover:scale-110 transition-transform">
-                    {g.icon}
-                  </span>
+                  {g.thumbnailUrl ? (
+                    <img src={g.thumbnailUrl} alt={g.name} className="w-9 h-9 object-contain mb-1" />
+                  ) : (
+                    <span className="text-2xl mb-1 group-hover:scale-110 transition-transform">{g.icon}</span>
+                  )}
                   <span className="text-[10px] font-bold text-white truncate max-w-full">
                     {g.name}
                   </span>

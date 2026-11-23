@@ -482,6 +482,10 @@ export interface Gift {
   priority?: number;
   isTestGift?: boolean;
   advancedConfig?: AdvancedGiftConfig;
+  /** True when this record originated in Admin Gift Management. */
+  adminCatalog?: boolean;
+  /** Admin visibility/status flag; false gifts stay hidden from all send-gift galleries. */
+  catalogVisible?: boolean;
 }
 
 export interface ChatMessage {

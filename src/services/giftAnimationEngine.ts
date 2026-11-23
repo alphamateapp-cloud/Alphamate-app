@@ -9,10 +9,139 @@ import {
   AdvancedGiftConfig,
   AdvancedGiftFormat,
   Gift,
+  GiftAnimationType,
   GiftDisplayMode,
   GiftMediaAnalysis,
 } from '../types';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
+
+
+
+/**
+ * Converts the Admin Panel's shared `/gifts` catalog document into the app gift model.
+ * StoreScreen intentionally does not consume this catalog; it remains a separate shop.
+ */
+function normalizeAdminCatalogGift(id: string, raw: Record<string, any>): Gift {
+  const coins = Math.max(0, Math.floor(Number(raw.coins ?? raw.costInCoins ?? 0) || 0));
+  const validAnimations: GiftAnimationType[] = ['sparkle', 'heart', 'car', 'rocket', 'crown', 'dragon', 'yacht', 'ring'];
+  const animationType = validAnimations.includes(raw.animationType) ? raw.animationType : 'sparkle';
+  const rawFormat = String(raw.format || raw.animationFormat || 'EMOJI').toLowerCase().trim();
+  const formatAliases: Record<string, AdvancedGiftFormat> = {
+    svga: 'svga', 'video/svga': 'svga', webm: 'webm', 'video/webm': 'webm',
+    mp4: 'mp4', 'video/mp4': 'mp4', mov: 'mov', 'video/quicktime': 'mov',
+    svg: 'svg', 'image/svg+xml': 'svg', gif: 'gif', 'image/gif': 'gif',
+  };
+  const format = formatAliases[rawFormat];
+  const assetUrl = String(raw.assetUrl || raw.downloadUrl || raw.animationUrl || raw.optimizedFileUrl || raw.originalFileUrl || '');
+  const durationValue = Number(raw.durationMs) || (Number(raw.duration) ? Number(raw.duration) * 1000 : 3000);
+  const durationMs = Math.min(60_000, Math.max(1_500, Math.round(durationValue)));
+  const modeRaw = String(raw.animationMode || raw.displayMode || '').toLowerCase();
+  const displayMode: GiftDisplayMode =
+    modeRaw.includes('overlay') || modeRaw.includes('background') ? 'overlay_background'
+      : modeRaw.includes('semi') ? 'semi_transparent' : 'transparent';
+  const statusRaw = String(raw.status || 'Active').toLowerCase();
+  const isActive = ['active', 'published', 'enabled', 'show'].includes(statusRaw) && raw.show !== false && raw.isActive !== false;
+  const timestampToIso = (value: any, fallback: string) => {
+    if (value && typeof value.toDate === 'function') return value.toDate().toISOString();
+    if (typeof value === 'string' && value) return value;
+    return fallback;
+  };
+  const nowIso = new Date().toISOString();
+  const advancedConfig: AdvancedGiftConfig | undefined = format && assetUrl ? {
+    id,
+    name: String(raw.name || 'Gift'),
+    description: String(raw.description || ''),
+    category: String(raw.category || 'Others'),
+    coins,
+    icon: String(raw.icon || '🎁'),
+    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || ''),
+    previewImageUrl: String(raw.previewImageUrl || raw.thumbnailUrl || raw.imageUrl || ''),
+    originalFileUrl: String(raw.originalFileUrl || assetUrl),
+    optimizedFileUrl: String(raw.optimizedFileUrl || assetUrl),
+    animationUrl: assetUrl,
+    format,
+    displayMode,
+    transparencyStatus: raw.transparencyStatus === 'alpha_verified' || raw.transparencyStatus === 'opaque_no_alpha' || raw.transparencyStatus === 'alpha_limited_gif'
+      ? raw.transparencyStatus : (format === 'svga' || format === 'svg' ? 'alpha_verified' : 'opaque_no_alpha'),
+    opacity: Math.min(100, Math.max(10, Number(raw.opacity ?? 90) || 90)),
+    durationMs,
+    loop: Boolean(raw.loop),
+    playbackSpeed: Math.min(2, Math.max(0.5, Number(raw.playbackSpeed ?? 1) || 1)),
+    position: ['top', 'bottom', 'center', 'fullscreen'].includes(String(raw.position)) ? raw.position : 'fullscreen',
+    scale: Math.min(1.5, Math.max(0.4, Number(raw.scale ?? 1) || 1)),
+    priority: Math.max(1, Math.min(100, Number(raw.priority ?? raw.order) || 50)),
+    enableParticles: raw.enableParticles !== false,
+    enableSound: raw.enableSound !== false,
+    edgeFeather: typeof raw.edgeFeather === 'boolean' ? raw.edgeFeather : (format === 'mp4' || format === 'webm' || format === 'mov'),
+    blendMode: raw.blendMode === 'screen' || raw.blendMode === 'lighten' ? raw.blendMode : 'normal',
+    status: isActive ? 'published' : 'disabled',
+    conversionStatus: 'not_needed',
+    conversionMessage: 'Loaded from the shared Alpha Mate Admin Gift Gallery catalog.',
+    isTestGift: Boolean(raw.isTestGift),
+    createdAt: timestampToIso(raw.createdAt, nowIso),
+    createdAtMs: Number(raw.createdAtMs) || Date.now(),
+    updatedAt: timestampToIso(raw.updatedAt, nowIso),
+    createdBy: typeof raw.createdBy === 'string' ? raw.createdBy : 'admin_catalog',
+  } : undefined;
+
+  const tier = coins >= 20_000 ? 'mythic' : coins >= 5_000 ? 'legendary' : coins >= 1_000 ? 'epic' : coins >= 100 ? 'rare' : 'common';
+  return {
+    id,
+    name: String(raw.name || 'Gift'),
+    icon: String(raw.icon || '🎁'),
+    coins,
+    costInCoins: coins,
+    animationType,
+    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || (rawFormat === 'png' ? assetUrl : '')) || undefined,
+    tier,
+    durationMs,
+    triggersScreenShake: coins >= 5_000,
+    description: String(raw.description || ''),
+    priority: Math.max(1, Number(raw.priority ?? raw.order) || 1),
+    advancedConfig,
+    adminCatalog: true,
+    catalogVisible: isActive,
+  };
+}
+
+/** Live subscription to gifts created/edited in the Alpha Mate Admin Panel. */
+export function subscribeToAdminGiftCatalog(
+  onUpdate: (gifts: Gift[], initialized: boolean) => void,
+  onError?: (error: Error) => void
+): () => void {
+  let latest: Gift[] = [];
+  let catalogReady = false;
+  let metaReady = false;
+  let explicitlyInitialized = false;
+  const emit = () => onUpdate(latest, explicitlyInitialized || (catalogReady && latest.length > 0));
+  const unsubscribeCatalog = onSnapshot(
+    collection(db, 'gifts'),
+    (snapshot) => {
+      latest = snapshot.docs
+        .map((item) => normalizeAdminCatalogGift(item.id, item.data() as Record<string, any>))
+        .sort((a, b) => (a.priority || 0) - (b.priority || 0));
+      catalogReady = true;
+      emit();
+    },
+    (error) => {
+      console.warn('[AdminGiftCatalog] Firestore listener fallback:', error?.message || error);
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  );
+  const unsubscribeMeta = onSnapshot(
+    doc(db, 'gift_catalog_meta', 'default_seed'),
+    (snapshot) => {
+      metaReady = true;
+      explicitlyInitialized = snapshot.exists() && snapshot.data()?.initialized === true;
+      if (metaReady) emit();
+    },
+    (error) => {
+      console.warn('[AdminGiftCatalog] Catalog metadata unavailable:', error?.message || error);
+      onError?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  );
+  return () => { unsubscribeCatalog(); unsubscribeMeta(); };
+}
 
 export const ALPHA_MATE_TEST_GIFT_ID = 'test_gift_alpha_mate_10000';
 export const UPLOADED_TEST_WEBM_URL = '/assets/aistudio/alpha_mate_gift_5666_a950c836.webm';

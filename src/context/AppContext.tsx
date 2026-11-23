@@ -36,6 +36,7 @@ import {
   DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
   advancedGiftConfigToGift,
   subscribeToAdvancedGifts,
+  subscribeToAdminGiftCatalog,
   saveAdvancedGiftToFirestore,
   deleteAdvancedGiftFromFirestore,
   validateGiftSendOnServer,
@@ -705,22 +706,36 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [advancedGifts, setAdvancedGifts] = useState<AdvancedGiftConfig[]>([
     DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
   ]);
+  const [adminCatalogGifts, setAdminCatalogGifts] = useState<Gift[]>([]);
+  const [adminCatalogLoaded, setAdminCatalogLoaded] = useState(false);
 
   const publishedCatalogGifts = useMemo<Gift[]>(() => {
     const publishedAdvanced = advancedGifts
       .filter((cfg) => cfg.status === 'published' && Boolean(cfg.optimizedFileUrl || cfg.animationUrl || cfg.originalFileUrl))
       .map(advancedGiftConfigToGift);
-    const usedIds = new Set(publishedAdvanced.map((g) => g.id));
-    const baseLegacy = VIRTUAL_GIFTS.filter((g) => !usedIds.has(g.id));
-    return [...publishedAdvanced, ...baseLegacy];
-  }, [advancedGifts]);
+    const merged = new Map<string, Gift>();
+    publishedAdvanced.forEach((gift) => merged.set(gift.id, gift));
+    // Reserve IDs for inactive/hidden Admin gifts too, so local defaults cannot bring them back.
+    adminCatalogGifts.forEach((gift) => {
+      // Admin status is authoritative: paused/hidden catalog records must also suppress
+      // any same-ID legacy advanced gift so it cannot leak back into the gallery.
+      if (gift.catalogVisible === false) merged.delete(gift.id);
+      else merged.set(gift.id, gift);
+    });
+    // Local defaults are only a first-load fallback, never a way to override Admin pause/delete.
+    if (!adminCatalogLoaded) VIRTUAL_GIFTS.forEach((gift) => { if (!merged.has(gift.id)) merged.set(gift.id, gift); });
+    return Array.from(merged.values()).sort((a, b) => (a.priority || 0) - (b.priority || 0));
+  }, [advancedGifts, adminCatalogGifts, adminCatalogLoaded]);
 
   useEffect(() => {
-    const unsubscribe = subscribeToAdvancedGifts((items) => {
-      setAdvancedGifts(items);
-    });
+    const unsubscribeAdvanced = subscribeToAdvancedGifts((items) => setAdvancedGifts(items));
+    const unsubscribeAdminCatalog = subscribeToAdminGiftCatalog(
+      (items, initialized) => { setAdminCatalogGifts(items); setAdminCatalogLoaded(initialized); },
+      (error) => { console.warn('Admin gift catalog unavailable; using local fallback.', error); }
+    );
     return () => {
-      unsubscribe();
+      unsubscribeAdvanced();
+      unsubscribeAdminCatalog();
     };
   }, []);
 

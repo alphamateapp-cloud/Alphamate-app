@@ -2951,7 +2951,8 @@ export async function adminReviewAgencyApplicationInFirestore(
         : 'Diamond Certified Host Agency',
     ownerUserId: String(app.applicantUserId).slice(0, 128),
     ownerName: String(app.applicantName || 'Agency Owner').slice(0, 128),
-    agencyBalance: 0, // Always starts at 0; only Official Admin allocates Coin Seller stock
+    agencyBalance: 0, // Mobile app balance alias
+    coinBalance: 0, // Admin Panel balance alias
     isPinSet: false,
     whatsappNumber: String(app.whatsapp || '').replace(/[^0-9+]/g, '').slice(0, 64) || String(app.whatsapp || '').slice(0, 64),
     whatsappDisplay: String(app.whatsapp || '').slice(0, 64),
@@ -2995,13 +2996,15 @@ export async function adminAllocateAgencyCoinsInFirestore(
         throw new Error('Agency record not found.');
       }
       const data = snap.data() as Record<string, any>;
-      if (data.type !== 'coin_seller') {
+      if (!['coin_seller', 'coin seller agency', 'coin-seller'].includes(String(data.type || '').toLowerCase())) {
         throw new Error('Only Coin Seller agencies can hold coin stock.');
       }
-      const current = Math.max(0, Number(data.agencyBalance) || 0);
+      const current = Math.max(0, Number(data.coinBalance) || 0, Number(data.agencyBalance) || 0, Number(data.coins) || 0);
       nextBalance = current + safeAdd;
       tx.update(agencyRef, {
         agencyBalance: nextBalance,
+        coinBalance: nextBalance,
+        coins: nextBalance,
         updatedAt: new Date().toISOString(),
       });
     });
@@ -3049,13 +3052,15 @@ export async function deductCoinSellerAgencyBalanceInFirestore(
         throw new Error('Official agency record not found.');
       }
       const data = snap.data() as Record<string, any>;
-      const current = Math.max(0, Number(data.agencyBalance) || 0);
+      const current = Math.max(0, Number(data.coinBalance) || 0, Number(data.agencyBalance) || 0, Number(data.coins) || 0);
       if (safeAmount > current) {
         throw new Error(`Insufficient agency coin stock (${current.toLocaleString()} Coins available).`);
       }
       nextBalance = current - safeAmount;
       tx.update(agencyRef, {
         agencyBalance: nextBalance,
+        coinBalance: nextBalance,
+        coins: nextBalance,
         updatedAt: new Date().toISOString(),
       });
     });

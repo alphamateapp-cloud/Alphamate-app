@@ -540,7 +540,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'agencyId', 'type', 'agencyName', 'agencyCode', 'agencyTag', 'tagColor',
           'badge', 'logo', 'ownerUserId', 'ownerName', 'ownerUniqueId', 'ownerAvatar',
-          'agencyBalance', 'isPinSet', 'whatsappNumber', 'whatsappDisplay',
+          'agencyBalance', 'coinBalance', 'coins', 'isPinSet', 'whatsappNumber', 'whatsappDisplay',
           'defaultCommissionRate', 'minWeeklyHours', 'slogan', 'isOfficial',
           'activeHostsCount', 'totalHosts', 'paymentMethods', 'rates',
           'status', 'createdAt', 'createdAtMs', 'updatedAt'
@@ -558,6 +558,8 @@ service cloud.firestore {
         && (!('ownerUniqueId' in data) || (data.ownerUniqueId is string && data.ownerUniqueId.size() <= 64))
         && (!('ownerAvatar' in data) || (data.ownerAvatar is string && data.ownerAvatar.size() <= 2048))
         && data.agencyBalance is number && data.agencyBalance >= 0 && data.agencyBalance <= 1000000000
+        && (!('coinBalance' in data) || (data.coinBalance is number && data.coinBalance >= 0 && data.coinBalance <= 1000000000))
+        && (!('coins' in data) || (data.coins is number && data.coins >= 0 && data.coins <= 1000000000))
         && (!('isPinSet' in data) || data.isPinSet is bool)
         && isNonEmptyString(data.whatsappNumber, 3, 64)
         && isNonEmptyString(data.whatsappDisplay, 3, 64)
@@ -573,6 +575,25 @@ service cloud.firestore {
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.createdAtMs is number
         && data.updatedAt is string && data.updatedAt.size() <= 64;
+    }
+
+    function isValidAdminPanelAgency(data) {
+      return data.keys().hasAll(['name', 'code', 'type', 'ownerUid', 'status', 'coinBalance', 'agencyBalance', 'coins'])
+        && data.name is string && data.name.size() >= 2 && data.name.size() <= 128
+        && data.code is string && data.code.size() <= 64
+        && data.type == 'Coin Seller Agency'
+        && data.ownerUid is string && data.ownerUid.size() > 0 && data.ownerUid.size() <= 128
+        && data.status in ['Active', 'On Hold', 'Suspended']
+        && data.coinBalance is number && data.coinBalance >= 0 && data.coinBalance <= 1000000000
+        && data.agencyBalance is number && data.agencyBalance >= 0 && data.agencyBalance <= 1000000000
+        && data.coins is number && data.coins >= 0 && data.coins <= 1000000000;
+    }
+
+    function isAgencyOwner(data) {
+      return data.get('ownerUserId', '') == request.auth.uid
+        || data.get('ownerUid', '') == request.auth.uid
+        || data.get('ownerId', '') == request.auth.uid
+        || data.get('ownerAuthUid', '') == request.auth.uid;
     }
 
     function isValidHostAgencyRequest(data) {
@@ -647,17 +668,13 @@ service cloud.firestore {
         && (
           resource == null
           || resource.data.status in ['active', 'Active', 'ACTIVE']
-          || resource.data.ownerUserId == request.auth.uid
-          || resource.data.ownerId == request.auth.uid
-          || resource.data.ownerUid == request.auth.uid
+          || isAgencyOwner(resource.data)
           || isOfficialAdmin()
         );
       allow list: if isSignedIn()
         && (
           resource.data.status in ['active', 'Active', 'ACTIVE']
-          || resource.data.ownerUserId == request.auth.uid
-          || resource.data.ownerId == request.auth.uid
-          || resource.data.ownerUid == request.auth.uid
+          || isAgencyOwner(resource.data)
           || isOfficialAdmin()
         );
       allow create: if isValidId(agencyId)
@@ -667,24 +684,51 @@ service cloud.firestore {
         && request.resource.data.agencyBalance == 0;
       allow update: if isValidId(agencyId)
         && isSignedIn()
-        && isValidOfficialAgency(request.resource.data)
-        && request.resource.data.agencyId == resource.data.agencyId
-        && request.resource.data.type == resource.data.type
-        && request.resource.data.ownerUserId == resource.data.ownerUserId
         && (
-          isOfficialAdmin()
-          || (
-            resource.data.ownerUserId == request.auth.uid
-            && request.resource.data.status == resource.data.status
-            && request.resource.data.isOfficial == resource.data.isOfficial
+          (
+            isValidOfficialAgency(request.resource.data)
+            && request.resource.data.agencyId == resource.data.agencyId
+            && request.resource.data.type == resource.data.type
+            && request.resource.data.ownerUserId == resource.data.ownerUserId
             && (
-              request.resource.data.agencyBalance == resource.data.agencyBalance
+              isOfficialAdmin()
               || (
-                resource.data.type == 'coin_seller'
-                && request.resource.data.agencyBalance >= 0
-                && request.resource.data.agencyBalance < resource.data.agencyBalance
+                isAgencyOwner(resource.data)
+                && request.resource.data.status == resource.data.status
+                && request.resource.data.isOfficial == resource.data.isOfficial
+                && (
+                  request.resource.data.agencyBalance == resource.data.agencyBalance
+                  || (
+                    resource.data.type == 'coin_seller'
+                    && request.resource.data.agencyBalance >= 0
+                    && (
+                      request.resource.data.agencyBalance < resource.data.agencyBalance
+                      || request.resource.data.agencyBalance < resource.data.get('coinBalance', 0)
+                      || request.resource.data.agencyBalance < resource.data.get('coins', 0)
+                    )
+                    && request.resource.data.coinBalance == request.resource.data.agencyBalance
+                    && request.resource.data.coins == request.resource.data.agencyBalance
+                  )
+                )
               )
             )
+          )
+          || (
+            isValidAdminPanelAgency(request.resource.data)
+            && request.resource.data.type == resource.data.type
+            && isAgencyOwner(resource.data)
+            && request.resource.data.status == resource.data.status
+            && request.resource.data.agencyBalance == request.resource.data.coinBalance
+            && request.resource.data.agencyBalance == request.resource.data.coins
+            && request.resource.data.agencyBalance >= 0
+            && (
+              request.resource.data.agencyBalance < resource.data.get('agencyBalance', 0)
+              || request.resource.data.agencyBalance < resource.data.get('coinBalance', 0)
+              || request.resource.data.agencyBalance < resource.data.get('coins', 0)
+            )
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'agencyBalance', 'coinBalance', 'coins', 'updatedAt'
+            ])
           )
         );
       allow delete: if false;
@@ -1297,6 +1341,18 @@ service cloud.firestore {
         && data.createdAtMs is number
         && data.updatedAt is string && data.updatedAt.size() <= 64
         && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 128));
+    }
+
+    // Shared Admin Gift Management catalog. Read-only for app clients; Admin SDK writes bypass rules.
+    match /gifts/{giftId} {
+      allow get, list: if true;
+      allow create, update, delete: if isOfficialAdmin();
+    }
+
+    match /gift_catalog_meta/{metaId} {
+      allow get: if metaId == 'default_seed';
+      allow list: if false;
+      allow create, update, delete: if isOfficialAdmin();
     }
 
     match /advancedGifts/{giftId} {

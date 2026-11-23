@@ -169,6 +169,11 @@ export const LiveStreamScreen: React.FC = () => {
   const [showGiftDrawer, setShowGiftDrawer] = useState(false);
   const [showLuckyDrawModal, setShowLuckyDrawModal] = useState(false);
   const [selectedGift, setSelectedGift] = useState<Gift>(() => publishedCatalogGifts[0] || VIRTUAL_GIFTS[0]);
+  // Keep the selected gift synchronized when Admin adds, edits, pauses, or removes gifts live.
+  useEffect(() => {
+    if (!publishedCatalogGifts.length) return;
+    setSelectedGift((current) => publishedCatalogGifts.find((gift) => gift.id === current.id) || publishedCatalogGifts[0]);
+  }, [publishedCatalogGifts]);
 
   // Spectacular Visual Gift Animation, Priority Queue & Rapid-Combo states (strictly scoped per streamId)
   const [activeGiftAnimation, setActiveGiftAnimation] = useState<ActiveGiftEvent | null>(null);

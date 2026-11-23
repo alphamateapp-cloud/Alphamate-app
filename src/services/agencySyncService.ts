@@ -380,7 +380,7 @@ export function normalizeOfficialAgencyDoc(doc: Record<string, any>): Normalized
     whatsappNumber: waInfo.e164Digits ? `+${waInfo.e164Digits}` : '',
     whatsappDisplay: waInfo.display,
     hasValidWhatsApp: waInfo.isValid,
-    agencyBalance: Math.max(0, Number(doc.agencyBalance ?? doc.coinStock ?? doc.stock ?? 0) || 0),
+    agencyBalance: Math.max(0, Number(doc.coinBalance ?? 0) || 0, Number(doc.agencyBalance ?? 0) || 0, Number(doc.coins ?? 0) || 0, Number(doc.coinStock ?? 0) || 0, Number(doc.stock ?? 0) || 0),
     isPinSet: Boolean(doc.isPinSet),
     defaultCommissionRate: Math.max(0, Math.min(80, Number(doc.defaultCommissionRate ?? doc.commissionRate ?? 15) || 15)),
     minWeeklyHours: Math.max(0, Number(doc.minWeeklyHours ?? 15) || 15),
