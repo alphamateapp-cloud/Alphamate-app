@@ -1,5 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
+import { auth } from '../services/firebase';
+import { subscribeToCreatorReels, Reel } from '../services/reelsService';
 import { EditProfileModal } from '../components/modals/EditProfileModal';
 import { ShareProfileModal } from '../components/modals/ShareProfileModal';
 import { JoinAgencyModal } from '../components/modals/JoinAgencyModal';
@@ -196,17 +198,121 @@ export const UserProfileScreen: React.FC = () => {
     setShowCoverModal(false);
   };
 
-  // Video Collections for Profile Tabs:
-  // 1. My Public Videos (uploaded by user)
-  const myVideos = videos.filter((v) => (v.user.id === currentUser.id || v.user.username === currentUser.username) && v.postType !== 'post');
-  
-  // 2. My Posts (text posts, quotes, photos with text)
-  const myPosts = videos.filter((v) => (v.user.id === currentUser.id || v.user.username === currentUser.username) && v.postType === 'post');
-  
-  // 2. Liked Videos (videos liked by user)
-  const likedVideos = videos.filter((v) => v.isLiked || v.id === 'vid_01' || v.id === 'vid_03');
+  // Real-time Firestore creator reels subscription so profile likes, comments & views stay live
+  const [myCreatorReels, setMyCreatorReels] = useState<Reel[]>([]);
+  const effectiveUid = auth.currentUser?.uid || currentUser.id;
 
-  // 3. Saved Videos (videos bookmarked to watch later)
+  useEffect(() => {
+    if (!effectiveUid) {
+      setMyCreatorReels([]);
+      return;
+    }
+    const unsub = subscribeToCreatorReels(effectiveUid, (reels) => {
+      setMyCreatorReels(reels);
+    });
+    return () => {
+      try {
+        unsub();
+      } catch {
+        // ignore listener cleanup errors
+      }
+    };
+  }, [effectiveUid]);
+
+  // Video Collections for Profile Tabs:
+  // 1. My Public Videos (merged live Firestore reels + local session videos, deduplicated by id)
+  const myVideos = useMemo(() => {
+    const contextOwned = videos.filter(
+      (v) =>
+        (v.user.id === currentUser.id ||
+          v.user.id === effectiveUid ||
+          v.user.username === currentUser.username) &&
+        v.postType !== 'post'
+    );
+    const byId = new Map<string, (typeof videos)[number]>();
+
+    contextOwned.forEach((v) => {
+      byId.set(v.id, v);
+    });
+
+    myCreatorReels.forEach((reel) => {
+      const existing = byId.get(reel.id);
+      if (existing) {
+        byId.set(reel.id, {
+          ...existing,
+          likes: Math.max(0, Number(reel.likesCount ?? existing.likes ?? 0)),
+          commentsCount: Math.max(0, Number(reel.commentsCount ?? existing.commentsCount ?? 0)),
+          viewsCount: Math.max(0, Number(reel.viewsCount ?? existing.viewsCount ?? 0)),
+          sharesCount: Math.max(0, Number(reel.sharesCount ?? existing.sharesCount ?? 0)),
+        });
+      } else {
+        byId.set(reel.id, {
+          id: reel.id,
+          user: {
+            ...currentUser,
+            id: reel.creator?.id || reel.uid || currentUser.id,
+            displayName: reel.creator?.displayName || currentUser.displayName,
+            username: reel.creator?.username || currentUser.username,
+            avatar: reel.creator?.avatar || currentUser.avatar,
+          },
+          title: reel.title || reel.caption || 'Moment',
+          description: reel.caption || '',
+          videoUrl: reel.videoUrl,
+          videoKey: reel.videoKey,
+          thumbnail: reel.thumbnailUrl || currentUser.avatar,
+          likes: Math.max(0, Number(reel.likesCount || 0)),
+          commentsCount: Math.max(0, Number(reel.commentsCount || 0)),
+          viewsCount: Math.max(0, Number(reel.viewsCount || 0)),
+          sharesCount: Math.max(0, Number(reel.sharesCount || 0)),
+          musicTitle: reel.musicTitle,
+          musicArtist: reel.musicArtist,
+          isLiked: false,
+          tags: Array.isArray(reel.tags) ? reel.tags : [],
+          timestamp: 'Just now',
+        });
+      }
+    });
+
+    return Array.from(byId.values());
+  }, [videos, myCreatorReels, currentUser, effectiveUid]);
+
+  // 2. My Posts (text posts, quotes, photos with text)
+  const myPosts = useMemo(
+    () =>
+      videos.filter(
+        (v) =>
+          (v.user.id === currentUser.id ||
+            v.user.id === effectiveUid ||
+            v.user.username === currentUser.username) &&
+          v.postType === 'post'
+      ),
+    [videos, currentUser.id, currentUser.username, effectiveUid]
+  );
+
+  // Real-time aggregated creator statistics across all public videos & posts
+  const { totalProfileLikes, totalProfileViews, totalProfileComments } = useMemo(() => {
+    const allOwned = [...myVideos, ...myPosts];
+    return allOwned.reduce(
+      (acc, item) => ({
+        totalProfileLikes: acc.totalProfileLikes + Math.max(0, Number(item.likes || 0)),
+        totalProfileViews: acc.totalProfileViews + Math.max(0, Number(item.viewsCount || 0)),
+        totalProfileComments: acc.totalProfileComments + Math.max(0, Number(item.commentsCount || 0)),
+      }),
+      { totalProfileLikes: 0, totalProfileViews: 0, totalProfileComments: 0 }
+    );
+  }, [myVideos, myPosts]);
+
+  const formatCompactStat = (value: number): string => {
+    const safe = Math.max(0, Math.floor(value || 0));
+    if (safe >= 1_000_000) return `${(safe / 1_000_000).toFixed(1)}M`;
+    if (safe >= 1_000) return `${(safe / 1_000).toFixed(1)}k`;
+    return safe.toLocaleString();
+  };
+
+  // 3. Liked Videos (real videos liked by user)
+  const likedVideos = useMemo(() => videos.filter((v) => v.isLiked), [videos]);
+
+  // 4. Saved Videos (videos bookmarked to watch later)
   const [savedVideoIds, setSavedVideoIds] = useState<Set<string>>(new Set(['vid_02', 'vid_04']));
   const savedVideos = videos.filter((v) => savedVideoIds.has(v.id));
 
@@ -764,17 +870,17 @@ export const UserProfileScreen: React.FC = () => {
           </div>
 
           {/* =========================================================================
-              PROFILE STATISTICS: Following, Followers, Likes (Matching Reference Design)
+              PROFILE STATISTICS: Following, Followers, Real-Time Likes & Views
               ========================================================================= */}
-          <div className="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-[#A855F7]/20 text-center">
+          <div className="grid grid-cols-4 gap-1.5 mt-4 pt-4 border-t border-[#A855F7]/20 text-center">
             <button
               onClick={() => showToast(`Following: ${currentUser.followingCount.toLocaleString()} creators`)}
               className="p-1 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
             >
               <div className="text-base sm:text-lg font-black text-white tabular-nums">
-                {currentUser.followingCount.toLocaleString()}
+                {formatCompactStat(currentUser.followingCount)}
               </div>
-              <div className="text-[10px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
+              <div className="text-[9.5px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
                 FOLLOWING
               </div>
             </button>
@@ -784,24 +890,42 @@ export const UserProfileScreen: React.FC = () => {
               className="p-1 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
             >
               <div className="text-base sm:text-lg font-black text-white tabular-nums">
-                {currentUser.followersCount >= 1000
-                  ? `${(currentUser.followersCount / 1000).toFixed(1)}k`
-                  : currentUser.followersCount}
+                {formatCompactStat(currentUser.followersCount)}
               </div>
-              <div className="text-[10px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
+              <div className="text-[9.5px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
                 FOLLOWERS
               </div>
             </button>
 
             <button
-              onClick={() => showToast(`Total Likes: 18`)}
+              onClick={() =>
+                showToast(
+                  `Likes: ${totalProfileLikes.toLocaleString()} • Comments: ${totalProfileComments.toLocaleString()}`
+                )
+              }
               className="p-1 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
             >
               <div className="text-base sm:text-lg font-black text-white tabular-nums">
-                {myVideos.reduce((acc, v) => acc + (v.likes || 0), 0) || 18}
+                {formatCompactStat(totalProfileLikes)}
               </div>
-              <div className="text-[10px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
+              <div className="text-[9.5px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
                 LIKES
+              </div>
+            </button>
+
+            <button
+              onClick={() =>
+                showToast(
+                  `Views: ${totalProfileViews.toLocaleString()} • Comments: ${totalProfileComments.toLocaleString()}`
+                )
+              }
+              className="p-1 rounded-xl hover:bg-white/5 transition-colors cursor-pointer"
+            >
+              <div className="text-base sm:text-lg font-black text-white tabular-nums">
+                {formatCompactStat(totalProfileViews)}
+              </div>
+              <div className="text-[9.5px] text-zinc-400 font-bold tracking-wider uppercase mt-0.5">
+                VIEWS
               </div>
             </button>
           </div>
@@ -944,13 +1068,17 @@ export const UserProfileScreen: React.FC = () => {
                           <span className="text-[11px] font-bold text-white line-clamp-1 drop-shadow">
                             {vid.title}
                           </span>
-                          <div className="flex items-center gap-3 text-[10px] text-zinc-300 mt-1">
+                          <div className="flex items-center gap-2.5 text-[10px] text-zinc-300 mt-1 tabular-nums">
                             <span className="flex items-center gap-1 font-semibold">
                               <Heart className="w-3 h-3 fill-rose-500 text-rose-500" />{' '}
-                              {vid.likes.toLocaleString()}
+                              {formatCompactStat(vid.likes || 0)}
                             </span>
-                            <span className="flex items-center gap-1 text-zinc-400">
-                              <Eye className="w-3 h-3" /> {(vid.likes * 4).toLocaleString()}
+                            <span className="flex items-center gap-1 text-zinc-300">
+                              <MessageCircle className="w-3 h-3 text-sky-300" />{' '}
+                              {formatCompactStat(vid.commentsCount || 0)}
+                            </span>
+                            <span className="flex items-center gap-1 text-zinc-300">
+                              <Eye className="w-3 h-3" /> {formatCompactStat(vid.viewsCount || 0)}
                             </span>
                           </div>
                         </div>
@@ -1050,10 +1178,10 @@ export const UserProfileScreen: React.FC = () => {
                   {/* Post Stats */}
                   <div className="flex items-center gap-4 pt-2 border-t border-white/5 text-xs text-zinc-400">
                     <span className="flex items-center gap-1 text-rose-400">
-                      <Heart className="w-3.5 h-3.5 fill-rose-500" /> {post.likes || 1}
+                      <Heart className="w-3.5 h-3.5 fill-rose-500" /> {(post.likes || 0).toLocaleString()}
                     </span>
                     <span className="flex items-center gap-1">
-                      <MessageCircle className="w-3.5 h-3.5" /> {post.commentsCount || 0} comments
+                      <MessageCircle className="w-3.5 h-3.5" /> {(post.commentsCount || 0).toLocaleString()} comments
                     </span>
                   </div>
                 </div>
@@ -1132,13 +1260,17 @@ export const UserProfileScreen: React.FC = () => {
                           <span className="text-[11px] font-bold text-white line-clamp-1 drop-shadow">
                             {vid.title}
                           </span>
-                          <div className="flex items-center gap-3 text-[10px] text-zinc-300 mt-1">
+                          <div className="flex items-center gap-2.5 text-[10px] text-zinc-300 mt-1 tabular-nums">
                             <span className="flex items-center gap-1 font-semibold text-rose-400">
                               <Heart className="w-3 h-3 fill-rose-500" />{' '}
-                              {vid.likes.toLocaleString()}
+                              {formatCompactStat(vid.likes || 0)}
                             </span>
-                            <span className="flex items-center gap-1 text-zinc-400">
-                              <Eye className="w-3 h-3" /> {(vid.viewsCount || vid.likes * 4).toLocaleString()}
+                            <span className="flex items-center gap-1 text-zinc-300">
+                              <MessageCircle className="w-3 h-3 text-sky-300" />{' '}
+                              {formatCompactStat(vid.commentsCount || 0)}
+                            </span>
+                            <span className="flex items-center gap-1 text-zinc-300">
+                              <Eye className="w-3 h-3" /> {formatCompactStat(vid.viewsCount || 0)}
                             </span>
                           </div>
                         </div>
@@ -1203,9 +1335,18 @@ export const UserProfileScreen: React.FC = () => {
                           <span className="text-[11px] font-bold text-white line-clamp-1 drop-shadow">
                             {vid.title}
                           </span>
-                          <div className="flex items-center justify-between text-[10px] text-zinc-300 mt-1">
-                            <span className="text-amber-300 font-semibold">Saved for later</span>
-                            <Play className="w-3 h-3 text-white fill-white" />
+                          <div className="flex items-center gap-2.5 text-[10px] text-zinc-300 mt-1 tabular-nums">
+                            <span className="flex items-center gap-1 font-semibold text-rose-400">
+                              <Heart className="w-3 h-3 fill-rose-500" />{' '}
+                              {formatCompactStat(vid.likes || 0)}
+                            </span>
+                            <span className="flex items-center gap-1 text-zinc-300">
+                              <MessageCircle className="w-3 h-3 text-sky-300" />{' '}
+                              {formatCompactStat(vid.commentsCount || 0)}
+                            </span>
+                            <span className="flex items-center gap-1 text-zinc-300">
+                              <Eye className="w-3 h-3" /> {formatCompactStat(vid.viewsCount || 0)}
+                            </span>
                           </div>
                         </div>
                       </div>

@@ -265,6 +265,7 @@
         "likesCount": { "type": "number" },
         "commentsCount": { "type": "number" },
         "viewsCount": { "type": "number" },
+        "sharesCount": { "type": "number" },
         "visibility": { "type": "string", "enum": ["public", "private", "friends"] },
         "status": { "type": "string", "enum": ["active", "archived", "deleted"] },
         "createdAt": { "type": "string", "format": "date-time" },

@@ -1186,16 +1186,42 @@ service cloud.firestore {
         && isValidReel(request.resource.data);
 
       // Users may update only their own reel metadata without modifying protected fields (uid, videoKey)
-      // Viewers can update interaction counters (likesCount, viewsCount)
+      // Viewers can update interaction counters (likesCount, commentsCount, viewsCount, sharesCount)
+      // with strict non-negative numeric bounds (at most +1 or -1 per write).
       allow update: if isSignedIn() && (
         (resource.data.uid == request.auth.uid
           && request.resource.data.uid == resource.data.uid
           && request.resource.data.videoKey == resource.data.videoKey
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
             'caption', 'thumbnailUrl', 'title', 'tags', 'visibility', 'status',
-            'updatedAt', 'likesCount', 'commentsCount', 'viewsCount'
+            'updatedAt', 'likesCount', 'commentsCount', 'viewsCount', 'sharesCount'
           ]))
-        || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likesCount', 'viewsCount']))
+        || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'likesCount', 'commentsCount', 'viewsCount', 'sharesCount'
+          ])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['likesCount']) || (
+            request.resource.data.likesCount is number
+            && request.resource.data.likesCount >= 0
+            && request.resource.data.likesCount >= (('likesCount' in resource.data && resource.data.likesCount is number) ? resource.data.likesCount : 0) - 1
+            && request.resource.data.likesCount <= (('likesCount' in resource.data && resource.data.likesCount is number) ? resource.data.likesCount : 0) + 1
+          ))
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['commentsCount']) || (
+            request.resource.data.commentsCount is number
+            && request.resource.data.commentsCount >= 0
+            && request.resource.data.commentsCount <= (('commentsCount' in resource.data && resource.data.commentsCount is number) ? resource.data.commentsCount : 0) + 1
+          ))
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['viewsCount']) || (
+            request.resource.data.viewsCount is number
+            && request.resource.data.viewsCount >= 0
+            && request.resource.data.viewsCount <= (('viewsCount' in resource.data && resource.data.viewsCount is number) ? resource.data.viewsCount : 0) + 1
+          ))
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['sharesCount']) || (
+            request.resource.data.sharesCount is number
+            && request.resource.data.sharesCount >= 0
+            && request.resource.data.sharesCount <= (('sharesCount' in resource.data && resource.data.sharesCount is number) ? resource.data.sharesCount : 0) + 1
+          ))
+        )
       );
 
       // Only owner may delete a reel

@@ -129,6 +129,9 @@ export interface Reel {
   likesCount: number;
   commentsCount: number;
   viewsCount: number;
+  sharesCount: number;
+  musicTitle?: string;
+  musicArtist?: string;
   visibility: 'public' | 'private' | 'friends';
   status: 'active' | 'archived' | 'deleted';
   creator: {
@@ -724,6 +727,7 @@ export async function saveReelMetadataToFirestore(
     likesCount: 0,
     commentsCount: 0,
     viewsCount: 0,
+    sharesCount: 0,
     visibility: normalizedVisibility,
     status: 'active',
     creator: {
@@ -833,9 +837,12 @@ export function subscribeToActiveReels(
           thumbnailUrl: data.thumbnailUrl || '',
           createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt || '',
           updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate().toISOString() : data.updatedAt || '',
-          likesCount: Number(data.likesCount) || 0,
-          commentsCount: Number(data.commentsCount) || 0,
-          viewsCount: Number(data.viewsCount) || 0,
+          likesCount: Math.max(0, Number(data.likesCount) || 0),
+          commentsCount: Math.max(0, Number(data.commentsCount) || 0),
+          viewsCount: Math.max(0, Number(data.viewsCount) || 0),
+          sharesCount: Math.max(0, Number(data.sharesCount) || 0),
+          musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
+          musicArtist: typeof data.musicArtist === 'string' ? data.musicArtist : undefined,
           visibility: data.visibility || 'public',
           status: data.status || 'active',
           creator: data.creator || {
@@ -857,10 +864,71 @@ export function subscribeToActiveReels(
 }
 
 /**
+ * Real-time subscription to a specific creator's public active reels so profile totals
+ * (Likes, Comments, Views) stay live even if the creator's videos are older than the global feed window.
+ */
+export function subscribeToCreatorReels(
+  creatorUid: string,
+  onUpdate: (reels: Reel[]) => void
+) {
+  if (!creatorUid) {
+    onUpdate([]);
+    return () => {};
+  }
+  const path = 'reels';
+  const creatorQuery = query(
+    collection(db, 'reels'),
+    where('uid', '==', creatorUid),
+    where('status', '==', 'active'),
+    where('visibility', '==', 'public')
+  );
+
+  return onSnapshot(
+    creatorQuery,
+    (snapshot) => {
+      const reels: Reel[] = snapshot.docs.map((docSnap) => {
+        const data = docSnap.data();
+        return {
+          id: docSnap.id,
+          uid: data.uid || creatorUid,
+          videoKey: data.videoKey || '',
+          videoUrl: data.videoUrl || '',
+          caption: data.caption || '',
+          title: data.title || '',
+          tags: data.tags || [],
+          thumbnailUrl: data.thumbnailUrl || '',
+          createdAt: data.createdAt?.toDate ? data.createdAt.toDate().toISOString() : data.createdAt || '',
+          updatedAt: data.updatedAt?.toDate ? data.updatedAt.toDate().toISOString() : data.updatedAt || '',
+          likesCount: Math.max(0, Number(data.likesCount) || 0),
+          commentsCount: Math.max(0, Number(data.commentsCount) || 0),
+          viewsCount: Math.max(0, Number(data.viewsCount) || 0),
+          sharesCount: Math.max(0, Number(data.sharesCount) || 0),
+          musicTitle: typeof data.musicTitle === 'string' ? data.musicTitle : undefined,
+          musicArtist: typeof data.musicArtist === 'string' ? data.musicArtist : undefined,
+          visibility: data.visibility || 'public',
+          status: data.status || 'active',
+          creator: data.creator || {
+            id: data.uid || creatorUid,
+            displayName: 'Alpha Creator',
+            username: 'creator',
+            avatar: '',
+          },
+        };
+      });
+      onUpdate(reels);
+    },
+    (error) => {
+      console.warn('Creator reels real-time listener error:', error);
+      handleSnapshotListenerError(error, OperationType.LIST, path);
+    }
+  );
+}
+
+/**
  * Increment views count on reel playback
  */
 export async function incrementReelViews(reelId: string) {
-  if (!reelId) return;
+  if (!reelId || reelId.startsWith('vid_')) return;
   try {
     await updateDoc(doc(db, 'reels', reelId), {
       viewsCount: increment(1),
@@ -871,13 +939,28 @@ export async function incrementReelViews(reelId: string) {
 }
 
 /**
- * Like / Unlike a Reel in Firestore
+ * Increment shares count on reel share
  */
-export async function toggleReelLike(reelId: string, isLiked: boolean) {
-  if (!reelId) return;
+export async function incrementReelShares(reelId: string) {
+  if (!reelId || reelId.startsWith('vid_')) return;
   try {
     await updateDoc(doc(db, 'reels', reelId), {
-      likesCount: increment(isLiked ? -1 : 1),
+      sharesCount: increment(1),
+    });
+  } catch {
+    // Non-critical
+  }
+}
+
+/**
+ * Like / Unlike a Reel in Firestore.
+ * `willLike === true` increments likesCount by +1; `willLike === false` decrements by -1.
+ */
+export async function toggleReelLike(reelId: string, willLike: boolean) {
+  if (!reelId || reelId.startsWith('vid_')) return;
+  try {
+    await updateDoc(doc(db, 'reels', reelId), {
+      likesCount: increment(willLike ? 1 : -1),
     });
   } catch (error) {
     console.warn('Failed to toggle reel like in Firestore:', error);

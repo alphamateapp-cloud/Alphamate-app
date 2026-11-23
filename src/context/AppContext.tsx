@@ -1521,9 +1521,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Real-time Firestore Reels & Cloudflare R2 Feed Subscription (independently refreshable for Moments)
   useEffect(() => {
+    const uidKey = firebaseUser?.uid || 'guest';
+    const readLikedSet = (): Set<string> => {
+      try {
+        const raw = window.localStorage.getItem(`alphamate_liked_reels_${uidKey}`);
+        const parsed = raw ? JSON.parse(raw) : [];
+        return new Set(Array.isArray(parsed) ? parsed.filter((x) => typeof x === 'string') : []);
+      } catch {
+        return new Set();
+      }
+    };
+
     const unsubscribeReels = subscribeToActiveReels((remoteReels: Reel[]) => {
       if (remoteReels && remoteReels.length > 0) {
+        const likedSet = readLikedSet();
         setVideos((prevLocal) => {
+          const prevLikedById = new Map<string, boolean>();
+          prevLocal.forEach((p) => {
+            if (p.isLiked) prevLikedById.set(p.id, true);
+          });
+
           const remotePosts: VideoPost[] = remoteReels.map((reel) => ({
             id: reel.id,
             user: {
@@ -1552,11 +1569,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             title: reel.title || reel.caption || 'Alpha Moment',
             description: reel.caption || '',
             tags: reel.tags || ['#AlphaMoments'],
-            likes: reel.likesCount || 0,
-            commentsCount: reel.commentsCount || 0,
-            sharesCount: 0,
-            viewsCount: reel.viewsCount || 0,
-            isLiked: false,
+            likes: Math.max(0, reel.likesCount || 0),
+            commentsCount: Math.max(0, reel.commentsCount || 0),
+            sharesCount: Math.max(0, reel.sharesCount || 0),
+            viewsCount: Math.max(0, reel.viewsCount || 0),
+            musicTitle: reel.musicTitle,
+            musicArtist: reel.musicArtist,
+            isLiked: likedSet.has(reel.id) || prevLikedById.get(reel.id) === true,
             feedCategory: 'For You',
             timestamp: reel.createdAt ? new Date(reel.createdAt).toLocaleDateString() : 'Just now',
             postType: 'video',
@@ -6258,25 +6277,40 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const toggleLikeVideo = (videoId: string) => {
     const targetVideo = videos.find((v) => v.id === videoId);
-    const willLike = targetVideo ? !targetVideo.isLiked : false;
+    if (!targetVideo) return;
+    const willLike = !targetVideo.isLiked;
+
+    // Persist liked reel ID locally per user so real-time snapshots keep the heart lit
+    try {
+      const uidKey = firebaseUser?.uid || 'guest';
+      const storageKey = `alphamate_liked_reels_${uidKey}`;
+      const raw = window.localStorage.getItem(storageKey);
+      const parsed = raw ? JSON.parse(raw) : [];
+      const set = new Set<string>(Array.isArray(parsed) ? parsed : []);
+      if (willLike) set.add(videoId);
+      else set.delete(videoId);
+      window.localStorage.setItem(storageKey, JSON.stringify(Array.from(set).slice(-500)));
+    } catch {
+      // ignore storage errors
+    }
+
+    // Sync with Firestore reel likes (+1 on like, -1 on unlike)
+    toggleReelLike(videoId, willLike).catch(() => {});
 
     setVideos((prev) =>
       prev.map((v) => {
         if (v.id === videoId) {
-          const isLiked = !v.isLiked;
-          // Sync with Firestore reel likes
-          toggleReelLike(videoId, isLiked).catch(() => {});
           return {
             ...v,
-            isLiked,
-            likes: isLiked ? v.likes + 1 : Math.max(0, v.likes - 1),
+            isLiked: willLike,
+            likes: willLike ? v.likes + 1 : Math.max(0, v.likes - 1),
           };
         }
         return v;
       })
     );
 
-    if (willLike && targetVideo?.user?.id && targetVideo.user.id !== currentUser.id) {
+    if (willLike && targetVideo.user?.id && targetVideo.user.id !== currentUser.id) {
       sendNotificationToUser({
         recipientId: targetVideo.user.id,
         type: 'like',

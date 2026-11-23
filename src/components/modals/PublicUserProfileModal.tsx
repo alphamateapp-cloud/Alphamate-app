@@ -9,12 +9,15 @@ import {
   Check,
   Users,
   Sparkles,
+  Heart,
+  Eye,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { User, UserBadgeId } from '../../types';
 import { fetchUserFollowCounts } from '../../services/userDirectoryService';
 import { subscribeToPublicUserProfile } from '../../services/firebase';
 import { subscribeToUserBadgeStats } from '../../services/badgeService';
+import { subscribeToCreatorReels, Reel } from '../../services/reelsService';
 import { UserBadgeStrip } from '../badges/UserBadgeIcon';
 import { copyToClipboard } from '../../utils/clipboard';
 import {
@@ -38,6 +41,7 @@ export const PublicUserProfileModal: React.FC = () => {
     followerUserIds,
     toggleFollowUser,
     startDirectMessage,
+    videos,
   } = useApp();
 
   const [followBusy, setFollowBusy] = useState(false);
@@ -46,6 +50,7 @@ export const PublicUserProfileModal: React.FC = () => {
     followersCount: 0,
     followingCount: 0,
   });
+  const [creatorReels, setCreatorReels] = useState<Reel[]>([]);
   const [badgeIds, setBadgeIds] = useState<UserBadgeId[]>([]);
   const [liveProfile, setLiveProfile] = useState<Record<string, any> | null>(null);
   const [showTicksInfo, setShowTicksInfo] = useState(false);
@@ -109,10 +114,17 @@ export const PublicUserProfileModal: React.FC = () => {
       }
     });
 
+    const unsubCreatorReels = subscribeToCreatorReels(viewingPublicUser.id, (reels) => {
+      if (!cancelled) {
+        setCreatorReels(reels);
+      }
+    });
+
     return () => {
       cancelled = true;
       unsubProfile();
       unsubBadges();
+      unsubCreatorReels();
     };
   }, [viewingPublicUser]);
 
@@ -146,6 +158,33 @@ export const PublicUserProfileModal: React.FC = () => {
   const isMe = profileUser.id === currentUser.id;
   const isFollowing = followingUserIds.includes(profileUser.id);
   const followsMe = followerUserIds.includes(profileUser.id);
+
+  // Real-time aggregated Moments/Reels engagement counts for this creator
+  const mergedCreatorReelMap = new Map<string, { likes: number; comments: number; views: number }>();
+  creatorReels.forEach((r) => {
+    mergedCreatorReelMap.set(r.id, {
+      likes: Math.max(0, r.likesCount || 0),
+      comments: Math.max(0, r.commentsCount || 0),
+      views: Math.max(0, r.viewsCount || 0),
+    });
+  });
+  videos.forEach((v) => {
+    if (v.user.id === profileUser.id && !mergedCreatorReelMap.has(v.id)) {
+      mergedCreatorReelMap.set(v.id, {
+        likes: Math.max(0, v.likes || 0),
+        comments: Math.max(0, v.commentsCount || 0),
+        views: Math.max(0, v.viewsCount || 0),
+      });
+    }
+  });
+  let totalCreatorLikes = 0;
+  let totalCreatorComments = 0;
+  let totalCreatorViews = 0;
+  mergedCreatorReelMap.forEach((entry) => {
+    totalCreatorLikes += entry.likes;
+    totalCreatorComments += entry.comments;
+    totalCreatorViews += entry.views;
+  });
 
   const handleToggleFollow = async () => {
     if (isMe || followBusy) return;
@@ -296,9 +335,9 @@ export const PublicUserProfileModal: React.FC = () => {
             </p>
           </div>
 
-          {/* Level / VIP & Stats Row */}
+          {/* Level / VIP & Real-Time Engagement Stats */}
           <div className="mt-4 grid grid-cols-3 gap-2">
-            <div className="p-3 rounded-2xl bg-[#180E30] border border-white/10 text-center">
+            <div className="p-2.5 rounded-2xl bg-[#180E30] border border-white/10 text-center">
               <div className="text-sm font-black text-white tabular-nums">
                 {counts.followersCount.toLocaleString()}
               </div>
@@ -307,13 +346,13 @@ export const PublicUserProfileModal: React.FC = () => {
                 <span>Followers</span>
               </div>
             </div>
-            <div className="p-3 rounded-2xl bg-[#180E30] border border-white/10 text-center">
+            <div className="p-2.5 rounded-2xl bg-[#180E30] border border-white/10 text-center">
               <div className="text-sm font-black text-white tabular-nums">
                 {counts.followingCount.toLocaleString()}
               </div>
               <div className="text-[10px] text-zinc-400 mt-0.5">Following</div>
             </div>
-            <div className="p-3 rounded-2xl bg-[#180E30] border border-white/10 text-center">
+            <div className="p-2.5 rounded-2xl bg-[#180E30] border border-white/10 text-center">
               <div className="text-sm font-black text-amber-300 flex items-center justify-center gap-1">
                 {profileUser.vipTier > 0 ? (
                   <>
@@ -326,6 +365,43 @@ export const PublicUserProfileModal: React.FC = () => {
               </div>
               <div className="text-[10px] text-zinc-400 mt-0.5">
                 {profileUser.vipTier > 0 ? `Lv.${profileUser.level}` : 'Tier Rank'}
+              </div>
+            </div>
+          </div>
+
+          {/* Real-Time Moments Stats: Likes, Views, Comments */}
+          <div className="mt-2 grid grid-cols-3 gap-2">
+            <div className="p-2.5 rounded-2xl bg-[#180E30]/80 border border-white/10 text-center">
+              <div className="text-sm font-black text-rose-300 tabular-nums">
+                {totalCreatorLikes >= 1000
+                  ? `${(totalCreatorLikes / 1000).toFixed(1)}k`
+                  : totalCreatorLikes.toLocaleString()}
+              </div>
+              <div className="text-[10px] text-zinc-400 flex items-center justify-center gap-1 mt-0.5">
+                <Heart className="w-3 h-3 text-rose-400" />
+                <span>Likes</span>
+              </div>
+            </div>
+            <div className="p-2.5 rounded-2xl bg-[#180E30]/80 border border-white/10 text-center">
+              <div className="text-sm font-black text-cyan-200 tabular-nums">
+                {totalCreatorViews >= 1000
+                  ? `${(totalCreatorViews / 1000).toFixed(1)}k`
+                  : totalCreatorViews.toLocaleString()}
+              </div>
+              <div className="text-[10px] text-zinc-400 flex items-center justify-center gap-1 mt-0.5">
+                <Eye className="w-3 h-3 text-cyan-300" />
+                <span>Views</span>
+              </div>
+            </div>
+            <div className="p-2.5 rounded-2xl bg-[#180E30]/80 border border-white/10 text-center">
+              <div className="text-sm font-black text-purple-200 tabular-nums">
+                {totalCreatorComments >= 1000
+                  ? `${(totalCreatorComments / 1000).toFixed(1)}k`
+                  : totalCreatorComments.toLocaleString()}
+              </div>
+              <div className="text-[10px] text-zinc-400 flex items-center justify-center gap-1 mt-0.5">
+                <MessageCircle className="w-3 h-3 text-purple-300" />
+                <span>Comments</span>
               </div>
             </div>
           </div>

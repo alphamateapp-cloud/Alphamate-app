@@ -416,7 +416,9 @@ const AppContent: React.FC = () => {
     <div className="relative w-full h-full bg-[#F5F3FA] dark:bg-[#09070F] flex flex-col overflow-hidden transition-colors duration-200">
       <div
         ref={mainTabScrollRef}
-        className="flex-1 w-full overflow-y-auto overflow-x-hidden min-h-0 overscroll-contain"
+        className={`flex-1 w-full overflow-x-hidden min-h-0 overscroll-contain ${
+          currentScreen === 'moments' ? 'overflow-hidden' : 'overflow-y-auto'
+        }`}
       >
         {!usesDedicatedPullToRefresh && (
           <PullToRefresh
