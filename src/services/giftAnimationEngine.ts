@@ -50,7 +50,7 @@ export const UPLOADED_WEBM_VERIFIED_ANALYSIS: GiftMediaAnalysis = {
 export const DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG: AdvancedGiftConfig = {
   id: ALPHA_MATE_TEST_GIFT_ID,
   name: 'Alpha Mate Test Gift',
-  description: 'TEST GIFT (10,000 Coins) — Real uploaded WebM animation ready to test across Transparent, Semi-Transparent, and Overlay/Background live room modes.',
+  description: 'TEST GIFT (10,000 Coins) — Full-screen edge-feathered WebM animation that merges seamlessly into the live room with zero rectangular borders.',
   category: 'Test & Showcase',
   coins: 10000,
   icon: '🎬',
@@ -62,18 +62,20 @@ export const DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG: AdvancedGiftConfig = {
   format: 'webm',
   displayMode: 'semi_transparent',
   transparencyStatus: 'opaque_no_alpha',
-  opacity: 82,
+  opacity: 90,
   durationMs: 10080,
   loop: false,
   playbackSpeed: 1,
-  position: 'center',
+  position: 'fullscreen',
   scale: 1,
   priority: 95,
   enableParticles: true,
   enableSound: true,
+  edgeFeather: true,
+  blendMode: 'normal',
   status: 'published',
   conversionStatus: 'not_needed',
-  conversionMessage: 'Real uploaded WebM (VP9 + Opus, 478x850, 24fps, 10.08s) verified with ffprobe.',
+  conversionMessage: 'Real uploaded WebM (VP9 + Opus, 478x850, 24fps, 10.08s) verified with ffprobe — Seamless Edge-Merge enabled.',
   analysis: UPLOADED_WEBM_VERIFIED_ANALYSIS,
   isTestGift: true,
   createdAt: '2026-01-01T00:00:00.000Z',
@@ -122,6 +124,7 @@ export function advancedGiftConfigToGift(config: AdvancedGiftConfig): Gift {
 export interface DeviceFormatCapabilities {
   webmVp9: boolean;
   webmVp8: boolean;
+  svgaAnimation: boolean;
   mp4H264: boolean;
   movQuickTime: boolean;
   svgAnimation: boolean;
@@ -134,6 +137,7 @@ export function detectDeviceGiftCapabilities(): DeviceFormatCapabilities {
     return {
       webmVp9: true,
       webmVp8: true,
+      svgaAnimation: true,
       mp4H264: true,
       movQuickTime: false,
       svgAnimation: true,
@@ -147,6 +151,7 @@ export function detectDeviceGiftCapabilities(): DeviceFormatCapabilities {
   return {
     webmVp9: Boolean(video.canPlayType('video/webm; codecs="vp9, opus"') || video.canPlayType('video/webm; codecs="vp9"')),
     webmVp8: Boolean(video.canPlayType('video/webm; codecs="vp8"')),
+    svgaAnimation: typeof HTMLCanvasElement !== 'undefined',
     mp4H264: Boolean(video.canPlayType('video/mp4; codecs="avc1.42E01E"')),
     movQuickTime: Boolean(video.canPlayType('video/quicktime')),
     svgAnimation: true,
@@ -197,6 +202,8 @@ export function resolvePlayableGiftUrl(config: AdvancedGiftConfig): {
     const ext = config.optimizedFileUrl.toLowerCase().split('?')[0];
     const effectiveFormat: AdvancedGiftFormat = ext.endsWith('.webm')
       ? 'webm'
+      : ext.endsWith('.svga')
+      ? 'svga'
       : ext.endsWith('.mp4')
       ? 'mp4'
       : config.format;
@@ -206,9 +213,14 @@ export function resolvePlayableGiftUrl(config: AdvancedGiftConfig): {
       usedOptimized: true,
     };
   }
+  const rawUrl = config.animationUrl || config.originalFileUrl;
+  const rawExt = rawUrl.toLowerCase().split('?')[0];
+  const inferredFormat: AdvancedGiftFormat = rawExt.endsWith('.svga')
+    ? 'svga'
+    : config.format;
   return {
-    url: config.animationUrl || config.originalFileUrl,
-    effectiveFormat: config.format,
+    url: rawUrl,
+    effectiveFormat: inferredFormat,
     usedOptimized: false,
   };
 }
@@ -237,18 +249,31 @@ export function enqueueByPriority<T extends { id: string; gift: Gift; timestamp:
  */
 function normalizeAdvancedGiftDoc(id: string, raw: Record<string, any>): AdvancedGiftConfig {
   const format: AdvancedGiftFormat =
-    raw.format === 'mov' || raw.format === 'mp4' || raw.format === 'svg' || raw.format === 'gif'
+    raw.format === 'svga' || raw.format === 'mov' || raw.format === 'mp4' || raw.format === 'svg' || raw.format === 'gif'
       ? raw.format
       : 'webm';
   const displayMode: GiftDisplayMode =
     raw.displayMode === 'transparent' || raw.displayMode === 'overlay_background'
       ? raw.displayMode
       : 'semi_transparent';
-  const opacity = Math.min(100, Math.max(10, Number(raw.opacity ?? 85) || 85));
+  const opacity = Math.min(100, Math.max(10, Number(raw.opacity ?? 88) || 88));
   const durationMs = Math.min(60_000, Math.max(1500, Number(raw.durationMs ?? 6000) || 6000));
   const playbackSpeed = Math.min(2, Math.max(0.5, Number(raw.playbackSpeed ?? 1) || 1));
   const scale = Math.min(1.5, Math.max(0.4, Number(raw.scale ?? 1) || 1));
   const priority = Math.min(100, Math.max(1, Number(raw.priority ?? 50) || 50));
+  const transparencyStatus =
+    raw.transparencyStatus === 'alpha_verified' ||
+    raw.transparencyStatus === 'alpha_limited_gif' ||
+    raw.transparencyStatus === 'opaque_no_alpha'
+      ? raw.transparencyStatus
+      : format === 'svga' || format === 'svg'
+      ? 'alpha_verified'
+      : 'unknown';
+  const isVideo = format === 'webm' || format === 'mp4' || format === 'mov';
+  const defaultEdgeFeather = isVideo && transparencyStatus !== 'alpha_verified';
+  const edgeFeather = typeof raw.edgeFeather === 'boolean' ? raw.edgeFeather : defaultEdgeFeather;
+  const blendMode =
+    raw.blendMode === 'screen' || raw.blendMode === 'lighten' ? raw.blendMode : 'normal';
 
   return {
     id,
@@ -264,24 +289,21 @@ function normalizeAdvancedGiftDoc(id: string, raw: Record<string, any>): Advance
     animationUrl: String(raw.optimizedFileUrl || raw.animationUrl || raw.originalFileUrl || ''),
     format,
     displayMode,
-    transparencyStatus:
-      raw.transparencyStatus === 'alpha_verified' ||
-      raw.transparencyStatus === 'alpha_limited_gif' ||
-      raw.transparencyStatus === 'opaque_no_alpha'
-        ? raw.transparencyStatus
-        : 'unknown',
+    transparencyStatus,
     opacity,
     durationMs,
     loop: Boolean(raw.loop),
     playbackSpeed,
     position:
-      raw.position === 'top' || raw.position === 'bottom' || raw.position === 'fullscreen'
+      raw.position === 'top' || raw.position === 'bottom' || raw.position === 'center'
         ? raw.position
-        : 'center',
+        : 'fullscreen',
     scale,
     priority,
     enableParticles: raw.enableParticles !== false,
     enableSound: raw.enableSound !== false,
+    edgeFeather,
+    blendMode,
     status:
       raw.status === 'draft' || raw.status === 'processing' || raw.status === 'disabled'
         ? raw.status

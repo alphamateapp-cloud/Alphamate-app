@@ -1259,9 +1259,9 @@ service cloud.firestore {
           'thumbnailUrl', 'previewImageUrl', 'originalFileUrl', 'optimizedFileUrl',
           'animationUrl', 'format', 'displayMode', 'transparencyStatus', 'opacity',
           'durationMs', 'loop', 'playbackSpeed', 'position', 'scale', 'priority',
-          'enableParticles', 'enableSound', 'status', 'conversionStatus',
-          'conversionMessage', 'analysis', 'isTestGift', 'createdAt', 'createdAtMs',
-          'updatedAt', 'createdBy'
+          'enableParticles', 'enableSound', 'edgeFeather', 'blendMode', 'status',
+          'conversionStatus', 'conversionMessage', 'analysis', 'isTestGift',
+          'createdAt', 'createdAtMs', 'updatedAt', 'createdBy'
         ])
         && data.id == giftId
         && isNonEmptyString(data.name, 1, 100)
@@ -1274,7 +1274,7 @@ service cloud.firestore {
         && isNonEmptyString(data.originalFileUrl, 1, 2048)
         && (!('optimizedFileUrl' in data) || (data.optimizedFileUrl is string && data.optimizedFileUrl.size() <= 2048))
         && isNonEmptyString(data.animationUrl, 1, 2048)
-        && data.format in ['webm', 'mov', 'mp4', 'svg', 'gif']
+        && data.format in ['webm', 'svga', 'mov', 'mp4', 'svg', 'gif']
         && data.displayMode in ['transparent', 'semi_transparent', 'overlay_background']
         && data.transparencyStatus in ['alpha_verified', 'alpha_limited_gif', 'opaque_no_alpha', 'unknown']
         && data.opacity is number && data.opacity >= 10 && data.opacity <= 100
@@ -1286,6 +1286,8 @@ service cloud.firestore {
         && data.priority is number && data.priority >= 1 && data.priority <= 100
         && (!('enableParticles' in data) || data.enableParticles is bool)
         && (!('enableSound' in data) || data.enableSound is bool)
+        && (!('edgeFeather' in data) || data.edgeFeather is bool)
+        && (!('blendMode' in data) || data.blendMode in ['normal', 'screen', 'lighten'])
         && data.status in ['draft', 'processing', 'published', 'disabled']
         && data.conversionStatus in ['not_needed', 'pending', 'converting', 'completed', 'failed', 'unsupported']
         && (!('conversionMessage' in data) || (data.conversionMessage is string && data.conversionMessage.size() <= 500))

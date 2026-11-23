@@ -877,6 +877,111 @@ html.light :where(
   will-change: transform, opacity;
 }
 
+/* =========================================================================
+   PARTY ROOM CORNER VINYL TURNTABLE + WOOFER + RISING MUSIC NOTES
+   Compositor-only (transform + opacity) GPU animations
+   ========================================================================= */
+
+@keyframes vinylRecordSpin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes vinylWooferRing {
+  0% {
+    transform: scale(0.86);
+    opacity: 0.72;
+  }
+  65% {
+    transform: scale(1.24);
+    opacity: 0.18;
+  }
+  100% {
+    transform: scale(1.38);
+    opacity: 0;
+  }
+}
+
+@keyframes vinylWooferCone {
+  0%, 100% {
+    transform: scale(1);
+  }
+  25% {
+    transform: scale(1.045);
+  }
+  50% {
+    transform: scale(0.985);
+  }
+  75% {
+    transform: scale(1.03);
+  }
+}
+
+@keyframes musicNoteFloatA {
+  0% {
+    transform: translate3d(0px, 0px, 0) scale(0.55) rotate(-14deg);
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  65% {
+    transform: translate3d(-12px, -42px, 0) scale(1.05) rotate(12deg);
+    opacity: 0.85;
+  }
+  100% {
+    transform: translate3d(-4px, -74px, 0) scale(0.85) rotate(-8deg);
+    opacity: 0;
+  }
+}
+
+@keyframes musicNoteFloatB {
+  0% {
+    transform: translate3d(0px, 0px, 0) scale(0.5) rotate(12deg);
+    opacity: 0;
+  }
+  20% {
+    opacity: 0.95;
+  }
+  60% {
+    transform: translate3d(11px, -38px, 0) scale(1.08) rotate(-10deg);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate3d(4px, -70px, 0) scale(0.8) rotate(14deg);
+    opacity: 0;
+  }
+}
+
+.animate-vinyl-spin {
+  animation: vinylRecordSpin 3.6s linear infinite;
+  will-change: transform;
+}
+
+.animate-vinyl-woofer-ring {
+  animation: vinylWooferRing 1.75s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  will-change: transform, opacity;
+}
+
+.animate-vinyl-woofer-cone {
+  animation: vinylWooferCone 1.1s ease-in-out infinite;
+  will-change: transform;
+}
+
+.animate-music-note-a {
+  animation: musicNoteFloatA 2.5s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  will-change: transform, opacity;
+}
+
+.animate-music-note-b {
+  animation: musicNoteFloatB 2.8s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+  will-change: transform, opacity;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-vip-entry-in,
   .animate-vip-entry-out,
@@ -892,7 +997,12 @@ html.light :where(
   .animate-diamond-glint,
   .animate-seat-sparkle,
   .animate-sofa-breathe,
-  .animate-sofa-shimmer {
+  .animate-sofa-shimmer,
+  .animate-vinyl-spin,
+  .animate-vinyl-woofer-ring,
+  .animate-vinyl-woofer-cone,
+  .animate-music-note-a,
+  .animate-music-note-b {
     animation: none !important;
   }
 }

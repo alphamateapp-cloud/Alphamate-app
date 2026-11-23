@@ -741,7 +741,7 @@
     },
     "AdvancedGift": {
       "title": "AdvancedGift",
-      "description": "Admin-managed multi-format live gift animation configuration (WebM, MOV, MP4, SVG, GIF) with display mode and transparency metadata",
+      "description": "Admin-managed multi-format live gift animation configuration (WebM, SVGA, MOV, MP4, SVG, GIF) with display mode, edge blending, and transparency metadata",
       "type": "object",
       "properties": {
         "id": { "type": "string", "maxLength": 128 },
@@ -755,7 +755,7 @@
         "originalFileUrl": { "type": "string", "maxLength": 2048 },
         "optimizedFileUrl": { "type": "string", "maxLength": 2048 },
         "animationUrl": { "type": "string", "maxLength": 2048 },
-        "format": { "type": "string", "enum": ["webm", "mov", "mp4", "svg", "gif"] },
+        "format": { "type": "string", "enum": ["webm", "svga", "mov", "mp4", "svg", "gif"] },
         "displayMode": { "type": "string", "enum": ["transparent", "semi_transparent", "overlay_background"] },
         "transparencyStatus": { "type": "string", "enum": ["alpha_verified", "alpha_limited_gif", "opaque_no_alpha", "unknown"] },
         "opacity": { "type": "number" },
@@ -767,6 +767,8 @@
         "priority": { "type": "number" },
         "enableParticles": { "type": "boolean" },
         "enableSound": { "type": "boolean" },
+        "edgeFeather": { "type": "boolean" },
+        "blendMode": { "type": "string", "enum": ["normal", "screen", "lighten"] },
         "status": { "type": "string", "enum": ["draft", "processing", "published", "disabled"] },
         "conversionStatus": { "type": "string", "enum": ["not_needed", "pending", "converting", "completed", "failed", "unsupported"] },
         "conversionMessage": { "type": "string", "maxLength": 500 },

@@ -30,9 +30,9 @@ import { getFunctions } from 'firebase/functions';
 import {
   getFirestore,
   initializeFirestore,
+  memoryLocalCache,
   persistentLocalCache,
   persistentMultipleTabManager,
-  enableNetwork,
   doc,
   getDoc,
   getDocFromCache,
@@ -83,25 +83,40 @@ export const FIRESTORE_PROJECT_ID = firebaseConfig.projectId;
 export const FIRESTORE_DATABASE_ID = firebaseConfig.firestoreDatabaseId;
 
 // CRITICAL: The app will break without passing firestoreDatabaseId
-function createFirestoreInstance() {
-  // Use auto-detect long-polling on web/iframe so HTTP/2 streaming is preferred and
-  // long-polling is used automatically only when a proxy blocks streaming.
-  // Reserve forced long-polling strictly for Capacitor native WebViews.
-  const transportSettings = Capacitor.isNativePlatform()
-    ? { experimentalForceLongPolling: true }
-    : { experimentalAutoDetectLongPolling: true };
+function isEmbeddedIframeContext(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
 
-  // Enable IndexedDB persistent local cache when available so profiles & feeds load
-  // instantaneously on cold boots or slow networks without failing on transient offline windows.
+function createFirestoreInstance() {
+  // Force long-polling across web, embedded preview iframes, and Capacitor WebViews so
+  // HTTP/2 streaming proxies, VPNs, or restricted ISP firewalls never stall WebChannel
+  // for 10 seconds and trigger "Could not reach Cloud Firestore backend / client is offline".
+  const baseSettings = {
+    experimentalForceLongPolling: true,
+    ignoreUndefinedProperties: true,
+  };
+
+  // Inside embedded/sandboxed iframes (such as preview windows), storage partitioning and
+  // rapid reloads can stall persistentMultipleTabManager() IndexedDB leases for 10+ seconds.
+  // Use memoryLocalCache() in iframes so each session opens its own primary connection immediately,
+  // while keeping persistentLocalCache() for standalone web/PWA and native Capacitor apps.
+  const isIframe = isEmbeddedIframeContext();
   const canUseIndexedDb =
-    typeof window !== 'undefined' && typeof window.indexedDB !== 'undefined';
+    !isIframe &&
+    typeof window !== 'undefined' &&
+    typeof window.indexedDB !== 'undefined';
 
   if (canUseIndexedDb) {
     try {
       return initializeFirestore(
         app,
         {
-          ...transportSettings,
+          ...baseSettings,
           localCache: persistentLocalCache({
             tabManager: persistentMultipleTabManager(),
           }),
@@ -109,24 +124,25 @@ function createFirestoreInstance() {
         firebaseConfig.firestoreDatabaseId
       );
     } catch {
-      // Fall through to memory cache if IndexedDB is restricted in a sandboxed iframe
+      // Fall through to memory cache if IndexedDB is restricted
     }
   }
 
   try {
-    return initializeFirestore(app, transportSettings, firebaseConfig.firestoreDatabaseId);
+    return initializeFirestore(
+      app,
+      {
+        ...baseSettings,
+        localCache: memoryLocalCache(),
+      },
+      firebaseConfig.firestoreDatabaseId
+    );
   } catch {
     return getFirestore(app, firebaseConfig.firestoreDatabaseId);
   }
 }
 
 export const db = createFirestoreInstance();
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('online', () => {
-    enableNetwork(db).catch(() => {});
-  });
-}
 // Use durable IndexedDB persistence in Capacitor Android so the Firebase JS SDK
 // keeps the same session after native Google Sign-In returns an ID token.
 function createFirebaseAuth() {
@@ -345,7 +361,7 @@ export async function testConnection(): Promise<boolean> {
     try {
       await withFirestoreTimeout(
         getDocFromServer(doc(db, 'test', 'connection')),
-        12000,
+        15000,
         'Firestore connection check'
       );
       clearFirestoreQuotaExceeded();
@@ -379,8 +395,14 @@ export async function testConnection(): Promise<boolean> {
   return false;
 }
 
-// Trigger initial verification
-testConnection().catch(() => {});
+// Trigger initial verification after first microtask so app boot completes cleanly
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    testConnection().catch(() => {});
+  }, 250);
+} else {
+  testConnection().catch(() => {});
+}
 
 // =========================================================================
 // AUTHENTICATION HELPER METHODS

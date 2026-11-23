@@ -1,5 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AdvancedGiftConfig, Gift, GiftDisplayMode, GiftPlaybackPosition } from '../../types';
+import * as SVGAModule from 'svgaplayerweb';
+import {
+  AdvancedGiftConfig,
+  Gift,
+  GiftDisplayMode,
+  GiftEdgeBlendMode,
+  GiftPlaybackPosition,
+} from '../../types';
 import { resolvePlayableGiftUrl } from '../../services/giftAnimationEngine';
 import { audioManager } from '../../services/audioManager';
 import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
@@ -36,9 +43,35 @@ interface UniversalGiftPlayerProps {
 
 const POSITION_CLASSES: Record<GiftPlaybackPosition, string> = {
   center: 'items-center justify-center',
-  top: 'items-start justify-center pt-16',
-  bottom: 'items-end justify-center pb-28',
+  top: 'items-start justify-center',
+  bottom: 'items-end justify-center',
   fullscreen: 'items-center justify-center',
+};
+
+/**
+ * Multi-axis nested CSS alpha feathering masks.
+ * Eliminates all 4 rectangular corners and hard top/bottom/side clip borders so uploaded
+ * WebM/MP4/MOV videos melt organically into the live screen on every WebView & browser.
+ */
+const VERTICAL_FEATHER_MASK: React.CSSProperties = {
+  WebkitMaskImage:
+    'linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.42) 6%, #000 18%, #000 82%, rgba(0,0,0,0.42) 94%, transparent 100%)',
+  maskImage:
+    'linear-gradient(to bottom, transparent 0%, rgba(0,0,0,0.42) 6%, #000 18%, #000 82%, rgba(0,0,0,0.42) 94%, transparent 100%)',
+};
+
+const HORIZONTAL_FEATHER_MASK: React.CSSProperties = {
+  WebkitMaskImage:
+    'linear-gradient(to right, transparent 0%, rgba(0,0,0,0.52) 4%, #000 11%, #000 89%, rgba(0,0,0,0.52) 96%, transparent 100%)',
+  maskImage:
+    'linear-gradient(to right, transparent 0%, rgba(0,0,0,0.52) 4%, #000 11%, #000 89%, rgba(0,0,0,0.52) 96%, transparent 100%)',
+};
+
+const RADIAL_CORNER_FEATHER_MASK: React.CSSProperties = {
+  WebkitMaskImage:
+    'radial-gradient(ellipse 88% 84% at 50% 50%, #000 56%, rgba(0,0,0,0.84) 74%, rgba(0,0,0,0.34) 89%, transparent 100%)',
+  maskImage:
+    'radial-gradient(ellipse 88% 84% at 50% 50%, #000 56%, rgba(0,0,0,0.84) 74%, rgba(0,0,0,0.34) 89%, transparent 100%)',
 };
 
 /**
@@ -91,6 +124,99 @@ export const GiftParticlesLayer: React.FC<{ active: boolean; accentColor?: strin
   );
 };
 
+/**
+ * Native Transparent SVGA Canvas Renderer (100% transparent background, zero box).
+ */
+const SvgaGiftCanvas: React.FC<{
+  url: string;
+  shouldLoop: boolean;
+  contentMode: 'AspectFill' | 'AspectFit';
+  onReady: (durationMs?: number) => void;
+  onFinished: () => void;
+  onError: () => void;
+}> = ({ url, shouldLoop, contentMode, onReady, onFinished, onError }) => {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const onReadyRef = useRef(onReady);
+  const onFinishedRef = useRef(onFinished);
+  const onErrorRef = useRef(onError);
+  onReadyRef.current = onReady;
+  onFinishedRef.current = onFinished;
+  onErrorRef.current = onError;
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !url) return;
+
+    let cancelled = false;
+    let player: SVGAModule.Player | null = null;
+
+    try {
+      const svgaRuntime =
+        ((SVGAModule as unknown as { default?: typeof SVGAModule }).default ||
+          SVGAModule) as typeof SVGAModule;
+
+      player = new svgaRuntime.Player(container);
+      player.loops = shouldLoop ? 0 : 1;
+      player.clearsAfterStop = true;
+      player.setContentMode(contentMode);
+      player.onFinished(() => {
+        if (!cancelled && !shouldLoop) {
+          onFinishedRef.current();
+        }
+      });
+
+      const parser = new svgaRuntime.Parser();
+      parser.load(
+        url,
+        (videoItem) => {
+          if (cancelled || !player) return;
+          try {
+            player.setVideoItem(videoItem);
+            player.startAnimation();
+            const fps = Number(videoItem?.FPS || 30);
+            const frames = Number(videoItem?.frames || 0);
+            const durationMs =
+              fps > 0 && frames > 0 ? Math.round((frames / fps) * 1000) : undefined;
+            onReadyRef.current(durationMs);
+          } catch {
+            onErrorRef.current();
+          }
+        },
+        () => {
+          if (!cancelled) {
+            onErrorRef.current();
+          }
+        }
+      );
+    } catch {
+      onErrorRef.current();
+    }
+
+    return () => {
+      cancelled = true;
+      if (player) {
+        try {
+          player.stopAnimation(true);
+          player.clear();
+        } catch {
+          // ignore cleanup error
+        }
+      }
+      if (container) {
+        container.innerHTML = '';
+      }
+    };
+  }, [url, shouldLoop, contentMode]);
+
+  return (
+    <div
+      ref={containerRef}
+      className="w-full h-full select-none pointer-events-none"
+      style={{ backgroundColor: 'transparent', transform: 'translateZ(0)' }}
+    />
+  );
+};
+
 export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   event,
   layer,
@@ -105,12 +231,13 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   const exitTimerRef = useRef<number | undefined>(undefined);
 
   // Store latest onComplete in a ref so parent re-renders (e.g. 1s live timer or 80ms combo ticks)
-  // NEVER trigger cleanup or interrupt the running video animation.
+  // NEVER trigger cleanup or interrupt the running animation.
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
 
   const [phase, setPhase] = useState<'enter' | 'visible' | 'exit'>('enter');
-  const [isVideoReady, setIsVideoReady] = useState(false);
+  const [isMediaReady, setIsMediaReady] = useState(false);
+  const [videoAspect, setVideoAspect] = useState<'portrait' | 'landscape' | null>(null);
 
   const baseConfig = event?.gift.advancedConfig;
   const config: AdvancedGiftConfig | null = useMemo(() => {
@@ -140,11 +267,23 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   const resolvedMedia = useMemo(() => {
     if (!config) return null;
     return resolvePlayableGiftUrl(config);
-  }, [config?.optimizedFileUrl, config?.conversionStatus, config?.animationUrl, config?.originalFileUrl, config?.format]);
+  }, [
+    config?.optimizedFileUrl,
+    config?.conversionStatus,
+    config?.animationUrl,
+    config?.originalFileUrl,
+    config?.format,
+  ]);
 
   const effectiveFormat = resolvedMedia?.effectiveFormat || config?.format || 'webm';
   const mediaUrl = resolvedMedia?.url || '';
-  const isVideoFormat = effectiveFormat === 'webm' || effectiveFormat === 'mov' || effectiveFormat === 'mp4';
+  const isVideoFormat =
+    effectiveFormat === 'webm' || effectiveFormat === 'mov' || effectiveFormat === 'mp4';
+  const isSvgaFormat = effectiveFormat === 'svga';
+  const isNativeTransparentAsset =
+    isSvgaFormat ||
+    effectiveFormat === 'svg' ||
+    config?.transparencyStatus === 'alpha_verified';
 
   const analysisDurationMs =
     config?.analysis?.durationSec && Number.isFinite(config.analysis.durationSec)
@@ -155,13 +294,25 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     Math.min(60_000, Math.max(config?.durationMs || 6000, analysisDurationMs))
   );
   const opacityFraction =
-    displayMode === 'transparent'
-      ? 1
-      : Math.min(1, Math.max(0.1, (config?.opacity ?? 82) / 100));
+    displayMode === 'transparent' || isNativeTransparentAsset
+      ? Math.min(1, Math.max(0.25, (config?.opacity ?? 100) / 100))
+      : Math.min(1, Math.max(0.1, (config?.opacity ?? 90) / 100));
   const scale = Math.min(1.5, Math.max(0.4, config?.scale ?? 1));
-  const position: GiftPlaybackPosition = config?.position || 'center';
+  const position: GiftPlaybackPosition = config?.position || 'fullscreen';
   const playbackSpeed = Math.min(2, Math.max(0.5, config?.playbackSpeed ?? 1));
   const shouldLoop = previewLoopOverride || Boolean(config?.loop);
+
+  // Seamless Edge Feathering: auto-ON for opaque videos (removes 4 sharp corners & top/bottom/side edges),
+  // auto-OFF for natively transparent SVGA/SVG/VP9-Alpha unless Admin explicitly toggles it.
+  const shouldFeatherEdges =
+    config?.edgeFeather !== undefined
+      ? config.edgeFeather
+      : isVideoFormat && !isNativeTransparentAsset;
+
+  const blendMode: GiftEdgeBlendMode =
+    config?.blendMode === 'screen' || config?.blendMode === 'lighten'
+      ? config.blendMode
+      : 'normal';
 
   const finishPlayback = (eventId: string, withFade = true) => {
     if (completedIdRef.current === eventId) return;
@@ -180,7 +331,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
       setPhase('exit');
       endTimerRef.current = window.setTimeout(() => {
         onCompleteRef.current?.(eventId);
-      }, 240);
+      }, 340);
     } else {
       onCompleteRef.current?.(eventId);
     }
@@ -192,16 +343,22 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
 
     const currentEventId = event.id;
     completedIdRef.current = null;
-    setIsVideoReady(false);
+    setIsMediaReady(!isVideoFormat && !isSvgaFormat);
+    setVideoAspect(
+      config.analysis?.width && config.analysis?.height
+        ? config.analysis.width > config.analysis.height
+          ? 'landscape'
+          : 'portrait'
+        : null
+    );
     setPhase('enter');
 
     const enterTimer = window.setTimeout(() => setPhase('visible'), 30);
 
     if (!previewLoopOverride && ownsCompletionLifecycle) {
-      if (isVideoFormat && !shouldLoop) {
-        // Non-looping videos play to their EXACT natural end via `onEnded`.
-        // Set only a generous stall safety deadline (adjusted further in onLoadedMetadata)
-        // so slow buffering NEVER cuts off a 10-second video prematurely.
+      if ((isVideoFormat || isSvgaFormat) && !shouldLoop) {
+        // Non-looping videos & SVGA animations play to their natural end via onEnded / onFinished.
+        // Set only a generous stall safety deadline (adjusted further once metadata loads).
         const stallSafetyMs = Math.min(
           65_000,
           Math.round(configuredDurationMs / playbackSpeed) + 6000
@@ -210,7 +367,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
           finishPlayback(currentEventId, true);
         }, stallSafetyMs);
       } else {
-        // Non-video (SVG/GIF) or explicitly looping videos run for their full configured duration
+        // Non-video (SVG/GIF) or explicitly looping animations run for their full configured duration
         const effectiveMs = Math.round(configuredDurationMs / playbackSpeed);
         const fadeOutLeadMs = Math.min(420, Math.round(effectiveMs * 0.12));
         exitTimerRef.current = window.setTimeout(() => {
@@ -253,6 +410,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     configuredDurationMs,
     playbackSpeed,
     isVideoFormat,
+    isSvgaFormat,
     shouldLoop,
     previewLoopOverride,
     ownsCompletionLifecycle,
@@ -282,7 +440,6 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
           v.muted = true;
           await v.play();
         } catch {
-          // If playback genuinely cannot start on this device, close cleanly instead of showing a static card image
           if (event?.id && !previewLoopOverride && ownsCompletionLifecycle) {
             finishPlayback(event.id, false);
           }
@@ -306,9 +463,19 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   if (!event || !config) return null;
   if (!shouldRenderAnimationOnThisLayer && !shouldRenderSenderCapsule) return null;
 
-  // Dynamic opacity for enter/visible/exit fade transitions (strictly scoped to animation element ONLY)
-  const animatedOpacity =
-    phase === 'enter' ? 0 : phase === 'exit' ? 0 : opacityFraction;
+  // Dynamic opacity & subtle emergence bloom so the animation feels born from inside the screen
+  const isWaitingMedia = (isVideoFormat || isSvgaFormat) && !isMediaReady;
+  const animatedOpacity = isWaitingMedia
+    ? 0
+    : phase === 'enter'
+    ? 0
+    : phase === 'exit'
+    ? 0
+    : opacityFraction;
+  const animatedScale =
+    phase === 'enter' ? scale * 1.05 : phase === 'exit' ? scale * 1.03 : scale;
+  const animatedBlurPx =
+    shouldFeatherEdges && (phase === 'enter' || phase === 'exit') ? 6 : 0;
 
   // Layer z-index strictly obeys the 7-Layer Live Room Rendering Architecture
   const layerZIndexClass =
@@ -320,14 +487,143 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
       ? 'z-[5]'
       : 'z-[35]';
 
-  const mediaSizingClass =
+  // Full-width edge-to-edge sizing: NEVER leave left/right gaps or boxed margins!
+  const isFullViewportCover =
+    position === 'fullscreen' ||
+    isOverlayBackgroundMode ||
+    (isVideoFormat && videoAspect !== 'landscape');
+
+  const videoSizingClass = isFullViewportCover
+    ? 'w-full h-full object-cover'
+    : 'w-full h-auto max-h-full object-cover';
+
+  const rasterSizingClass =
     position === 'fullscreen' || isOverlayBackgroundMode
-      ? 'w-full h-full object-cover'
-      : 'max-w-[92%] max-h-[76%] object-contain';
+      ? 'w-full h-full object-contain'
+      : 'w-full h-full object-contain';
 
   // Card thumbnail/photo is used ONLY inside the compact gift notification capsule — NEVER on the animation canvas
   const notificationGiftThumb =
     config.thumbnailUrl || config.previewImageUrl || event.gift.thumbnailUrl;
+
+  const renderCoreMedia = () => {
+    if (isSvgaFormat) {
+      return (
+        <SvgaGiftCanvas
+          key={`${event.id}_${mediaUrl}`}
+          url={mediaUrl}
+          shouldLoop={shouldLoop}
+          contentMode={position === 'fullscreen' || isOverlayBackgroundMode ? 'AspectFill' : 'AspectFit'}
+          onReady={(svgaDurationMs) => {
+            setIsMediaReady(true);
+            if (
+              !shouldLoop &&
+              !previewLoopOverride &&
+              ownsCompletionLifecycle &&
+              svgaDurationMs &&
+              svgaDurationMs > 0
+            ) {
+              if (endTimerRef.current !== undefined) {
+                window.clearTimeout(endTimerRef.current);
+              }
+              endTimerRef.current = window.setTimeout(() => {
+                finishPlayback(event.id, true);
+              }, Math.min(68_000, svgaDurationMs + 4000));
+            }
+          }}
+          onFinished={() => {
+            if (!shouldLoop && !previewLoopOverride && ownsCompletionLifecycle) {
+              finishPlayback(event.id, true);
+            }
+          }}
+          onError={() => {
+            if (!previewLoopOverride && ownsCompletionLifecycle) {
+              finishPlayback(event.id, false);
+            }
+          }}
+        />
+      );
+    }
+
+    if (isVideoFormat) {
+      return (
+        <video
+          key={`${event.id}_${mediaUrl}`}
+          ref={videoRef}
+          src={mediaUrl}
+          playsInline
+          autoPlay
+          loop={shouldLoop}
+          preload="auto"
+          muted={forceMuted || audioManager.getIsMuted() || config.enableSound === false}
+          onLoadedMetadata={(e) => {
+            const vid = e.currentTarget;
+            if (vid.videoWidth > 0 && vid.videoHeight > 0) {
+              setVideoAspect(vid.videoWidth > vid.videoHeight ? 'landscape' : 'portrait');
+            }
+            if (
+              !shouldLoop &&
+              !previewLoopOverride &&
+              ownsCompletionLifecycle &&
+              Number.isFinite(vid.duration) &&
+              vid.duration > 0
+            ) {
+              const realDurationMs = Math.ceil((vid.duration * 1000) / playbackSpeed);
+              if (endTimerRef.current !== undefined) {
+                window.clearTimeout(endTimerRef.current);
+              }
+              endTimerRef.current = window.setTimeout(() => {
+                finishPlayback(event.id, true);
+              }, Math.min(68_000, realDurationMs + 5000));
+            }
+          }}
+          onLoadedData={() => setIsMediaReady(true)}
+          onPlaying={() => setIsMediaReady(true)}
+          onEnded={() => {
+            if (!shouldLoop && !previewLoopOverride && ownsCompletionLifecycle) {
+              finishPlayback(event.id, true);
+            }
+          }}
+          onError={() => {
+            if (!previewLoopOverride && ownsCompletionLifecycle) {
+              finishPlayback(event.id, false);
+            }
+          }}
+          className={`${videoSizingClass} block select-none`}
+          style={{
+            backgroundColor: 'transparent',
+            transform: 'translateZ(0)',
+            ...(shouldFeatherEdges ? RADIAL_CORNER_FEATHER_MASK : undefined),
+          }}
+        />
+      );
+    }
+
+    // Sanitized SVG Animation & Animated GIF Renderer (native transparent background, zero box)
+    return (
+      <img
+        key={`${event.id}_${mediaUrl}`}
+        src={
+          effectiveFormat === 'gif' && !shouldLoop
+            ? `${mediaUrl}${mediaUrl.includes('?') ? '&' : '?'}play=${event.timestamp}`
+            : mediaUrl
+        }
+        alt={event.gift.name}
+        decoding="async"
+        onError={() => {
+          if (!previewLoopOverride && ownsCompletionLifecycle) {
+            finishPlayback(event.id, false);
+          }
+        }}
+        className={`${rasterSizingClass} block select-none`}
+        style={{
+          backgroundColor: 'transparent',
+          transform: 'translateZ(0)',
+          ...(shouldFeatherEdges ? RADIAL_CORNER_FEATHER_MASK : undefined),
+        }}
+      />
+    );
+  };
 
   return (
     <>
@@ -335,107 +631,66 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
       {shouldRenderAnimationOnThisLayer &&
         (displayMode === 'semi_transparent' || displayMode === 'overlay_background') &&
         config.enableParticles !== false && (
-          <GiftParticlesLayer active={phase === 'visible' && (!isVideoFormat || isVideoReady)} />
+          <GiftParticlesLayer active={phase === 'visible' && !isWaitingMedia} />
         )}
 
-      {/* Main Animation Layer: plays ONLY the direct animation media (NO card sticker/crown/poster overlay) */}
+      {/* Main Animation Layer: 100% transparent backdrop, edge-to-edge width, zero boxy frame */}
       {shouldRenderAnimationOnThisLayer && (
         <div
           className={`absolute inset-0 ${layerZIndexClass} pointer-events-none overflow-hidden flex ${POSITION_CLASSES[position]}`}
           style={{
             backgroundColor: 'transparent',
+            mixBlendMode: blendMode !== 'normal' ? blendMode : undefined,
             willChange: 'opacity, transform',
           }}
           data-gift-layer={layer}
           data-gift-mode={displayMode}
           data-gift-format={effectiveFormat}
+          data-gift-feather={shouldFeatherEdges ? 'true' : 'false'}
         >
           <div
-            className={`relative flex items-center justify-center transition-opacity duration-300 ease-out ${
-              position === 'fullscreen' || isOverlayBackgroundMode ? 'w-full h-full' : 'w-full h-full p-2'
-            }`}
+            className="relative w-full h-full flex items-center justify-center transition-[opacity,transform,filter] duration-300 ease-out"
             style={{
-              opacity: isVideoFormat && !isVideoReady ? 0 : animatedOpacity,
-              transform: `scale(${scale}) translateZ(0)`,
+              opacity: animatedOpacity,
+              transform: `scale(${animatedScale}) translateZ(0)`,
+              filter: animatedBlurPx > 0 ? `blur(${animatedBlurPx}px)` : undefined,
               transformOrigin: 'center center',
               backgroundColor: 'transparent',
             }}
           >
-            {isVideoFormat ? (
-              <video
-                key={`${event.id}_${mediaUrl}`}
-                ref={videoRef}
-                src={mediaUrl}
-                playsInline
-                autoPlay
-                loop={shouldLoop}
-                preload="auto"
-                muted={forceMuted || audioManager.getIsMuted() || config.enableSound === false}
-                onLoadedMetadata={(e) => {
-                  const vid = e.currentTarget;
-                  if (
-                    !shouldLoop &&
-                    !previewLoopOverride &&
-                    ownsCompletionLifecycle &&
-                    Number.isFinite(vid.duration) &&
-                    vid.duration > 0
-                  ) {
-                    // Reschedule stall safety deadline to match the video's true full duration + generous buffer
-                    const realDurationMs = Math.ceil((vid.duration * 1000) / playbackSpeed);
-                    if (endTimerRef.current !== undefined) {
-                      window.clearTimeout(endTimerRef.current);
-                    }
-                    endTimerRef.current = window.setTimeout(() => {
-                      finishPlayback(event.id, true);
-                    }, Math.min(68_000, realDurationMs + 5000));
-                  }
-                }}
-                onLoadedData={() => setIsVideoReady(true)}
-                onPlaying={() => setIsVideoReady(true)}
-                onEnded={() => {
-                  if (!shouldLoop && !previewLoopOverride && ownsCompletionLifecycle) {
-                    finishPlayback(event.id, true);
-                  }
-                }}
-                onError={() => {
-                  if (!previewLoopOverride && ownsCompletionLifecycle) {
-                    finishPlayback(event.id, false);
-                  }
-                }}
-                className={`${mediaSizingClass} select-none`}
+            {shouldFeatherEdges ? (
+              /* Dual-axis soft edge blur-dissolve wrappers + elliptical corner dissolve on media */
+              <div
+                className="w-full h-full flex items-center justify-center"
                 style={{
+                  ...VERTICAL_FEATHER_MASK,
                   backgroundColor: 'transparent',
-                  transform: 'translateZ(0)',
                 }}
-              />
+              >
+                <div
+                  className={`w-full ${isFullViewportCover ? 'h-full' : 'max-h-full'} flex items-center justify-center`}
+                  style={{
+                    ...HORIZONTAL_FEATHER_MASK,
+                    backgroundColor: 'transparent',
+                  }}
+                >
+                  {renderCoreMedia()}
+                </div>
+              </div>
             ) : (
-              /* Sanitized SVG Animation & Animated GIF Renderer (native transparent background, zero JS execution) */
-              <img
-                key={`${event.id}_${mediaUrl}`}
-                src={
-                  effectiveFormat === 'gif' && !shouldLoop
-                    ? `${mediaUrl}${mediaUrl.includes('?') ? '&' : '?'}play=${event.timestamp}`
-                    : mediaUrl
-                }
-                alt={event.gift.name}
-                decoding="async"
-                onError={() => {
-                  if (!previewLoopOverride && ownsCompletionLifecycle) {
-                    finishPlayback(event.id, false);
-                  }
-                }}
-                className={`${mediaSizingClass} select-none`}
-                style={{
-                  backgroundColor: 'transparent',
-                  transform: 'translateZ(0)',
-                }}
-              />
+              /* Pure transparent SVGA / SVG / VP9-Alpha WebM: crystal-clear, zero backdrop */
+              <div
+                className="w-full h-full flex items-center justify-center"
+                style={{ backgroundColor: 'transparent' }}
+              >
+                {renderCoreMedia()}
+              </div>
             )}
           </div>
         </div>
       )}
 
-      {/* Non-Blocking Gift Notification Capsule (shows sender + gift photo/thumbnail + coins inside the notification only) */}
+      {/* Non-Blocking Gift Notification Capsule (shows sender + gift thumbnail + coins cleanly) */}
       {shouldRenderSenderCapsule && (
         <div
           data-keep-dark="true"

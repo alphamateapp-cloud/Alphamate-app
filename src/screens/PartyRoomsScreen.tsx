@@ -28,6 +28,7 @@ import {
   isValidPartySeatTheme,
 } from '../components/party/AnimatedSeatThemeFrame';
 import { PartyRemoteAudioPlayer } from '../components/party/PartyRemoteAudioPlayer';
+import { PartyMusicVinylWidget } from '../components/party/PartyMusicVinylWidget';
 import { SharePartyModal } from '../components/party/SharePartyModal';
 import { VoiceModulationModal } from '../components/party/VoiceModulationModal';
 import { buildPartyRoomDeepLink } from '../utils/partyDeepLink';
@@ -2959,8 +2960,8 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         )}
 
-        {/* Floating Animated Hearts Area */}
-        <div className="absolute right-6 bottom-32 z-20 pointer-events-none w-20 h-56 flex flex-col items-center justify-end">
+        {/* Floating Animated Hearts Area (positioned cleanly above corner vinyl turntable) */}
+        <div className="absolute right-5 bottom-44 z-20 pointer-events-none w-20 h-48 flex flex-col items-center justify-end">
           {hearts.map((heart) => (
             <div
               key={heart.id}
@@ -2989,7 +2990,7 @@ export const PartyRoomsScreen: React.FC = () => {
         {/* =====================================================================
             2. ROOM HEADER & LEVEL SWITCHER (Layer 7 z-[45] — Always Above Animations)
            ===================================================================== */}
-        <div className="relative z-[45] pt-2 px-3 pb-2 flex flex-col gap-2 border-b border-[#A855F7]/15 bg-black/45 backdrop-blur-md shrink-0">
+        <div className="relative z-[45] pt-1.5 px-2.5 pb-1.5 flex flex-col gap-1.5 border-b border-[#A855F7]/15 bg-black/45 backdrop-blur-md shrink-0">
           {/* Room identity on the left; exit action on the opposite/right edge */}
           <div className="flex items-center justify-between gap-2 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
@@ -3197,40 +3198,7 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         </div>
 
-        {/* Ambient Now Playing Track Ribbon (Host & Moderator can Change; strictly read-only for Viewers & Guests) */}
-        {isMusicPlaying && (
-          <div className="relative z-10 px-3 py-1 bg-gradient-to-r from-[#7928CA]/30 via-[#EC4899]/25 to-[#7928CA]/30 border-b border-[#A855F7]/25 flex items-center justify-between text-xs text-purple-200 backdrop-blur-sm">
-            <div
-              onClick={canModerate ? () => setShowMusicModal(true) : undefined}
-              className={`flex items-center gap-2 truncate ${
-                canModerate ? 'cursor-pointer group hover:text-white' : 'select-none'
-              }`}
-            >
-              <Music className="w-3.5 h-3.5 text-[#EC4899] animate-spin-slow shrink-0" />
-              <span className="text-[10px] font-bold truncate">
-                Now Playing: <span className="text-white">{currentTrack.title}</span> — {currentTrack.artist}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              <span className="flex items-end gap-0.5 h-3">
-                <span className="w-0.5 h-3 bg-[#EC4899] animate-pulse" />
-                <span className="w-0.5 h-2 bg-[#A855F7] animate-pulse" style={{ animationDelay: '0.2s' }} />
-                <span className="w-0.5 h-3.5 bg-[#38BDF8] animate-pulse" style={{ animationDelay: '0.4s' }} />
-              </span>
-              {canModerate && (
-                <button
-                  type="button"
-                  onClick={() => setShowMusicModal(true)}
-                  className="text-[9px] font-black text-[#C084FC] hover:text-white underline cursor-pointer ml-1"
-                >
-                  Change
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Dedicated non-blocking VIP Entry Animation lane (directly below header/music bar) */}
+        {/* Dedicated non-blocking VIP Entry Animation lane (directly below header) */}
         <div className="relative z-[42] h-0 overflow-visible pointer-events-none">
           <VipEntryBannerOverlay
             currentEvent={
@@ -3327,13 +3295,13 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         ) : (
           <div
-            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-3 pb-1 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
-              partyLevel === 4 ? 'h-[60%] max-h-[60%]' : 'h-[50%] max-h-[50%]'
+            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-1 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
+              partyLevel === 4 ? 'h-[62%] max-h-[62%]' : 'h-[50%] max-h-[50%]'
             }`}
           >
             {/* Floating Three-Star Seat Theme Selector — Host & Moderator only */}
             {canModerate && (
-              <div className="absolute right-2 top-2 z-30">
+              <div className="absolute right-2 top-1 z-30">
                 <PartySeatThemeStarSelector
                   selectedTheme={seatTheme}
                   onSelectTheme={handleSelectSeatTheme}
@@ -3343,7 +3311,7 @@ export const PartyRoomsScreen: React.FC = () => {
             )}
 
             {/* UPPER PROMINENCE ROW: Large Circular HOST Seat + VIP 1 (VIP GUEST) Seat Beside Host */}
-            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-1">
+            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-0.5">
               {/* 1. HOST SEAT (Large Circular Frame with Synchronized Animated Seat Theme) */}
               <div className="flex flex-col items-center shrink-0">
                 <div className="relative">
@@ -3429,7 +3397,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 </div>
 
                 {/* HOST Label & Name Underneath */}
-                <div className="mt-3 flex items-center gap-1 justify-center">
+                <div className="mt-1.5 flex items-center gap-1 justify-center">
                   <span className="px-1.5 py-[1px] rounded-full bg-gradient-to-r from-amber-400 to-amber-500 text-black text-[8px] font-black tracking-wider uppercase shadow-sm">
                     HOST
                   </span>
@@ -3442,7 +3410,7 @@ export const PartyRoomsScreen: React.FC = () => {
               {/* 2. VIP 1 – VIP GUEST SEAT (Separate Premium Circular Seat Beside Host, Locked by Default) */}
               <div
                 onClick={() => handleSeatClick(vipGuestSeat)}
-                className="flex flex-col items-center shrink-0 cursor-pointer group transition-transform active:scale-95 pt-1"
+                className="flex flex-col items-center shrink-0 cursor-pointer group transition-transform active:scale-95 pt-0.5"
                 title={
                   vipGuestSeat.user
                     ? `VIP 1 • ${vipGuestSeat.user.displayName}`
@@ -3526,7 +3494,7 @@ export const PartyRoomsScreen: React.FC = () => {
                 </div>
 
                 {/* VIP 1 Label + VIP GUEST Subtitle */}
-                <div className="mt-2.5 flex flex-col items-center leading-tight">
+                <div className="mt-1.5 flex flex-col items-center leading-tight">
                   <span className="text-[9.5px] font-black text-amber-300 tracking-wide truncate max-w-[78px]">
                     {vipGuestSeat.user
                       ? `${vipGuestSeat.user.displayName.split(' ')[0]}`
@@ -3614,31 +3582,31 @@ export const PartyRoomsScreen: React.FC = () => {
             {/* ===================================================================
                 NORMAL CIRCULAR GUEST SEATS GRID (Progressive 4 / 8 / 12 / 16)
                =================================================================== */}
-            <div className="w-full mt-2.5 flex-1 flex flex-col justify-center">
+            <div className="w-full mt-1.5 flex-1 flex flex-col justify-start">
               {partyLevel === 1 && (
                 /* LEVEL 1: 4 normal circular seats (1 Row x 4) */
-                <div className="grid grid-cols-4 gap-x-3 gap-y-3 max-w-sm mx-auto w-full px-1">
+                <div className="grid grid-cols-4 gap-x-3 gap-y-2.5 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'lg'))}
                 </div>
               )}
 
               {partyLevel === 2 && (
                 /* LEVEL 2: 8 normal circular seats (2 Rows x 4) */
-                <div className="grid grid-cols-4 gap-x-3 gap-y-2.5 max-w-sm mx-auto w-full px-1">
+                <div className="grid grid-cols-4 gap-x-3 gap-y-2 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'md'))}
                 </div>
               )}
 
               {partyLevel === 3 && (
                 /* LEVEL 3: 12 normal circular seats (3 Rows x 4) */
-                <div className="grid grid-cols-4 gap-x-2.5 gap-y-2 max-w-sm mx-auto w-full px-1">
+                <div className="grid grid-cols-4 gap-x-2.5 gap-y-1.5 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'sm'))}
                 </div>
               )}
 
               {partyLevel === 4 && (
                 /* LEVEL 4: 16 normal circular seats (4 Rows x 4) */
-                <div className="grid grid-cols-4 gap-x-2.5 gap-y-1.5 max-w-sm mx-auto w-full px-1">
+                <div className="grid grid-cols-4 gap-x-2.5 gap-y-1 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'xs'))}
                 </div>
               )}
@@ -3684,27 +3652,37 @@ export const PartyRoomsScreen: React.FC = () => {
         )}
 
         {/* =====================================================================
-            4. LOWER AREA (50% for <=12 seats, 40% for 16 seats)
-            COMMENTS STREAM, GIFT ANIMATIONS & BOTTOM CONTROLS
+            4. LOWER AREA (50% for <=12 seats, 38% for 16 seats)
+            COMMENTS STREAM, CORNER VINYL TURNTABLE & BOTTOM CONTROLS
            ===================================================================== */}
-        <div className="relative z-40 flex-1 min-h-0 flex flex-col justify-end w-full px-3 pb-2 pt-1">
+        <div className="relative z-40 flex-1 min-h-0 flex flex-col justify-end w-full px-3 pb-2 pt-0.5">
+          {/* Vintage Spinning Vinyl Turntable + Woofer + Rising Music Notes (Lower-Right Corner Above Comments Bar) */}
+          <div className="absolute right-2.5 bottom-[92px] sm:bottom-[100px] z-30">
+            <PartyMusicVinylWidget
+              isPlaying={isMusicPlaying}
+              trackTitle={currentTrack.title}
+              canModerate={canModerate}
+              onOpenMusicModal={() => setShowMusicModal(true)}
+            />
+          </div>
+
           {/* Subtle Real-Time User Join Notification (deduplicated) */}
           {joinNotification && (
             <div
               key={joinNotification.id}
-              className="mb-1.5 inline-flex items-center gap-1.5 w-fit max-w-[90%] px-3 py-1 rounded-full bg-gradient-to-r from-[#7928CA]/80 via-[#EC4899]/75 to-[#7928CA]/80 border border-white/20 text-white text-[11px] font-bold shadow-lg backdrop-blur-md animate-fadeIn pointer-events-none shrink-0"
+              className="mb-1.5 inline-flex items-center gap-1.5 w-fit max-w-[78%] px-3 py-1 rounded-full bg-gradient-to-r from-[#7928CA]/80 via-[#EC4899]/75 to-[#7928CA]/80 border border-white/20 text-white text-[11px] font-bold shadow-lg backdrop-blur-md animate-fadeIn pointer-events-none shrink-0"
             >
               <span className="truncate">👋 {joinNotification.name} joined the room</span>
             </div>
           )}
 
-          {/* Transparent Floating Comments Stream (Dynamically Fills Remaining Lower Area) */}
-          <div className="flex-1 min-h-[72px] overflow-y-auto space-y-1.5 scrollbar-none pr-1 mb-2 [mask-image:linear-gradient(to_bottom,transparent_0%,black_15%,black_100%)]">
+          {/* Transparent Floating Comments Stream (Dynamically Fills Remaining Lower Area, leaving right lane clear for Vinyl Turntable) */}
+          <div className="flex-1 min-h-[72px] overflow-y-auto space-y-1.5 scrollbar-none pr-[76px] mb-2 [mask-image:linear-gradient(to_bottom,transparent_0%,black_15%,black_100%)]">
             {chatItems.map((item) => (
               <div
                 key={item.id}
                 onClick={() => handleCommentUserClick(item.sender)}
-                className="flex items-start gap-1.5 text-xs text-zinc-200 leading-snug animate-fadeIn cursor-pointer hover:bg-white/10 px-2 py-1 rounded-2xl bg-black/40 backdrop-blur-md border border-white/5 transition-all w-fit max-w-[92%]"
+                className="flex items-start gap-1.5 text-xs text-zinc-200 leading-snug animate-fadeIn cursor-pointer hover:bg-white/10 px-2 py-1 rounded-2xl bg-black/40 backdrop-blur-md border border-white/5 transition-all w-fit max-w-full"
                 title="Tap to view profile & actions"
               >
                 {/* User Avatar */}

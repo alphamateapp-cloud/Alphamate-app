@@ -1,14 +1,56 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import {defineConfig, type Plugin} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
+
+/**
+ * Vite 8 throws SendBeforeConnectError if import.meta.hot.send() is invoked before
+ * the HMR WebSocket opens. vite-plugin-pwa@2.0.0 calls import.meta.hot.send()
+ * synchronously inside registerDevSW() on page load, so defer it until vite:ws:connect.
+ */
+function pwaDevHmrSafeGuard(): Plugin {
+  return {
+    name: 'alphamate-pwa-dev-hmr-guard',
+    apply: 'serve',
+    enforce: 'post',
+    transform(code, id) {
+      if (!id.includes('pwa-entry-point-loaded')) return null;
+      const target = "import.meta.hot.send('vite-pwa-plugin:dev-ready');";
+      if (!code.includes(target)) return null;
+      const patched =
+        `let __pwaWsConnected = false;\n` +
+        `if (import.meta.hot) {\n` +
+        `  import.meta.hot.on('vite:ws:connect', () => { __pwaWsConnected = true; });\n` +
+        `}\n` +
+        code.replace(
+          target,
+          `if (import.meta.hot) {
+            const sendReady = () => {
+              try {
+                import.meta.hot.send('vite-pwa-plugin:dev-ready');
+              } catch {
+                // Ignore if HMR socket is unavailable
+              }
+            };
+            if (__pwaWsConnected) {
+              sendReady();
+            } else {
+              import.meta.hot.on('vite:ws:connect', sendReady);
+            }
+          }`
+        );
+      return {code: patched, map: null};
+    },
+  };
+}
 
 export default defineConfig(() => {
   return {
     plugins: [
       react(),
       tailwindcss(),
+      pwaDevHmrSafeGuard(),
       VitePWA({
         registerType: 'autoUpdate',
         injectRegister: false,

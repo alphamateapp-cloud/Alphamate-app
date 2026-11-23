@@ -379,9 +379,11 @@ export type GiftCssAnimationClass =
 
 export type GiftRarityTier = 'common' | 'rare' | 'epic' | 'legendary' | 'mythic';
 
-export type AdvancedGiftFormat = 'webm' | 'mov' | 'mp4' | 'svg' | 'gif';
+export type AdvancedGiftFormat = 'webm' | 'svga' | 'mov' | 'mp4' | 'svg' | 'gif';
 
 export type GiftDisplayMode = 'transparent' | 'semi_transparent' | 'overlay_background';
+
+export type GiftEdgeBlendMode = 'normal' | 'screen' | 'lighten';
 
 export type GiftTransparencyStatus =
   | 'alpha_verified'
@@ -449,6 +451,8 @@ export interface AdvancedGiftConfig {
   priority: number; // 1..100
   enableParticles?: boolean;
   enableSound?: boolean;
+  edgeFeather?: boolean;
+  blendMode?: GiftEdgeBlendMode;
   status: AdvancedGiftStatus;
   conversionStatus: GiftConversionStatus;
   conversionMessage?: string;

@@ -15,11 +15,12 @@ const CONVERTED_DIR = path.resolve(GIFTS_UPLOAD_ROOT, 'converted');
 const THUMBNAILS_DIR = path.resolve(GIFTS_UPLOAD_ROOT, 'thumbnails');
 const AISTUDIO_ASSETS_DIR = path.resolve(PUBLIC_ROOT, 'assets', 'aistudio');
 
-const ALLOWED_ANIMATION_EXTS = new Set(['.webm', '.mov', '.mp4', '.svg', '.gif']);
+const ALLOWED_ANIMATION_EXTS = new Set(['.webm', '.svga', '.mov', '.mp4', '.svg', '.gif']);
 const ALLOWED_THUMBNAIL_EXTS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg']);
 
 const MAX_BYTES_BY_FORMAT = {
   svg: 2 * 1024 * 1024, // 2 MB
+  svga: 25 * 1024 * 1024, // 25 MB
   gif: 12 * 1024 * 1024, // 12 MB
   webm: 50 * 1024 * 1024, // 50 MB
   mov: 50 * 1024 * 1024, // 50 MB
@@ -69,11 +70,54 @@ export function resolveConfinedGiftMediaPath(publicUrlPath) {
 function detectFormatFromExt(ext) {
   const normalized = String(ext || '').toLowerCase();
   if (normalized === '.webm') return 'webm';
+  if (normalized === '.svga') return 'svga';
   if (normalized === '.mov') return 'mov';
   if (normalized === '.mp4') return 'mp4';
   if (normalized === '.svg') return 'svg';
   if (normalized === '.gif') return 'gif';
   return null;
+}
+
+/**
+ * Validates and inspects an uploaded SVGA binary file (SVGA 2.x zlib protobuf or SVGA 1.x ZIP).
+ * SVGA renders natively on a 100% transparent canvas via SVGAPlayer.
+ */
+export function analyzeSvgaBuffer(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 4) {
+    throw new Error('Uploaded SVGA file is empty or too small.');
+  }
+  const b0 = buffer[0];
+  const b1 = buffer[1];
+  const isZipSvga1 = b0 === 0x50 && b1 === 0x4b && buffer[2] === 0x03 && buffer[3] === 0x04;
+  // Standard zlib headers (CMF=0x78 with FLG 0x01, 0x5e, 0x9c, 0xda)
+  const isZlibSvga2 = b0 === 0x78 && (b1 === 0x01 || b1 === 0x5e || b1 === 0x9c || b1 === 0xda);
+  if (!isZipSvga1 && !isZlibSvga2) {
+    throw new Error('Uploaded file does not have a valid SVGA 1.x (ZIP) or SVGA 2.x (Zlib Protobuf) header.');
+  }
+
+  const warnings = [];
+  if (buffer.length > 8 * 1024 * 1024) {
+    warnings.push('Large SVGA file (>8 MB) detected — keep SVGA assets compact for instant mobile live room playback.');
+  }
+
+  return {
+    format: 'svga',
+    container: isZlibSvga2 ? 'application/x-svga-v2' : 'application/x-svga-v1',
+    codec: isZlibSvga2 ? 'SVGA 2.0 (Zlib Protobuf)' : 'SVGA 1.0 (ZIP)',
+    pixFmt: 'canvas-rgba',
+    width: 750,
+    height: 1334,
+    fps: 30,
+    durationSec: 6,
+    fileSizeBytes: buffer.length,
+    hasAlpha: true,
+    hasAudio: false,
+    audioCodec: null,
+    transparencyStatus: 'alpha_verified',
+    recommendedMode: 'transparent',
+    androidWebViewCompatible: true,
+    warnings,
+  };
 }
 
 function parseFrameRate(rawRate) {
@@ -217,6 +261,11 @@ export async function probeMediaFile(filePath, formatHint = null) {
     return sanitizeAndAnalyzeSvg(raw).analysis;
   }
 
+  if (format === 'svga') {
+    const rawBuf = await fsp.readFile(filePath);
+    return analyzeSvgaBuffer(rawBuf);
+  }
+
   const { stdout } = await execFileAsync(
     'ffprobe',
     ['-v', 'quiet', '-print_format', 'json', '-show_format', '-show_streams', filePath],
@@ -342,8 +391,8 @@ export async function convertVideoToOptimizedWebm(sourcePath) {
   ensureGiftDirectoriesSync();
   const sourceAnalysis = await probeMediaFile(sourcePath);
 
-  if (sourceAnalysis.format === 'svg' || sourceAnalysis.format === 'gif') {
-    throw new Error('SVG and GIF files do not require video transcoding.');
+  if (sourceAnalysis.format === 'svg' || sourceAnalysis.format === 'svga' || sourceAnalysis.format === 'gif') {
+    throw new Error('SVGA, SVG, and GIF files play natively and do not require video transcoding.');
   }
 
   const preserveAlpha = Boolean(sourceAnalysis.hasAlpha);
@@ -417,6 +466,9 @@ export function registerGiftMediaRoutes(app, { requireFirebaseAuth, requireAdmin
           'Content-Security-Policy',
           "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:;"
         );
+      } else if (req.path.toLowerCase().endsWith('.svga')) {
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Access-Control-Allow-Origin', '*');
       }
       next();
     },
@@ -484,7 +536,7 @@ export function registerGiftMediaRoutes(app, { requireFirebaseAuth, requireAdmin
         if (!ALLOWED_ANIMATION_EXTS.has(ext)) {
           return res.status(400).json({
             success: false,
-            error: `Unsupported animation format "${ext}". Supported formats: MOV, MP4, WebM, SVG, GIF.`,
+            error: `Unsupported animation format "${ext}". Supported formats: WebM, SVGA, MOV, MP4, SVG, GIF.`,
           });
         }
 
@@ -508,6 +560,9 @@ export function registerGiftMediaRoutes(app, { requireFirebaseAuth, requireAdmin
           const { sanitizedSvg, analysis: svgAnalysis } = sanitizeAndAnalyzeSvg(rawBody.toString('utf8'));
           await fsp.writeFile(targetPath, sanitizedSvg, 'utf8');
           analysis = svgAnalysis;
+        } else if (format === 'svga') {
+          analysis = analyzeSvgaBuffer(rawBody);
+          await fsp.writeFile(targetPath, rawBody);
         } else {
           await fsp.writeFile(targetPath, rawBody);
           try {

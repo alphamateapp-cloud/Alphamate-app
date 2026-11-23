@@ -4,6 +4,7 @@ import {
   AdvancedGiftFormat,
   AdvancedGiftStatus,
   GiftDisplayMode,
+  GiftEdgeBlendMode,
   GiftPlaybackPosition,
 } from '../../types';
 import { useApp } from '../../context/AppContext';
@@ -41,6 +42,8 @@ import {
   Wand2,
   FlaskConical,
   Image as ImageIcon,
+  Maximize2,
+  X,
 } from 'lucide-react';
 
 function createBlankGiftConfig(): AdvancedGiftConfig {
@@ -59,17 +62,19 @@ function createBlankGiftConfig(): AdvancedGiftConfig {
     optimizedFileUrl: undefined,
     animationUrl: '',
     format: 'webm',
-    displayMode: 'transparent',
+    displayMode: 'semi_transparent',
     transparencyStatus: 'unknown',
-    opacity: 85,
+    opacity: 90,
     durationMs: 6000,
     loop: false,
     playbackSpeed: 1,
-    position: 'center',
+    position: 'fullscreen',
     scale: 1,
     priority: 65,
     enableParticles: true,
     enableSound: true,
+    edgeFeather: true,
+    blendMode: 'normal',
     status: 'draft',
     conversionStatus: 'not_needed',
     isTestGift: false,
@@ -103,6 +108,7 @@ export const AdvancedGiftManager: React.FC = () => {
   const [previewLoop, setPreviewLoop] = useState(true);
   const [previewSource, setPreviewSource] = useState<'optimized' | 'original'>('optimized');
   const [stageControlClicks, setStageControlClicks] = useState(0);
+  const [isFullScreenTestOpen, setIsFullScreenTestOpen] = useState(false);
 
   const animFileInputRef = useRef<HTMLInputElement | null>(null);
   const thumbFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -200,22 +206,34 @@ export const AdvancedGiftManager: React.FC = () => {
           ? Math.min(60_000, Math.round(analysis.durationSec * 1000))
           : draft.durationMs;
 
+      const isTransparentNative =
+        res.format === 'svga' || res.format === 'svg' || Boolean(analysis?.hasAlpha);
+
       setDraft((prev) => ({
         ...prev,
         originalFileUrl: res.originalFileUrl!,
-        optimizedFileUrl: res.format === 'svg' || res.format === 'gif' ? res.originalFileUrl : undefined,
+        optimizedFileUrl:
+          res.format === 'svga' || res.format === 'svg' || res.format === 'gif'
+            ? res.originalFileUrl
+            : undefined,
         animationUrl: res.originalFileUrl!,
         format: res.format!,
-        transparencyStatus: analysis?.transparencyStatus || 'unknown',
-        displayMode: analysis?.recommendedMode || prev.displayMode,
+        transparencyStatus: analysis?.transparencyStatus || (isTransparentNative ? 'alpha_verified' : 'unknown'),
+        displayMode: isTransparentNative ? 'transparent' : analysis?.recommendedMode || 'semi_transparent',
+        opacity: isTransparentNative ? 100 : 90,
+        position: 'fullscreen',
+        edgeFeather: !isTransparentNative,
+        blendMode: 'normal',
         durationMs: detectedDurationMs,
         conversionStatus: res.format === 'mov' ? 'pending' : 'not_needed',
         conversionMessage:
-          res.format === 'mov'
+          res.format === 'svga'
+            ? 'SVGA uploaded — native transparent canvas playback ready (zero background box).'
+            : res.format === 'mov'
             ? 'MOV uploaded — click "Convert to Optimized WebM (VP9)" for Android & Web compatibility.'
             : analysis?.hasAlpha
-            ? 'Alpha channel verified on upload.'
-            : 'Uploaded and analyzed via server ffprobe.',
+            ? 'Alpha channel verified on upload — pure transparent playback ready.'
+            : 'Uploaded and analyzed via server ffprobe — Full-width Soft Edge Merge enabled automatically.',
         analysis,
         updatedAt: new Date().toISOString(),
       }));
@@ -224,9 +242,9 @@ export const AdvancedGiftManager: React.FC = () => {
       notify(
         analysis?.warnings?.length ? 'warn' : 'ok',
         `Uploaded ${file.name} (${res.format.toUpperCase()}). ${
-          analysis?.hasAlpha
-            ? 'Transparency detected.'
-            : 'No alpha channel detected — review compatibility warnings below.'
+          isTransparentNative
+            ? 'Native transparency verified — zero background box.'
+            : 'Full-width edge-feathered merge enabled so corners & borders dissolve seamlessly.'
         }`
       );
     } finally {
@@ -297,8 +315,8 @@ export const AdvancedGiftManager: React.FC = () => {
       notify('err', 'Upload a MOV, MP4, or WebM video first.');
       return;
     }
-    if (draft.format === 'svg' || draft.format === 'gif') {
-      notify('warn', 'SVG and GIF files play natively without FFmpeg video conversion.');
+    if (draft.format === 'svga' || draft.format === 'svg' || draft.format === 'gif') {
+      notify('warn', 'SVGA, SVG, and GIF files play natively without FFmpeg video conversion.');
       return;
     }
     setIsConverting(true);
@@ -463,11 +481,11 @@ export const AdvancedGiftManager: React.FC = () => {
               Advanced Gift Animation Manager
             </h2>
             <span className="px-2 py-0.5 rounded-full bg-cyan-500/20 border border-cyan-400/40 text-cyan-200 text-[10px] font-mono font-bold uppercase">
-              WebM • MOV • MP4 • SVG • GIF
+              WebM • SVGA • MOV • MP4 • SVG • GIF
             </span>
           </div>
           <p className="text-xs text-zinc-400 mt-1">
-            Upload, inspect with real FFprobe, sanitize SVG, convert to VP9 WebM, configure all 3 display modes, preview on the 7-layer live stage, and publish to Live & Party rooms.
+            Upload WebM or transparent SVGA gifts, configure full-screen edge-feathered merging, test live full-screen, and publish directly to Live & Party rooms.
           </p>
         </div>
 
@@ -562,12 +580,12 @@ export const AdvancedGiftManager: React.FC = () => {
                   </span>
                 </div>
                 <p className="text-[10px] text-zinc-400">
-                  Supports MOV (incl. ProRes 4444), MP4, WebM (VP9 Alpha), animated SVG, and GIF.
+                  Supports WebM (VP9 / VP9 Alpha), SVGA (100% transparent), MOV, MP4, animated SVG, and GIF.
                 </p>
                 <input
                   ref={animFileInputRef}
                   type="file"
-                  accept=".webm,.mov,.mp4,.svg,.gif,video/webm,video/quicktime,video/mp4,image/svg+xml,image/gif"
+                  accept=".svga,.webm,.mov,.mp4,.svg,.gif,video/webm,video/quicktime,video/mp4,image/svg+xml,image/gif"
                   onChange={handleUploadAnimation}
                   className="hidden"
                 />
@@ -638,6 +656,7 @@ export const AdvancedGiftManager: React.FC = () => {
                   disabled={
                     isConverting ||
                     !draft.originalFileUrl ||
+                    draft.format === 'svga' ||
                     draft.format === 'svg' ||
                     draft.format === 'gif'
                   }
@@ -939,6 +958,7 @@ export const AdvancedGiftManager: React.FC = () => {
                   className="w-full h-9 px-2.5 rounded-xl bg-black/50 border border-white/15 text-xs text-white uppercase"
                 >
                   <option value="webm">WebM (VP9)</option>
+                  <option value="svga">SVGA (Transparent)</option>
                   <option value="mov">MOV (QuickTime)</option>
                   <option value="mp4">MP4 (H.264/HEVC)</option>
                   <option value="svg">SVG (Animated)</option>
@@ -976,6 +996,54 @@ export const AdvancedGiftManager: React.FC = () => {
                   <option value="published">Published</option>
                   <option value="disabled">Disabled</option>
                 </select>
+              </div>
+            </div>
+
+            {/* Seamless Screen Merge & Blend Controls */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-3 rounded-xl bg-black/30 border border-purple-500/25">
+              <div>
+                <label className="text-[10px] font-bold text-purple-200 uppercase block mb-1">
+                  Video Edge Blend Mode
+                </label>
+                <select
+                  value={draft.blendMode || 'normal'}
+                  onChange={(e) => {
+                    setDraft({ ...draft, blendMode: e.target.value as GiftEdgeBlendMode });
+                    setPreviewNonce((n) => n + 1);
+                  }}
+                  className="w-full h-9 px-2.5 rounded-xl bg-black/60 border border-white/15 text-xs text-white"
+                >
+                  <option value="normal">Normal (Rich Full Colors)</option>
+                  <option value="screen">Screen (Auto-Remove Black BG)</option>
+                  <option value="lighten">Lighten (Soft Glow Merge)</option>
+                </select>
+              </div>
+              <div className="flex items-center">
+                <label className="inline-flex items-start gap-2 cursor-pointer text-xs text-zinc-200 pt-2 sm:pt-4">
+                  <input
+                    type="checkbox"
+                    checked={
+                      draft.edgeFeather !== undefined
+                        ? draft.edgeFeather
+                        : draft.format !== 'svga' &&
+                          draft.format !== 'svg' &&
+                          draft.transparencyStatus !== 'alpha_verified'
+                    }
+                    onChange={(e) => {
+                      setDraft({ ...draft, edgeFeather: e.target.checked });
+                      setPreviewNonce((n) => n + 1);
+                    }}
+                    className="accent-[#EC4899] mt-0.5"
+                  />
+                  <span>
+                    <span className="font-bold text-white block leading-tight">
+                      Soft Blurred Edge Merge
+                    </span>
+                    <span className="text-[10px] text-zinc-400">
+                      Dissolves all 4 corners & top/bottom/side edges into screen
+                    </span>
+                  </span>
+                </label>
               </div>
             </div>
 
@@ -1111,6 +1179,18 @@ export const AdvancedGiftManager: React.FC = () => {
                   <RotateCcw className="w-3 h-3" />
                   <span>Replay</span>
                 </button>
+                <button
+                  type="button"
+                  disabled={!previewEvent}
+                  onClick={() => {
+                    setPreviewNonce((n) => n + 1);
+                    setIsFullScreenTestOpen(true);
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-gradient-to-r from-[#EC4899] to-amber-500 text-white text-[10px] font-black inline-flex items-center gap-1 cursor-pointer disabled:opacity-40"
+                >
+                  <Maximize2 className="w-3 h-3" />
+                  <span>Full-Screen Test</span>
+                </button>
               </div>
             </div>
 
@@ -1210,6 +1290,7 @@ export const AdvancedGiftManager: React.FC = () => {
               <div className="flex flex-wrap gap-1.5 text-[9.5px] font-mono">
                 {[
                   { label: 'WebM VP9', ok: capabilities.webmVp9 },
+                  { label: 'SVGA Canvas', ok: capabilities.svgaAnimation },
                   { label: 'MP4 H.264', ok: capabilities.mp4H264 },
                   { label: 'MOV Direct', ok: capabilities.movQuickTime },
                   { label: 'SVG Anim', ok: capabilities.svgAnimation },
@@ -1305,6 +1386,116 @@ export const AdvancedGiftManager: React.FC = () => {
         <span>Active Test WebM Asset: {UPLOADED_TEST_WEBM_URL}</span>
         <span>All animation layers enforce pointer-events: none • Live controls remain interactive</span>
       </div>
+
+      {/* Full-Screen Live Room Gift Verification Stage */}
+      {isFullScreenTestOpen && previewEvent && (
+        <div className="fixed inset-0 z-[120] bg-[#090414] flex flex-col overflow-hidden">
+          {/* Realistic Party Room Background */}
+          <div className="absolute inset-0 z-0 bg-[radial-gradient(ellipse_at_50%_20%,rgba(139,92,246,0.42),rgba(18,8,38,0.96)_62%,#06020E_100%)]" />
+
+          {/* LAYER 2: Background Gift Mode */}
+          <UniversalGiftPlayer
+            event={previewEvent}
+            layer="background"
+            forceMuted={previewMuted}
+            previewLoopOverride={previewLoop}
+          />
+
+          {/* LAYER 4: Simulated Host, VIP 1 & Party Seats */}
+          <div className="relative z-10 flex-1 flex flex-col items-center pt-20 px-4 pointer-events-none">
+            <div className="flex items-center justify-center gap-8 mb-6">
+              <div className="flex flex-col items-center">
+                <div className="w-20 h-20 rounded-full p-1 bg-gradient-to-tr from-amber-400 via-yellow-300 to-[#EC4899] shadow-[0_0_24px_rgba(251,191,36,0.45)]">
+                  <div className="w-full h-full rounded-full bg-[#1C1036] flex items-center justify-center text-sm font-black text-amber-300">
+                    HOST
+                  </div>
+                </div>
+                <span className="mt-1.5 text-xs font-black text-amber-300">Alpha Host</span>
+              </div>
+              <div className="flex flex-col items-center">
+                <div className="w-16 h-16 rounded-full p-1 bg-gradient-to-tr from-purple-400 via-[#EC4899] to-amber-300 shadow-[0_0_20px_rgba(168,85,247,0.4)]">
+                  <div className="w-full h-full rounded-full bg-[#1C1036] flex items-center justify-center text-xs font-black text-purple-200">
+                    VIP 1
+                  </div>
+                </div>
+                <span className="mt-1.5 text-[11px] font-bold text-purple-200">VIP Guest</span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-4 gap-3 w-full max-w-sm">
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((seat) => (
+                <div
+                  key={seat}
+                  className="flex flex-col items-center p-2 rounded-2xl bg-black/35 border border-white/10 backdrop-blur-sm"
+                >
+                  <div className="w-10 h-10 rounded-full bg-purple-950/80 border border-amber-400/50 flex items-center justify-center text-xs font-bold text-amber-200">
+                    {seat}
+                  </div>
+                  <span className="text-[10px] text-zinc-300 mt-1">Seat {seat}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* LAYER 5: Foreground Gift Mode (Full-Screen Edge-to-Edge Seamless Render) */}
+          <UniversalGiftPlayer
+            event={previewEvent}
+            layer="foreground"
+            forceMuted={previewMuted}
+            previewLoopOverride={previewLoop}
+          />
+
+          {/* Top Interactive Verification Controls (Always Above Animation) */}
+          <div className="absolute top-4 inset-x-4 z-50 flex flex-wrap items-center justify-between gap-2">
+            <div className="px-3 py-1.5 rounded-xl bg-black/75 border border-white/15 backdrop-blur-md text-xs text-white font-bold flex items-center gap-2">
+              <span>{draft.name}</span>
+              <span className="text-zinc-400">·</span>
+              <span className="text-amber-300 font-mono uppercase">{draft.format}</span>
+              <span className="text-zinc-400">·</span>
+              <span className="text-cyan-300">
+                {draft.edgeFeather !== false && draft.format !== 'svga' && draft.format !== 'svg'
+                  ? 'Soft Edge Merge ON'
+                  : 'Native Transparent'}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setPreviewMuted((m) => !m)}
+                className="min-h-[40px] px-3 rounded-xl bg-black/75 border border-white/20 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                {previewMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-amber-300" />}
+                <span>{previewMuted ? 'Muted' : 'Sound On'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setPreviewNonce((n) => n + 1)}
+                className="min-h-[40px] px-3 rounded-xl bg-[#7928CA] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                <span>Replay</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsFullScreenTestOpen(false)}
+                className="min-h-[40px] px-3.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-black inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+                <span>Close Test</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Bottom Simulated Live Chat Bar */}
+          <div className="relative z-40 p-4 max-w-md w-full mx-auto space-y-2 pointer-events-none">
+            <div className="inline-block px-3 py-1 rounded-xl bg-black/60 border border-white/10 text-xs text-zinc-200 backdrop-blur-sm">
+              <span className="text-amber-300 font-bold">Super Admin</span> sent{' '}
+              <span className="text-pink-300 font-bold">{draft.name}</span> ({draft.coins.toLocaleString()} coins)
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 };

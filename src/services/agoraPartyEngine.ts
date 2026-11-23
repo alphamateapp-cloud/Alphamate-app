@@ -81,6 +81,8 @@ class AgoraPartyEngine {
   private webLocalAudioTrack: any = null;
   private webRawMicStream: MediaStream | null = null;
   private webJoined = false;
+  private webSessionToken = 0;
+  private webReconnectingWatchdog: ReturnType<typeof setTimeout> | null = null;
   private webRemoteAudioTracks = new Map<number, any>();
 
   private enqueueOp<T>(fn: () => Promise<T>): Promise<T> {
@@ -314,6 +316,31 @@ class AgoraPartyEngine {
     }
   }
 
+  private clearWebReconnectingWatchdog() {
+    if (this.webReconnectingWatchdog) {
+      clearTimeout(this.webReconnectingWatchdog);
+      this.webReconnectingWatchdog = null;
+    }
+  }
+
+  private async teardownWebClient(clientRef: any): Promise<void> {
+    if (!clientRef) return;
+    try {
+      clientRef.removeAllListeners?.();
+    } catch {
+      // ignore
+    }
+    try {
+      // Always call leave() unless already DISCONNECTED so in-flight joins or stalled
+      // RECONNECTING WebSockets (ping / traffic_stats / rejoin) are closed cleanly.
+      if (clientRef.connectionState !== 'DISCONNECTED') {
+        await clientRef.leave();
+      }
+    } catch {
+      // ignore cleanup leave failures
+    }
+  }
+
   private async renewSessionToken(roomId: string, forceJoinFallback = false) {
     if (this.manualStop || this.roomId !== roomId) return;
     if (!this.inflightTokenRefresh) {
@@ -372,14 +399,17 @@ class AgoraPartyEngine {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       if (this.manualStop || this.roomId !== targetRoomId) return;
-      this.startPartyVoiceInternal(
-        targetRoomId,
-        targetUserId,
-        targetMuted,
-        targetListenOnly,
-        targetOptions,
-        true
-      ).catch((err: any) => {
+      this.enqueueOp(() => {
+        if (this.manualStop || this.roomId !== targetRoomId) return Promise.resolve();
+        return this.startPartyVoiceInternal(
+          targetRoomId,
+          targetUserId,
+          targetMuted,
+          targetListenOnly,
+          targetOptions,
+          true
+        );
+      }).catch((err: any) => {
         if (this.manualStop || this.roomId !== targetRoomId) return;
         if (err?.nonRetryable) {
           this.callbacks.onError?.(err);
@@ -668,17 +698,39 @@ class AgoraPartyEngine {
     if (this.manualStop || this.roomId !== roomId) return;
 
     try {
-      AgoraRTC.setLogLevel?.(3);
+      // Silence transient internal WebSocket reconnect console errors (WS_ABORT: ping/traffic_stats,
+      // ERR_REJOIN_NOT_JOINED) and disable background telemetry log uploads; real errors still reject
+      // promises and surface through connection-state-change / onError handlers.
+      AgoraRTC.disableLogUpload?.();
+      AgoraRTC.setLogLevel?.(4);
     } catch {
       // ignore
     }
 
+    // Ensure any previous web client is fully torn down before creating a new one
+    if (this.webClient) {
+      const stale = this.webClient;
+      this.webClient = null;
+      this.webJoined = false;
+      this.clearWebReconnectingWatchdog();
+      await this.teardownWebClient(stale);
+    }
+    if (this.manualStop || this.roomId !== roomId) return;
+
+    const sessionToken = ++this.webSessionToken;
     const client = AgoraRTC.createClient({ mode: 'live', codec: 'vp8' });
     this.webClient = client;
 
+    const isStaleClient = () =>
+      this.manualStop ||
+      this.roomId !== roomId ||
+      this.webClient !== client ||
+      this.webSessionToken !== sessionToken;
+
     client.on('connection-state-change', (curState: string, _revState: string, reason?: string) => {
-      if (this.manualStop || this.roomId !== roomId) return;
+      if (isStaleClient()) return;
       if (curState === 'CONNECTED') {
+        this.clearWebReconnectingWatchdog();
         this.reconnectAttempt = 0;
         this.clearReconnectTimer();
         this.networkStats.connectionState = 'connected';
@@ -689,7 +741,25 @@ class AgoraPartyEngine {
       } else if (curState === 'RECONNECTING') {
         this.networkStats.connectionState = 'reconnecting';
         this.callbacks.onConnectionStateChange?.('reconnecting');
+        // Watchdog: if Agora's internal WebSocket rejoin stalls (e.g. server evicted session with
+        // 2025 ERR_REJOIN_NOT_JOINED after a network blip), cleanly leave and perform a fresh join.
+        if (!this.webReconnectingWatchdog) {
+          this.webReconnectingWatchdog = setTimeout(() => {
+            this.webReconnectingWatchdog = null;
+            if (isStaleClient()) return;
+            if (client.connectionState === 'RECONNECTING' || client.connectionState === 'DISCONNECTED') {
+              this.webJoined = false;
+              void this.teardownWebClient(client);
+              if (this.webClient === client) {
+                this.webClient = null;
+              }
+              this.scheduleReconnect('Fresh voice rejoin after WebSocket drop');
+            }
+          }, 6500);
+        }
       } else if (curState === 'DISCONNECTED') {
+        this.clearWebReconnectingWatchdog();
+        this.webJoined = false;
         this.networkStats.connectionState = 'disconnected';
         if (reason !== 'LEAVE') {
           this.scheduleReconnect(`Web Agora disconnected (${reason || 'network'})`);
@@ -698,7 +768,7 @@ class AgoraPartyEngine {
     });
 
     client.on('network-quality', (stats: { uplinkNetworkQuality?: number; downlinkNetworkQuality?: number }) => {
-      if (this.manualStop || this.roomId !== roomId) return;
+      if (isStaleClient()) return;
       let measuredRtt: number | null = null;
       try {
         const rtcStats = client.getRTCStats?.();
@@ -718,14 +788,16 @@ class AgoraPartyEngine {
     });
 
     client.on('token-privilege-will-expire', () => {
+      if (isStaleClient()) return;
       void this.renewSessionToken(roomId, true);
     });
     client.on('token-privilege-did-expire', () => {
+      if (isStaleClient()) return;
       void this.renewSessionToken(roomId, true);
     });
 
     client.on('user-joined', (user: any) => {
-      if (this.roomId !== roomId) return;
+      if (isStaleClient()) return;
       const numericUid = Number(user.uid);
       if (!numericUid) return;
       const presence = this.buildRemotePresence(numericUid, roomId);
@@ -735,7 +807,7 @@ class AgoraPartyEngine {
     });
 
     client.on('user-left', (user: any) => {
-      if (this.roomId !== roomId) return;
+      if (isStaleClient()) return;
       const numericUid = Number(user.uid);
       const existing = this.remoteUsers.get(numericUid);
       this.remoteUsers.delete(numericUid);
@@ -747,8 +819,9 @@ class AgoraPartyEngine {
     });
 
     client.on('user-published', async (user: any, mediaType: string) => {
-      if (mediaType !== 'audio' || this.roomId !== roomId) return;
+      if (mediaType !== 'audio' || isStaleClient()) return;
       await client.subscribe(user, 'audio').catch(() => {});
+      if (isStaleClient()) return;
       const numericUid = Number(user.uid);
       this.remoteMutedByUid.set(numericUid, false);
       const track = user.audioTrack;
@@ -769,7 +842,7 @@ class AgoraPartyEngine {
     });
 
     client.on('user-unpublished', (user: any, mediaType: string) => {
-      if (mediaType !== 'audio' || this.roomId !== roomId) return;
+      if (mediaType !== 'audio' || isStaleClient()) return;
       const numericUid = Number(user.uid);
       this.remoteMutedByUid.set(numericUid, true);
       this.remoteSpeakingUntilMs.delete(numericUid);
@@ -784,7 +857,7 @@ class AgoraPartyEngine {
 
     client.enableAudioVolumeIndicator?.();
     client.on('volume-indicator', (volumes: Array<{ uid: number; level: number }>) => {
-      if (this.roomId !== roomId) return;
+      if (isStaleClient()) return;
       const now = Date.now();
       let changed = false;
       for (const v of volumes || []) {
@@ -814,14 +887,33 @@ class AgoraPartyEngine {
       }
     });
 
-    await client.setClientRole(payload.canPublish ? 'host' : 'audience');
-    await client.join(payload.appId, payload.channelName, payload.token, Number(payload.uid));
+    try {
+      await client.setClientRole(payload.canPublish ? 'host' : 'audience');
+      await client.join(payload.appId, payload.channelName, payload.token, Number(payload.uid));
+    } catch (joinErr) {
+      await this.teardownWebClient(client);
+      if (this.webClient === client) {
+        this.webClient = null;
+        this.webJoined = false;
+      }
+      throw joinErr;
+    }
+
+    if (isStaleClient()) {
+      await this.teardownWebClient(client);
+      if (this.webClient === client) {
+        this.webClient = null;
+        this.webJoined = false;
+      }
+      return;
+    }
+
     this.webJoined = true;
 
     if (payload.canPublish) {
       try {
         const micTrack = await this.createWebPublishedAudioTrack(AgoraRTC, this.activeVoicePreset);
-        if (this.manualStop || this.roomId !== roomId || !this.canPublish) {
+        if (isStaleClient() || !this.canPublish) {
           try {
             micTrack.stop();
             micTrack.close();
@@ -829,7 +921,9 @@ class AgoraPartyEngine {
             // ignore
           }
           this.releaseWebRawMicStream();
-          await this.switchWebClientToAudience(roomId, payload).catch(() => {});
+          if (!isStaleClient()) {
+            await this.switchWebClientToAudience(roomId, payload).catch(() => {});
+          }
           return;
         }
         this.webLocalAudioTrack = micTrack;
@@ -873,6 +967,9 @@ class AgoraPartyEngine {
     this.resumeAudioPlayback();
 
     const connState = this.networkStats.connectionState;
+    if (connState === 'connecting' || connState === 'reconnecting') {
+      return;
+    }
     const isDisconnected =
       connState === 'disconnected' ||
       connState === 'failed' ||
@@ -1173,14 +1270,12 @@ class AgoraPartyEngine {
         });
         this.webRemoteAudioTracks.clear();
         if (this.webClient) {
-          try {
-            if (this.webJoined) await this.webClient.leave();
-            this.webClient.removeAllListeners?.();
-          } catch {
-            // ignore
-          }
+          this.webSessionToken += 1;
+          this.clearWebReconnectingWatchdog();
+          const clientToLeave = this.webClient;
           this.webClient = null;
           this.webJoined = false;
+          await this.teardownWebClient(clientToLeave);
         }
       }
 
