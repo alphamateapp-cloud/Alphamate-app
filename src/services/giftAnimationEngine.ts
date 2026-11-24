@@ -25,6 +25,16 @@ import {
   UnifiedGiftKind,
 } from '../types';
 import { auth, db, handleFirestoreError, OperationType } from './firebase';
+import {
+  ALPHA_MATE_10_ANIMATED_GIFTS,
+  ALPHA_MATE_10_GIFT_BY_ID,
+} from '../data/alphaMateAnimatedGifts';
+
+export { ALPHA_MATE_10_ANIMATED_GIFTS, ALPHA_MATE_10_GIFT_BY_ID };
+
+const OFFICIAL_ADMIN_EMAIL = 'alphamateapp@gmail.com';
+let alphaMate10SyncAttemptedForUid: string | null = null;
+let alphaMate10SyncInFlight = false;
 
 export const UNIFIED_GIFT_SCHEMA_VERSION = 2;
 export const UNIFIED_GIFTS_COLLECTION = 'gifts';
@@ -61,12 +71,56 @@ function isHttpOrAssetUrl(value: unknown): value is string {
   if (typeof value !== 'string') return false;
   const trimmed = value.trim();
   if (!trimmed) return false;
+  // Explicitly reject local computer filesystem paths
+  if (
+    /^[a-zA-Z]:[\\/]/.test(trimmed) ||
+    trimmed.startsWith('file://') ||
+    trimmed.startsWith('/Users/') ||
+    trimmed.startsWith('/home/') ||
+    trimmed.startsWith('/var/') ||
+    trimmed.startsWith('/tmp/')
+  ) {
+    return false;
+  }
   return (
     trimmed.startsWith('https://') ||
     trimmed.startsWith('http://') ||
     trimmed.startsWith('/') ||
     trimmed.startsWith('data:image/')
   );
+}
+
+/**
+ * Normalizes deployed `/assets/aistudio/...` URLs:
+ * - For runtime playback & IndexedDB pre-caching, resolves same-origin `/assets/aistudio/...`
+ *   so switching between dev/preview/production domains never causes CORS errors.
+ */
+function normalizeDeployedAssetRuntimeUrl(url: string): string {
+  if (!url) return '';
+  const match = url.match(/^https?:\/\/[^/]+(\/assets\/aistudio\/.+)$/i);
+  if (match && match[1]) {
+    return match[1];
+  }
+  return url;
+}
+
+/**
+ * Resolves a relative deployed `/assets/...` path to a full public HTTPS URL when persisting
+ * to Firestore from an HTTPS deployment. Never returns local computer paths.
+ */
+function toFirestorePublicAssetUrl(url: string, preferAbsoluteHttps = false): string {
+  const trimmed = String(url || '').trim();
+  if (!trimmed || !isHttpOrAssetUrl(trimmed)) return '';
+  if (
+    preferAbsoluteHttps &&
+    trimmed.startsWith('/') &&
+    typeof window !== 'undefined' &&
+    typeof window.location?.origin === 'string' &&
+    /^https:\/\//i.test(window.location.origin)
+  ) {
+    return `${window.location.origin}${trimmed}`.slice(0, 2048);
+  }
+  return trimmed.slice(0, 2048);
 }
 
 function isStaticRasterImageUrl(url: string): boolean {
@@ -105,7 +159,7 @@ function inferAnimationFormatFromUrl(url: string): AdvancedGiftFormat | undefine
 function pickFirstValidUrl(candidates: unknown[], excludeStaticImages = false): string {
   for (const candidate of candidates) {
     if (!isHttpOrAssetUrl(candidate)) continue;
-    const trimmed = candidate.trim();
+    const trimmed = normalizeDeployedAssetRuntimeUrl(candidate.trim());
     if (excludeStaticImages && isStaticRasterImageUrl(trimmed)) continue;
     return trimmed;
   }
@@ -385,7 +439,7 @@ export function normalizeUnifiedGiftDoc(
     typeof raw.show !== 'boolean' ||
     typeof raw.createdAtMs !== 'number' ||
     typeof raw.updatedAtMs !== 'number' ||
-    !['draft', 'processing', 'published', 'disabled'].includes(String(raw.status || ''));
+    !['draft', 'processing', 'published', 'disabled', 'Active', 'Paused'].includes(String(raw.status || ''));
 
   return {
     id,
@@ -591,9 +645,79 @@ function sortUnifiedGifts(list: UnifiedGiftConfig[]): UnifiedGiftConfig[] {
 }
 
 /**
+ * Idempotent background Firestore sync for the official 10 Alpha Mate animated gifts.
+ * - Runs automatically when Official Admin (`alphamateapp@gmail.com`) is authenticated —
+ *   no need to open the Admin Panel.
+ * - Writes ONLY missing 10-gift docs (or upgrades pre-v2 static stubs matching those 10 IDs).
+ * - Preserves ALL unrelated existing gifts and NEVER overwrites already-published v2 Admin edits.
+ */
+export async function syncAlphaMate10GiftsToFirestoreIfAdmin(
+  canonicalById?: Map<string, UnifiedGiftConfig>
+): Promise<{ syncedCount: number; skipped: boolean }> {
+  const currentUser = auth.currentUser;
+  const email = currentUser?.email?.toLowerCase() || '';
+  if (!currentUser || email !== OFFICIAL_ADMIN_EMAIL || currentUser.emailVerified !== true) {
+    return { syncedCount: 0, skipped: true };
+  }
+  if (alphaMate10SyncInFlight || alphaMate10SyncAttemptedForUid === currentUser.uid) {
+    return { syncedCount: 0, skipped: true };
+  }
+
+  const existingMap = canonicalById || new Map<string, UnifiedGiftConfig>();
+  const toWrite = ALPHA_MATE_10_ANIMATED_GIFTS.filter((packGift) => {
+    const existing = existingMap.get(packGift.id);
+    if (!existing) return true;
+    // Upgrade pre-v2 or static-only stub matching one of the 10 official IDs so its WEBM plays
+    if ((existing.schemaVersion ?? 1) < UNIFIED_GIFT_SCHEMA_VERSION || existing.giftKind !== 'animated') {
+      return existing.status === 'published';
+    }
+    return false;
+  });
+
+  if (toWrite.length === 0) {
+    alphaMate10SyncAttemptedForUid = currentUser.uid;
+    return { syncedCount: 0, skipped: false };
+  }
+
+  alphaMate10SyncInFlight = true;
+  try {
+    const batch = writeBatch(db);
+    for (const packGift of toWrite) {
+      const { safeId, payload } = buildUnifiedGiftFirestorePayload(packGift, {
+        useActiveStatusLabel: true,
+        resolveAbsoluteHttpsUrls: true,
+      });
+      batch.set(doc(db, UNIFIED_GIFTS_COLLECTION, safeId), payload, { merge: false });
+    }
+    batch.set(
+      doc(db, 'gift_catalog_meta', 'default_seed'),
+      {
+        initialized: true,
+        schemaVersion: UNIFIED_GIFT_SCHEMA_VERSION,
+        alphaMate10PackImportedAt: new Date().toISOString(),
+        alphaMate10PackCount: ALPHA_MATE_10_ANIMATED_GIFTS.length,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+    await batch.commit();
+    alphaMate10SyncAttemptedForUid = currentUser.uid;
+    return { syncedCount: toWrite.length, skipped: false };
+  } catch (error) {
+    console.warn('[UnifiedGiftCatalog] Auto-sync of 10 animated gifts skipped:', error);
+    return { syncedCount: 0, skipped: true };
+  } finally {
+    alphaMate10SyncInFlight = false;
+  }
+}
+
+/**
  * SINGLE UNIFIED REAL-TIME GIFT CATALOG SUBSCRIPTION (`/gifts` canonical collection).
  * - Subscribes to EVERY document in `/gifts` (both static and animated) without filtering out
  *   pre-v2 docs missing `priority`, guaranteeing 100% visibility in Admin Catalog.
+ * - Always merges the official 10 Alpha Mate animated gifts (`ALPHA_MATE_10_ANIMATED_GIFTS`)
+ *   so all 10 PNG thumbnails & WEBM animations work immediately in Live & Party rooms
+ *   without depending on the Admin panel, while preserving every existing gift.
  * - Performs a one-time read-only discovery check against deprecated `/advancedGifts` so any
  *   unmigrated animated gifts remain visible until Admin runs one-click schema unification.
  */
@@ -610,22 +734,62 @@ export function subscribeToUnifiedGiftCatalog(
   let catalogReady = false;
   let explicitlyInitialized = false;
   let disposed = false;
+  let deferredAdminSyncTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const scheduleAdminPackSync = () => {
+    if (disposed || !catalogReady) return;
+    if (deferredAdminSyncTimer !== undefined) {
+      clearTimeout(deferredAdminSyncTimer);
+    }
+    deferredAdminSyncTimer = setTimeout(() => {
+      deferredAdminSyncTimer = undefined;
+      if (disposed || !catalogReady) return;
+      void syncAlphaMate10GiftsToFirestoreIfAdmin(canonicalById);
+    }, 2500);
+  };
 
   const emit = () => {
     if (disposed) return;
     const merged = new Map<string, UnifiedGiftConfig>();
 
-    // 1. Seed legacy `/advancedGifts` records ONLY when not yet present in canonical `/gifts`
+    // 1. Seed the official 10 Alpha Mate animated gifts first so all 10 PNG thumbnails & WEBM
+    //    animations are immediately live for every room participant (independent of Admin Panel).
+    for (const packGift of ALPHA_MATE_10_ANIMATED_GIFTS) {
+      merged.set(packGift.id, packGift);
+    }
+
+    // 2. Seed legacy `/advancedGifts` records ONLY when not yet present in canonical `/gifts`
     legacyById.forEach((legacyDoc, id) => {
-      merged.set(id, legacyDoc);
+      if (!merged.has(id) || legacyDoc.giftKind === 'animated') {
+        merged.set(id, legacyDoc);
+      }
     });
 
-    // 2. Canonical `/gifts` records ALWAYS take precedence
+    // 3. Canonical `/gifts` records ALWAYS preserve existing gifts and take precedence
     canonicalById.forEach((docItem, id) => {
       const legacyMatch = legacyById.get(id);
-      // If a legacy `/gifts` sticker doc shares an ID with an unmigrated `/advancedGifts` doc
-      // and the `/gifts` doc doesn't have the animation URL yet, preserve the animation until synced.
-      if (legacyMatch && docItem.giftKind === 'static' && docItem.needsSchemaSync && legacyMatch.giftKind === 'animated') {
+      const officialPackMatch = ALPHA_MATE_10_GIFT_BY_ID.get(id);
+
+      if (
+        officialPackMatch &&
+        ((docItem.schemaVersion ?? 1) < UNIFIED_GIFT_SCHEMA_VERSION || docItem.giftKind !== 'animated') &&
+        docItem.status === 'published'
+      ) {
+        // Existing pre-v2 static stub matching one of the 10 official IDs: upgrade with real WEBM + PNG
+        merged.set(id, {
+          ...officialPackMatch,
+          name: docItem.name || officialPackMatch.name,
+          coins: officialPackMatch.coins,
+          needsSchemaSync: true,
+        });
+      } else if (
+        legacyMatch &&
+        docItem.giftKind === 'static' &&
+        docItem.needsSchemaSync &&
+        legacyMatch.giftKind === 'animated'
+      ) {
+        // If a legacy `/gifts` sticker doc shares an ID with an unmigrated `/advancedGifts` doc
+        // and the `/gifts` doc doesn't have the animation URL yet, preserve the animation until synced.
         merged.set(id, {
           ...legacyMatch,
           name: docItem.name || legacyMatch.name,
@@ -642,18 +806,22 @@ export function subscribeToUnifiedGiftCatalog(
       }
     });
 
-    // 3. Ensure default 10,000-coin Alpha Mate Test Gift is always present if not overridden in `/gifts`
+    // 4. Ensure default 10,000-coin Alpha Mate Test Gift is always present if not overridden in `/gifts`
     if (!merged.has(ALPHA_MATE_TEST_GIFT_ID)) {
       merged.set(ALPHA_MATE_TEST_GIFT_ID, DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG);
     }
 
     const sorted = sortUnifiedGifts(Array.from(merged.values()));
-    preloadGiftAnimationAssets(sorted);
+    preloadGiftAnimationAssets(sorted, 14);
     onUpdate({
       gifts: sorted,
       initialized: explicitlyInitialized || (catalogReady && canonicalById.size > 0),
       stats: computeSyncStats(sorted),
     });
+
+    if (catalogReady) {
+      scheduleAdminPackSync();
+    }
   };
 
   // Canonical `/gifts` real-time listener
@@ -676,6 +844,12 @@ export function subscribeToUnifiedGiftCatalog(
       emit();
     }
   );
+
+  // Trigger silent Firestore persistence as soon as Official Admin authenticates (even if Admin Panel is never opened)
+  const unsubscribeAuthSync = auth.onAuthStateChanged((user) => {
+    if (disposed || !catalogReady || !user) return;
+    scheduleAdminPackSync();
+  });
 
   // Catalog meta seed marker listener
   const unsubscribeMeta = onSnapshot(
@@ -711,7 +885,12 @@ export function subscribeToUnifiedGiftCatalog(
 
   return () => {
     disposed = true;
+    if (deferredAdminSyncTimer !== undefined) {
+      clearTimeout(deferredAdminSyncTimer);
+      deferredAdminSyncTimer = undefined;
+    }
     unsubscribeCatalog();
+    unsubscribeAuthSync();
     unsubscribeMeta();
   };
 }
@@ -813,7 +992,7 @@ export function detectDeviceGiftCapabilities(): DeviceFormatCapabilities {
  */
 const preloadedAssetUrls = new Set<string>();
 
-export function preloadGiftAnimationAssets(configs: UnifiedGiftConfig[], maxPreload = 8): void {
+export function preloadGiftAnimationAssets(configs: UnifiedGiftConfig[], maxPreload = 14): void {
   if (typeof document === 'undefined' || typeof window === 'undefined') return;
   const published = configs
     .filter((g) => g.status === 'published')
@@ -926,7 +1105,13 @@ function sanitizeSafeGiftId(rawId: string): string {
  * Constructs a strictly validated, schema-v2 Firestore payload matching `firebase-blueprint.json`
  * (`UnifiedGift`) and `firestore.rules` (`isValidUnifiedGift`) for BOTH static and animated gifts.
  */
-export function buildUnifiedGiftFirestorePayload(config: UnifiedGiftConfig): {
+export function buildUnifiedGiftFirestorePayload(
+  config: UnifiedGiftConfig,
+  options?: {
+    useActiveStatusLabel?: boolean;
+    resolveAbsoluteHttpsUrls?: boolean;
+  }
+): {
   safeId: string;
   payload: Record<string, any>;
   normalizedClientConfig: UnifiedGiftConfig;
@@ -934,8 +1119,12 @@ export function buildUnifiedGiftFirestorePayload(config: UnifiedGiftConfig): {
   const safeId = sanitizeSafeGiftId(config.id);
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
+  const preferAbsoluteHttps = Boolean(options?.resolveAbsoluteHttpsUrls);
 
-  const rawAnimUrl = (config.optimizedFileUrl || config.animationUrl || config.originalFileUrl || '').trim().slice(0, 2048);
+  const rawAnimUrl = toFirestorePublicAssetUrl(
+    config.optimizedFileUrl || config.animationUrl || config.originalFileUrl || '',
+    preferAbsoluteHttps
+  );
   const requestedStatic = config.giftKind === 'static';
   const hasPlayableAnim = !requestedStatic && Boolean(rawAnimUrl);
   const giftKind: UnifiedGiftKind = hasPlayableAnim ? 'animated' : 'static';
@@ -953,9 +1142,17 @@ export function buildUnifiedGiftFirestorePayload(config: UnifiedGiftConfig): {
     ? config.status
     : 'published';
   const isActive = safeStatus === 'published';
+  const persistedStatus = options?.useActiveStatusLabel
+    ? isActive
+      ? 'Active'
+      : 'Paused'
+    : safeStatus;
   const tier = computeGiftTier(safeCoins);
 
-  const safeThumb = (config.thumbnailUrl || config.previewImageUrl || '').trim().slice(0, 2048);
+  const safeThumb = toFirestorePublicAssetUrl(
+    config.thumbnailUrl || config.previewImageUrl || '',
+    preferAbsoluteHttps
+  );
   const safeAnimFormat: AdvancedGiftFormat =
     inferAnimationFormatFromUrl(rawAnimUrl) ||
     (['webm', 'svga', 'mov', 'mp4', 'svg', 'gif'].includes(config.format) ? config.format : 'webm');
@@ -978,6 +1175,14 @@ export function buildUnifiedGiftFirestorePayload(config: UnifiedGiftConfig): {
 
   const createdTs = timestampToIsoAndMs(config.createdAt || config.createdAtMs, config.createdAtMs || nowMs);
   const createdBy = String(config.createdBy || auth.currentUser?.uid || 'official_admin').slice(0, 128);
+  const resolvedOriginalAnimUrl =
+    giftKind === 'animated'
+      ? toFirestorePublicAssetUrl(config.originalFileUrl || rawAnimUrl, preferAbsoluteHttps)
+      : '';
+  const resolvedOptimizedAnimUrl =
+    giftKind === 'animated'
+      ? toFirestorePublicAssetUrl(config.optimizedFileUrl || rawAnimUrl, preferAbsoluteHttps)
+      : '';
 
   const payload = stripUndefinedDeep({
     id: safeId,
@@ -996,14 +1201,10 @@ export function buildUnifiedGiftFirestorePayload(config: UnifiedGiftConfig): {
     iconUrl: safeThumb,
     imageUrl: safeThumb,
     format: giftKind === 'animated' ? safeAnimFormat : 'static',
+    animationFormat: giftKind === 'animated' ? safeAnimFormat : 'static',
     animationType: safeAnimType,
-    originalFileUrl: giftKind === 'animated' ? (config.originalFileUrl || rawAnimUrl).trim().slice(0, 2048) : '',
-    optimizedFileUrl:
-      giftKind === 'animated' && config.optimizedFileUrl
-        ? config.optimizedFileUrl.trim().slice(0, 2048)
-        : giftKind === 'animated'
-        ? rawAnimUrl
-        : '',
+    originalFileUrl: resolvedOriginalAnimUrl,
+    optimizedFileUrl: resolvedOptimizedAnimUrl,
     animationUrl: giftKind === 'animated' ? rawAnimUrl : '',
     videoUrl:
       giftKind === 'animated' && (safeAnimFormat === 'webm' || safeAnimFormat === 'mp4' || safeAnimFormat === 'mov')
@@ -1031,7 +1232,7 @@ export function buildUnifiedGiftFirestorePayload(config: UnifiedGiftConfig): {
     enableSound: config.enableSound !== false,
     edgeFeather: Boolean(config.edgeFeather),
     blendMode: config.blendMode === 'screen' || config.blendMode === 'lighten' ? config.blendMode : 'normal',
-    status: safeStatus,
+    status: persistedStatus,
     isActive,
     show: isActive,
     conversionStatus: ['not_needed', 'pending', 'converting', 'completed', 'failed', 'unsupported'].includes(

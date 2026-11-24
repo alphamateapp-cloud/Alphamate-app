@@ -73,7 +73,7 @@ async function sendActivity(includeLocation: boolean) {
         location,
         locationConsent: includeLocation,
         platform: Capacitor.getPlatform(),
-        appVersion: '1.2.0',
+        appVersion: '1.3.0',
         userAgent: navigator.userAgent.slice(0, 500),
       }),
     });

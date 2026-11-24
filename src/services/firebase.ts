@@ -52,6 +52,7 @@ import {
   writeBatch,
   getDocs,
   increment,
+  enableNetwork,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { sanitizeAvatarString } from '../utils/imageCompressor';
@@ -100,19 +101,22 @@ function isEmbeddedIframeContext(): boolean {
 }
 
 function createFirestoreInstance() {
-  // Use automatic long-polling detection instead of unconditionally forcing XHR long-polling.
-  // Modern browsers & Cloud Run proxies use fast native HTTP/2 Fetch streaming cleanly,
-  // while restrictive firewalls/proxies still auto-fallback to long-polling without stalling.
-  const baseSettings = {
-    experimentalAutoDetectLongPolling: true,
-    ignoreUndefinedProperties: true,
-  };
-
-  // Inside embedded/sandboxed iframes (such as preview windows), storage partitioning and
-  // rapid reloads can stall persistentMultipleTabManager() IndexedDB leases for 10+ seconds.
-  // Use memoryLocalCache() in iframes so each session opens its own primary connection immediately,
-  // while keeping persistentLocalCache() for standalone web/PWA and native Capacitor apps.
+  // Inside embedded/sandboxed iframes (such as preview windows), HTTP/2 Fetch streaming
+  // frequently stalls for 15-30s before auto-detect falls back, and persistentMultipleTabManager()
+  // IndexedDB leases can stall across reloads. Use experimentalForceLongPolling + memoryLocalCache
+  // in iframes so every write & listener connects immediately, while keeping auto-detect +
+  // persistentLocalCache for standalone web/PWA and native Capacitor apps.
   const isIframe = isEmbeddedIframeContext();
+  const baseSettings = isIframe
+    ? {
+        experimentalForceLongPolling: true,
+        ignoreUndefinedProperties: true,
+      }
+    : {
+        experimentalAutoDetectLongPolling: true,
+        ignoreUndefinedProperties: true,
+      };
+
   const canUseIndexedDb =
     !isIframe &&
     typeof window !== 'undefined' &&
@@ -415,6 +419,11 @@ if (typeof window !== 'undefined') {
 
   waitForAuthReady.then(() => {
     testConnection().catch(() => {});
+  });
+
+  // Immediately re-enable Firestore transport when mobile internet recovers after a drop
+  window.addEventListener('online', () => {
+    enableNetwork(db).catch(() => {});
   });
 } else {
   testConnection().catch(() => {});
@@ -1171,27 +1180,41 @@ export async function syncPartyRoomToFirestore(room: any, options?: { overwrite?
     };
 
     const sanitizedPayload = stripUndefinedFields(sanitizedRoom);
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        await withFirestoreTimeout(
-          options?.overwrite
-            ? setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload)
-            : setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload, { merge: true }),
-          15000,
-          'Party Room sync'
+    // Issue a SINGLE Firestore write so we never double-queue writes on slow connections.
+    // Firestore SDK automatically queues & flushes this write if the connection briefly lags.
+    const writePromise = options?.overwrite
+      ? setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload)
+      : setDoc(doc(db, 'partyRooms', room.id), sanitizedPayload, { merge: true });
+
+    try {
+      await withFirestoreTimeout(writePromise, 10000, 'Party Room sync');
+    } catch (err) {
+      if (isTransientFirestoreNetworkError(err)) {
+        // Keep the queued SDK write alive in the background and report only real delayed errors
+        // (e.g. permission-denied or quota) without blocking the host from launching the room.
+        writePromise.catch((delayedErr) => {
+          if (isFirestoreQuotaExceededError(delayedErr)) {
+            notifyFirestoreQuotaExceeded();
+            return;
+          }
+          if (!isTransientFirestoreNetworkError(delayedErr)) {
+            console.warn(`Delayed Party Room Firestore write error (${path}):`, delayedErr);
+          }
+        });
+        console.warn(
+          `Transient Firestore delay syncing ${path}; continuing launch while queued write commits in background.`
         );
-        break;
-      } catch (err) {
-        if (attempt === 1 && isTransientFirestoreNetworkError(err)) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-          continue;
-        }
-        throw err;
+        return;
       }
+      throw err;
     }
   } catch (error) {
     if (isFirestoreQuotaExceededError(error)) {
       notifyFirestoreQuotaExceeded();
+      return;
+    }
+    if (isTransientFirestoreNetworkError(error)) {
+      console.warn(`Transient Firestore network delay on ${path}; queued write will sync automatically.`);
       return;
     }
     handleFirestoreError(error, OperationType.WRITE, path);
@@ -1570,21 +1593,22 @@ export async function syncLiveStreamToFirestore(stream: any) {
     };
 
     const sanitizedPayload = stripUndefinedFields(sanitizedStream);
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      try {
-        await withFirestoreTimeout(
-          setDoc(doc(db, 'liveStreams', stream.id), sanitizedPayload, { merge: true }),
-          18000,
-          'Live Stream sync'
+    const writePromise = setDoc(doc(db, 'liveStreams', stream.id), sanitizedPayload, { merge: true });
+    try {
+      await withFirestoreTimeout(writePromise, 10000, 'Live Stream sync');
+    } catch (err) {
+      if (isTransientFirestoreNetworkError(err)) {
+        writePromise.catch((delayedErr) => {
+          if (isFirestoreQuotaExceededError(delayedErr)) {
+            notifyFirestoreQuotaExceeded();
+          }
+        });
+        console.warn(
+          `Transient Firestore delay syncing ${path}; queued live stream write will commit in background.`
         );
-        break;
-      } catch (err) {
-        if (attempt === 1 && isTransientFirestoreNetworkError(err)) {
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-          continue;
-        }
-        throw err;
+        return;
       }
+      throw err;
     }
   } catch (error) {
     if (isFirestoreQuotaExceededError(error)) {

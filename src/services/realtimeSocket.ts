@@ -1,9 +1,12 @@
 import { auth } from './firebase';
 
 const PRODUCTION_API_URL = 'https://api.alphamate.app';
-const RECONNECT_BASE_MS = 1000;
-const RECONNECT_MAX_MS = 25000;
-const HEARTBEAT_MS = 20000;
+const RECONNECT_BASE_MS = 800;
+const RECONNECT_MAX_MS = 12000;
+const HEARTBEAT_MS = 15000;
+const ZOMBIE_SOCKET_TIMEOUT_MS = 38000;
+const CONNECT_HANDSHAKE_TIMEOUT_MS = 12000;
+const OUTBOX_TTL_MS = 60000;
 
 export interface RealtimeViewerProfile {
   id: string;
@@ -94,6 +97,9 @@ class RealtimeSocketService {
   private reconnectAttempts = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private connectTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
+  private lastServerActivityAt = 0;
+  private networkListenersBound = false;
 
   private activeJoinedRoom: {
     roomType: 'live' | 'party';
@@ -103,13 +109,48 @@ class RealtimeSocketService {
     roomSessionId?: string;
   } | null = null;
 
-  private pendingOutbox: Array<Record<string, any>> = [];
+  private pendingOutbox: Array<{ payload: Record<string, any>; queuedAtMs: number }> = [];
   private discoveryListeners = new Set<(event: DiscoveryEvent) => void>();
   private roomListeners = new Map<string, Set<(event: RoomSocketEvent) => void>>();
+
+  constructor() {
+    this.bindNetworkRecoveryListeners();
+  }
+
+  private bindNetworkRecoveryListeners(): void {
+    if (this.networkListenersBound || typeof window === 'undefined') return;
+    this.networkListenersBound = true;
+
+    const recoverNow = () => {
+      if (this.manuallyDisconnected || !auth.currentUser) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const isZombie =
+        this.ws &&
+        this.ws.readyState === WebSocket.OPEN &&
+        this.lastServerActivityAt > 0 &&
+        Date.now() - this.lastServerActivityAt > ZOMBIE_SOCKET_TIMEOUT_MS;
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN || !this.isAuthed || isZombie) {
+        void this.forceReconnect();
+      } else {
+        this.sendRaw({ type: 'ping' });
+      }
+    };
+
+    window.addEventListener('online', recoverNow);
+    window.addEventListener('pageshow', recoverNow);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          recoverNow();
+        }
+      });
+    }
+  }
 
   public ensureConnected(): void {
     if (typeof window === 'undefined' || typeof WebSocket === 'undefined') return;
     if (!auth.currentUser) return;
+    this.bindNetworkRecoveryListeners();
     this.manuallyDisconnected = false;
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
@@ -170,10 +211,18 @@ class RealtimeSocketService {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
     }
+    if (this.connectTimeoutTimer) {
+      clearTimeout(this.connectTimeoutTimer);
+      this.connectTimeoutTimer = null;
+    }
   }
 
   private async connectInternal(): Promise<void> {
     if (this.isConnecting || this.manuallyDisconnected) return;
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      this.scheduleReconnect();
+      return;
+    }
     const user = auth.currentUser;
     if (!user) return;
 
@@ -190,13 +239,35 @@ class RealtimeSocketService {
       this.ws = socket;
       this.isAuthed = false;
 
+      if (this.connectTimeoutTimer) clearTimeout(this.connectTimeoutTimer);
+      this.connectTimeoutTimer = setTimeout(() => {
+        this.connectTimeoutTimer = null;
+        if (this.ws === socket && socket.readyState === WebSocket.CONNECTING) {
+          this.isConnecting = false;
+          try {
+            socket.close();
+          } catch {
+            // ignore
+          }
+          if (!this.manuallyDisconnected && auth.currentUser) {
+            this.scheduleReconnect();
+          }
+        }
+      }, CONNECT_HANDSHAKE_TIMEOUT_MS);
+
       socket.onopen = () => {
+        if (this.connectTimeoutTimer) {
+          clearTimeout(this.connectTimeoutTimer);
+          this.connectTimeoutTimer = null;
+        }
         this.isConnecting = false;
         this.reconnectAttempts = 0;
+        this.lastServerActivityAt = Date.now();
         this.startPingLoop();
       };
 
       socket.onmessage = (event) => {
+        this.lastServerActivityAt = Date.now();
         this.handleIncomingMessage(event.data);
       };
 
@@ -205,6 +276,10 @@ class RealtimeSocketService {
       };
 
       socket.onclose = () => {
+        if (this.connectTimeoutTimer) {
+          clearTimeout(this.connectTimeoutTimer);
+          this.connectTimeoutTimer = null;
+        }
         this.isConnecting = false;
         this.isAuthed = false;
         if (this.ws === socket) {
@@ -228,10 +303,11 @@ class RealtimeSocketService {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer || this.manuallyDisconnected) return;
-    const delay = Math.min(
+    const baseDelay = Math.min(
       RECONNECT_MAX_MS,
-      RECONNECT_BASE_MS * Math.pow(1.7, Math.min(this.reconnectAttempts, 6))
+      RECONNECT_BASE_MS * Math.pow(1.6, Math.min(this.reconnectAttempts, 6))
     );
+    const delay = Math.round(baseDelay + Math.random() * 450);
     this.reconnectAttempts += 1;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
@@ -244,9 +320,16 @@ class RealtimeSocketService {
   private startPingLoop(): void {
     if (this.pingTimer) clearInterval(this.pingTimer);
     this.pingTimer = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        this.sendRaw({ type: 'ping' });
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      // Detect zombie half-open cellular TCP sockets where readyState stays OPEN but server is unreachable
+      if (
+        this.lastServerActivityAt > 0 &&
+        Date.now() - this.lastServerActivityAt > ZOMBIE_SOCKET_TIMEOUT_MS
+      ) {
+        void this.forceReconnect();
+        return;
       }
+      this.sendRaw({ type: 'ping' });
     }, HEARTBEAT_MS);
   }
 
@@ -266,8 +349,10 @@ class RealtimeSocketService {
       this.sendRaw(payload);
       return;
     }
-    if (this.pendingOutbox.length < 40) {
-      this.pendingOutbox.push(payload);
+    const now = Date.now();
+    this.pendingOutbox = this.pendingOutbox.filter((item) => now - item.queuedAtMs < OUTBOX_TTL_MS);
+    if (this.pendingOutbox.length < 60) {
+      this.pendingOutbox.push({ payload, queuedAtMs: now });
     }
   }
 
@@ -287,9 +372,12 @@ class RealtimeSocketService {
           : {}),
       });
     }
+    const now = Date.now();
     const queue = this.pendingOutbox.splice(0, this.pendingOutbox.length);
-    for (const msg of queue) {
-      this.sendRaw(msg);
+    for (const item of queue) {
+      if (now - item.queuedAtMs < OUTBOX_TTL_MS) {
+        this.sendRaw(item.payload);
+      }
     }
   }
 
@@ -301,6 +389,7 @@ class RealtimeSocketService {
       return;
     }
     if (!msg || typeof msg.type !== 'string') return;
+    if (msg.type === 'pong') return;
 
     if (msg.type === 'auth:ok') {
       this.isAuthed = true;

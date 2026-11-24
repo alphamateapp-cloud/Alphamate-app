@@ -184,7 +184,7 @@ export const CLOUDFLARE_TURN_URLS = [
 export const PARTY_PARTICIPANT_STALE_MS = 15_000;
 const PARTY_HEARTBEAT_INTERVAL_MS = 4000;
 const RECONNECT_GRACE_MS = 2500;
-const MAX_RECONNECT_ATTEMPTS = 3;
+const MAX_RECONNECT_ATTEMPTS = 8;
 const LIVE_HEARTBEAT_INTERVAL_MS = 5000;
 
 class RealtimeSfuStreamingEngine {
@@ -239,6 +239,13 @@ class RealtimeSfuStreamingEngine {
       window.addEventListener('online', () => {
         this.autoReconnectAllDisconnected();
       });
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') {
+            this.autoReconnectAllDisconnected();
+          }
+        });
+      }
     }
   }
 

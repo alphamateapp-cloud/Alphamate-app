@@ -30,6 +30,7 @@ interface GiftAnimationOverlayProps {
    */
   layer?: 'background' | 'foreground' | 'both';
   onDurationDetected?: (eventId: string, durationMs: number) => void;
+  onProgress?: (eventId: string, currentTimeMs: number, durationMs: number) => void;
 }
 
 export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
@@ -37,6 +38,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   onComplete,
   layer = 'both',
   onDurationDetected,
+  onProgress,
 }) => {
   const [isMuted, setIsMuted] = useState(() => audioManager.getIsMuted());
   const [shakeScreen, setShakeScreen] = useState(false);
@@ -225,6 +227,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
         layer={layer}
         onComplete={handleUniversalGiftComplete}
         onDurationDetected={onDurationDetected}
+        onProgress={onProgress}
       />
     );
   }

@@ -1562,7 +1562,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'schemaVersion', 'giftKind', 'name', 'description', 'category',
           'coins', 'costInCoins', 'price', 'tier', 'icon', 'thumbnailUrl',
-          'previewImageUrl', 'iconUrl', 'imageUrl', 'format', 'animationType',
+          'previewImageUrl', 'iconUrl', 'imageUrl', 'format', 'animationFormat', 'animationType',
           'originalFileUrl', 'optimizedFileUrl', 'animationUrl', 'videoUrl',
           'webmUrl', 'svgaUrl', 'displayMode', 'transparencyStatus', 'opacity',
           'durationMs', 'loop', 'playbackSpeed', 'position', 'scale', 'priority',
@@ -1590,6 +1590,7 @@ service cloud.firestore {
           (data.giftKind == 'static' && data.format in ['static', 'png'])
           || (data.giftKind == 'animated' && data.format in ['webm', 'svga', 'mov', 'mp4', 'svg', 'gif'])
         )
+        && (!('animationFormat' in data) || data.animationFormat in ['static', 'png', 'webm', 'svga', 'mov', 'mp4', 'svg', 'gif'])
         && (!('animationType' in data) || data.animationType in ['sparkle', 'heart', 'car', 'rocket', 'crown', 'dragon', 'yacht', 'ring'])
         && (!('originalFileUrl' in data) || (data.originalFileUrl is string && data.originalFileUrl.size() <= 2048))
         && (!('optimizedFileUrl' in data) || (data.optimizedFileUrl is string && data.optimizedFileUrl.size() <= 2048))
@@ -1612,7 +1613,7 @@ service cloud.firestore {
         && (!('enableSound' in data) || data.enableSound is bool)
         && (!('edgeFeather' in data) || data.edgeFeather is bool)
         && (!('blendMode' in data) || data.blendMode in ['normal', 'screen', 'lighten'])
-        && data.status in ['draft', 'processing', 'published', 'disabled']
+        && data.status in ['draft', 'processing', 'published', 'disabled', 'Active', 'Paused']
         && data.isActive is bool
         && data.show is bool
         && data.conversionStatus in ['not_needed', 'pending', 'converting', 'completed', 'failed', 'unsupported']

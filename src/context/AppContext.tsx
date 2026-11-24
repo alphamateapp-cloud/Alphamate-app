@@ -35,6 +35,7 @@ import {
   UnifiedGiftCatalogSyncStats,
 } from '../types';
 import {
+  ALPHA_MATE_10_ANIMATED_GIFTS,
   DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
   unifiedGiftToGift,
   subscribeToUnifiedGiftCatalog,
@@ -715,17 +716,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
-  const [unifiedCatalogGifts, setUnifiedCatalogGifts] = useState<UnifiedGiftConfig[]>([
+  const [unifiedCatalogGifts, setUnifiedCatalogGifts] = useState<UnifiedGiftConfig[]>(() => [
     DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
+    ...ALPHA_MATE_10_ANIMATED_GIFTS,
   ]);
-  const [catalogSyncStats, setCatalogSyncStats] = useState<UnifiedGiftCatalogSyncStats>({
-    total: 1,
-    animatedCount: 1,
-    staticCount: 0,
-    publishedCount: 1,
-    draftOrPausedCount: 0,
-    legacyCount: 0,
-    unindexedCount: 0,
+  const [catalogSyncStats, setCatalogSyncStats] = useState<UnifiedGiftCatalogSyncStats>(() => {
+    const initialCount = 1 + ALPHA_MATE_10_ANIMATED_GIFTS.length;
+    return {
+      total: initialCount,
+      animatedCount: initialCount,
+      staticCount: 0,
+      publishedCount: initialCount,
+      draftOrPausedCount: 0,
+      legacyCount: 0,
+      unindexedCount: 0,
+    };
   });
   const [adminCatalogLoaded, setAdminCatalogLoaded] = useState(false);
 
@@ -740,7 +745,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const published = unifiedCatalogGifts
       .filter((cfg) => cfg.status === 'published')
       .map(unifiedGiftToGift);
-    if (!adminCatalogLoaded && published.length <= 1) {
+    if (!adminCatalogLoaded && published.length === 0) {
       const merged = new Map<string, Gift>();
       published.forEach((gift) => merged.set(gift.id, gift));
       VIRTUAL_GIFTS.forEach((gift) => {

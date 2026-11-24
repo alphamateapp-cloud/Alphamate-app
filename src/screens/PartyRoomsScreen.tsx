@@ -359,6 +359,8 @@ export const PartyRoomsScreen: React.FC = () => {
   const seenPartyGiftEventIdsRef = useRef<Set<string>>(new Set());
   const partyMessagesHydratedRef = useRef<boolean>(false);
   const partyDetectedGiftDurationRef = useRef<{ eventId: string; durationMs: number } | null>(null);
+  const partyLastGiftHeartbeatRef = useRef<{ eventId: string; at: number } | null>(null);
+  const lastPartyResetKeyRef = useRef<{ roomId: string; sessionId: string }>({ roomId: '', sessionId: '' });
   const [activeVipEntry, setActiveVipEntry] = useState<VipEntryEvent | null>(null);
   const vipEntryQueueRef = useRef<VipEntryEvent[]>([]);
   const vipEntryNotifiedRef = useRef<Map<string, number>>(new Map());
@@ -415,6 +417,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
   const handlePartyGiftOverlayComplete = useCallback(() => {
     partyDetectedGiftDurationRef.current = null;
+    partyLastGiftHeartbeatRef.current = null;
     const nextQueued = partyGiftQueueRef.current.shift() || null;
     setActivePartyGiftAnimation(nextQueued);
   }, []);
@@ -425,63 +428,75 @@ export const PartyRoomsScreen: React.FC = () => {
     if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
       partyDetectedGiftDurationRef.current = { eventId, durationMs };
     }
+    partyLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
   }, []);
+
+  const handlePartyGiftPlaybackProgress = useCallback(
+    (eventId: string, _currentTimeMs: number, durationMs: number) => {
+      partyLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
+      if (Number.isFinite(durationMs) && durationMs > 0) {
+        const current = partyDetectedGiftDurationRef.current;
+        if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
+          partyDetectedGiftDurationRef.current = { eventId, durationMs };
+        }
+      }
+    },
+    []
+  );
 
   // Quietly pre-warm published animated gift media into IndexedDB + blob URLs on room entry
   // so gift playback starts immediately (<30ms) for everyone in the Party Room.
   useEffect(() => {
     if (!activePartyRoom?.id || !publishedCatalogGifts.length) return;
-    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 8);
+    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 14);
   }, [activePartyRoom?.id, publishedCatalogGifts]);
 
   useEffect(() => {
     return audioFilter.subscribe(setActiveVoiceFilter);
   }, []);
 
-  // Parent-side wall-clock fail-safe: ensures Android WebView timer throttling never leaves a gift stuck
-  // while NEVER cutting off a full-duration advanced gift video (10s, 15s, 20s+ WebM/MOV/MP4) early.
+  // Parent-side inactivity fail-safe:
+  // - For advanced video/animated gifts, NEVER cuts off an animation on a fixed wall-clock timer
+  //   (8s, 10s, 12s, 20s+ play to natural onEnded even after slow-network pre-buffering).
+  // - Only intervenes if playback heartbeats go completely silent for 45s+ (dead Android WebView).
   useEffect(() => {
     if (!activePartyGiftAnimation) return;
     const coins = Number(
       activePartyGiftAnimation.gift?.costInCoins ?? activePartyGiftAnimation.gift?.coins ?? 0
     );
     const advConfig = activePartyGiftAnimation.gift?.advancedConfig;
-    const advDurationMs = advConfig?.durationMs || 0;
-    const analysisDurationMs =
-      advConfig?.analysis?.durationSec && Number.isFinite(advConfig.analysis.durationSec)
-        ? Math.ceil(advConfig.analysis.durationSec * 1000)
-        : 0;
-    const playbackSpeed = Math.min(2, Math.max(0.5, advConfig?.playbackSpeed ?? 1));
-    const effectiveAdvMs = Math.max(advDurationMs, analysisDurationMs);
-    const baseMaxMs = advConfig
-      ? Math.min(120_000, Math.ceil((effectiveAdvMs > 0 ? effectiveAdvMs : 20_000) / playbackSpeed) + 15_000)
-      : coins <= 100
-      ? 3500
-      : 9000;
     const startedAt = Date.now();
     const eventId = activePartyGiftAnimation.id;
+    partyLastGiftHeartbeatRef.current = { eventId, at: startedAt };
     let cleared = false;
 
-    const getEffectiveMaxMs = () => {
-      const detected = partyDetectedGiftDurationRef.current;
-      if (detected && detected.eventId === eventId && detected.durationMs > 0) {
-        return Math.max(baseMaxMs, Math.min(120_000, Math.ceil(detected.durationMs) + 15_000));
+    const legacyMaxMs = coins <= 100 ? 3800 : 9500;
+    const ADV_INACTIVITY_LIMIT_MS = 45_000;
+    const ADV_HARD_CEILING_MS = 180_000;
+
+    const isStuckOrExpired = () => {
+      const now = Date.now();
+      if (!advConfig) {
+        return now - startedAt >= legacyMaxMs;
       }
-      return baseMaxMs;
+      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
+      const hb = partyLastGiftHeartbeatRef.current;
+      const lastActiveAt = hb && hb.eventId === eventId ? hb.at : startedAt;
+      return now - lastActiveAt >= ADV_INACTIVITY_LIMIT_MS;
     };
 
     const clearIfExpired = () => {
       if (cleared) return;
-      if (Date.now() - startedAt >= getEffectiveMaxMs()) {
+      if (isStuckOrExpired()) {
         cleared = true;
         partyDetectedGiftDurationRef.current = null;
+        partyLastGiftHeartbeatRef.current = null;
         const nextQueued = partyGiftQueueRef.current.shift() || null;
         setActivePartyGiftAnimation((prev) => (prev?.id === eventId ? nextQueued : prev));
       }
     };
 
-    const failSafeTimeout = setTimeout(() => clearIfExpired(), baseMaxMs + 100);
-    const failSafePoll = setInterval(() => clearIfExpired(), 500);
+    const failSafePoll = setInterval(() => clearIfExpired(), 1000);
     const onResume = () => clearIfExpired();
 
     window.addEventListener('focus', onResume);
@@ -490,7 +505,6 @@ export const PartyRoomsScreen: React.FC = () => {
 
     return () => {
       cleared = true;
-      clearTimeout(failSafeTimeout);
       clearInterval(failSafePoll);
       window.removeEventListener('focus', onResume);
       window.removeEventListener('pageshow', onResume);
@@ -499,12 +513,28 @@ export const PartyRoomsScreen: React.FC = () => {
   }, [activePartyGiftAnimation?.id]);
 
   // Reset party gift overlay, chat, hearts, PK & givers whenever entering, switching sessions, or leaving a Party Room
+  // (Ignores non-breaking sessionId hydration from '' -> 'ps_...' on slow networks so active gifts are never wiped mid-play!)
   useEffect(() => {
+    const nextRoomId = activePartyRoom?.id || '';
+    const nextSessionId = activePartyRoom?.sessionId || '';
+    const prev = lastPartyResetKeyRef.current;
+    const isSameRoomHydratingSession =
+      nextRoomId !== '' &&
+      prev.roomId === nextRoomId &&
+      prev.sessionId === '' &&
+      nextSessionId !== '';
+
+    lastPartyResetKeyRef.current = { roomId: nextRoomId, sessionId: nextSessionId };
+    if (isSameRoomHydratingSession) {
+      return;
+    }
+
     partyJoinedAtRef.current = Date.now();
     seenPartyBannerIdsRef.current.clear();
     seenPartyGiftEventIdsRef.current.clear();
     partyMessagesHydratedRef.current = false;
     partyDetectedGiftDurationRef.current = null;
+    partyLastGiftHeartbeatRef.current = null;
     partyGiftQueueRef.current = [];
     lastSyncedViewerCountRef.current = -1;
     setActivePartyGiftAnimation(null);
@@ -532,9 +562,11 @@ export const PartyRoomsScreen: React.FC = () => {
     setRightRoomPKScore(0);
     audioManager.stopAll();
     return () => {
-      setActivePartyGiftAnimation(null);
-      clearActiveGiftBanner();
-      audioManager.stopAll();
+      if (!activePartyRoom?.id) {
+        setActivePartyGiftAnimation(null);
+        clearActiveGiftBanner();
+        audioManager.stopAll();
+      }
     };
   }, [activePartyRoom?.id, activePartyRoom?.sessionId, clearActiveGiftBanner]);
 
@@ -3068,6 +3100,7 @@ export const PartyRoomsScreen: React.FC = () => {
           }
           onComplete={handlePartyGiftOverlayComplete}
           onDurationDetected={handlePartyGiftDurationDetected}
+          onProgress={handlePartyGiftPlaybackProgress}
         />
 
         {/* Toast Alert Feedback */}
@@ -3104,6 +3137,7 @@ export const PartyRoomsScreen: React.FC = () => {
           }
           onComplete={handlePartyGiftOverlayComplete}
           onDurationDetected={handlePartyGiftDurationDetected}
+          onProgress={handlePartyGiftPlaybackProgress}
         />
 
         {/* =====================================================================

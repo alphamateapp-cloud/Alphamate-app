@@ -185,6 +185,7 @@ export const LiveStreamScreen: React.FC = () => {
   const seenLiveGiftEventIdsRef = useRef<Set<string>>(new Set());
   const liveMessagesHydratedRef = useRef<boolean>(false);
   const liveDetectedGiftDurationRef = useRef<{ eventId: string; durationMs: number } | null>(null);
+  const liveLastGiftHeartbeatRef = useRef<{ eventId: string; at: number } | null>(null);
   const [activeGiftCombo, setActiveGiftCombo] = useState<LiveGiftComboState | null>(null);
   const [comboRemainingMs, setComboRemainingMs] = useState<number>(0);
   const [giftQuantityMultiplier, setGiftQuantityMultiplier] = useState<number>(1);
@@ -218,6 +219,7 @@ export const LiveStreamScreen: React.FC = () => {
 
   const handleGiftOverlayComplete = useCallback(() => {
     liveDetectedGiftDurationRef.current = null;
+    liveLastGiftHeartbeatRef.current = null;
     const nextQueued = giftQueueRef.current.shift() || null;
     setActiveGiftAnimation(nextQueued);
   }, []);
@@ -228,13 +230,27 @@ export const LiveStreamScreen: React.FC = () => {
     if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
       liveDetectedGiftDurationRef.current = { eventId, durationMs };
     }
+    liveLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
   }, []);
+
+  const handleLiveGiftPlaybackProgress = useCallback(
+    (eventId: string, _currentTimeMs: number, durationMs: number) => {
+      liveLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
+      if (Number.isFinite(durationMs) && durationMs > 0) {
+        const current = liveDetectedGiftDurationRef.current;
+        if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
+          liveDetectedGiftDurationRef.current = { eventId, durationMs };
+        }
+      }
+    },
+    []
+  );
 
   // Quietly pre-warm published animated gift media into IndexedDB + blob URLs on broadcast entry
   // so gift animations launch immediately (<30ms) for Host & all Viewers.
   useEffect(() => {
     if (!activeStream?.id || !publishedCatalogGifts.length) return;
-    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 8);
+    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 14);
   }, [activeStream?.id, publishedCatalogGifts]);
 
   // Top Givers Leaderboard State for Current Broadcast Session
@@ -1285,50 +1301,48 @@ export const LiveStreamScreen: React.FC = () => {
     };
   }, [activeStream?.id, clearActiveGiftBanner]);
 
-  // Parent-side wall-clock fail-safe: ensures Android WebView timer throttling never leaves a gift stuck
-  // while NEVER cutting off a full-duration advanced gift video (10s, 15s, 20s+ WebM/MOV/MP4) early.
+  // Parent-side inactivity fail-safe:
+  // - For advanced video/animated gifts, NEVER cuts off an animation on a fixed wall-clock timer
+  //   (8s, 10s, 12s, 20s+ play to natural onEnded even after slow-network pre-buffering).
+  // - Only intervenes if playback heartbeats go completely silent for 45s+ (dead Android WebView).
   useEffect(() => {
     if (!activeGiftAnimation) return;
     const coins = Number(
       activeGiftAnimation.gift?.costInCoins ?? activeGiftAnimation.gift?.coins ?? 0
     );
     const advConfig = activeGiftAnimation.gift?.advancedConfig;
-    const advDurationMs = advConfig?.durationMs || 0;
-    const analysisDurationMs =
-      advConfig?.analysis?.durationSec && Number.isFinite(advConfig.analysis.durationSec)
-        ? Math.ceil(advConfig.analysis.durationSec * 1000)
-        : 0;
-    const playbackSpeed = Math.min(2, Math.max(0.5, advConfig?.playbackSpeed ?? 1));
-    const effectiveAdvMs = Math.max(advDurationMs, analysisDurationMs);
-    const baseMaxMs = advConfig
-      ? Math.min(120_000, Math.ceil((effectiveAdvMs > 0 ? effectiveAdvMs : 20_000) / playbackSpeed) + 15_000)
-      : coins <= 100
-      ? 3500
-      : 9000;
     const startedAt = Date.now();
     const eventId = activeGiftAnimation.id;
+    liveLastGiftHeartbeatRef.current = { eventId, at: startedAt };
     let cleared = false;
 
-    const getEffectiveMaxMs = () => {
-      const detected = liveDetectedGiftDurationRef.current;
-      if (detected && detected.eventId === eventId && detected.durationMs > 0) {
-        return Math.max(baseMaxMs, Math.min(120_000, Math.ceil(detected.durationMs) + 15_000));
+    const legacyMaxMs = coins <= 100 ? 3800 : 9500;
+    const ADV_INACTIVITY_LIMIT_MS = 45_000;
+    const ADV_HARD_CEILING_MS = 180_000;
+
+    const isStuckOrExpired = () => {
+      const now = Date.now();
+      if (!advConfig) {
+        return now - startedAt >= legacyMaxMs;
       }
-      return baseMaxMs;
+      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
+      const hb = liveLastGiftHeartbeatRef.current;
+      const lastActiveAt = hb && hb.eventId === eventId ? hb.at : startedAt;
+      return now - lastActiveAt >= ADV_INACTIVITY_LIMIT_MS;
     };
 
     const clearIfExpired = () => {
       if (cleared) return;
-      if (Date.now() - startedAt >= getEffectiveMaxMs()) {
+      if (isStuckOrExpired()) {
         cleared = true;
         liveDetectedGiftDurationRef.current = null;
+        liveLastGiftHeartbeatRef.current = null;
         const nextQueued = giftQueueRef.current.shift() || null;
         setActiveGiftAnimation((prev) => (prev?.id === eventId ? nextQueued : prev));
       }
     };
 
-    const failSafeTimeout = setTimeout(() => clearIfExpired(), baseMaxMs + 100);
-    const failSafePoll = setInterval(() => clearIfExpired(), 500);
+    const failSafePoll = setInterval(() => clearIfExpired(), 1000);
     const onResume = () => clearIfExpired();
 
     window.addEventListener('focus', onResume);
@@ -1337,7 +1351,6 @@ export const LiveStreamScreen: React.FC = () => {
 
     return () => {
       cleared = true;
-      clearTimeout(failSafeTimeout);
       clearInterval(failSafePoll);
       window.removeEventListener('focus', onResume);
       window.removeEventListener('pageshow', onResume);
@@ -1733,6 +1746,7 @@ export const LiveStreamScreen: React.FC = () => {
         }
         onComplete={handleGiftOverlayComplete}
         onDurationDetected={handleLiveGiftDurationDetected}
+        onProgress={handleLiveGiftPlaybackProgress}
       />
 
       {/* Floating Microphone Muted Indicator (Host or Viewer perspective) */}
@@ -1823,6 +1837,7 @@ export const LiveStreamScreen: React.FC = () => {
         }
         onComplete={handleGiftOverlayComplete}
         onDurationDetected={handleLiveGiftDurationDetected}
+        onProgress={handleLiveGiftPlaybackProgress}
       />
 
       {/* Interactive Rapid-Succession Gift Combo Counter HUD */}

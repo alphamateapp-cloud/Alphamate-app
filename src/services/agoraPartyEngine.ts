@@ -29,8 +29,8 @@ type StartOptions = PartyCallbacks & {
   roomParticipants?: PartyProfile[];
 };
 
-const MAX_RECONNECT_ATTEMPTS = 5;
-const TOKEN_FETCH_TIMEOUT_MS = 10_000;
+const MAX_RECONNECT_ATTEMPTS = 12;
+const TOKEN_FETCH_TIMEOUT_MS = 15_000;
 const SPEAKING_HOLD_MS = 450;
 const NATIVE_SPEAKING_VOLUME_THRESHOLD = 28; // 0..255 Agora Android scale (filters ambient room hum)
 const WEB_SPEAKING_VOLUME_THRESHOLD = 8; // 0..100 Agora Web SDK scale
@@ -84,6 +84,38 @@ class AgoraPartyEngine {
   private webSessionToken = 0;
   private webReconnectingWatchdog: ReturnType<typeof setTimeout> | null = null;
   private webRemoteAudioTracks = new Map<number, any>();
+  private networkListenersBound = false;
+
+  constructor() {
+    this.bindNetworkRecoveryListeners();
+  }
+
+  private bindNetworkRecoveryListeners(): void {
+    if (this.networkListenersBound || typeof window === 'undefined') return;
+    this.networkListenersBound = true;
+
+    const triggerRecoveryIfDisconnected = (reason: string) => {
+      if (this.manualStop || !this.roomId || !this.userId) return;
+      if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+      const state = String(this.networkStats.connectionState || '').toLowerCase();
+      if (state === 'failed' || state === 'disconnected' || state === 'reconnecting') {
+        this.clearReconnectTimer();
+        this.reconnectAttempt = 0;
+        this.scheduleReconnect(reason);
+      }
+    };
+
+    window.addEventListener('online', () => {
+      triggerRecoveryIfDisconnected('Network restored — reconnecting Party Voice');
+    });
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') {
+          triggerRecoveryIfDisconnected('App resumed — verifying Party Voice connection');
+        }
+      });
+    }
+  }
 
   private enqueueOp<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.opQueue.then(fn, fn);
