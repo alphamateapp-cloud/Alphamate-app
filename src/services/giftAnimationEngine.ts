@@ -17,82 +17,248 @@ import { auth, db, handleFirestoreError, OperationType } from './firebase';
 
 
 
+function isHttpOrAssetUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  return (
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('/') ||
+    trimmed.startsWith('data:image/')
+  );
+}
+
+function isStaticRasterImageUrl(url: string): boolean {
+  const clean = decodeURIComponent(url.split('?')[0] || url).toLowerCase();
+  return /\.(png|jpe?g|webp|bmp|ico|avif)$/.test(clean) || url.startsWith('data:image/png') || url.startsWith('data:image/jpeg') || url.startsWith('data:image/webp');
+}
+
+function inferAnimationFormatFromUrl(url: string): AdvancedGiftFormat | undefined {
+  if (!url) return undefined;
+  let decoded = url;
+  try {
+    decoded = decodeURIComponent(url);
+  } catch {
+    decoded = url;
+  }
+  const cleanPath = decoded.split('?')[0].toLowerCase();
+  if (cleanPath.endsWith('.webm') || cleanPath.includes('.webm/')) return 'webm';
+  if (cleanPath.endsWith('.svga') || cleanPath.includes('.svga/')) return 'svga';
+  if (cleanPath.endsWith('.mp4') || cleanPath.includes('.mp4/')) return 'mp4';
+  if (cleanPath.endsWith('.mov') || cleanPath.includes('.mov/')) return 'mov';
+  if (cleanPath.endsWith('.gif') || cleanPath.includes('.gif/')) return 'gif';
+  if (cleanPath.endsWith('.svg') || cleanPath.includes('.svg/')) return 'svg';
+  return undefined;
+}
+
+function pickFirstValidUrl(candidates: unknown[], excludeStaticImages = false): string {
+  for (const candidate of candidates) {
+    if (!isHttpOrAssetUrl(candidate)) continue;
+    const trimmed = candidate.trim();
+    if (excludeStaticImages && isStaticRasterImageUrl(trimmed)) continue;
+    return trimmed;
+  }
+  return '';
+}
+
+function sanitizeEmojiIcon(rawIcon: unknown, fallback = '🎁'): string {
+  if (typeof rawIcon !== 'string') return fallback;
+  const trimmed = rawIcon.trim();
+  if (!trimmed || isHttpOrAssetUrl(rawIcon)) return fallback;
+  return trimmed.slice(0, 16);
+}
+
 /**
  * Converts the Admin Panel's shared `/gifts` catalog document into the app gift model.
+ * Extracts uploaded PNG gift box icons and WebM/SVGA/MP4 animation files across all
+ * Admin Panel field naming conventions so admin-added gifts ALWAYS show their PNG image
+ * in the Gift Box and render their real uploaded animation when sent.
  * StoreScreen intentionally does not consume this catalog; it remains a separate shop.
  */
-function normalizeAdminCatalogGift(id: string, raw: Record<string, any>): Gift {
-  const coins = Math.max(0, Math.floor(Number(raw.coins ?? raw.costInCoins ?? 0) || 0));
+export function normalizeAdminCatalogGift(id: string, raw: Record<string, any>): Gift {
+  const coins = Math.max(0, Math.floor(Number(raw.coins ?? raw.costInCoins ?? raw.price ?? 0) || 0));
   const validAnimations: GiftAnimationType[] = ['sparkle', 'heart', 'car', 'rocket', 'crown', 'dragon', 'yacht', 'ring'];
   const animationType = validAnimations.includes(raw.animationType) ? raw.animationType : 'sparkle';
-  const rawFormat = String(raw.format || raw.animationFormat || 'EMOJI').toLowerCase().trim();
+
+  const rawFormat = String(raw.format || raw.animationFormat || raw.mediaType || raw.fileType || '').toLowerCase().trim();
   const formatAliases: Record<string, AdvancedGiftFormat> = {
-    svga: 'svga', 'video/svga': 'svga', webm: 'webm', 'video/webm': 'webm',
-    mp4: 'mp4', 'video/mp4': 'mp4', mov: 'mov', 'video/quicktime': 'mov',
-    svg: 'svg', 'image/svg+xml': 'svg', gif: 'gif', 'image/gif': 'gif',
+    svga: 'svga',
+    'video/svga': 'svga',
+    'application/svga': 'svga',
+    webm: 'webm',
+    'video/webm': 'webm',
+    mp4: 'mp4',
+    'video/mp4': 'mp4',
+    mov: 'mov',
+    'video/quicktime': 'mov',
+    svg: 'svg',
+    'image/svg+xml': 'svg',
+    gif: 'gif',
+    'image/gif': 'gif',
   };
-  const format = formatAliases[rawFormat];
-  const assetUrl = String(raw.assetUrl || raw.downloadUrl || raw.animationUrl || raw.optimizedFileUrl || raw.originalFileUrl || '');
-  const durationValue = Number(raw.durationMs) || (Number(raw.duration) ? Number(raw.duration) * 1000 : 3000);
+
+  // 1. Extract the uploaded PNG/image thumbnail shown inside the Gift Box (never show generic 🎁 box when PNG exists)
+  const rawIconIsUrl = isHttpOrAssetUrl(raw.icon) ? raw.icon.trim() : '';
+  const pngThumbnailUrl = pickFirstValidUrl([
+    raw.thumbnailUrl,
+    raw.previewImageUrl,
+    raw.iconUrl,
+    raw.imageUrl,
+    raw.pngUrl,
+    raw.iconImageUrl,
+    raw.iconImage,
+    raw.staticIconUrl,
+    raw.cardImageUrl,
+    raw.previewUrl,
+    raw.thumbnail,
+    raw.image,
+    raw.photoUrl,
+    raw.photoURL,
+    raw.coverUrl,
+    rawIconIsUrl,
+    rawFormat === 'png' ? raw.assetUrl : '',
+    rawFormat === 'png' ? raw.fileUrl : '',
+  ]);
+
+  // 2. Extract the uploaded WebM / SVGA / MP4 / MOV / GIF / SVG animation asset URL
+  const animationAssetUrl = pickFirstValidUrl(
+    [
+      raw.optimizedFileUrl,
+      raw.animationUrl,
+      raw.webmUrl,
+      raw.videoUrl,
+      raw.svgaUrl,
+      raw.mp4Url,
+      raw.movUrl,
+      raw.animationFileUrl,
+      raw.animationAssetUrl,
+      raw.effectUrl,
+      raw.giftVideoUrl,
+      raw.mediaUrl,
+      raw.assetUrl,
+      raw.downloadUrl,
+      raw.fileUrl,
+      raw.originalFileUrl,
+    ],
+    true // never treat a static PNG thumbnail as a video animation
+  );
+
+  // 3. Determine playable animation format: explicit alias OR inferred from animation URL path
+  const inferredFromUrl = inferAnimationFormatFromUrl(animationAssetUrl);
+  const format: AdvancedGiftFormat | undefined =
+    formatAliases[rawFormat] ||
+    inferredFromUrl ||
+    (animationAssetUrl && (rawFormat === 'video' || rawFormat === 'animation') ? 'webm' : undefined) ||
+    (animationAssetUrl && !isStaticRasterImageUrl(animationAssetUrl) ? 'webm' : undefined);
+
+  const isVideoLike = format === 'webm' || format === 'mp4' || format === 'mov';
+  const rawDurationMs = Number(raw.durationMs);
+  const rawDurationSec = Number(raw.duration);
+  const durationValue =
+    Number.isFinite(rawDurationMs) && rawDurationMs > 0
+      ? rawDurationMs
+      : Number.isFinite(rawDurationSec) && rawDurationSec > 0
+      ? rawDurationSec * 1000
+      : isVideoLike
+      ? 10_000
+      : 4_000;
   const durationMs = Math.min(60_000, Math.max(1_500, Math.round(durationValue)));
+
   const modeRaw = String(raw.animationMode || raw.displayMode || '').toLowerCase();
   const displayMode: GiftDisplayMode =
-    modeRaw.includes('overlay') || modeRaw.includes('background') ? 'overlay_background'
-      : modeRaw.includes('semi') ? 'semi_transparent' : 'transparent';
+    modeRaw.includes('overlay') || modeRaw.includes('background')
+      ? 'overlay_background'
+      : modeRaw.includes('transparent') && !modeRaw.includes('semi')
+      ? 'transparent'
+      : format === 'svga' || format === 'svg'
+      ? 'transparent'
+      : 'semi_transparent';
+
   const statusRaw = String(raw.status || 'Active').toLowerCase();
-  const isActive = ['active', 'published', 'enabled', 'show'].includes(statusRaw) && raw.show !== false && raw.isActive !== false;
+  const isActive =
+    ['active', 'published', 'enabled', 'show'].includes(statusRaw) &&
+    raw.show !== false &&
+    raw.isActive !== false;
+
   const timestampToIso = (value: any, fallback: string) => {
     if (value && typeof value.toDate === 'function') return value.toDate().toISOString();
     if (typeof value === 'string' && value) return value;
     return fallback;
   };
   const nowIso = new Date().toISOString();
-  const advancedConfig: AdvancedGiftConfig | undefined = format && assetUrl ? {
-    id,
-    name: String(raw.name || 'Gift'),
-    description: String(raw.description || ''),
-    category: String(raw.category || 'Others'),
-    coins,
-    icon: String(raw.icon || '🎁'),
-    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || raw.iconUrl || ''),
-    previewImageUrl: String(raw.previewImageUrl || raw.thumbnailUrl || raw.imageUrl || raw.iconUrl || ''),
-    originalFileUrl: String(raw.originalFileUrl || raw.animationUrl || raw.assetUrl || raw.downloadUrl || assetUrl),
-    optimizedFileUrl: String(raw.optimizedFileUrl || raw.animationUrl || raw.assetUrl || raw.downloadUrl || assetUrl),
-    animationUrl: assetUrl,
-    format,
-    displayMode,
-    transparencyStatus: raw.transparencyStatus === 'alpha_verified' || raw.transparencyStatus === 'opaque_no_alpha' || raw.transparencyStatus === 'alpha_limited_gif'
-      ? raw.transparencyStatus : (format === 'svga' || format === 'svg' ? 'alpha_verified' : 'opaque_no_alpha'),
-    opacity: Math.min(100, Math.max(10, Number(raw.opacity ?? 90) || 90)),
-    durationMs,
-    loop: Boolean(raw.loop),
-    playbackSpeed: Math.min(2, Math.max(0.5, Number(raw.playbackSpeed ?? 1) || 1)),
-    position: ['top', 'bottom', 'center', 'fullscreen'].includes(String(raw.position)) ? raw.position : 'fullscreen',
-    scale: Math.min(1.5, Math.max(0.4, Number(raw.scale ?? 1) || 1)),
-    priority: Math.max(1, Math.min(100, Number(raw.priority ?? raw.order) || 50)),
-    enableParticles: raw.enableParticles !== false,
-    enableSound: raw.enableSound !== false,
-    edgeFeather: typeof raw.edgeFeather === 'boolean' ? raw.edgeFeather : (format === 'mp4' || format === 'webm' || format === 'mov'),
-    blendMode: raw.blendMode === 'screen' || raw.blendMode === 'lighten' ? raw.blendMode : 'normal',
-    status: isActive ? 'published' : 'disabled',
-    conversionStatus: 'not_needed',
-    conversionMessage: 'Loaded from the shared Alpha Mate Admin Gift Gallery catalog.',
-    isTestGift: Boolean(raw.isTestGift),
-    createdAt: timestampToIso(raw.createdAt, nowIso),
-    createdAtMs: Number(raw.createdAtMs) || Date.now(),
-    updatedAt: timestampToIso(raw.updatedAt, nowIso),
-    createdBy: typeof raw.createdBy === 'string' ? raw.createdBy : 'admin_catalog',
-  } : undefined;
+  const cleanEmoji = sanitizeEmojiIcon(raw.icon, '🎁');
 
-  const tier = coins >= 20_000 ? 'mythic' : coins >= 5_000 ? 'legendary' : coins >= 1_000 ? 'epic' : coins >= 100 ? 'rare' : 'common';
+  const advancedConfig: AdvancedGiftConfig | undefined =
+    format && animationAssetUrl
+      ? {
+          id,
+          name: String(raw.name || 'Gift'),
+          description: String(raw.description || ''),
+          category: String(raw.category || 'Others'),
+          coins,
+          icon: cleanEmoji,
+          thumbnailUrl: pngThumbnailUrl,
+          previewImageUrl: pngThumbnailUrl,
+          originalFileUrl: String(raw.originalFileUrl || animationAssetUrl),
+          optimizedFileUrl: String(raw.optimizedFileUrl || animationAssetUrl),
+          animationUrl: animationAssetUrl,
+          format,
+          displayMode,
+          transparencyStatus:
+            raw.transparencyStatus === 'alpha_verified' ||
+            raw.transparencyStatus === 'opaque_no_alpha' ||
+            raw.transparencyStatus === 'alpha_limited_gif'
+              ? raw.transparencyStatus
+              : format === 'svga' || format === 'svg'
+              ? 'alpha_verified'
+              : 'opaque_no_alpha',
+          opacity: Math.min(100, Math.max(10, Number(raw.opacity ?? 92) || 92)),
+          durationMs,
+          loop: Boolean(raw.loop),
+          playbackSpeed: Math.min(2, Math.max(0.5, Number(raw.playbackSpeed ?? 1) || 1)),
+          position: ['top', 'bottom', 'center', 'fullscreen'].includes(String(raw.position))
+            ? raw.position
+            : 'fullscreen',
+          scale: Math.min(1.5, Math.max(0.4, Number(raw.scale ?? 1) || 1)),
+          priority: Math.max(1, Math.min(100, Number(raw.priority ?? raw.order) || 50)),
+          enableParticles: raw.enableParticles !== false,
+          enableSound: raw.enableSound !== false,
+          edgeFeather:
+            typeof raw.edgeFeather === 'boolean'
+              ? raw.edgeFeather
+              : format === 'mp4' || format === 'webm' || format === 'mov',
+          blendMode:
+            raw.blendMode === 'screen' || raw.blendMode === 'lighten' ? raw.blendMode : 'normal',
+          status: isActive ? 'published' : 'disabled',
+          conversionStatus: 'not_needed',
+          conversionMessage: 'Loaded from the shared Alpha Mate Admin Gift Gallery catalog.',
+          isTestGift: Boolean(raw.isTestGift),
+          createdAt: timestampToIso(raw.createdAt, nowIso),
+          createdAtMs: Number(raw.createdAtMs) || Date.now(),
+          updatedAt: timestampToIso(raw.updatedAt, nowIso),
+          createdBy: typeof raw.createdBy === 'string' ? raw.createdBy : 'admin_catalog',
+        }
+      : undefined;
+
+  const tier =
+    coins >= 20_000
+      ? 'mythic'
+      : coins >= 5_000
+      ? 'legendary'
+      : coins >= 1_000
+      ? 'epic'
+      : coins >= 100
+      ? 'rare'
+      : 'common';
   return {
     id,
     name: String(raw.name || 'Gift'),
-    icon: String(raw.icon || '🎁'),
+    icon: cleanEmoji,
     coins,
     costInCoins: coins,
     animationType,
-    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || raw.iconUrl || (rawFormat === 'png' ? assetUrl : '')) || undefined,
+    thumbnailUrl: pngThumbnailUrl || undefined,
     tier,
     durationMs,
     triggersScreenShake: coins >= 5_000,
@@ -404,19 +570,45 @@ function normalizeAdvancedGiftDoc(id: string, raw: Record<string, any>): Advance
   const blendMode =
     raw.blendMode === 'screen' || raw.blendMode === 'lighten' ? raw.blendMode : 'normal';
 
+  const resolvedThumb = pickFirstValidUrl([
+    raw.thumbnailUrl,
+    raw.previewImageUrl,
+    raw.iconUrl,
+    raw.imageUrl,
+    raw.pngUrl,
+    raw.iconImageUrl,
+    raw.thumbnail,
+    raw.image,
+    isHttpOrAssetUrl(raw.icon) ? raw.icon : '',
+  ]);
+  const resolvedAnim = pickFirstValidUrl(
+    [
+      raw.optimizedFileUrl,
+      raw.animationUrl,
+      raw.webmUrl,
+      raw.videoUrl,
+      raw.svgaUrl,
+      raw.mp4Url,
+      raw.assetUrl,
+      raw.downloadUrl,
+      raw.originalFileUrl,
+    ],
+    true
+  );
+
   return {
     id,
     name: String(raw.name || 'Unnamed Gift'),
     description: String(raw.description || ''),
     category: String(raw.category || 'Special'),
     coins: Math.max(1, Math.floor(Number(raw.coins ?? 100) || 100)),
-    icon: typeof raw.icon === 'string' && raw.icon.trim() ? raw.icon.trim() : '🎁',
-    thumbnailUrl: typeof raw.thumbnailUrl === 'string' ? raw.thumbnailUrl : undefined,
-    previewImageUrl: typeof raw.previewImageUrl === 'string' ? raw.previewImageUrl : undefined,
-    originalFileUrl: String(raw.originalFileUrl || raw.animationUrl || ''),
+    icon: sanitizeEmojiIcon(raw.icon, '🎁'),
+    thumbnailUrl: resolvedThumb || undefined,
+    previewImageUrl: resolvedThumb || undefined,
+    originalFileUrl: String(raw.originalFileUrl || resolvedAnim || ''),
     optimizedFileUrl: typeof raw.optimizedFileUrl === 'string' ? raw.optimizedFileUrl : undefined,
-    animationUrl: String(raw.optimizedFileUrl || raw.animationUrl || raw.assetUrl || raw.downloadUrl || raw.originalFileUrl || ''),
-    format,
+    animationUrl: resolvedAnim || String(raw.animationUrl || raw.originalFileUrl || ''),
+    format: inferAnimationFormatFromUrl(resolvedAnim) || format,
     displayMode,
     transparencyStatus,
     opacity,

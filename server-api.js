@@ -162,9 +162,54 @@ export function createApiApp() {
       headers['Content-Type'] = 'application/json';
       init.body = JSON.stringify(req.body);
     }
-    const upstreamRes = await fetchWithTimeout(targetUrl, init, 14000);
+
+    let upstreamRes = null;
+    let rawText = '';
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        upstreamRes = await fetchWithTimeout(targetUrl, init, 12000);
+        rawText = await upstreamRes.text();
+        const isTransientGateway =
+          upstreamRes.status === 502 ||
+          upstreamRes.status === 503 ||
+          upstreamRes.status === 504 ||
+          (upstreamRes.status >= 520 && upstreamRes.status <= 526);
+        if (!isTransientGateway || attempt === 1) {
+          break;
+        }
+      } catch (err) {
+        lastErr = err;
+        if (attempt === 1) throw err;
+      }
+      await new Promise((r) => setTimeout(r, 500));
+    }
+
+    if (!upstreamRes) {
+      throw lastErr || new Error('Upstream backend did not respond.');
+    }
+
     const contentType = upstreamRes.headers.get('content-type') || 'application/json';
-    const rawText = await upstreamRes.text();
+    const looksJson = contentType.toLowerCase().includes('application/json');
+    let parsedJson = null;
+    if (rawText) {
+      try {
+        parsedJson = JSON.parse(rawText);
+      } catch {
+        parsedJson = null;
+      }
+    }
+
+    if (!upstreamRes.ok && (!looksJson || !parsedJson || typeof parsedJson !== 'object')) {
+      const code =
+        upstreamRes.status >= 500 ? 'AGORA_BACKEND_UNREACHABLE' : 'UPSTREAM_ERROR';
+      return res.status(upstreamRes.status).json({
+        success: false,
+        code,
+        error: `Upstream voice backend returned HTTP ${upstreamRes.status}. Please retry.`,
+      });
+    }
+
     res.status(upstreamRes.status).type(contentType).send(rawText);
   }
 
@@ -1414,10 +1459,19 @@ export function createApiApp() {
 
       const uid = req.firebaseUser.uid;
       const idToken = req.firebaseIdToken;
-      const roomDoc =
+      let roomDoc =
         (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
         app.locals.realtimeRegistry?.getPartyRoom?.(roomId) ||
         null;
+
+      if (!roomDoc) {
+        // Brief retry to tolerate Firestore write propagation right after room creation
+        await new Promise((r) => setTimeout(r, 400));
+        roomDoc =
+          (await fetchFirestoreDocument(`partyRooms/${encodeURIComponent(roomId)}`, idToken).catch(() => null)) ||
+          app.locals.realtimeRegistry?.getPartyRoom?.(roomId) ||
+          null;
+      }
 
       if (!roomDoc || roomDoc.isActive === false) {
         return res.status(404).json({

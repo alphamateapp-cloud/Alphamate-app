@@ -63,6 +63,7 @@ import { User } from '../types';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
+import { GiftCacheBadge, GiftCacheBar, GiftIconImage } from '../components/live/GiftBoxMedia';
 import { LiveGiftComboCounter, LiveGiftComboState } from '../components/live/LiveGiftComboCounter';
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
@@ -169,8 +170,10 @@ export const LiveStreamScreen: React.FC = () => {
   const [showGiftDrawer, setShowGiftDrawer] = useState(false);
   const [showLuckyDrawModal, setShowLuckyDrawModal] = useState(false);
   const [selectedGift, setSelectedGift] = useState<Gift>(() => publishedCatalogGifts[0] || VIRTUAL_GIFTS[0]);
+  const publishedCatalogGiftsRef = useRef<Gift[]>(publishedCatalogGifts);
   // Keep the selected gift synchronized when Admin adds, edits, pauses, or removes gifts live.
   useEffect(() => {
+    publishedCatalogGiftsRef.current = publishedCatalogGifts;
     if (!publishedCatalogGifts.length) return;
     setSelectedGift((current) => publishedCatalogGifts.find((gift) => gift.id === current.id) || publishedCatalogGifts[0]);
   }, [publishedCatalogGifts]);
@@ -600,9 +603,12 @@ export const LiveStreamScreen: React.FC = () => {
           sigTs >= streamJoinedAtRef.current - 1500 &&
           Math.abs(now - sigTs) < 8000
         ) {
+          const incomingGift = sig.gift as Gift;
+          const resolvedGift =
+            publishedCatalogGiftsRef.current.find((g) => g.id === incomingGift?.id) || incomingGift;
           enqueueLiveGiftAnimation({
             id: `ws_gift_${streamId}_${sigTs}_${Math.random().toString(36).slice(2, 7)}`,
-            gift: sig.gift as Gift,
+            gift: resolvedGift,
             senderName: String(sig.senderName || 'Viewer'),
             senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
             senderVipTier: Number(sig.senderVipTier || 1),
@@ -2180,6 +2186,9 @@ export const LiveStreamScreen: React.FC = () => {
               </div>
             </div>
 
+            {/* On-device Gift Animation Cache Bar */}
+            <GiftCacheBar gifts={publishedCatalogGifts} />
+
             {/* Gift Grid (Published Multi-Format Advanced Gifts + Standard Virtual Gifts) */}
             <div className="grid grid-cols-4 gap-2 py-3.5 max-h-64 overflow-y-auto">
               {publishedCatalogGifts.map((g) => {
@@ -2220,15 +2229,11 @@ export const LiveStreamScreen: React.FC = () => {
                         VIP
                       </span>
                     )}
-                    {g.thumbnailUrl ? (
-                      <img
-                        src={g.thumbnailUrl}
-                        alt={g.name}
-                        className="w-9 h-9 object-contain mb-1 drop-shadow"
-                      />
-                    ) : (
-                      <span className="text-2xl mb-1 drop-shadow">{g.icon}</span>
-                    )}
+                    <GiftIconImage
+                      gift={g}
+                      className="w-10 h-10 object-contain mb-1 drop-shadow"
+                      emojiClassName="text-2xl mb-1 drop-shadow"
+                    />
                     <span className="text-[10.5px] font-bold text-white truncate max-w-full">
                       {g.name}
                     </span>
@@ -2236,6 +2241,7 @@ export const LiveStreamScreen: React.FC = () => {
                       <span>{(g.costInCoins ?? g.coins).toLocaleString()}</span>
                       <span className="text-[9px]">💰</span>
                     </span>
+                    <GiftCacheBadge gift={g} />
                   </div>
                 );
               })}
@@ -2267,7 +2273,11 @@ export const LiveStreamScreen: React.FC = () => {
             {/* Selected Gift Footer with Send & Combo Button */}
             <div className="flex items-center justify-between pt-2 border-t border-[#A855F7]/15 gap-2">
               <div className="flex items-center gap-2 min-w-0">
-                <span className="text-2xl shrink-0 drop-shadow">{selectedGift.icon}</span>
+                <GiftIconImage
+                  gift={selectedGift}
+                  className="w-8 h-8 object-contain shrink-0 rounded-lg drop-shadow"
+                  emojiClassName="text-2xl shrink-0 drop-shadow"
+                />
                 <div className="min-w-0">
                   <div className="text-xs font-black text-white truncate">
                     {selectedGift.name}
@@ -2276,7 +2286,7 @@ export const LiveStreamScreen: React.FC = () => {
                     )}
                   </div>
                   <div className="text-[10px] text-amber-300 font-bold">
-                    Total: {(selectedGift.coins * giftQuantityMultiplier).toLocaleString()} Coins
+                    Total: {((selectedGift.costInCoins ?? selectedGift.coins) * giftQuantityMultiplier).toLocaleString()} Coins
                   </div>
                 </div>
               </div>

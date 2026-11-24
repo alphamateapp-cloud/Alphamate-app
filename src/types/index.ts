@@ -547,11 +547,17 @@ export interface VideoPost {
 
 export interface WalletTransaction {
   id: string;
-  type: 'recharge' | 'reward' | 'gift_sent' | 'gift_received' | 'vip_upgrade' | 'withdrawal';
+  type: 'recharge' | 'reward' | 'gift_sent' | 'gift_received' | 'vip_upgrade' | 'withdrawal' | 'agency_transfer' | 'diamond_exchange';
   amount: number;
   currency: 'coins' | 'diamonds' | 'USD';
+  walletType?: 'gifting' | 'earnings';
+  direction?: 'credit' | 'debit';
+  balanceBefore?: number;
+  balanceAfter?: number;
+  referenceId?: string;
   title: string;
   date: string;
+  createdAtMs?: number;
   status: 'completed' | 'pending';
   heldDiamonds?: number;
   pkrAmount?: number;
@@ -717,13 +723,21 @@ export interface AgencyOrder {
 export interface AgencyTransaction {
   id: string;
   type: 'direct_send' | 'order_delivery';
+  agencyId?: string;
+  agencyName?: string;
+  agencyCode?: string;
+  senderUid?: string;
   recipientId: string;
   recipientUniqueId: string;
   recipientName: string;
   recipientAvatar: string;
   coins: number;
+  previousAgencyBalance?: number;
   remainingBalance: number;
+  previousRecipientCoins?: number;
+  nextRecipientCoins?: number;
   timestamp: string;
+  createdAtMs?: number;
   referenceId?: string;
 }
 

@@ -135,63 +135,150 @@ class AgoraPartyEngine {
       });
     }
 
-    const base = this.getResolvedApiBase();
-    const idToken = await user.getIdToken(forceRefreshIdToken);
-    let response: Response;
-    const abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
-    const timeoutHandle = abortController
-      ? setTimeout(() => abortController.abort(), TOKEN_FETCH_TIMEOUT_MS)
-      : null;
-    try {
-      response = await fetch(`${base}/api/agora/party/rooms/${encodeURIComponent(roomId)}/token`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          wantPublish,
-          mode: !wantPublish ? 'pk_listen' : 'party',
-        }),
-        signal: abortController?.signal,
-      });
-    } catch (networkErr: any) {
-      const isTimeout = networkErr?.name === 'AbortError';
-      throw Object.assign(
-        new Error(
-          isTimeout
-            ? 'Party Voice server timed out. Retrying connection…'
-            : `Unable to reach Party Voice server (${networkErr?.message || 'network offline'}).`
-        ),
-        { code: 'AGORA_BACKEND_UNREACHABLE' }
-      );
-    } finally {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-    }
+    const primaryBase = this.getResolvedApiBase();
+    const fallbackBase = 'https://api.alphamate.app';
+    const candidateBases =
+      !Capacitor.isNativePlatform() && primaryBase !== fallbackBase
+        ? [primaryBase, fallbackBase]
+        : [primaryBase];
 
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok || !payload?.success) {
-      const code = payload?.code || 'AGORA_TOKEN_FAILED';
-      const nonRetryable =
-        response.status === 401 ||
-        response.status === 403 ||
-        response.status === 404 ||
-        code === 'AGORA_NOT_CONFIGURED' ||
-        code === 'USER_RESTRICTED' ||
-        code === 'ROOM_NOT_FOUND';
-      throw Object.assign(
-        new Error(payload?.error || 'Unable to obtain Agora Party token.'),
-        { code, status: response.status, nonRetryable }
-      );
-    }
-
-    return payload as {
-      appId: string;
-      channelName: string;
-      uid: number;
-      token: string;
-      canPublish: boolean;
+    const attemptRequest = async (baseUrl: string, idToken: string) => {
+      const abortController = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      const timeoutHandle = abortController
+        ? setTimeout(() => abortController.abort(), TOKEN_FETCH_TIMEOUT_MS)
+        : null;
+      try {
+        const response = await fetch(
+          `${baseUrl}/api/agora/party/rooms/${encodeURIComponent(roomId)}/token`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${idToken}`,
+            },
+            body: JSON.stringify({
+              wantPublish,
+              mode: !wantPublish ? 'pk_listen' : 'party',
+            }),
+            signal: abortController?.signal,
+          }
+        );
+        const rawText = await response.text().catch(() => '');
+        let payload: any = {};
+        if (rawText) {
+          try {
+            payload = JSON.parse(rawText);
+          } catch {
+            payload = {};
+          }
+        }
+        return { response, payload };
+      } catch (networkErr: any) {
+        const isTimeout = networkErr?.name === 'AbortError';
+        throw Object.assign(
+          new Error(
+            isTimeout
+              ? 'Party Voice server timed out. Retrying connection…'
+              : `Unable to reach Party Voice server (${networkErr?.message || 'network offline'}).`
+          ),
+          { code: 'AGORA_BACKEND_UNREACHABLE', status: 0, nonRetryable: false }
+        );
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+      }
     };
+
+    let currentIdToken = await user.getIdToken(forceRefreshIdToken);
+    let didForceRefreshToken = forceRefreshIdToken;
+    let didRetryRoomLookup = false;
+    let lastError: any = null;
+
+    for (let baseIdx = 0; baseIdx < candidateBases.length; baseIdx++) {
+      const baseUrl = candidateBases[baseIdx];
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const { response, payload } = await attemptRequest(baseUrl, currentIdToken);
+
+          if (response.ok && payload?.success && payload?.token && payload?.appId) {
+            return payload as {
+              appId: string;
+              channelName: string;
+              uid: number;
+              token: string;
+              canPublish: boolean;
+            };
+          }
+
+          // Self-heal expired Firebase ID tokens once before failing with 401
+          if (response.status === 401 && !didForceRefreshToken) {
+            didForceRefreshToken = true;
+            currentIdToken = await user.getIdToken(true);
+            continue;
+          }
+
+          const rawCode = String(payload?.code || '');
+          // Brief retry if Firestore room document is still propagating right after room creation
+          if (
+            (response.status === 404 || rawCode === 'ROOM_NOT_FOUND') &&
+            !didRetryRoomLookup
+          ) {
+            didRetryRoomLookup = true;
+            await new Promise((r) => setTimeout(r, 750));
+            continue;
+          }
+
+          const isTransientServer =
+            response.status >= 500 || response.status === 429 || !payload?.error;
+          const code =
+            rawCode ||
+            (isTransientServer ? 'AGORA_BACKEND_UNREACHABLE' : 'AGORA_TOKEN_FAILED');
+          const nonRetryable =
+            (response.status === 401 && didForceRefreshToken) ||
+            response.status === 403 ||
+            response.status === 404 ||
+            code === 'AGORA_NOT_CONFIGURED' ||
+            code === 'USER_RESTRICTED' ||
+            code === 'ROOM_NOT_FOUND';
+
+          const errMessage =
+            payload?.error ||
+            (response.status
+              ? `Party Voice token request failed (HTTP ${response.status}). Retrying…`
+              : 'Unable to obtain Agora Party token.');
+
+          lastError = Object.assign(new Error(errMessage), {
+            code,
+            status: response.status,
+            nonRetryable,
+          });
+
+          if (nonRetryable) {
+            throw lastError;
+          }
+
+          // Wait briefly before retrying transient errors, or advance to fallback backend
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 650));
+          }
+        } catch (err: any) {
+          lastError = err;
+          if (err?.nonRetryable) {
+            throw err;
+          }
+          if (attempt === 0) {
+            await new Promise((r) => setTimeout(r, 650));
+          }
+        }
+      }
+    }
+
+    throw (
+      lastError ||
+      Object.assign(new Error('Party Voice server is temporarily unavailable. Tap Retry.'), {
+        code: 'AGORA_BACKEND_UNREACHABLE',
+        nonRetryable: false,
+      })
+    );
   }
 
   public syncRoomParticipants(roomId: string, profiles: PartyProfile[]) {

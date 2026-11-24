@@ -59,6 +59,13 @@ import {
   normalizeNotificationDocument,
   stripAdminProtectedUserFields,
 } from './adminModerationService';
+import {
+  buildIdempotentTxId,
+  buildSynchronizedAgencyBalanceUpdate,
+  calculateSixtyFortyGiftSplit,
+  resolveCanonicalAgencyBalance,
+  validateAgencyTransfer,
+} from './financialLedgerService';
 
 interface NativeGoogleAuthPluginContract {
   signIn(options: {
@@ -884,13 +891,22 @@ function stripUndefinedFields<T>(value: T): T {
  */
 export async function syncUserProfileToFirestore(
   userData: any,
-  options?: { background?: boolean; isNewUserDoc?: boolean }
+  options?: { background?: boolean; isNewUserDoc?: boolean; allowWalletWrite?: boolean }
 ) {
   if (!userData?.id) return;
   if (options?.background && isFirestoreQuotaExceeded()) return;
   const path = `users/${userData.id}`;
   try {
-    const { password: _omitPassword, coverImage, ...restUser } = userData;
+    const {
+      password: _omitPassword,
+      coverImage,
+      coins,
+      diamonds,
+      heldDiamonds,
+      lastAgencyCreditTxId: _omitAgencyTx,
+      lastGiftCreditTxId: _omitGiftTx,
+      ...restUser
+    } = userData;
     const rawProfile: Record<string, any> = {
       ...restUser,
       usernameLower: String(userData.username || '').trim().toLowerCase(),
@@ -899,6 +915,15 @@ export async function syncUserProfileToFirestore(
       avatar: sanitizeAvatarString(userData.avatar),
       updatedAt: new Date().toISOString(),
     };
+
+    // Never allow background profile syncs to overwrite authoritative Firestore wallet balances
+    // (coins / diamonds / heldDiamonds are mutated exclusively by atomic financial transactions
+    // or explicit wallet operations that pass allowWalletWrite: true or initial account creation).
+    if (options?.isNewUserDoc === true || options?.allowWalletWrite === true) {
+      if (coins !== undefined) rawProfile.coins = coins;
+      if (diamonds !== undefined) rawProfile.diamonds = diamonds;
+      if (heldDiamonds !== undefined) rawProfile.heldDiamonds = heldDiamonds;
+    }
 
     // Prevent oversized base64 cover images (>80KB) or undefined values from breaking setDoc
     if (typeof coverImage === 'string' && coverImage.length > 0 && coverImage.length <= 80000) {
@@ -2477,6 +2502,8 @@ export interface SixtyFortyGiftInput {
   roomId?: string;
   streamId?: string;
   reelId?: string;
+  txId?: string;
+  idempotencyKey?: string;
 }
 
 export interface SixtyFortyGiftResult {
@@ -2485,93 +2512,110 @@ export interface SixtyFortyGiftResult {
   hostDiamonds: number;
   appShareCoins: number;
   creditedHostFirestore: boolean;
+  idempotentReplay?: boolean;
   senderNextCoins?: number;
   senderNextDiamonds?: number;
+  recipientNextDiamonds?: number;
 }
 
 export async function executeSixtyFortyGiftTransaction(
   input: SixtyFortyGiftInput
 ): Promise<SixtyFortyGiftResult> {
-  const qty = Math.max(1, Math.floor(Number(input.quantity) || 1));
-  const unitCoins = Math.max(1, Math.floor(Number(input.unitCoins) || 1));
-  const totalCoins = unitCoins * qty;
-  const hostDiamonds = Math.round(totalCoins * 0.6);
-  const appShareCoins = totalCoins - hostDiamonds;
+  const split = calculateSixtyFortyGiftSplit(input.unitCoins, input.quantity);
+  const { unitCoins, quantity: qty, totalCoins, recipientEarnings: hostDiamonds, platformShare: appShareCoins } = split;
 
   const nowMs = Date.now();
   const nowIso = new Date(nowMs).toISOString();
-  const txId = `gift_${nowMs}_${Math.random().toString(36).slice(2, 8)}`;
+  const txId = input.txId
+    ? buildIdempotentTxId('gift', input.txId)
+    : buildIdempotentTxId('gift', input.idempotencyKey);
 
   const authUid = auth.currentUser?.uid;
-  if (!authUid || isFirestoreQuotaExceeded()) {
-    return {
-      txId,
-      totalCoins,
-      hostDiamonds,
-      appShareCoins,
-      creditedHostFirestore: false,
-    };
+  if (!authUid) {
+    throw new Error('You must be signed in to send gifts.');
+  }
+  if (isFirestoreQuotaExceeded()) {
+    throw new Error('Service temporarily busy (database quota). Please try again shortly.');
   }
 
-  const recipientId = String(input.recipientId || authUid).trim();
+  const recipientId = String(input.recipientId || '').trim();
+  if (!recipientId || !FIRESTORE_VALID_ID_RE.test(recipientId)) {
+    throw new Error('Invalid gift recipient account ID.');
+  }
   const isSelfRecipient = recipientId === authUid;
-  const canQueryRecipientDoc = FIRESTORE_VALID_ID_RE.test(recipientId);
 
   let creditedHostFirestore = false;
+  let idempotentReplay = false;
   let senderNextCoins: number | undefined;
   let senderNextDiamonds: number | undefined;
+  let recipientNextDiamonds: number | undefined;
+
+  const senderRef = doc(db, 'users', authUid);
+  const recipientRef = doc(db, 'users', recipientId);
+  const giftTxRef = doc(db, 'giftTransactions', txId);
+  const recipientWalletTxRef = doc(db, 'users', recipientId, 'walletTransactions', txId);
+  const senderWalletTxId = `${txId}_sent`.slice(0, 128);
+  const senderWalletTxRef = doc(db, 'users', authUid, 'walletTransactions', senderWalletTxId);
 
   try {
     await runTransaction(db, async (transaction) => {
-      const senderRef = doc(db, 'users', authUid);
-      const senderSnap = await transaction.get(senderRef);
-
-      let recipientSnap: any = null;
-      const recipientRef = canQueryRecipientDoc && !isSelfRecipient ? doc(db, 'users', recipientId) : null;
-      if (recipientRef) {
-        recipientSnap = await transaction.get(recipientRef);
-      }
-
-      if (senderSnap.exists()) {
-        const senderData = senderSnap.data() as Record<string, any>;
-        const currentCoins = Number(senderData.coins ?? 0);
-        const currentDiamonds = Number(senderData.diamonds ?? 0);
-        senderNextCoins = Math.max(0, currentCoins - totalCoins);
-
-        if (isSelfRecipient) {
-          senderNextDiamonds = currentDiamonds + hostDiamonds;
-          transaction.update(senderRef, {
-            coins: senderNextCoins,
-            diamonds: senderNextDiamonds,
-            updatedAt: nowIso,
-          });
-          creditedHostFirestore = true;
-        } else {
-          transaction.update(senderRef, {
-            coins: senderNextCoins,
-            updatedAt: nowIso,
-          });
-        }
-      }
-
-      if (recipientRef && recipientSnap && recipientSnap.exists()) {
-        const rData = recipientSnap.data() as Record<string, any>;
-        const currentRecipientDiamonds = Number(rData.diamonds ?? 0);
-        transaction.update(recipientRef, {
-          diamonds: currentRecipientDiamonds + hostDiamonds,
-          updatedAt: nowIso,
-        });
+      // Idempotency guard: if this transaction already committed, never debit or credit twice.
+      const existingTxSnap = await transaction.get(giftTxRef);
+      if (existingTxSnap.exists()) {
+        const existing = existingTxSnap.data() as Record<string, any>;
+        idempotentReplay = true;
         creditedHostFirestore = true;
+        senderNextCoins = undefined;
+        recipientNextDiamonds = undefined;
+        if (Number(existing.totalCoins) > 0) {
+          return;
+        }
+        return;
       }
 
+      const senderSnap = await transaction.get(senderRef);
+      if (!senderSnap.exists()) {
+        throw new Error('Sender wallet account was not found in Firestore.');
+      }
+
+      const recipientSnap = isSelfRecipient ? senderSnap : await transaction.get(recipientRef);
+      if (!recipientSnap.exists()) {
+        throw new Error('Recipient account was not found in Firestore. Gift cancelled.');
+      }
+
+      const senderData = senderSnap.data() as Record<string, any>;
+      const currentSenderCoins = Math.max(0, Math.floor(Number(senderData.coins ?? 0) || 0));
+      const currentSenderDiamonds = Math.max(0, Math.floor(Number(senderData.diamonds ?? 0) || 0));
+
+      if (currentSenderCoins < totalCoins) {
+        throw new Error(
+          `Insufficient Gifting Wallet coins. Required: ${totalCoins.toLocaleString()}, Available: ${currentSenderCoins.toLocaleString()}.`
+        );
+      }
+
+      senderNextCoins = currentSenderCoins - totalCoins;
+
+      const recipientData = recipientSnap.data() as Record<string, any>;
+      const currentRecipientDiamonds = Math.max(0, Math.floor(Number(recipientData.diamonds ?? 0) || 0));
+      recipientNextDiamonds = currentRecipientDiamonds + hostDiamonds;
+
+      const cleanGiftIcon = String(input.giftIcon || '🎁').slice(0, 512);
+      const cleanGiftName = String(input.giftName || 'Gift').slice(0, 128);
+      const cleanGiftId = String(input.giftId || 'gift').slice(0, 128);
+      const cleanSenderName = String(input.senderName || 'Alpha Mate User').slice(0, 128);
+      const cleanRecipientName = String(input.recipientName || recipientData.displayName || 'Creator').slice(0, 128);
+
+      // 1. Atomic immutable 60/40 Gift Ledger document
       const ledgerPayload = stripUndefinedFields({
+        id: txId,
         senderId: authUid,
-        senderName: String(input.senderName || 'Alpha Mate User').slice(0, 128),
-        recipientId: canQueryRecipientDoc ? recipientId : authUid,
-        recipientName: String(input.recipientName || 'Host').slice(0, 128),
-        giftId: String(input.giftId || 'gift').slice(0, 64),
-        giftName: String(input.giftName || 'Gift').slice(0, 80),
-        giftIcon: String(input.giftIcon || '🎁').slice(0, 32),
+        senderName: cleanSenderName,
+        recipientId,
+        recipientName: cleanRecipientName,
+        giftId: cleanGiftId,
+        giftName: cleanGiftName,
+        giftIcon: cleanGiftIcon,
+        unitCoins,
         quantity: qty,
         totalCoins,
         hostDiamonds,
@@ -2584,24 +2628,112 @@ export async function executeSixtyFortyGiftTransaction(
         createdAt: nowIso,
         createdAtMs: nowMs,
       });
+      transaction.set(giftTxRef, ledgerPayload);
 
-      transaction.set(doc(db, 'giftTransactions', txId), ledgerPayload);
+      // 2. Debit sender Gifting Wallet (`coins`) & credit recipient Earnings Wallet (`diamonds`, 60%)
+      if (isSelfRecipient) {
+        senderNextDiamonds = recipientNextDiamonds;
+        transaction.update(senderRef, {
+          coins: senderNextCoins,
+          diamonds: recipientNextDiamonds,
+          lastGiftCreditTxId: txId,
+          updatedAt: nowIso,
+        });
+      } else {
+        transaction.update(senderRef, {
+          coins: senderNextCoins,
+          updatedAt: nowIso,
+        });
+        transaction.update(recipientRef, {
+          diamonds: recipientNextDiamonds,
+          lastGiftCreditTxId: txId,
+          updatedAt: nowIso,
+        });
+      }
+
+      // 3. Recipient immutable Earnings Wallet ledger entry (60% share -> Earnings Wallet)
+      transaction.set(
+        recipientWalletTxRef,
+        stripUndefinedFields({
+          id: txId,
+          userId: recipientId,
+          type: 'gift_received',
+          direction: 'credit',
+          currency: 'diamonds',
+          walletType: 'earnings',
+          amount: hostDiamonds,
+          balanceBefore: currentRecipientDiamonds,
+          balanceAfter: recipientNextDiamonds,
+          grossGiftCoins: totalCoins,
+          platformShareCoins: appShareCoins,
+          source: `gift_${input.context}`,
+          senderId: authUid,
+          senderUid: authUid,
+          senderName: cleanSenderName,
+          recipientId,
+          recipientName: cleanRecipientName,
+          giftId: cleanGiftId,
+          giftName: cleanGiftName,
+          giftIcon: cleanGiftIcon,
+          quantity: qty,
+          referenceId: txId,
+          title: `60% Gift Earnings: ${qty > 1 ? `${qty}x ` : ''}${cleanGiftName} from ${cleanSenderName}`,
+          status: 'completed',
+          createdAt: nowIso,
+          createdAtMs: nowMs,
+        })
+      );
+
+      // 4. Sender immutable Gifting Wallet ledger entry (100% coin spend)
+      transaction.set(
+        senderWalletTxRef,
+        stripUndefinedFields({
+          id: senderWalletTxId,
+          userId: authUid,
+          type: 'gift_sent',
+          direction: 'debit',
+          currency: 'coins',
+          walletType: 'gifting',
+          amount: totalCoins,
+          balanceBefore: currentSenderCoins,
+          balanceAfter: senderNextCoins,
+          grossGiftCoins: totalCoins,
+          platformShareCoins: appShareCoins,
+          source: `gift_${input.context}`,
+          senderId: authUid,
+          senderUid: authUid,
+          senderName: cleanSenderName,
+          recipientId,
+          recipientName: cleanRecipientName,
+          giftId: cleanGiftId,
+          giftName: cleanGiftName,
+          giftIcon: cleanGiftIcon,
+          quantity: qty,
+          referenceId: txId,
+          title: `Sent ${qty > 1 ? `${qty}x ` : ''}${cleanGiftName} to ${cleanRecipientName}`,
+          status: 'completed',
+          createdAt: nowIso,
+          createdAtMs: nowMs,
+        })
+      );
+
+      creditedHostFirestore = true;
     });
   } catch (error) {
     if (isFirestoreQuotaExceededError(error)) {
       notifyFirestoreQuotaExceeded();
-      return {
-        txId,
-        totalCoins,
-        hostDiamonds,
-        appShareCoins,
-        creditedHostFirestore: false,
-      };
+      throw new Error('Database quota reached while processing gift. Please try again shortly.');
+    }
+    if (error instanceof Error && (
+      error.message.includes('Insufficient Gifting Wallet') ||
+      error.message.includes('was not found in Firestore')
+    )) {
+      throw error;
     }
     handleFirestoreError(error, OperationType.WRITE, `giftTransactions/${txId}`);
   }
 
-  if (!isFirestoreQuotaExceeded()) {
+  if (!idempotentReplay && !isFirestoreQuotaExceeded()) {
     if (input.context === 'live' && input.streamId) {
       updateDoc(doc(db, 'liveStreams', input.streamId), {
         totalGiftCoins: increment(totalCoins),
@@ -2618,32 +2750,30 @@ export async function executeSixtyFortyGiftTransaction(
       });
     }
 
-    if (canQueryRecipientDoc) {
-      sendFirestoreNotification({
-        recipientId,
-        type: 'gift',
-        category: 'gifts',
-        title: `${input.giftIcon} Gift Received (+${hostDiamonds.toLocaleString()} 💎)`,
-        message: `${input.senderName} sent ${qty > 1 ? `${qty}x ` : ''}${input.giftName} (${totalCoins.toLocaleString()} Coins). Your 60% host share (+${hostDiamonds.toLocaleString()} Diamonds) is in your wallet!`,
-        senderName: input.senderName,
-        senderAvatar: input.senderAvatar,
-        screen: 'wallet',
-        roomId: input.roomId,
-        streamId: input.streamId,
-        reelId: input.reelId,
-      }).catch((err) => console.warn('Gift notification dispatch warning:', err));
+    sendFirestoreNotification({
+      recipientId,
+      type: 'gift',
+      category: 'gifts',
+      title: `${String(input.giftIcon || '🎁').slice(0, 8)} Gift Received (+${hostDiamonds.toLocaleString()} 💎)`,
+      message: `${input.senderName} sent ${qty > 1 ? `${qty}x ` : ''}${input.giftName} (${totalCoins.toLocaleString()} Coins). Your 60% earnings share (+${hostDiamonds.toLocaleString()} Diamonds) has been credited to your Earnings Wallet!`,
+      senderName: input.senderName,
+      senderAvatar: input.senderAvatar,
+      screen: 'wallet',
+      roomId: input.roomId,
+      streamId: input.streamId,
+      reelId: input.reelId,
+    }).catch((err) => console.warn('Gift notification dispatch warning:', err));
 
-      import('./leaderboardService')
-        .then((m) =>
-          m.recordLeaderboardGiftReceived({
-            recipientId,
-            recipientName: input.recipientName,
-            giftCoins: totalCoins,
-            hostDiamonds,
-          })
-        )
-        .catch((err) => console.warn('Leaderboard gift update warning:', err));
-    }
+    import('./leaderboardService')
+      .then((m) =>
+        m.recordLeaderboardGiftReceived({
+          recipientId,
+          recipientName: input.recipientName,
+          giftCoins: totalCoins,
+          hostDiamonds,
+        })
+      )
+      .catch((err) => console.warn('Leaderboard gift update warning:', err));
   }
 
   return {
@@ -2652,8 +2782,10 @@ export async function executeSixtyFortyGiftTransaction(
     hostDiamonds,
     appShareCoins,
     creditedHostFirestore,
+    idempotentReplay,
     senderNextCoins,
     senderNextDiamonds,
+    recipientNextDiamonds,
   };
 }
 
@@ -2996,19 +3128,18 @@ export async function adminAllocateAgencyCoinsInFirestore(
         throw new Error('Agency record not found.');
       }
       const data = snap.data() as Record<string, any>;
-      if (!['coin_seller', 'coin seller agency', 'coin-seller'].includes(String(data.type || '').toLowerCase())) {
+      const normalizedType = String(data.type ?? data.agencyType ?? '').trim().toLowerCase();
+      if (!['coin_seller', 'coin seller agency', 'coin seller', 'coin-seller', 'coin_agency'].includes(normalizedType)) {
         throw new Error('Only Coin Seller agencies can hold coin stock.');
       }
-      const current = Math.max(0, Math.floor(Number(data.agencyBalance ?? data.coinBalance ?? data.coins ?? data.coinStock ?? data.stock ?? 0) || 0));
+      const current = resolveCanonicalAgencyBalance(data);
       nextBalance = current + safeAdd;
-      tx.update(agencyRef, {
-        agencyBalance: nextBalance,
-        coinBalance: nextBalance,
-        coins: nextBalance,
-        coinStock: nextBalance,
-        stock: nextBalance,
-        updatedAt: new Date().toISOString(),
-      });
+      tx.update(
+        agencyRef,
+        buildSynchronizedAgencyBalanceUpdate(data, nextBalance, {
+          updatedAt: new Date().toISOString(),
+        })
+      );
     });
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `agencies/${agencyId}`);
@@ -3037,6 +3168,408 @@ export async function updateApprovedAgencySettingsInFirestore(
   }
 }
 
+/**
+ * Looks up any real user document in Firestore by UID, uniqueId, uniqueIdLower,
+ * username, usernameLower, or email — never limited to the in-memory user slice.
+ */
+export async function findRealUserInFirestore(rawQuery: string): Promise<Record<string, any> | null> {
+  const trimmed = String(rawQuery || '').trim();
+  if (!trimmed || !auth.currentUser) return null;
+  const clean = trimmed.replace(/^@/, '').trim();
+  const lower = clean.toLowerCase();
+  const numericOnly = clean.replace(/^AM[-_]?/i, '').trim();
+
+  // 1. Direct document ID lookup
+  if (FIRESTORE_VALID_ID_RE.test(clean)) {
+    try {
+      const directSnap = await getDoc(doc(db, 'users', clean));
+      if (directSnap.exists()) {
+        return { id: directSnap.id, ...directSnap.data() };
+      }
+    } catch {
+      // fall through to indexed queries
+    }
+  }
+
+  // 2. Indexed exact-field queries
+  const queriesToTry: Array<[string, string]> = [
+    ['uniqueIdLower', lower],
+    ['uniqueId', clean],
+    ['uniqueId', clean.toUpperCase()],
+    ['usernameLower', lower],
+    ['username', clean],
+    ['email', lower],
+  ];
+  if (numericOnly && numericOnly !== clean) {
+    queriesToTry.push(['uniqueIdLower', numericOnly.toLowerCase()]);
+    queriesToTry.push(['uniqueId', numericOnly]);
+  }
+
+  for (const [field, value] of queriesToTry) {
+    if (!value) continue;
+    try {
+      const snap = await getDocs(query(collection(db, 'users'), where(field, '==', value), limit(1)));
+      if (!snap.empty) {
+        const d = snap.docs[0];
+        return { id: d.id, ...d.data() };
+      }
+    } catch {
+      // try next field
+    }
+  }
+
+  return null;
+}
+
+export interface AtomicAgencyCoinTransferInput {
+  agencyId: string;
+  recipientId: string;
+  amount: number;
+  type: 'direct_send' | 'order_delivery';
+  orderId?: string;
+  idempotencyKey?: string;
+  senderName?: string;
+}
+
+export interface AtomicAgencyCoinTransferResult {
+  txId: string;
+  referenceId: string;
+  agencyId: string;
+  agencyName: string;
+  agencyCode?: string;
+  senderUid: string;
+  recipientId: string;
+  recipientUniqueId: string;
+  recipientName: string;
+  recipientAvatar: string;
+  coins: number;
+  previousAgencyBalance: number;
+  remainingBalance: number;
+  previousRecipientCoins: number;
+  nextRecipientCoins: number;
+  type: 'direct_send' | 'order_delivery';
+  orderId?: string;
+  status: 'completed';
+  createdAt: string;
+  createdAtMs: number;
+  idempotentReplay: boolean;
+}
+
+/**
+ * Atomically transfers coins from an Official Coin Seller Agency to a recipient's
+ * Gifting Wallet (`users/{recipientId}.coins`) in a single ACID Firestore transaction:
+ *   1. Verifies idempotency (`agencyTransactions/{txId}` not already processed)
+ *   2. Validates agency ownership, Coin Seller type, active status, recipient existence & stock
+ *   3. Deducts exact `amount` from `agencies/{agencyId}` (syncing canonical `agencyBalance` + legacy aliases)
+ *   4. Credits exact `amount` to `users/{recipientId}.coins` + `lastAgencyCreditTxId`
+ *   5. Creates immutable `agencyTransactions/{txId}` ledger record
+ *   6. Creates immutable `users/{recipientId}/walletTransactions/{txId}` Gifting Wallet ledger record
+ */
+export async function transferAgencyCoinsAtomicInFirestore(
+  input: AtomicAgencyCoinTransferInput
+): Promise<AtomicAgencyCoinTransferResult> {
+  const callerUid = auth.currentUser?.uid;
+  if (!callerUid) {
+    throw new Error('Please sign in with your Agency Owner account to transfer coins.');
+  }
+  if (isFirestoreQuotaExceeded()) {
+    throw new Error('Database quota temporarily reached. Please try again in a moment.');
+  }
+
+  const agencyId = String(input.agencyId || '').trim();
+  const recipientId = String(input.recipientId || '').trim();
+  if (!agencyId || !FIRESTORE_VALID_ID_RE.test(agencyId)) {
+    throw new Error('Invalid official agency ID.');
+  }
+  if (!recipientId || !FIRESTORE_VALID_ID_RE.test(recipientId)) {
+    throw new Error('Invalid recipient user ID.');
+  }
+
+  const txId = buildIdempotentTxId('agtx', input.idempotencyKey);
+  const nowMs = Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const referenceId = `AM-AG-${txId.slice(-8).toUpperCase()}`;
+
+  const agencyRef = doc(db, 'agencies', agencyId);
+  const recipientRef = doc(db, 'users', recipientId);
+  const agencyTxRef = doc(db, 'agencyTransactions', txId);
+  const recipientWalletTxRef = doc(db, 'users', recipientId, 'walletTransactions', txId);
+
+  let committedResult: AtomicAgencyCoinTransferResult | null = null;
+
+  try {
+    await runTransaction(db, async (tx) => {
+      // 1. Idempotency check: never process the same transfer twice
+      const existingTxSnap = await tx.get(agencyTxRef);
+      if (existingTxSnap.exists()) {
+        const existing = existingTxSnap.data() as Record<string, any>;
+        committedResult = {
+          txId: existing.id || txId,
+          referenceId: existing.referenceId || referenceId,
+          agencyId: existing.agencyId || agencyId,
+          agencyName: existing.agencyName || 'Official Coin Seller Agency',
+          agencyCode: existing.agencyCode,
+          senderUid: existing.senderUid || callerUid,
+          recipientId: existing.recipientId || recipientId,
+          recipientUniqueId: existing.recipientUniqueId || '',
+          recipientName: existing.recipientName || 'Alpha Mate User',
+          recipientAvatar: existing.recipientAvatar || '',
+          coins: Number(existing.coins) || 0,
+          previousAgencyBalance: Number(existing.previousAgencyBalance) || 0,
+          remainingBalance: Number(existing.remainingBalance) || 0,
+          previousRecipientCoins: Number(existing.previousRecipientCoins) || 0,
+          nextRecipientCoins: Number(existing.nextRecipientCoins) || 0,
+          type: existing.type === 'order_delivery' ? 'order_delivery' : 'direct_send',
+          orderId: existing.orderId,
+          status: 'completed',
+          createdAt: existing.createdAt || nowIso,
+          createdAtMs: Number(existing.createdAtMs) || nowMs,
+          idempotentReplay: true,
+        };
+        return;
+      }
+
+      // 2. Read authoritative agency and recipient documents inside the transaction
+      const [agencySnap, recipientSnap] = await Promise.all([
+        tx.get(agencyRef),
+        tx.get(recipientRef),
+      ]);
+
+      const agencyData = agencySnap.exists() ? (agencySnap.data() as Record<string, any>) : null;
+      const recipientData = recipientSnap.exists() ? (recipientSnap.data() as Record<string, any>) : null;
+
+      const validation = validateAgencyTransfer({
+        agencyId,
+        agencyDoc: agencyData,
+        callerUid,
+        recipientUid: recipientId,
+        recipientExists: Boolean(recipientData),
+        amount: input.amount,
+      });
+
+      if (!validation.valid) {
+        throw new Error(validation.error || 'Agency coin transfer validation failed.');
+      }
+
+      const safeAmount = validation.safeAmount;
+      const previousAgencyBalance = validation.currentAgencyBalance;
+      const remainingBalance = validation.nextAgencyBalance;
+      const previousRecipientCoins = Math.max(0, Math.floor(Number(recipientData!.coins ?? 0) || 0));
+      const nextRecipientCoins = previousRecipientCoins + safeAmount;
+
+      const agencyName = String(
+        agencyData!.agencyName || agencyData!.name || 'Official Coin Seller Agency'
+      ).slice(0, 128);
+      const agencyCode = String(agencyData!.agencyCode || agencyData!.code || '').slice(0, 64) || undefined;
+      const recipientName = String(
+        recipientData!.displayName || recipientData!.username || 'Alpha Mate User'
+      ).slice(0, 128);
+      const recipientUniqueId = String(recipientData!.uniqueId || recipientId).slice(0, 64);
+      const recipientAvatar = String(recipientData!.avatar || '').slice(0, 2048);
+
+      // 3. Atomic Agency balance deduction (writes canonical agencyBalance + synchronized aliases)
+      tx.update(
+        agencyRef,
+        buildSynchronizedAgencyBalanceUpdate(agencyData!, remainingBalance, {
+          lastTransferTxId: txId,
+          updatedAt: nowIso,
+        })
+      );
+
+      // 4. Atomic Recipient Gifting Wallet (`coins`) credit
+      tx.update(recipientRef, {
+        coins: nextRecipientCoins,
+        lastAgencyCreditTxId: txId,
+        updatedAt: nowIso,
+      });
+
+      // 5. Immutable Agency Transaction Ledger record
+      const agencyTxPayload = stripUndefinedFields({
+        id: txId,
+        type: input.type,
+        agencyId,
+        agencyName,
+        agencyCode,
+        senderUid: callerUid,
+        recipientId,
+        recipientUniqueId,
+        recipientName,
+        recipientAvatar,
+        coins: safeAmount,
+        previousAgencyBalance,
+        remainingBalance,
+        previousRecipientCoins,
+        nextRecipientCoins,
+        referenceId,
+        orderId: input.orderId ? String(input.orderId).slice(0, 128) : undefined,
+        status: 'completed',
+        createdAt: nowIso,
+        createdAtMs: nowMs,
+      });
+      tx.set(agencyTxRef, agencyTxPayload);
+
+      // 6. Immutable Recipient Wallet Transaction record (Gifting Wallet credit)
+      const walletTxPayload = stripUndefinedFields({
+        id: txId,
+        userId: recipientId,
+        type: 'agency_transfer',
+        direction: 'credit',
+        currency: 'coins',
+        walletType: 'gifting',
+        amount: safeAmount,
+        balanceBefore: previousRecipientCoins,
+        balanceAfter: nextRecipientCoins,
+        source: input.type === 'order_delivery' ? 'agency_order_delivery' : 'agency_direct_transfer',
+        agencyId,
+        agencyName,
+        senderUid: callerUid,
+        senderName: String(input.senderName || agencyName).slice(0, 128),
+        recipientId,
+        recipientName,
+        referenceId,
+        title: `Received ${safeAmount.toLocaleString()} Coins from ${agencyName}`,
+        status: 'completed',
+        createdAt: nowIso,
+        createdAtMs: nowMs,
+      });
+      tx.set(recipientWalletTxRef, walletTxPayload);
+
+      committedResult = {
+        txId,
+        referenceId,
+        agencyId,
+        agencyName,
+        agencyCode,
+        senderUid: callerUid,
+        recipientId,
+        recipientUniqueId,
+        recipientName,
+        recipientAvatar,
+        coins: safeAmount,
+        previousAgencyBalance,
+        remainingBalance,
+        previousRecipientCoins,
+        nextRecipientCoins,
+        type: input.type,
+        orderId: input.orderId,
+        status: 'completed',
+        createdAt: nowIso,
+        createdAtMs: nowMs,
+        idempotentReplay: false,
+      };
+    });
+  } catch (error: any) {
+    if (isFirestoreQuotaExceededError(error)) {
+      notifyFirestoreQuotaExceeded();
+      throw new Error('Database quota reached while transferring coins. Please retry shortly.');
+    }
+    const msg = error instanceof Error ? error.message : String(error || '');
+    if (
+      msg.includes('Insufficient agency stock') ||
+      msg.includes('not found in Firestore') ||
+      msg.includes('Unauthorized') ||
+      msg.includes('Transfer amount') ||
+      msg.includes('currently inactive') ||
+      msg.includes('Only Coin Seller Agencies') ||
+      msg.includes('cannot become negative')
+    ) {
+      throw error;
+    }
+    handleFirestoreError(error, OperationType.WRITE, `agencyTransactions/${txId}`);
+  }
+
+  if (!committedResult) {
+    throw new Error('Agency coin transfer did not complete. Please verify balances and try again.');
+  }
+
+  const finalResult: AtomicAgencyCoinTransferResult = committedResult;
+
+  if (!finalResult.idempotentReplay && !isFirestoreQuotaExceeded()) {
+    sendFirestoreNotification({
+      recipientId: finalResult.recipientId,
+      type: 'wallet',
+      category: 'wallet',
+      title: `+${finalResult.coins.toLocaleString()} Coins Credited 🪙`,
+      message: `${finalResult.agencyName} transferred ${finalResult.coins.toLocaleString()} Coins to your Gifting Wallet (Ref: ${finalResult.referenceId}).`,
+      senderName: finalResult.agencyName,
+      screen: 'wallet',
+    }).catch((err) => console.warn('Agency transfer notification warning:', err));
+  }
+
+  return finalResult;
+}
+
+/**
+ * Real-time listener for Official Agency Coin Transfers (`agencyTransactions`).
+ * - Official Admin sees all recent transfers across agencies.
+ * - Agency Owners see transfers sent by their UID.
+ */
+export function subscribeToAgencyTransactions(
+  options: { senderUid?: string; isAdmin?: boolean },
+  onUpdate: (items: any[]) => void
+) {
+  const path = 'agencyTransactions';
+  if (!auth.currentUser) return () => {};
+
+  if (options.isAdmin) {
+    const q = query(
+      collection(db, 'agencyTransactions'),
+      orderBy('createdAtMs', 'desc'),
+      limit(200)
+    );
+    return onSnapshot(
+      q,
+      (snap) => onUpdate(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+      (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+    );
+  }
+
+  const uid = options.senderUid;
+  if (!uid) return () => {};
+
+  const q = query(
+    collection(db, 'agencyTransactions'),
+    where('senderUid', '==', uid),
+    limit(150)
+  );
+  return onSnapshot(
+    q,
+    (snap) => {
+      const items = snap.docs
+        .map((d) => ({ id: d.id, ...d.data() }))
+        .sort((a: any, b: any) => (Number(b.createdAtMs) || 0) - (Number(a.createdAtMs) || 0));
+      onUpdate(items);
+    },
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
+/**
+ * Real-time listener for the signed-in user's immutable per-user Wallet Ledger
+ * (`users/{userId}/walletTransactions`).
+ */
+export function subscribeToUserWalletTransactions(
+  userId: string,
+  onUpdate: (items: any[]) => void
+) {
+  if (!userId || !auth.currentUser) return () => {};
+  const path = `users/${userId}/walletTransactions`;
+  const q = query(
+    collection(db, 'users', userId, 'walletTransactions'),
+    orderBy('createdAtMs', 'desc'),
+    limit(150)
+  );
+  return onSnapshot(
+    q,
+    (snap) => onUpdate(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+    (err) => handleSnapshotListenerError(err, OperationType.LIST, path)
+  );
+}
+
+/**
+ * @deprecated Kept as thin alias only for backward compatibility.
+ * Use `transferAgencyCoinsAtomicInFirestore` for all real Agency Coin Transfers.
+ */
 export async function deductCoinSellerAgencyBalanceInFirestore(
   agencyId: string,
   amount: number
@@ -3045,36 +3578,9 @@ export async function deductCoinSellerAgencyBalanceInFirestore(
   if (safeAmount <= 0) {
     throw new Error('Transfer amount must be positive.');
   }
-  const agencyRef = doc(db, 'agencies', agencyId);
-  let nextBalance = 0;
-  try {
-    await runTransaction(db, async (tx) => {
-      const snap = await tx.get(agencyRef);
-      if (!snap.exists()) {
-        throw new Error('Official agency record not found.');
-      }
-      const data = snap.data() as Record<string, any>;
-      // agencyBalance is the canonical live wallet. Older documents may still
-      // contain stale coinStock/stock aliases; never take the maximum of aliases.
-      const rawBalance = data.agencyBalance ?? data.coinBalance ?? data.coins ?? data.coinStock ?? data.stock ?? 0;
-      const current = Math.max(0, Math.floor(Number(rawBalance) || 0));
-      if (safeAmount > current) {
-        throw new Error(`Insufficient agency coin stock (${current.toLocaleString()} Coins available).`);
-      }
-      nextBalance = current - safeAmount;
-      // Keep all legacy aliases synchronized on trusted/admin writes where possible.
-      // Client rules permit canonical trio only; normalizers must prefer agencyBalance.
-      tx.update(agencyRef, {
-        agencyBalance: nextBalance,
-        coinBalance: nextBalance,
-        coins: nextBalance,
-        updatedAt: new Date().toISOString(),
-      });
-    });
-  } catch (error) {
-    handleFirestoreError(error, OperationType.UPDATE, `agencies/${agencyId}`);
-  }
-  return nextBalance;
+  throw new Error(
+    `Direct balance-only deduction is disabled for agency ${agencyId}. Use atomic transferAgencyCoinsAtomicInFirestore instead.`
+  );
 }
 
 export interface FirestoreHostAgencyRequestInput {

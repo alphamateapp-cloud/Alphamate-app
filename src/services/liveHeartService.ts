@@ -2,12 +2,13 @@ import {
   addDoc,
   collection,
   doc,
+  increment,
   limit,
   onSnapshot,
   orderBy,
   query,
-  runTransaction,
   serverTimestamp,
+  setDoc,
 } from 'firebase/firestore';
 import {
   auth,
@@ -74,23 +75,16 @@ export async function sendLiveHeart(type: LiveRoomType, id: string, sessionId?: 
 
   if (isFirestoreQuotaExceeded()) return;
 
-  // 2. Persistent Firestore counter + event doc matching firestore.rules
+  // 2. Persistent atomic Firestore counter + event doc matching firestore.rules
   await Promise.all([
-    runTransaction(db, async (tx) => {
-      const snap = await tx.get(statsRef);
-      if (!snap.exists()) {
-        tx.set(statsRef, {
-          count: 1,
-          updatedAt: serverTimestamp(),
-        });
-      } else {
-        const currentCount = Number(snap.data()?.count) || 0;
-        tx.update(statsRef, {
-          count: currentCount + 1,
-          updatedAt: serverTimestamp(),
-        });
-      }
-    }).catch((err: any) => {
+    setDoc(
+      statsRef,
+      {
+        count: increment(1),
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    ).catch((err: any) => {
       if (isFirestoreQuotaExceededError(err)) {
         notifyFirestoreQuotaExceeded();
         return;

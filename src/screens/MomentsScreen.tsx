@@ -43,6 +43,7 @@ import {
   subscribeToReelComments,
 } from '../services/reelsService';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
+import { GiftCacheBadge, GiftCacheBar, GiftIconImage } from '../components/live/GiftBoxMedia';
 
 export const MomentsScreen: React.FC = () => {
   const {
@@ -1392,52 +1393,72 @@ export const MomentsScreen: React.FC = () => {
               </button>
             </div>
 
-            <div className="grid grid-cols-4 gap-2.5 py-4">
-              {publishedCatalogGifts.map((g) => (
-                <button
-                  key={g.id}
-                  onClick={() => {
-                    if (coins < g.coins) {
-                      showToast(`Insufficient coins! You need ${g.coins.toLocaleString()} Coins.`);
-                      return;
-                    }
-                    const sent = sendLiveGift(g, giftTargetPost.user.id, 1, giftTargetPost.user.displayName, {
-                      context: 'moments',
-                      reelId: giftTargetPost.id,
-                    });
-                    if (!sent) {
-                      showToast('Gift could not be sent. Please try again.');
-                      return;
-                    }
-                    setActiveMomentGift({
-                      id: `moment_gift_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-                      gift: g,
-                      senderName: currentUser.displayName,
-                      senderAvatar: currentUser.avatar,
-                      senderVipTier: currentUser.vipTier ?? 0,
-                      recipientName: giftTargetPost.user.displayName,
-                      comboCount: 1,
-                      quantity: 1,
-                      timestamp: Date.now(),
-                    });
-                    setGiftTargetPost(null);
-                    showToast(`Sent ${g.name} ${g.icon} to @${giftTargetPost.user.username}! 🎁✨`);
-                  }}
-                  className="p-3 rounded-2xl bg-[#1E1238] border border-white/10 hover:border-[#EC4899] flex flex-col items-center justify-center cursor-pointer transition-all active:scale-95 shadow-md group"
-                >
-                  {g.thumbnailUrl ? (
-                    <img src={g.thumbnailUrl} alt={g.name} className="w-9 h-9 object-contain mb-1" />
-                  ) : (
-                    <span className="text-2xl mb-1 group-hover:scale-110 transition-transform">{g.icon}</span>
-                  )}
-                  <span className="text-[10px] font-bold text-white truncate max-w-full">
-                    {g.name}
-                  </span>
-                  <span className="text-[10px] text-amber-400 font-black mt-0.5">
-                    {g.coins} 💰
-                  </span>
-                </button>
-              ))}
+            <GiftCacheBar gifts={publishedCatalogGifts} />
+
+            <div className="grid grid-cols-4 gap-2.5 py-4 max-h-64 overflow-y-auto">
+              {publishedCatalogGifts.map((g) => {
+                const giftCost = g.costInCoins ?? g.coins;
+                const handleSendMomentGift = () => {
+                  if (coins < giftCost) {
+                    showToast(`Insufficient coins! You need ${giftCost.toLocaleString()} Coins.`);
+                    return;
+                  }
+                  const sent = sendLiveGift(g, giftTargetPost.user.id, 1, giftTargetPost.user.displayName, {
+                    context: 'moments',
+                    reelId: giftTargetPost.id,
+                  });
+                  if (!sent) {
+                    showToast('Gift could not be sent. Please try again.');
+                    return;
+                  }
+                  setActiveMomentGift({
+                    id: `moment_gift_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                    gift: g,
+                    senderName: currentUser.displayName,
+                    senderAvatar: currentUser.avatar,
+                    senderVipTier: currentUser.vipTier ?? 0,
+                    recipientName: giftTargetPost.user.displayName,
+                    comboCount: 1,
+                    quantity: 1,
+                    timestamp: Date.now(),
+                  });
+                  setGiftTargetPost(null);
+                  showToast(`Sent ${g.name} to @${giftTargetPost.user.username}! ✨`);
+                };
+                return (
+                  <div
+                    key={g.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={handleSendMomentGift}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        handleSendMomentGift();
+                      }
+                    }}
+                    className="relative p-3 rounded-2xl bg-[#1E1238] border border-white/10 hover:border-[#EC4899] flex flex-col items-center justify-center cursor-pointer transition-all active:scale-95 shadow-md group"
+                  >
+                    {g.advancedConfig?.format && (
+                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-emerald-600/90 text-[6.5px] font-black text-white uppercase shadow">
+                        {g.advancedConfig.format}
+                      </span>
+                    )}
+                    <GiftIconImage
+                      gift={g}
+                      className="w-10 h-10 object-contain mb-1 group-hover:scale-105 transition-transform drop-shadow"
+                      emojiClassName="text-2xl mb-1 group-hover:scale-110 transition-transform"
+                    />
+                    <span className="text-[10px] font-bold text-white truncate max-w-full">
+                      {g.name}
+                    </span>
+                    <span className="text-[10px] text-amber-400 font-black mt-0.5">
+                      {giftCost.toLocaleString()} 💰
+                    </span>
+                    <GiftCacheBadge gift={g} />
+                  </div>
+                );
+              })}
             </div>
           </div>
         </div>

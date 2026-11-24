@@ -46,6 +46,7 @@ export const AdminDashboard: React.FC = () => {
     rejectHostJoinRequest,
     officialCoinSellerProfiles,
     adminAllocateAgencyCoins,
+    agencyTransactions,
     firebaseUser,
     giftTransactions,
   } = useApp();
@@ -767,6 +768,66 @@ export const AdminDashboard: React.FC = () => {
                       <td className="py-2.5 text-pink-300 font-bold">+{tx.hostDiamonds.toLocaleString()} 💎</td>
                       <td className="py-2.5 text-right text-amber-300 font-bold">
                         {tx.appShareCoins.toLocaleString()} Coins
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+
+        {/* Official Agency Coin Transfer Audit Ledger */}
+        <div className="rounded-3xl bg-[#120A24] border border-emerald-400/25 p-5 shadow-xl space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
+            <div className="flex items-center gap-2.5">
+              <DollarSign className="w-5 h-5 text-emerald-400" />
+              <div>
+                <h3 className="text-sm font-black text-white">
+                  Official Agency Coin Transfer Audit Ledger
+                </h3>
+                <p className="text-[11px] text-zinc-400">
+                  Real-time atomic Firestore transfers from Coin Seller Agencies to user Gifting Wallets
+                </p>
+              </div>
+            </div>
+            <span className="px-2.5 py-1 rounded-full bg-emerald-400/15 text-emerald-300 text-xs font-bold border border-emerald-400/30 font-mono">
+              Total Distributed: {agencyTransactions.reduce((acc, t) => acc + (t.coins || 0), 0).toLocaleString()} Coins
+            </span>
+          </div>
+
+          {agencyTransactions.length === 0 ? (
+            <div className="p-4 rounded-2xl bg-[#0B0616] border border-white/10 text-xs text-zinc-400">
+              No agency coin transfers recorded yet.
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="border-b border-white/10 text-zinc-400 uppercase text-[10px] tracking-wider">
+                    <th className="pb-2">Agency</th>
+                    <th className="pb-2">Recipient</th>
+                    <th className="pb-2">Transferred</th>
+                    <th className="pb-2">Agency Remaining</th>
+                    <th className="pb-2 text-right">Ref &amp; Time</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5 font-mono">
+                  {agencyTransactions.slice(0, 25).map((tx) => (
+                    <tr key={tx.id} className="hover:bg-white/[0.02]">
+                      <td className="py-2.5 font-sans font-bold text-white">
+                        {tx.agencyName || 'Official Agency'}
+                        <span className="ml-1.5 px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[9px] uppercase">
+                          {tx.type === 'order_delivery' ? 'Order' : 'Direct'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 font-sans text-zinc-200">
+                        {tx.recipientName} <span className="text-zinc-500 font-mono text-[10px]">({tx.recipientUniqueId})</span>
+                      </td>
+                      <td className="py-2.5 text-emerald-300 font-bold">+{tx.coins.toLocaleString()} 🪙</td>
+                      <td className="py-2.5 text-amber-300">{tx.remainingBalance.toLocaleString()}</td>
+                      <td className="py-2.5 text-right text-zinc-400 text-[10px]">
+                        {tx.referenceId || tx.id.slice(-8)} • {tx.timestamp}
                       </td>
                     </tr>
                   ))}

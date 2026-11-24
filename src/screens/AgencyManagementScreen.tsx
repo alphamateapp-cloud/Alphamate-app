@@ -53,7 +53,7 @@ export const AgencyManagementScreen: React.FC = () => {
     agencyOrders,
     agencyTransactions,
     updateAgencyProfile,
-    findUserByIdOrUsername,
+    findUserByIdOrUsernameAsync,
     sendAgencyCoins,
     hostAgencyProfile,
     hostAgencyMembership,
@@ -282,24 +282,36 @@ export const AgencyManagementScreen: React.FC = () => {
     }
   };
 
-  const handleSearchDirectUser = () => {
+  const [isSearchingDirectUser, setIsSearchingDirectUser] = useState(false);
+  const [isSendingDirectCoins, setIsSendingDirectCoins] = useState(false);
+
+  const handleSearchDirectUser = async () => {
     setDirectError(null);
     setDirectSuccess(null);
     if (!directQuery.trim()) {
-      setDirectError('Please enter a User ID or Username');
+      setDirectError('Please enter a User ID, Username, or Email');
       setDirectUser(null);
       return;
     }
-    const found = findUserByIdOrUsername(directQuery);
-    if (found) {
-      setDirectUser(found);
-    } else {
+    setIsSearchingDirectUser(true);
+    try {
+      const found = await findUserByIdOrUsernameAsync(directQuery);
+      if (found) {
+        setDirectUser(found);
+      } else {
+        setDirectUser(null);
+        setDirectError('No verified Alpha Mate user found with this User ID, Username, or Email');
+      }
+    } catch {
       setDirectUser(null);
-      setDirectError('No user found with this User ID or Username');
+      setDirectError('Unable to search user right now. Please try again.');
+    } finally {
+      setIsSearchingDirectUser(false);
     }
   };
 
-  const handleExecuteDirectSend = () => {
+  const handleExecuteDirectSend = async () => {
+    if (isSendingDirectCoins) return;
     setDirectError(null);
     setDirectSuccess(null);
 
@@ -319,13 +331,26 @@ export const AgencyManagementScreen: React.FC = () => {
       return;
     }
 
-    const res = sendAgencyCoins(directUser.uniqueId || directUser.username, amt, directPin);
-    if (res.success) {
-      setDirectSuccess(res.message);
-      setDirectPin('');
-      setTimeout(() => setDirectSuccess(null), 3500);
-    } else {
-      setDirectError(res.message);
+    setIsSendingDirectCoins(true);
+    try {
+      const idempotencyKey = `direct_${agencyProfile?.agencyId || 'ag'}_${directUser.id}_${amt}_${Date.now()}`;
+      const res = await sendAgencyCoins(
+        directUser.id || directUser.uniqueId || directUser.username,
+        amt,
+        directPin,
+        idempotencyKey
+      );
+      if (res.success) {
+        setDirectSuccess(res.message);
+        setDirectPin('');
+        setTimeout(() => setDirectSuccess(null), 4000);
+      } else {
+        setDirectError(res.message);
+      }
+    } catch (err: any) {
+      setDirectError(err?.message || 'Transfer failed. Please verify balances and try again.');
+    } finally {
+      setIsSendingDirectCoins(false);
     }
   };
 
@@ -1751,16 +1776,16 @@ export const AgencyManagementScreen: React.FC = () => {
 
                 <button
                   type="button"
-                  onClick={handleExecuteDirectSend}
-                  disabled={!directUser || !directAmount || directPin.length !== 4}
+                  onClick={() => void handleExecuteDirectSend()}
+                  disabled={isSendingDirectCoins || isSearchingDirectUser || !directUser || !directAmount || directPin.length !== 4}
                   className={`w-full h-12 rounded-2xl font-black text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-lg transition-all ${
-                    !directUser || !directAmount || directPin.length !== 4
+                    isSendingDirectCoins || isSearchingDirectUser || !directUser || !directAmount || directPin.length !== 4
                       ? 'bg-zinc-800 text-zinc-500 cursor-not-allowed opacity-60'
                       : 'bg-gradient-to-r from-amber-400 to-amber-600 text-black shadow-amber-500/30 hover:brightness-110 active:scale-95 cursor-pointer'
                   }`}
                 >
                   <Coins className="w-4 h-4 fill-current" />
-                  <span>Transfer Coins</span>
+                  <span>{isSendingDirectCoins ? 'Verifying & Transferring...' : 'Transfer Coins'}</span>
                 </button>
               </div>
             )}

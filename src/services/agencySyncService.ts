@@ -1,5 +1,6 @@
 import { HostAgencyProfile, HostJoinRequest, User } from '../types';
 import { parseFirestoreTimestampMs } from './adminModerationService';
+import { resolveCanonicalAgencyBalance } from './financialLedgerService';
 
 export type CanonicalAgencyType = 'coin_seller' | 'host_agency';
 export type CanonicalAgencyStatus = 'active' | 'suspended' | 'hold' | 'inactive';
@@ -380,7 +381,7 @@ export function normalizeOfficialAgencyDoc(doc: Record<string, any>): Normalized
     whatsappNumber: waInfo.e164Digits ? `+${waInfo.e164Digits}` : '',
     whatsappDisplay: waInfo.display,
     hasValidWhatsApp: waInfo.isValid,
-    agencyBalance: Math.max(0, Math.floor(Number(doc.agencyBalance ?? doc.coinBalance ?? doc.coins ?? doc.coinStock ?? doc.stock ?? 0) || 0)),
+    agencyBalance: resolveCanonicalAgencyBalance(doc),
     isPinSet: Boolean(doc.isPinSet),
     defaultCommissionRate: Math.max(0, Math.min(80, Number(doc.defaultCommissionRate ?? doc.commissionRate ?? 15) || 15)),
     minWeeklyHours: Math.max(0, Number(doc.minWeeklyHours ?? 15) || 15),

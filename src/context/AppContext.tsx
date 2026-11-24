@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { Capacitor } from '@capacitor/core';
 import { DEFAULT_AVATAR_URL } from '../utils/imageHd';
 import {
@@ -106,7 +106,10 @@ import {
   adminReviewAgencyApplicationInFirestore,
   adminAllocateAgencyCoinsInFirestore,
   updateApprovedAgencySettingsInFirestore,
-  deductCoinSellerAgencyBalanceInFirestore,
+  findRealUserInFirestore,
+  transferAgencyCoinsAtomicInFirestore,
+  subscribeToAgencyTransactions,
+  subscribeToUserWalletTransactions,
   submitHostAgencyRequestToFirestore,
   subscribeToMyHostAgencyRequests,
   subscribeToAgencyOwnerHostRequests,
@@ -116,6 +119,7 @@ import {
   SendNotificationParams,
   FirebaseUser,
 } from '../services/firebase';
+import { buildIdempotentTxId } from '../services/financialLedgerService';
 import {
   normalizeOfficialAgencyDoc,
   normalizeHostAgencyRequestDoc,
@@ -598,12 +602,13 @@ interface AppContextType {
   sendAgencyCoins: (
     recipientQuery: string,
     amount: number,
-    pin: string
-  ) => { success: boolean; message: string; tx?: AgencyTransaction };
+    pin: string,
+    idempotencyKey?: string
+  ) => Promise<{ success: boolean; message: string; tx?: AgencyTransaction }>;
   deliverAgencyOrder: (
     orderId: string,
     pin: string
-  ) => { success: boolean; message: string };
+  ) => Promise<{ success: boolean; message: string }>;
   rejectAgencyOrder: (
     orderId: string,
     reason?: string
@@ -617,6 +622,7 @@ interface AppContextType {
     order: Omit<AgencyOrder, 'id' | 'orderNo' | 'createdAt' | 'status'>
   ) => AgencyOrder;
   findUserByIdOrUsername: (query: string) => User | null;
+  findUserByIdOrUsernameAsync: (query: string) => Promise<User | null>;
 
   // Host Agency Management (Strictly Admin-Approved Only)
   hostAgencyProfile: HostAgencyProfile | null;
@@ -2689,6 +2695,92 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
 
       secondaryUnsubs.push(
+        subscribeToAgencyTransactions({ senderUid: uid, isAdmin }, (remoteAgencyTxs) => {
+          const mapped: AgencyTransaction[] = remoteAgencyTxs.map((tx: any) => {
+            const ms = Number(tx.createdAtMs) || Date.now();
+            const dateLabel = new Date(ms).toLocaleString(undefined, {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+            return {
+              id: String(tx.id),
+              type: tx.type === 'order_delivery' ? 'order_delivery' : 'direct_send',
+              agencyId: tx.agencyId,
+              agencyName: tx.agencyName,
+              agencyCode: tx.agencyCode,
+              senderUid: tx.senderUid,
+              recipientId: String(tx.recipientId || ''),
+              recipientUniqueId: String(tx.recipientUniqueId || tx.recipientId || ''),
+              recipientName: String(tx.recipientName || 'Alpha Mate User'),
+              recipientAvatar: String(tx.recipientAvatar || ''),
+              coins: Number(tx.coins) || 0,
+              previousAgencyBalance:
+                typeof tx.previousAgencyBalance === 'number' ? tx.previousAgencyBalance : undefined,
+              remainingBalance: Number(tx.remainingBalance) || 0,
+              previousRecipientCoins:
+                typeof tx.previousRecipientCoins === 'number' ? tx.previousRecipientCoins : undefined,
+              nextRecipientCoins:
+                typeof tx.nextRecipientCoins === 'number' ? tx.nextRecipientCoins : undefined,
+              timestamp: dateLabel,
+              createdAtMs: ms,
+              referenceId: tx.referenceId,
+            };
+          });
+          setAgencyTransactions(mapped);
+          try {
+            localStorage.setItem('alphamate_agency_transactions', JSON.stringify(mapped.slice(0, 100)));
+          } catch {}
+        })
+      );
+
+      secondaryUnsubs.push(
+        subscribeToUserWalletTransactions(uid, (remoteWalletTxs) => {
+          const normalized: WalletTransaction[] = remoteWalletTxs.map((tx: any) => {
+            const ms = Number(tx.createdAtMs) || Date.now();
+            const dateLabel = new Date(ms).toLocaleString(undefined, {
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+            });
+            return {
+              id: String(tx.id),
+              type: (tx.type || 'recharge') as WalletTransaction['type'],
+              amount: Number(tx.amount) || 0,
+              currency: tx.currency === 'diamonds' ? 'diamonds' : 'coins',
+              walletType: tx.walletType === 'earnings' ? 'earnings' : 'gifting',
+              direction: tx.direction === 'debit' ? 'debit' : 'credit',
+              balanceBefore: typeof tx.balanceBefore === 'number' ? tx.balanceBefore : undefined,
+              balanceAfter: typeof tx.balanceAfter === 'number' ? tx.balanceAfter : undefined,
+              referenceId: tx.referenceId,
+              title: String(tx.title || 'Wallet Transaction'),
+              date: dateLabel,
+              createdAtMs: ms,
+              status: tx.status === 'pending' ? 'pending' : 'completed',
+            };
+          });
+          setTransactions((prev) => {
+            const remoteIds = new Set(normalized.map((item) => item.id));
+            const remoteRefs = new Set(normalized.map((item) => item.referenceId).filter(Boolean));
+            const localOnly = prev.filter((item) => {
+              if (remoteIds.has(item.id)) return false;
+              if (item.referenceId && remoteRefs.has(item.referenceId)) return false;
+              // Drop temporary optimistic gift placeholders once Firestore ledger arrives
+              if (item.id.startsWith('tx_gift_') || item.id.startsWith('tx_earn_')) {
+                return false;
+              }
+              return true;
+            });
+            return [...normalized, ...localOnly].sort(
+              (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
+            );
+          });
+        })
+      );
+
+      secondaryUnsubs.push(
         subscribeToMyHostAgencyRequests(uid, (rawReqs) => {
           const normalized = rawReqs
             .map((r) => normalizeHostAgencyRequestDoc(r))
@@ -3197,9 +3289,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const agencyTransferInFlightRef = useRef(false);
+
   const findUserByIdOrUsername = (query: string): User | null => {
     if (!query || !query.trim()) return null;
-    const clean = query.trim().toLowerCase();
+    const clean = query.trim().replace(/^@/, '').toLowerCase();
 
     const pool = realUsers.length > 0 ? realUsers : registeredUsers;
     const matched = pool.find(
@@ -3207,6 +3301,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (u.uniqueId && u.uniqueId.toLowerCase() === clean) ||
         (u.username && u.username.toLowerCase() === clean) ||
         (u.displayName && u.displayName.toLowerCase() === clean) ||
+        (u.email && u.email.toLowerCase() === clean) ||
         (u.id && u.id.toLowerCase() === clean)
     );
     if (matched) return matched;
@@ -3215,6 +3310,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       currentUser.uniqueId.toLowerCase() === clean ||
       currentUser.username.toLowerCase() === clean ||
       currentUser.displayName.toLowerCase() === clean ||
+      (currentUser.email && currentUser.email.toLowerCase() === clean) ||
       currentUser.id.toLowerCase() === clean
     ) {
       return currentUser;
@@ -3223,11 +3319,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return null;
   };
 
-  const sendAgencyCoins = (
+  const findUserByIdOrUsernameAsync = async (query: string): Promise<User | null> => {
+    const localHit = findUserByIdOrUsername(query);
+    if (localHit && !localHit.id.startsWith('user_')) {
+      return localHit;
+    }
+    const remoteDoc = await findRealUserInFirestore(query);
+    if (!remoteDoc) return localHit;
+    const resolved: User = {
+      ...CURRENT_USER,
+      ...remoteDoc,
+      id: String(remoteDoc.id),
+      uniqueId: String(remoteDoc.uniqueId || remoteDoc.id),
+      username: String(remoteDoc.username || remoteDoc.displayName || 'user'),
+      displayName: String(remoteDoc.displayName || remoteDoc.username || 'Alpha Mate User'),
+      avatar: String(remoteDoc.avatar || ''),
+      coins: Math.max(0, Math.floor(Number(remoteDoc.coins ?? 0) || 0)),
+      diamonds: Math.max(0, Math.floor(Number(remoteDoc.diamonds ?? 0) || 0)),
+      level: Number(remoteDoc.level ?? 1) || 1,
+      vipTier: Number(remoteDoc.vipTier ?? 0) || 0,
+    };
+    return resolved;
+  };
+
+  const sendAgencyCoins = async (
     recipientQuery: string,
     amount: number,
-    pin: string
-  ): { success: boolean; message: string; tx?: AgencyTransaction } => {
+    pin: string,
+    idempotencyKey?: string
+  ): Promise<{ success: boolean; message: string; tx?: AgencyTransaction }> => {
     if (!agencyProfile || !firebaseUser?.uid) {
       return {
         success: false,
@@ -3246,9 +3366,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'Invalid 4-digit security PIN. Please try again.' };
     }
 
-    const safeAmount = Math.floor(Number(amount) || 0);
-    if (!safeAmount || safeAmount <= 0) {
-      return { success: false, message: 'Please enter a valid coin amount.' };
+    const numericAmount = Number(amount);
+    const safeAmount = Math.floor(numericAmount);
+    if (!Number.isFinite(numericAmount) || numericAmount !== safeAmount || safeAmount <= 0) {
+      return { success: false, message: 'Please enter a valid whole coin amount greater than zero.' };
     }
 
     if (safeAmount > agencyProfile.agencyBalance) {
@@ -3258,70 +3379,107 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const recipient = findUserByIdOrUsername(recipientQuery);
-    if (!recipient) {
-      return { success: false, message: 'Real Alpha Mate user not found. Please check the exact User ID or username.' };
+    if (agencyTransferInFlightRef.current) {
+      return {
+        success: false,
+        message: 'A transfer is already being processed. Please wait a moment.',
+      };
     }
 
-    const prevBalance = agencyProfile.agencyBalance;
-    const newAgencyBalance = Math.max(0, prevBalance - safeAmount);
+    agencyTransferInFlightRef.current = true;
+    try {
+      const recipient = await findUserByIdOrUsernameAsync(recipientQuery);
+      if (!recipient || !recipient.id || recipient.id.startsWith('user_')) {
+        return {
+          success: false,
+          message: 'Real Alpha Mate user not found in Firestore. Please check the exact User ID, username, or email.',
+        };
+      }
 
-    setApprovedAgencyDocs((prev) =>
-      prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: newAgencyBalance } : d))
-    );
-
-    deductCoinSellerAgencyBalanceInFirestore(agencyProfile.agencyId, safeAmount).catch((err) => {
-      console.warn('Failed to deduct Firestore agency stock:', err);
-      setApprovedAgencyDocs((prev) =>
-        prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: prevBalance } : d))
-      );
-    });
-
-    if (recipient.id === currentUser.id || recipient.uniqueId === currentUser.uniqueId) {
-      setCoins((c) => c + safeAmount);
-      setCurrentUser((prev) => {
-        const updated = { ...prev, coins: prev.coins + safeAmount };
-        saveUserSession(updated);
-        if (firebaseUser?.uid) {
-          syncUserProfileToFirestore(updated, { background: true }).catch(() => {});
-        }
-        return updated;
-      });
-    }
-
-    const newTx: AgencyTransaction = {
-      id: `atx_${Date.now()}`,
-      type: 'direct_send',
-      recipientId: recipient.id,
-      recipientUniqueId: recipient.uniqueId,
-      recipientName: recipient.displayName,
-      recipientAvatar: recipient.avatar,
-      coins: safeAmount,
-      remainingBalance: newAgencyBalance,
-      timestamp: 'Just now',
-      referenceId: `TX-DIR-${Math.floor(1000 + Math.random() * 9000)}`,
-    };
-    saveAgencyTransactions([newTx, ...agencyTransactions]);
-
-    if (recipient.id && !recipient.id.startsWith('user_')) {
-      sendFirestoreNotification({
+      // Atomic Firestore ACID transfer: deducts agency balance, credits recipient Gifting Wallet,
+      // writes immutable agencyTransactions/{txId} and users/{recipientId}/walletTransactions/{txId}.
+      // Never reports success unless Firestore commits all writes atomically!
+      const committed = await transferAgencyCoinsAtomicInFirestore({
+        agencyId: agencyProfile.agencyId,
         recipientId: recipient.id,
-        type: 'agency',
-        category: 'system',
-        title: `💎 ${safeAmount.toLocaleString()} Coins Sent from ${agencyProfile.agencyName}`,
-        message: `Official Agency transfer recorded for ${safeAmount.toLocaleString()} coins (ID ${recipient.uniqueId}).`,
-        screen: 'wallet',
-      }).catch(() => {});
-    }
+        amount: safeAmount,
+        type: 'direct_send',
+        idempotencyKey,
+        senderName: currentUser.displayName || agencyProfile.agencyName,
+      });
 
-    return {
-      success: true,
-      message: `Successfully transferred ${safeAmount.toLocaleString()} Coins from agency stock to ${recipient.displayName} (${recipient.uniqueId})!`,
-      tx: newTx,
-    };
+      // Immediately reflect authoritative post-commit balance (matches onSnapshot with zero snap-back)
+      setApprovedAgencyDocs((prev) =>
+        prev.map((d) =>
+          d.agencyId === agencyProfile.agencyId
+            ? {
+                ...d,
+                agencyBalance: committed.remainingBalance,
+                coinBalance: committed.remainingBalance,
+                coins: committed.remainingBalance,
+              }
+            : d
+        )
+      );
+
+      if (committed.recipientId === currentUser.id) {
+        setCoins(committed.nextRecipientCoins);
+        setCurrentUser((prev) => {
+          const updated = { ...prev, coins: committed.nextRecipientCoins };
+          saveUserSession(updated, isAuthenticated);
+          return updated;
+        });
+      }
+
+      const newTx: AgencyTransaction = {
+        id: committed.txId,
+        type: 'direct_send',
+        agencyId: committed.agencyId,
+        agencyName: committed.agencyName,
+        agencyCode: committed.agencyCode,
+        senderUid: committed.senderUid,
+        recipientId: committed.recipientId,
+        recipientUniqueId: committed.recipientUniqueId,
+        recipientName: committed.recipientName,
+        recipientAvatar: committed.recipientAvatar,
+        coins: committed.coins,
+        previousAgencyBalance: committed.previousAgencyBalance,
+        remainingBalance: committed.remainingBalance,
+        previousRecipientCoins: committed.previousRecipientCoins,
+        nextRecipientCoins: committed.nextRecipientCoins,
+        timestamp: 'Just now',
+        createdAtMs: committed.createdAtMs,
+        referenceId: committed.referenceId,
+      };
+
+      setAgencyTransactions((prev) => {
+        const deduped = [newTx, ...prev.filter((t) => t.id !== newTx.id)];
+        try {
+          localStorage.setItem('alphamate_agency_transactions', JSON.stringify(deduped.slice(0, 100)));
+        } catch {}
+        return deduped;
+      });
+
+      return {
+        success: true,
+        message: `Successfully transferred ${committed.coins.toLocaleString()} Coins to ${committed.recipientName}'s Gifting Wallet (${committed.recipientUniqueId}). Remaining agency stock: ${committed.remainingBalance.toLocaleString()} Coins.`,
+        tx: newTx,
+      };
+    } catch (err: any) {
+      const errMsg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Coin transfer failed. No balances were changed. Please try again.';
+      return { success: false, message: errMsg };
+    } finally {
+      agencyTransferInFlightRef.current = false;
+    }
   };
 
-  const deliverAgencyOrder = (orderId: string, pin: string): { success: boolean; message: string } => {
+  const deliverAgencyOrder = async (
+    orderId: string,
+    pin: string
+  ): Promise<{ success: boolean; message: string }> => {
     if (!agencyProfile || !firebaseUser?.uid) {
       return {
         success: false,
@@ -3349,7 +3507,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, message: 'This order has already been delivered.' };
     }
 
-    const totalCoinsToCredit = order.coins + (order.bonusCoins || 0);
+    const totalCoinsToCredit = Math.floor(Number(order.coins || 0) + Number(order.bonusCoins || 0));
     if (totalCoinsToCredit <= 0 || totalCoinsToCredit > agencyProfile.agencyBalance) {
       return {
         success: false,
@@ -3357,54 +3515,108 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       };
     }
 
-    const prevBalance = agencyProfile.agencyBalance;
-    const newAgencyBalance = Math.max(0, prevBalance - totalCoinsToCredit);
-    setApprovedAgencyDocs((prev) =>
-      prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: newAgencyBalance } : d))
-    );
-
-    deductCoinSellerAgencyBalanceInFirestore(agencyProfile.agencyId, totalCoinsToCredit).catch((err) => {
-      console.warn('Order stock deduction failed:', err);
-      setApprovedAgencyDocs((prev) =>
-        prev.map((d) => (d.agencyId === agencyProfile.agencyId ? { ...d, agencyBalance: prevBalance } : d))
-      );
-    });
-
-    if (order.buyerId === currentUser.id || order.buyerUniqueId === currentUser.uniqueId) {
-      setCoins((c) => c + totalCoinsToCredit);
-      setCurrentUser((prev) => {
-        const updated = { ...prev, coins: prev.coins + totalCoinsToCredit };
-        saveUserSession(updated);
-        if (firebaseUser?.uid) {
-          syncUserProfileToFirestore(updated, { background: true }).catch(() => {});
-        }
-        return updated;
-      });
+    if (agencyTransferInFlightRef.current) {
+      return {
+        success: false,
+        message: 'Another agency transfer is currently in progress. Please wait.',
+      };
     }
 
-    const updatedOrders = agencyOrders.map((o) =>
-      o.id === orderId ? { ...o, status: 'delivered' as const, deliveredAt: 'Just now' } : o
-    );
-    saveAgencyOrders(updatedOrders);
+    agencyTransferInFlightRef.current = true;
+    try {
+      const resolvedBuyer =
+        (order.buyerId && !order.buyerId.startsWith('user_')
+          ? await findUserByIdOrUsernameAsync(order.buyerId)
+          : null) ||
+        (order.buyerUniqueId ? await findUserByIdOrUsernameAsync(order.buyerUniqueId) : null);
 
-    const newTx: AgencyTransaction = {
-      id: `atx_${Date.now()}`,
-      type: 'order_delivery',
-      recipientId: order.buyerId,
-      recipientUniqueId: order.buyerUniqueId,
-      recipientName: order.buyerName,
-      recipientAvatar: order.buyerAvatar,
-      coins: totalCoinsToCredit,
-      remainingBalance: newAgencyBalance,
-      timestamp: 'Just now',
-      referenceId: order.orderNo,
-    };
-    saveAgencyTransactions([newTx, ...agencyTransactions]);
+      if (!resolvedBuyer || !resolvedBuyer.id || resolvedBuyer.id.startsWith('user_')) {
+        return {
+          success: false,
+          message: 'Buyer account could not be verified in Firestore. Order not fulfilled.',
+        };
+      }
 
-    return {
-      success: true,
-      message: `Order ${order.orderNo} fulfilled! ${totalCoinsToCredit.toLocaleString()} Coins delivered to ${order.buyerName}.`,
-    };
+      // Deterministic idempotency key per order guarantees an order can NEVER be delivered twice
+      const committed = await transferAgencyCoinsAtomicInFirestore({
+        agencyId: agencyProfile.agencyId,
+        recipientId: resolvedBuyer.id,
+        amount: totalCoinsToCredit,
+        type: 'order_delivery',
+        orderId: order.id,
+        idempotencyKey: `order_${order.id}`,
+        senderName: currentUser.displayName || agencyProfile.agencyName,
+      });
+
+      setApprovedAgencyDocs((prev) =>
+        prev.map((d) =>
+          d.agencyId === agencyProfile.agencyId
+            ? {
+                ...d,
+                agencyBalance: committed.remainingBalance,
+                coinBalance: committed.remainingBalance,
+                coins: committed.remainingBalance,
+              }
+            : d
+        )
+      );
+
+      if (committed.recipientId === currentUser.id) {
+        setCoins(committed.nextRecipientCoins);
+        setCurrentUser((prev) => {
+          const updated = { ...prev, coins: committed.nextRecipientCoins };
+          saveUserSession(updated, isAuthenticated);
+          return updated;
+        });
+      }
+
+      const updatedOrders = agencyOrders.map((o) =>
+        o.id === orderId ? { ...o, status: 'delivered' as const, deliveredAt: 'Just now' } : o
+      );
+      saveAgencyOrders(updatedOrders);
+
+      const newTx: AgencyTransaction = {
+        id: committed.txId,
+        type: 'order_delivery',
+        agencyId: committed.agencyId,
+        agencyName: committed.agencyName,
+        agencyCode: committed.agencyCode,
+        senderUid: committed.senderUid,
+        recipientId: committed.recipientId,
+        recipientUniqueId: committed.recipientUniqueId,
+        recipientName: committed.recipientName,
+        recipientAvatar: committed.recipientAvatar,
+        coins: committed.coins,
+        previousAgencyBalance: committed.previousAgencyBalance,
+        remainingBalance: committed.remainingBalance,
+        previousRecipientCoins: committed.previousRecipientCoins,
+        nextRecipientCoins: committed.nextRecipientCoins,
+        timestamp: 'Just now',
+        createdAtMs: committed.createdAtMs,
+        referenceId: committed.referenceId,
+      };
+
+      setAgencyTransactions((prev) => {
+        const deduped = [newTx, ...prev.filter((t) => t.id !== newTx.id)];
+        try {
+          localStorage.setItem('alphamate_agency_transactions', JSON.stringify(deduped.slice(0, 100)));
+        } catch {}
+        return deduped;
+      });
+
+      return {
+        success: true,
+        message: `Order ${order.orderNo} fulfilled! ${committed.coins.toLocaleString()} Coins credited to ${committed.recipientName}'s Gifting Wallet.`,
+      };
+    } catch (err: any) {
+      const errMsg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Order delivery failed. Agency stock was not deducted.';
+      return { success: false, message: errMsg };
+    } finally {
+      agencyTransferInFlightRef.current = false;
+    }
   };
 
   const rejectAgencyOrder = (orderId: string, reason?: string): { success: boolean; message: string } => {
@@ -5532,16 +5744,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
     setTransactions((prev) => [...newTxs, ...prev]);
 
-    const localLedgerId = firebaseUser?.uid ? `pending_${Date.now()}` : `local_gift_${Date.now()}`;
+    const prevCoinsSnapshot = coins;
+    const prevDiamondsSnapshot = diamonds;
+    const txId = buildIdempotentTxId('gift');
+    const localLedgerId = firebaseUser?.uid ? txId : `local_gift_${Date.now()}`;
     const ledgerItem: GiftTransactionRecord = {
       id: localLedgerId,
       senderId: firebaseUser?.uid || currentUser.id,
       senderName: currentUser.displayName,
       recipientId: effectiveRecipientId,
       recipientName: resolvedRecipientName,
-      giftId: gift.id,
-      giftName: gift.name,
-      giftIcon: gift.icon,
+      giftId: authoritativeGift.id,
+      giftName: authoritativeGift.name,
+      giftIcon: authoritativeGift.icon,
       quantity: qty,
       totalCoins,
       hostDiamonds,
@@ -5555,7 +5770,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       createdAtMs: Date.now(),
     };
     setGiftTransactions((prev) => {
-      const updated = [ledgerItem, ...prev.filter((x) => !x.id.startsWith('pending_'))];
+      const updated = [ledgerItem, ...prev.filter((x) => x.id !== localLedgerId && !x.id.startsWith('pending_'))];
       try {
         localStorage.setItem('alphamate_gift_transactions', JSON.stringify(updated.slice(0, 100)));
       } catch {}
@@ -5564,15 +5779,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     if (firebaseUser?.uid) {
       executeSixtyFortyGiftTransaction({
+        txId,
         senderId: firebaseUser.uid,
         senderName: currentUser.displayName,
         senderAvatar: currentUser.avatar,
         recipientId: effectiveRecipientId,
         recipientName: resolvedRecipientName,
-        giftId: gift.id,
-        giftName: gift.name,
-        giftIcon: gift.icon,
-        unitCoins: gift.coins,
+        giftId: authoritativeGift.id,
+        giftName: authoritativeGift.name,
+        giftIcon: authoritativeGift.icon,
+        unitCoins,
         quantity: qty,
         context,
         roomId: meta?.roomId,
@@ -5580,11 +5796,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         reelId: meta?.reelId,
       })
         .then((res) => {
+          if (typeof res.senderNextCoins === 'number') {
+            setCoins(res.senderNextCoins);
+          }
+          if (typeof res.senderNextDiamonds === 'number') {
+            setDiamonds(res.senderNextDiamonds);
+          }
           setGiftTransactions((prev) =>
             prev.map((g) => (g.id === localLedgerId ? { ...g, id: res.txId } : g))
           );
         })
-        .catch((err) => console.warn('60/40 Firestore gift transaction warning:', err));
+        .catch((err) => {
+          console.error('60/40 Firestore gift transaction failed — rolling back optimistic balance:', err);
+          // Roll back local optimistic balances if the atomic Firestore commit was rejected
+          setCoins(prevCoinsSnapshot);
+          if (isSelfHost) {
+            setDiamonds(prevDiamondsSnapshot);
+          }
+          setGiftTransactions((prev) => prev.filter((g) => g.id !== localLedgerId));
+          setTransactions((prev) => prev.filter((t) => t.id !== sentTx.id));
+        });
     } else if (isSelfHost) {
       const localNotifId = `local_notif_${Date.now()}`;
       const giftNotif: NotificationItem = {
@@ -7028,6 +7259,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setAgencySecurityPin,
         createBuyerCoinOrder,
         findUserByIdOrUsername,
+        findUserByIdOrUsernameAsync,
         hostAgencyProfile,
         agencyHosts,
         hostJoinRequests,

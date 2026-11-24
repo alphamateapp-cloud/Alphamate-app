@@ -204,21 +204,108 @@ service cloud.firestore {
           'createdAt', 'createdAtMs'
         ])
         && data.keys().hasOnly([
-          'senderId', 'senderName', 'recipientId', 'recipientName', 'giftId', 'giftName', 'giftIcon',
-          'quantity', 'totalCoins', 'hostDiamonds', 'appShareCoins', 'context',
+          'id', 'senderId', 'senderName', 'recipientId', 'recipientName', 'giftId', 'giftName', 'giftIcon',
+          'unitCoins', 'quantity', 'totalCoins', 'hostDiamonds', 'appShareCoins', 'context',
           'roomId', 'streamId', 'reelId', 'status', 'createdAt', 'createdAtMs'
         ])
+        && (!('id' in data) || isNonEmptyString(data.id, 1, 128))
         && data.senderId == request.auth.uid
         && data.recipientId is string && data.recipientId.size() > 0 && data.recipientId.size() <= 128
-        && data.giftId is string && data.giftId.size() > 0 && data.giftId.size() <= 64
-        && data.giftName is string && data.giftName.size() > 0 && data.giftName.size() <= 80
+        && (!('senderName' in data) || (data.senderName is string && data.senderName.size() <= 128))
+        && (!('recipientName' in data) || (data.recipientName is string && data.recipientName.size() <= 128))
+        && data.giftId is string && data.giftId.size() > 0 && data.giftId.size() <= 128
+        && data.giftName is string && data.giftName.size() > 0 && data.giftName.size() <= 128
+        && (!('giftIcon' in data) || (data.giftIcon is string && data.giftIcon.size() <= 512))
+        && (!('unitCoins' in data) || (data.unitCoins is number && data.unitCoins >= 1 && data.unitCoins <= 10000000))
         && data.quantity is number && data.quantity >= 1 && data.quantity <= 9999
         && data.totalCoins is number && data.totalCoins > 0 && data.totalCoins <= 50000000
         && data.hostDiamonds is number && data.hostDiamonds >= 0
         && data.appShareCoins is number && data.appShareCoins >= 0
         && (data.hostDiamonds + data.appShareCoins) == data.totalCoins
+        && (data.hostDiamonds * 100) >= (data.totalCoins * 60 - 50)
+        && (data.hostDiamonds * 100) <= (data.totalCoins * 60 + 50)
         && data.context in ['live', 'party', 'moments', 'pk', 'demo']
         && data.status == 'completed'
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.createdAtMs is number;
+    }
+
+    function isValidAgencyTransaction(data) {
+      return data.keys().hasAll([
+          'id', 'type', 'agencyId', 'agencyName', 'senderUid',
+          'recipientId', 'recipientName', 'coins',
+          'previousAgencyBalance', 'remainingBalance',
+          'previousRecipientCoins', 'nextRecipientCoins',
+          'referenceId', 'status', 'createdAt', 'createdAtMs'
+        ])
+        && data.keys().hasOnly([
+          'id', 'type', 'agencyId', 'agencyName', 'agencyCode', 'senderUid',
+          'recipientId', 'recipientUniqueId', 'recipientName', 'recipientAvatar',
+          'coins', 'previousAgencyBalance', 'remainingBalance',
+          'previousRecipientCoins', 'nextRecipientCoins',
+          'referenceId', 'orderId', 'status', 'createdAt', 'createdAtMs'
+        ])
+        && isNonEmptyString(data.id, 1, 128)
+        && data.type in ['direct_send', 'order_delivery']
+        && isNonEmptyString(data.agencyId, 1, 128)
+        && isNonEmptyString(data.agencyName, 1, 128)
+        && (!('agencyCode' in data) || (data.agencyCode is string && data.agencyCode.size() <= 64))
+        && data.senderUid == request.auth.uid
+        && isNonEmptyString(data.recipientId, 1, 128)
+        && (!('recipientUniqueId' in data) || (data.recipientUniqueId is string && data.recipientUniqueId.size() <= 64))
+        && isNonEmptyString(data.recipientName, 1, 128)
+        && (!('recipientAvatar' in data) || (data.recipientAvatar is string && data.recipientAvatar.size() <= 2048))
+        && data.coins is number && data.coins >= 1 && data.coins <= 1000000000
+        && data.previousAgencyBalance is number && data.previousAgencyBalance >= data.coins
+        && data.remainingBalance is number && data.remainingBalance >= 0
+        && data.remainingBalance == (data.previousAgencyBalance - data.coins)
+        && data.previousRecipientCoins is number && data.previousRecipientCoins >= 0
+        && data.nextRecipientCoins is number && data.nextRecipientCoins == (data.previousRecipientCoins + data.coins)
+        && isNonEmptyString(data.referenceId, 1, 128)
+        && (!('orderId' in data) || (data.orderId is string && data.orderId.size() <= 128))
+        && data.status == 'completed'
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.createdAtMs is number;
+    }
+
+    function isValidWalletTransaction(data, userId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'type', 'direction', 'currency', 'walletType',
+          'amount', 'title', 'status', 'createdAt', 'createdAtMs'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'type', 'direction', 'currency', 'walletType',
+          'amount', 'balanceBefore', 'balanceAfter', 'grossGiftCoins', 'platformShareCoins',
+          'source', 'agencyId', 'agencyName', 'senderId', 'senderUid', 'senderName',
+          'recipientId', 'recipientName', 'giftId', 'giftName', 'giftIcon', 'quantity',
+          'referenceId', 'title', 'status', 'createdAt', 'createdAtMs'
+        ])
+        && isNonEmptyString(data.id, 1, 128)
+        && data.userId == userId
+        && data.type in ['recharge', 'gift_sent', 'gift_received', 'withdrawal', 'reward', 'agency_transfer', 'diamond_exchange']
+        && data.direction in ['credit', 'debit']
+        && data.currency in ['coins', 'diamonds']
+        && data.walletType in ['gifting', 'earnings']
+        && data.amount is number && data.amount > 0 && data.amount <= 1000000000
+        && (!('balanceBefore' in data) || (data.balanceBefore is number && data.balanceBefore >= 0))
+        && (!('balanceAfter' in data) || (data.balanceAfter is number && data.balanceAfter >= 0))
+        && (!('grossGiftCoins' in data) || (data.grossGiftCoins is number && data.grossGiftCoins >= 0))
+        && (!('platformShareCoins' in data) || (data.platformShareCoins is number && data.platformShareCoins >= 0))
+        && (!('source' in data) || (data.source is string && data.source.size() <= 64))
+        && (!('agencyId' in data) || (data.agencyId is string && data.agencyId.size() <= 128))
+        && (!('agencyName' in data) || (data.agencyName is string && data.agencyName.size() <= 128))
+        && (!('senderId' in data) || (data.senderId is string && data.senderId.size() <= 128))
+        && (!('senderUid' in data) || (data.senderUid is string && data.senderUid.size() <= 128))
+        && (!('senderName' in data) || (data.senderName is string && data.senderName.size() <= 128))
+        && (!('recipientId' in data) || (data.recipientId is string && data.recipientId.size() <= 128))
+        && (!('recipientName' in data) || (data.recipientName is string && data.recipientName.size() <= 128))
+        && (!('giftId' in data) || (data.giftId is string && data.giftId.size() <= 128))
+        && (!('giftName' in data) || (data.giftName is string && data.giftName.size() <= 128))
+        && (!('giftIcon' in data) || (data.giftIcon is string && data.giftIcon.size() <= 512))
+        && (!('quantity' in data) || (data.quantity is number && data.quantity >= 1 && data.quantity <= 9999))
+        && (!('referenceId' in data) || (data.referenceId is string && data.referenceId.size() <= 128))
+        && isNonEmptyString(data.title, 1, 240)
+        && data.status in ['completed', 'pending', 'rejected']
         && data.createdAt is string && data.createdAt.size() <= 64
         && data.createdAtMs is number;
     }
@@ -316,17 +403,87 @@ service cloud.firestore {
       allow update: if isOfficialAdmin()
         || (isOwner(userId) && isValidId(userId) && isClientAllowedUserUpdate())
         || (
+          // Atomic 60% Gift Earnings credit to recipient's Earnings Wallet (diamonds)
           isSignedIn()
           && isValidId(userId)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['diamonds', 'updatedAt'])
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['diamonds', 'lastGiftCreditTxId', 'updatedAt'])
           && request.resource.data.diamonds is number
-          && (!('diamonds' in resource.data) || resource.data.diamonds is number)
-          && request.resource.data.diamonds > (('diamonds' in resource.data) ? resource.data.diamonds : 0)
-          && request.resource.data.diamonds <= (('diamonds' in resource.data) ? resource.data.diamonds : 0) + 5000000
+          && isValidId(request.resource.data.lastGiftCreditTxId)
+          && existsAfter(/databases/$(database)/documents/giftTransactions/$(request.resource.data.lastGiftCreditTxId))
+          && getAfter(/databases/$(database)/documents/giftTransactions/$(request.resource.data.lastGiftCreditTxId)).data.senderId == request.auth.uid
+          && getAfter(/databases/$(database)/documents/giftTransactions/$(request.resource.data.lastGiftCreditTxId)).data.recipientId == userId
+          && getAfter(/databases/$(database)/documents/giftTransactions/$(request.resource.data.lastGiftCreditTxId)).data.hostDiamonds > 0
+          && request.resource.data.diamonds == (
+            (('diamonds' in resource.data && resource.data.diamonds is number) ? resource.data.diamonds : 0)
+            + getAfter(/databases/$(database)/documents/giftTransactions/$(request.resource.data.lastGiftCreditTxId)).data.hostDiamonds
+          )
+          && request.resource.data.updatedAt is string
+          && request.resource.data.updatedAt.size() <= 64
+        )
+        || (
+          // Atomic Official Agency Coin Transfer credit to recipient's Gifting Wallet (coins)
+          isSignedIn()
+          && isValidId(userId)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['coins', 'lastAgencyCreditTxId', 'updatedAt'])
+          && request.resource.data.coins is number
+          && isValidId(request.resource.data.lastAgencyCreditTxId)
+          && existsAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId))
+          && getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.senderUid == request.auth.uid
+          && getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.recipientId == userId
+          && getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.coins > 0
+          && request.resource.data.coins == (
+            (('coins' in resource.data && resource.data.coins is number) ? resource.data.coins : 0)
+            + getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.coins
+          )
+          && exists(/databases/$(database)/documents/agencies/$(getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.agencyId))
+          && isAgencyOwner(get(/databases/$(database)/documents/agencies/$(getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.agencyId)).data)
+          && isCoinSellerAgency(get(/databases/$(database)/documents/agencies/$(getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.agencyId)).data)
+          && isActiveAgencyStatus(get(/databases/$(database)/documents/agencies/$(getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.agencyId)).data)
+          && getAfter(/databases/$(database)/documents/agencies/$(getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.agencyId)).data.lastTransferTxId == request.resource.data.lastAgencyCreditTxId
+          && (
+            canonicalAgencyBalance(get(/databases/$(database)/documents/agencies/$(getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.agencyId)).data)
+            - getAfter(/databases/$(database)/documents/agencies/$(getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.agencyId)).data.agencyBalance
+          ) == getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastAgencyCreditTxId)).data.coins
           && request.resource.data.updatedAt is string
           && request.resource.data.updatedAt.size() <= 64
         );
       allow delete: if false;
+
+      // Immutable per-user wallet transaction history (Gifting Coins & 60% Gift Earnings)
+      match /walletTransactions/{txId} {
+        allow get: if isValidId(userId) && isValidId(txId) && (isOwner(userId) || isOfficialAdmin());
+        allow list: if isOwner(userId) || isOfficialAdmin();
+        allow create: if isSignedIn()
+          && isValidId(userId)
+          && isValidId(txId)
+          && isValidWalletTransaction(request.resource.data, userId)
+          && request.resource.data.id == txId
+          && (
+            isOfficialAdmin()
+            || isOwner(userId)
+            || (
+              // Atomic recipient wallet credit from an Official Agency coin transfer
+              existsAfter(/databases/$(database)/documents/agencyTransactions/$(txId))
+              && getAfter(/databases/$(database)/documents/agencyTransactions/$(txId)).data.senderUid == request.auth.uid
+              && getAfter(/databases/$(database)/documents/agencyTransactions/$(txId)).data.recipientId == userId
+              && request.resource.data.currency == 'coins'
+              && request.resource.data.walletType == 'gifting'
+              && request.resource.data.direction == 'credit'
+              && request.resource.data.amount == getAfter(/databases/$(database)/documents/agencyTransactions/$(txId)).data.coins
+            )
+            || (
+              // Atomic recipient 60% earnings credit from a live/party/moments gift
+              existsAfter(/databases/$(database)/documents/giftTransactions/$(txId))
+              && getAfter(/databases/$(database)/documents/giftTransactions/$(txId)).data.senderId == request.auth.uid
+              && getAfter(/databases/$(database)/documents/giftTransactions/$(txId)).data.recipientId == userId
+              && request.resource.data.currency == 'diamonds'
+              && request.resource.data.walletType == 'earnings'
+              && request.resource.data.direction == 'credit'
+              && request.resource.data.amount == getAfter(/databases/$(database)/documents/giftTransactions/$(txId)).data.hostDiamonds
+            )
+          );
+        allow update, delete: if false;
+      }
 
       // Per-user real-time notifications inbox (includes Official Admin Action notifications)
       match /notifications/{notificationId} {
@@ -472,7 +629,7 @@ service cloud.firestore {
         && resource.data.followerId == request.auth.uid;
     }
 
-    // Immutable 60/40 Gifting Ledger (60% Host Diamonds, 40% App Revenue Share)
+    // Immutable 60/40 Gifting Ledger (60% Host/Recipient Earnings, 40% Platform Share)
     match /giftTransactions/{txId} {
       allow get: if isValidId(txId)
         && isSignedIn()
@@ -481,7 +638,34 @@ service cloud.firestore {
         && (isOfficialAdmin() || resource.data.senderId == request.auth.uid || resource.data.recipientId == request.auth.uid);
       allow create: if isValidId(txId)
         && isSignedIn()
-        && isValidGiftTransaction(request.resource.data);
+        && isValidGiftTransaction(request.resource.data)
+        && existsAfter(/databases/$(database)/documents/users/$(request.resource.data.recipientId))
+        && getAfter(/databases/$(database)/documents/users/$(request.resource.data.recipientId)).data.lastGiftCreditTxId == txId;
+      allow update, delete: if false;
+    }
+
+    // Immutable Official Coin Seller Agency Transfer Ledger (Atomic & Idempotent)
+    match /agencyTransactions/{txId} {
+      allow get: if isValidId(txId)
+        && isSignedIn()
+        && (isOfficialAdmin() || resource.data.senderUid == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow list: if isSignedIn()
+        && (isOfficialAdmin() || resource.data.senderUid == request.auth.uid || resource.data.recipientId == request.auth.uid);
+      allow create: if isValidId(txId)
+        && isSignedIn()
+        && isValidAgencyTransaction(request.resource.data)
+        && request.resource.data.id == txId
+        && exists(/databases/$(database)/documents/agencies/$(request.resource.data.agencyId))
+        && isAgencyOwner(get(/databases/$(database)/documents/agencies/$(request.resource.data.agencyId)).data)
+        && isCoinSellerAgency(get(/databases/$(database)/documents/agencies/$(request.resource.data.agencyId)).data)
+        && isActiveAgencyStatus(get(/databases/$(database)/documents/agencies/$(request.resource.data.agencyId)).data)
+        && getAfter(/databases/$(database)/documents/agencies/$(request.resource.data.agencyId)).data.lastTransferTxId == txId
+        && (
+          canonicalAgencyBalance(get(/databases/$(database)/documents/agencies/$(request.resource.data.agencyId)).data)
+          - getAfter(/databases/$(database)/documents/agencies/$(request.resource.data.agencyId)).data.agencyBalance
+        ) == request.resource.data.coins
+        && existsAfter(/databases/$(database)/documents/users/$(request.resource.data.recipientId))
+        && getAfter(/databases/$(database)/documents/users/$(request.resource.data.recipientId)).data.lastAgencyCreditTxId == txId;
       allow update, delete: if false;
     }
 
@@ -589,6 +773,31 @@ service cloud.firestore {
         && data.coins is number && data.coins >= 0 && data.coins <= 1000000000;
     }
 
+    function canonicalAgencyBalance(data) {
+      return ('agencyBalance' in data && data.agencyBalance is number) ? data.agencyBalance
+        : (('coinBalance' in data && data.coinBalance is number) ? data.coinBalance
+          : (('coins' in data && data.coins is number) ? data.coins
+            : (('coinStock' in data && data.coinStock is number) ? data.coinStock
+              : (('stock' in data && data.stock is number) ? data.stock : 0))));
+    }
+
+    function isCoinSellerAgency(data) {
+      return (
+        ('type' in data && data.type in ['coin_seller', 'Coin Seller Agency', 'coin seller', 'coin seller agency', 'coin-seller', 'coin_agency'])
+        || ('agencyType' in data && data.agencyType in ['coin_seller', 'Coin Seller Agency', 'coin seller', 'coin seller agency', 'coin-seller', 'coin_agency'])
+      );
+    }
+
+    function isActiveAgencyStatus(data) {
+      return ('status' in data && data.status in ['active', 'Active', 'ACTIVE', 'activated', 'approved active'])
+        && !('isSuspended' in data && data.isSuspended == true)
+        && !('suspended' in data && data.suspended == true)
+        && !('isBanned' in data && data.isBanned == true)
+        && !('isDeleted' in data && data.isDeleted == true)
+        && !('onHold' in data && data.onHold == true)
+        && !('isOnHold' in data && data.isOnHold == true);
+    }
+
     function isAgencyOwner(data) {
       return data.get('ownerUserId', '') == request.auth.uid
         || data.get('ownerUid', '') == request.auth.uid
@@ -685,50 +894,47 @@ service cloud.firestore {
       allow update: if isValidId(agencyId)
         && isSignedIn()
         && (
-          (
-            isValidOfficialAgency(request.resource.data)
-            && request.resource.data.agencyId == resource.data.agencyId
-            && request.resource.data.type == resource.data.type
-            && request.resource.data.ownerUserId == resource.data.ownerUserId
-            && (
-              isOfficialAdmin()
-              || (
-                isAgencyOwner(resource.data)
-                && request.resource.data.status == resource.data.status
-                && request.resource.data.isOfficial == resource.data.isOfficial
-                && (
-                  request.resource.data.agencyBalance == resource.data.agencyBalance
-                  || (
-                    resource.data.type == 'coin_seller'
-                    && request.resource.data.agencyBalance >= 0
-                    && (
-                      request.resource.data.agencyBalance < resource.data.agencyBalance
-                      || request.resource.data.agencyBalance < resource.data.get('coinBalance', 0)
-                      || request.resource.data.agencyBalance < resource.data.get('coins', 0)
-                    )
-                    && request.resource.data.coinBalance == request.resource.data.agencyBalance
-                    && request.resource.data.coins == request.resource.data.agencyBalance
-                  )
-                )
-              )
-            )
+          // Action 1: Official Admin management & stock allocation
+          isOfficialAdmin()
+          || (
+            // Action 2: Agency Owner settings update (cannot alter balance or status)
+            isAgencyOwner(resource.data)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'whatsappNumber', 'whatsappDisplay', 'slogan',
+              'defaultCommissionRate', 'minWeeklyHours', 'isPinSet', 'updatedAt'
+            ])
+            && (!('whatsappNumber' in request.resource.data) || (request.resource.data.whatsappNumber is string && request.resource.data.whatsappNumber.size() <= 64))
+            && (!('whatsappDisplay' in request.resource.data) || (request.resource.data.whatsappDisplay is string && request.resource.data.whatsappDisplay.size() <= 64))
+            && (!('slogan' in request.resource.data) || (request.resource.data.slogan is string && request.resource.data.slogan.size() <= 300))
+            && (!('defaultCommissionRate' in request.resource.data) || (request.resource.data.defaultCommissionRate is number && request.resource.data.defaultCommissionRate >= 0 && request.resource.data.defaultCommissionRate <= 80))
+            && (!('minWeeklyHours' in request.resource.data) || (request.resource.data.minWeeklyHours is number && request.resource.data.minWeeklyHours >= 0 && request.resource.data.minWeeklyHours <= 168))
+            && (!('isPinSet' in request.resource.data) || request.resource.data.isPinSet is bool)
+            && (!('updatedAt' in request.resource.data) || (request.resource.data.updatedAt is string && request.resource.data.updatedAt.size() <= 64))
           )
           || (
-            isValidAdminPanelAgency(request.resource.data)
-            && request.resource.data.type == resource.data.type
-            && isAgencyOwner(resource.data)
-            && request.resource.data.status == resource.data.status
-            && request.resource.data.agencyBalance == request.resource.data.coinBalance
-            && request.resource.data.agencyBalance == request.resource.data.coins
-            && request.resource.data.agencyBalance >= 0
-            && (
-              request.resource.data.agencyBalance < resource.data.get('agencyBalance', 0)
-              || request.resource.data.agencyBalance < resource.data.get('coinBalance', 0)
-              || request.resource.data.agencyBalance < resource.data.get('coins', 0)
-            )
+            // Action 3: Atomic Coin Seller Agency stock deduction tied to an immutable agencyTransactions/{txId} ledger record
+            isAgencyOwner(resource.data)
+            && isCoinSellerAgency(resource.data)
+            && isActiveAgencyStatus(resource.data)
             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'agencyBalance', 'coinBalance', 'coins', 'updatedAt'
+              'agencyBalance', 'coinBalance', 'coins', 'coinStock', 'stock', 'lastTransferTxId', 'updatedAt'
             ])
+            && request.resource.data.agencyBalance is number
+            && request.resource.data.agencyBalance >= 0
+            && request.resource.data.agencyBalance < canonicalAgencyBalance(resource.data)
+            && request.resource.data.coinBalance == request.resource.data.agencyBalance
+            && request.resource.data.coins == request.resource.data.agencyBalance
+            && (!('coinStock' in request.resource.data) || request.resource.data.coinStock == request.resource.data.agencyBalance)
+            && (!('stock' in request.resource.data) || request.resource.data.stock == request.resource.data.agencyBalance)
+            && isValidId(request.resource.data.lastTransferTxId)
+            && existsAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastTransferTxId))
+            && getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastTransferTxId)).data.agencyId == agencyId
+            && getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastTransferTxId)).data.senderUid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/agencyTransactions/$(request.resource.data.lastTransferTxId)).data.coins == (
+              canonicalAgencyBalance(resource.data) - request.resource.data.agencyBalance
+            )
+            && request.resource.data.updatedAt is string
+            && request.resource.data.updatedAt.size() <= 64
           )
         );
       allow delete: if false;
@@ -972,14 +1178,23 @@ service cloud.firestore {
         && data.keys().hasOnly(['count', 'updatedAt'])
         && data.count is number
         && data.count >= 1
-        && data.updatedAt == request.time;
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPartyHeartStatUpdate() {
+      return request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
+        && 'count' in request.resource.data
+        && request.resource.data.count is number
+        && request.resource.data.count >= 1
+        && request.resource.data.count == (('count' in resource.data && resource.data.count is number) ? resource.data.count : 0) + 1
+        && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt is timestamp);
     }
 
     function isValidPartyHeartEvent(data) {
       return data.keys().hasAll(['senderId', 'createdAt'])
         && data.keys().hasOnly(['senderId', 'createdAt'])
         && data.senderId == request.auth.uid
-        && data.createdAt == request.time;
+        && data.createdAt is timestamp;
     }
 
     function isValidPartyRoomMessage(data) {
@@ -995,7 +1210,7 @@ service cloud.firestore {
         && data.sender.avatar is string && data.sender.avatar.size() <= 65000
         && data.text is string && data.text.size() <= 2000
         && data.type in ['room', 'host', 'gift', 'system']
-        && data.createdAt == request.time
+        && data.createdAt is timestamp
         && (!('giftId' in data) || (data.giftId is string && data.giftId.size() <= 64))
         && (!('giftName' in data) || (data.giftName is string && data.giftName.size() <= 128))
         && (!('giftIcon' in data) || (data.giftIcon is string && data.giftIcon.size() <= 512))
@@ -1053,60 +1268,54 @@ service cloud.firestore {
       );
 
       match /stats/{statId} {
-        allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+        allow read: if isValidId(roomId) && (isSignedIn() || (exists(/databases/$(database)/documents/partyRooms/$(roomId)) && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true));
         allow create: if isSignedIn() && isValidId(roomId) && statId == 'hearts' && isValidPartyHeartStat(request.resource.data) && request.resource.data.count == 1;
-        allow update: if isSignedIn() && isValidId(roomId) && statId == 'hearts'
-          && isValidPartyHeartStat(request.resource.data)
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
-          && request.resource.data.count == resource.data.count + 1;
-        allow delete: if isValidId(statId) && isPartyHost(roomId);
+        allow update: if isSignedIn() && isValidId(roomId) && statId == 'hearts' && isValidPartyHeartStatUpdate();
+        allow delete: if isValidId(statId) && (isPartyHost(roomId) || isOfficialAdmin());
       }
       match /heartEvents/{eventId} {
-        allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+        allow read: if isValidId(roomId) && (isSignedIn() || (exists(/databases/$(database)/documents/partyRooms/$(roomId)) && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true));
         allow create: if isSignedIn() && isValidId(roomId) && isValidId(eventId) && isValidPartyHeartEvent(request.resource.data);
         allow update: if false;
-        allow delete: if isValidId(eventId) && isPartyHost(roomId);
+        allow delete: if isValidId(eventId) && (isPartyHost(roomId) || isOfficialAdmin());
       }
 
       match /messages/{messageId} {
-        allow read: if isValidId(roomId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+        allow read: if isValidId(roomId) && (isSignedIn() || (exists(/databases/$(database)/documents/partyRooms/$(roomId)) && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true));
         allow create: if isSignedIn()
           && isValidId(roomId)
           && isValidId(messageId)
           && isValidPartyRoomMessage(request.resource.data);
         allow update: if false;
-        allow delete: if isValidId(messageId) && isPartyHost(roomId);
+        allow delete: if isValidId(messageId) && (isPartyHost(roomId) || isOfficialAdmin());
       }
 
       match /sessions/{sessionId} {
         allow read, write: if false;
 
         match /stats/{statId} {
-          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || (exists(/databases/$(database)/documents/partyRooms/$(roomId)) && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true));
           allow create: if isSignedIn() && isValidId(roomId) && isValidId(sessionId) && statId == 'hearts' && isValidPartyHeartStat(request.resource.data) && request.resource.data.count == 1;
-          allow update: if isSignedIn() && isValidId(roomId) && isValidId(sessionId) && statId == 'hearts'
-            && isValidPartyHeartStat(request.resource.data)
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
-            && request.resource.data.count == resource.data.count + 1;
-          allow delete: if isValidId(sessionId) && isValidId(statId) && isPartyHost(roomId);
+          allow update: if isSignedIn() && isValidId(roomId) && isValidId(sessionId) && statId == 'hearts' && isValidPartyHeartStatUpdate();
+          allow delete: if isValidId(sessionId) && isValidId(statId) && (isPartyHost(roomId) || isOfficialAdmin());
         }
 
         match /heartEvents/{eventId} {
-          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || (exists(/databases/$(database)/documents/partyRooms/$(roomId)) && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true));
           allow create: if isSignedIn() && isValidId(roomId) && isValidId(sessionId) && isValidId(eventId) && isValidPartyHeartEvent(request.resource.data);
           allow update: if false;
-          allow delete: if isValidId(sessionId) && isValidId(eventId) && isPartyHost(roomId);
+          allow delete: if isValidId(sessionId) && isValidId(eventId) && (isPartyHost(roomId) || isOfficialAdmin());
         }
 
         match /messages/{messageId} {
-          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true);
+          allow read: if isValidId(roomId) && isValidId(sessionId) && (isSignedIn() || (exists(/databases/$(database)/documents/partyRooms/$(roomId)) && get(/databases/$(database)/documents/partyRooms/$(roomId)).data.isActive == true));
           allow create: if isSignedIn()
             && isValidId(roomId)
             && isValidId(sessionId)
             && isValidId(messageId)
             && isValidPartyRoomMessage(request.resource.data);
           allow update: if false;
-          allow delete: if isValidId(sessionId) && isValidId(messageId) && isPartyHost(roomId);
+          allow delete: if isValidId(sessionId) && isValidId(messageId) && (isPartyHost(roomId) || isOfficialAdmin());
         }
       }
 
@@ -1120,6 +1329,7 @@ service cloud.firestore {
         allow create, update, delete: if isSignedIn() && (
           request.auth.uid == userId
           || isPartyHost(roomId)
+          || isOfficialAdmin()
           || (
             exists(/databases/$(database)/documents/partyRooms/$(roomId))
             && 'moderatorIds' in get(/databases/$(database)/documents/partyRooms/$(roomId)).data
@@ -1172,15 +1382,13 @@ service cloud.firestore {
       );
 
       match /stats/{statId} {
-        allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;
-        allow create: if isSignedIn() && statId == 'hearts' && request.resource.data.count == 1;
-        allow update: if isSignedIn() && statId == 'hearts'
-          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['count', 'updatedAt'])
-          && request.resource.data.count == resource.data.count + 1;
+        allow read: if isSignedIn() || (exists(/databases/$(database)/documents/liveStreams/$(streamId)) && get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true);
+        allow create: if isSignedIn() && isValidId(streamId) && statId == 'hearts' && isValidPartyHeartStat(request.resource.data) && request.resource.data.count == 1;
+        allow update: if isSignedIn() && isValidId(streamId) && statId == 'hearts' && isValidPartyHeartStatUpdate();
       }
       match /heartEvents/{eventId} {
-        allow read: if isSignedIn() || get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true;
-        allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+        allow read: if isSignedIn() || (exists(/databases/$(database)/documents/liveStreams/$(streamId)) && get(/databases/$(database)/documents/liveStreams/$(streamId)).data.isActive == true);
+        allow create: if isSignedIn() && isValidId(streamId) && isValidId(eventId) && isValidPartyHeartEvent(request.resource.data);
         allow update, delete: if false;
       }
 

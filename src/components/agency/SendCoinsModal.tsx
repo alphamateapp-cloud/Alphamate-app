@@ -27,12 +27,13 @@ export const SendCoinsModal: React.FC<SendCoinsModalProps> = ({
   onClose,
   initialQuery = '',
 }) => {
-  const { agencyProfile, sendAgencyCoins, findUserByIdOrUsername } = useApp();
+  const { agencyProfile, sendAgencyCoins, findUserByIdOrUsername, findUserByIdOrUsernameAsync } = useApp();
 
   const [query, setQuery] = useState(initialQuery);
   const [recipient, setRecipient] = useState<User | null>(() => {
     return initialQuery ? findUserByIdOrUsername(initialQuery) : null;
   });
+  const [isSearching, setIsSearching] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
 
   const [amount, setAmount] = useState<string>('50000');
@@ -41,34 +42,46 @@ export const SendCoinsModal: React.FC<SendCoinsModalProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const transferKeyRef = React.useRef<string>('');
 
   if (!isOpen || !agencyProfile) return null;
 
-  const handleSearchUser = (e?: React.FormEvent) => {
+  const handleSearchUser = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setSearchError(null);
     setErrorMsg(null);
 
     if (!query.trim()) {
-      setSearchError('Please enter a User ID or Username');
+      setSearchError('Please enter a User ID, Username, or Email');
       setRecipient(null);
       return;
     }
 
-    const found = findUserByIdOrUsername(query);
-    if (found) {
-      setRecipient(found);
-    } else {
+    setIsSearching(true);
+    try {
+      const found = await findUserByIdOrUsernameAsync(query);
+      if (found) {
+        setRecipient(found);
+        transferKeyRef.current = '';
+      } else {
+        setRecipient(null);
+        setSearchError('No verified Alpha Mate user found matching this ID, Username, or Email');
+      }
+    } catch {
       setRecipient(null);
-      setSearchError('No user found matching this User ID or Username');
+      setSearchError('Could not search user right now. Please try again.');
+    } finally {
+      setIsSearching(false);
     }
   };
 
   const handleQuickAmount = (val: number) => {
     setAmount(val.toString());
+    transferKeyRef.current = '';
   };
 
-  const handleTransfer = () => {
+  const handleTransfer = async () => {
+    if (isSubmitting) return;
     setErrorMsg(null);
     setSuccessMsg(null);
 
@@ -93,21 +106,36 @@ export const SendCoinsModal: React.FC<SendCoinsModalProps> = ({
       return;
     }
 
+    if (!transferKeyRef.current) {
+      transferKeyRef.current = `modal_${agencyProfile.agencyId}_${recipient.id}_${numAmount}_${Date.now()}`;
+    }
+
     setIsSubmitting(true);
-    setTimeout(() => {
-      const res = sendAgencyCoins(recipient.uniqueId || recipient.username, numAmount, pin);
-      setIsSubmitting(false);
+    try {
+      const res = await sendAgencyCoins(
+        recipient.id || recipient.uniqueId || recipient.username,
+        numAmount,
+        pin,
+        transferKeyRef.current
+      );
 
       if (res.success) {
+        transferKeyRef.current = '';
         setSuccessMsg(res.message);
         setPin('');
         setTimeout(() => {
           onClose();
         }, 1800);
       } else {
+        transferKeyRef.current = '';
         setErrorMsg(res.message);
       }
-    }, 400);
+    } catch (err: any) {
+      transferKeyRef.current = '';
+      setErrorMsg(err?.message || 'Transfer failed. Please check balances and try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -165,10 +193,11 @@ export const SendCoinsModal: React.FC<SendCoinsModalProps> = ({
                 />
                 <button
                   type="button"
-                  onClick={() => handleSearchUser()}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-xl bg-amber-400 hover:bg-amber-300 text-black flex items-center justify-center transition-colors cursor-pointer shadow"
+                  disabled={isSearching}
+                  onClick={() => void handleSearchUser()}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-7 h-7 rounded-xl bg-amber-400 hover:bg-amber-300 text-black flex items-center justify-center transition-colors cursor-pointer shadow disabled:opacity-60"
                 >
-                  <Search className="w-3.5 h-3.5" />
+                  <Search className={`w-3.5 h-3.5 ${isSearching ? 'animate-spin' : ''}`} />
                 </button>
               </div>
             </div>

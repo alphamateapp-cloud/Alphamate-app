@@ -8,6 +8,10 @@ import {
   GiftPlaybackPosition,
 } from '../../types';
 import { resolvePlayableGiftUrl } from '../../services/giftAnimationEngine';
+import {
+  getCachedGiftMediaUrlSync,
+  resolveCachedGiftMediaUrl,
+} from '../../services/giftMediaCache';
 import { audioManager } from '../../services/audioManager';
 import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
 import { Sparkles } from 'lucide-react';
@@ -276,7 +280,43 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   ]);
 
   const effectiveFormat = resolvedMedia?.effectiveFormat || config?.format || 'webm';
-  const mediaUrl = resolvedMedia?.url || '';
+  const remoteMediaUrl = resolvedMedia?.url || '';
+  const [resolvedLocalUrl, setResolvedLocalUrl] = useState<string>(() =>
+    remoteMediaUrl ? getCachedGiftMediaUrlSync(remoteMediaUrl) || remoteMediaUrl : ''
+  );
+  const lastProgressAtRef = useRef<number>(Date.now());
+  const hasStartedPlayingRef = useRef<boolean>(false);
+
+  // Resolve local IndexedDB cached Blob URL for zero-buffering instant playback.
+  // Never swaps src mid-playback if the video has already started streaming.
+  useEffect(() => {
+    if (!remoteMediaUrl) {
+      setResolvedLocalUrl('');
+      return;
+    }
+    const syncHit = getCachedGiftMediaUrlSync(remoteMediaUrl);
+    if (syncHit) {
+      setResolvedLocalUrl(syncHit);
+      return;
+    }
+    let cancelled = false;
+    setResolvedLocalUrl(remoteMediaUrl);
+    void resolveCachedGiftMediaUrl(remoteMediaUrl, {
+      giftId: event?.gift.id || config?.id || 'gift',
+      autoCache: true,
+    }).then(({ playableUrl, fromCache }) => {
+      if (cancelled || !fromCache || !playableUrl) return;
+      // Only switch to the IndexedDB Blob URL if playback has not yet begun frames
+      if (!hasStartedPlayingRef.current) {
+        setResolvedLocalUrl(playableUrl);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [remoteMediaUrl, event?.id, event?.gift.id, config?.id]);
+
+  const mediaUrl = resolvedLocalUrl || remoteMediaUrl;
   const isVideoFormat =
     effectiveFormat === 'webm' || effectiveFormat === 'mov' || effectiveFormat === 'mp4';
   const isSvgaFormat = effectiveFormat === 'svga';
@@ -337,12 +377,37 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     }
   };
 
+  const armVideoStallWatchdog = (eventId: string, durationHintMs: number) => {
+    if (previewLoopOverride || !ownsCompletionLifecycle || shouldLoop) return;
+    if (endTimerRef.current !== undefined) {
+      window.clearTimeout(endTimerRef.current);
+      endTimerRef.current = undefined;
+    }
+    const checkMs = Math.min(75_000, Math.max(15_000, Math.round(durationHintMs) + 12_000));
+    endTimerRef.current = window.setTimeout(() => {
+      const vid = videoRef.current;
+      // If the video is actively advancing frames and hasn't ended yet, NEVER cut it off prematurely!
+      if (
+        vid &&
+        !vid.ended &&
+        !vid.paused &&
+        Date.now() - lastProgressAtRef.current < 4000
+      ) {
+        armVideoStallWatchdog(eventId, 10_000);
+        return;
+      }
+      finishPlayback(eventId, true);
+    }, checkMs);
+  };
+
   // Lifecycle: direct animation playback -> full duration completion -> clean auto-dismiss & resource release
   useEffect(() => {
     if (!event || !config) return;
 
     const currentEventId = event.id;
     completedIdRef.current = null;
+    hasStartedPlayingRef.current = false;
+    lastProgressAtRef.current = Date.now();
     setIsMediaReady(!isVideoFormat && !isSvgaFormat);
     setVideoAspect(
       config.analysis?.width && config.analysis?.height
@@ -356,12 +421,14 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     const enterTimer = window.setTimeout(() => setPhase('visible'), 30);
 
     if (!previewLoopOverride && ownsCompletionLifecycle) {
-      if ((isVideoFormat || isSvgaFormat) && !shouldLoop) {
-        // Non-looping videos & SVGA animations play to their natural end via onEnded / onFinished.
-        // Set only a generous stall safety deadline (adjusted further once metadata loads).
+      if (isVideoFormat && !shouldLoop) {
+        // Non-looping videos finish naturally via onEnded.
+        // Use a progress-aware watchdog so slow network buffering NEVER kills a 10s WebM at 5-6s!
+        armVideoStallWatchdog(currentEventId, Math.round(configuredDurationMs / playbackSpeed) + 8000);
+      } else if (isSvgaFormat && !shouldLoop) {
         const stallSafetyMs = Math.min(
           65_000,
-          Math.round(configuredDurationMs / playbackSpeed) + 6000
+          Math.round(configuredDurationMs / playbackSpeed) + 10_000
         );
         endTimerRef.current = window.setTimeout(() => {
           finishPlayback(currentEventId, true);
@@ -406,7 +473,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   }, [
     event?.id,
     displayMode,
-    mediaUrl,
+    remoteMediaUrl,
     configuredDurationMs,
     playbackSpeed,
     isVideoFormat,
@@ -569,16 +636,43 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
               vid.duration > 0
             ) {
               const realDurationMs = Math.ceil((vid.duration * 1000) / playbackSpeed);
-              if (endTimerRef.current !== undefined) {
-                window.clearTimeout(endTimerRef.current);
-              }
-              endTimerRef.current = window.setTimeout(() => {
-                finishPlayback(event.id, true);
-              }, Math.min(68_000, realDurationMs + 5000));
+              armVideoStallWatchdog(event.id, realDurationMs);
             }
           }}
           onLoadedData={() => setIsMediaReady(true)}
-          onPlaying={() => setIsMediaReady(true)}
+          onPlaying={(e) => {
+            hasStartedPlayingRef.current = true;
+            lastProgressAtRef.current = Date.now();
+            setIsMediaReady(true);
+            const vid = e.currentTarget;
+            if (Number.isFinite(vid.duration) && vid.duration > 0) {
+              const remainingMs = Math.max(
+                2000,
+                Math.ceil(((vid.duration - vid.currentTime) * 1000) / playbackSpeed)
+              );
+              armVideoStallWatchdog(event.id, remainingMs);
+            }
+          }}
+          onTimeUpdate={() => {
+            lastProgressAtRef.current = Date.now();
+          }}
+          onCanPlay={(e) => {
+            const vid = e.currentTarget;
+            if (vid.paused && !vid.ended) {
+              vid.play().catch(() => {});
+            }
+          }}
+          onWaiting={() => {
+            // Extend watchdog during transient network buffering so video finishes smoothly
+            armVideoStallWatchdog(event.id, 12_000);
+          }}
+          onStalled={(e) => {
+            armVideoStallWatchdog(event.id, 12_000);
+            const vid = e.currentTarget;
+            if (vid.paused && !vid.ended) {
+              vid.play().catch(() => {});
+            }
+          }}
           onEnded={() => {
             if (!shouldLoop && !previewLoopOverride && ownsCompletionLifecycle) {
               finishPlayback(event.id, true);

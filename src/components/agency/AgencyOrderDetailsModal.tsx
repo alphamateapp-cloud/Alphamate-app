@@ -43,7 +43,8 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
 
   const totalCoins = order.coins + (order.bonusCoins || 0);
 
-  const handleDeliver = () => {
+  const handleDeliver = async () => {
+    if (isDelivering) return;
     setErrorMsg(null);
     setSuccessMsg(null);
 
@@ -65,9 +66,8 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
     }
 
     setIsDelivering(true);
-    setTimeout(() => {
-      const res = deliverAgencyOrder(order.id, pin);
-      setIsDelivering(false);
+    try {
+      const res = await deliverAgencyOrder(order.id, pin);
 
       if (res.success) {
         setSuccessMsg(res.message);
@@ -78,7 +78,11 @@ export const AgencyOrderDetailsModal: React.FC<AgencyOrderDetailsModalProps> = (
       } else {
         setErrorMsg(res.message);
       }
-    }, 450);
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Order delivery failed. Please verify balances and try again.');
+    } finally {
+      setIsDelivering(false);
+    }
   };
 
   const handleReject = () => {

@@ -47,6 +47,7 @@ import {
   VoiceFilterPresetId,
 } from '../services/audioFilter';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
+import { GiftCacheBadge, GiftCacheBar, GiftIconImage } from '../components/live/GiftBoxMedia';
 import {
   Radio,
   Mic,
@@ -300,8 +301,10 @@ export const PartyRoomsScreen: React.FC = () => {
   // Modals & Drawers
   const [showGiftDrawer, setShowGiftDrawer] = useState(false);
   const [selectedGift, setSelectedGift] = useState<Gift>(() => publishedCatalogGifts[0] || VIRTUAL_GIFTS[0]);
+  const publishedCatalogGiftsRef = useRef<Gift[]>(publishedCatalogGifts);
   // Keep the selected gift synchronized when Admin adds, edits, pauses, or removes gifts live.
   useEffect(() => {
+    publishedCatalogGiftsRef.current = publishedCatalogGifts;
     if (!publishedCatalogGifts.length) return;
     setSelectedGift((current) => publishedCatalogGifts.find((gift) => gift.id === current.id) || publishedCatalogGifts[0]);
   }, [publishedCatalogGifts]);
@@ -1910,13 +1913,20 @@ export const PartyRoomsScreen: React.FC = () => {
           setPartyVoiceError(error?.message || 'Party Voice service is temporarily unavailable.');
           return;
         }
-        console.error('[Party Voice] Unable to start Agora session:', error);
 
-        if (
-          (error?.code === 'AGORA_BACKEND_UNREACHABLE' || error?.code === 'SFU_BACKEND_UNREACHABLE') &&
-          startupAutoRetryCountRef.current < 2
-        ) {
+        const isRetryableStartup =
+          !error?.nonRetryable &&
+          (error?.code === 'AGORA_BACKEND_UNREACHABLE' ||
+            error?.code === 'SFU_BACKEND_UNREACHABLE' ||
+            error?.code === 'AGORA_TOKEN_FAILED' ||
+            (typeof error?.status === 'number' && error.status >= 500));
+
+        if (isRetryableStartup && startupAutoRetryCountRef.current < 2) {
           startupAutoRetryCountRef.current += 1;
+          console.warn(
+            `[Party Voice] Startup retry ${startupAutoRetryCountRef.current}/2:`,
+            error?.message || error
+          );
           setPartyVoiceReconnecting(`Reconnecting Party Voice… (${startupAutoRetryCountRef.current}/2)`);
           startupRetryTimerRef.current = setTimeout(() => {
             startupRetryTimerRef.current = null;
@@ -1927,6 +1937,7 @@ export const PartyRoomsScreen: React.FC = () => {
           return;
         }
 
+        console.warn('[Party Voice] Unable to start Agora session:', error?.message || error);
         setPartyVoiceError(error?.message || 'Unable to connect Party Voice. Tap Retry.');
       });
 
@@ -2048,9 +2059,12 @@ export const PartyRoomsScreen: React.FC = () => {
           sigTs >= partyJoinedAtRef.current - 1500 &&
           Math.abs(now - sigTs) < 8000
         ) {
+          const incomingGift = sig.gift as Gift;
+          const resolvedGift =
+            publishedCatalogGiftsRef.current.find((g) => g.id === incomingGift?.id) || incomingGift;
           enqueuePartyGiftAnimation({
             id: `party_ws_gift_${roomId}_${sigTs}_${Math.random().toString(36).slice(2, 7)}`,
-            gift: sig.gift as Gift,
+            gift: resolvedGift,
             senderName: String(sig.senderName || 'Guest'),
             senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
             senderVipTier: Number(sig.senderVipTier || 1),
@@ -4039,8 +4053,11 @@ export const PartyRoomsScreen: React.FC = () => {
                 </div>
               </div>
 
+              {/* On-device Gift Animation Cache Bar */}
+              <GiftCacheBar gifts={publishedCatalogGifts} />
+
               {/* Gift Grid (Published Multi-Format Advanced Gifts + Standard Virtual Gifts) */}
-              <div className="grid grid-cols-4 gap-2.5 py-4 max-h-60 overflow-y-auto">
+              <div className="grid grid-cols-4 gap-2.5 py-3.5 max-h-60 overflow-y-auto">
                 {publishedCatalogGifts.map((g) => {
                   const isSelected = selectedGift.id === g.id;
                   const isTestGift = Boolean(g.isTestGift || g.advancedConfig?.isTestGift);
@@ -4067,19 +4084,16 @@ export const PartyRoomsScreen: React.FC = () => {
                           {g.advancedConfig?.format}
                         </span>
                       )}
-                      {g.thumbnailUrl ? (
-                        <img
-                          src={g.thumbnailUrl}
-                          alt={g.name}
-                          className="w-9 h-9 object-contain mb-1 drop-shadow"
-                        />
-                      ) : (
-                        <span className="text-2xl mb-1">{g.icon}</span>
-                      )}
+                      <GiftIconImage
+                        gift={g}
+                        className="w-10 h-10 object-contain mb-1 drop-shadow"
+                        emojiClassName="text-2xl mb-1"
+                      />
                       <span className="text-[10px] font-bold text-white truncate max-w-full">{g.name}</span>
                       <span className="text-[10px] text-amber-400 font-semibold mt-0.5">
                         {(g.costInCoins ?? g.coins).toLocaleString()}
                       </span>
+                      <GiftCacheBadge gift={g} />
                     </div>
                   );
                 })}
@@ -4087,19 +4101,15 @@ export const PartyRoomsScreen: React.FC = () => {
 
               {/* Selected Gift Footer */}
               <div className="flex items-center justify-between pt-2 border-t border-[#A855F7]/15">
-                <div className="flex items-center gap-2">
-                  {selectedGift.thumbnailUrl ? (
-                    <img
-                      src={selectedGift.thumbnailUrl}
-                      alt={selectedGift.name}
-                      className="w-8 h-8 object-contain rounded-lg"
-                    />
-                  ) : (
-                    <span className="text-xl">{selectedGift.icon}</span>
-                  )}
-                  <div>
-                    <div className="text-xs font-bold text-white">{selectedGift.name}</div>
-                    <div className="text-[10px] text-zinc-400">{selectedGift.description}</div>
+                <div className="flex items-center gap-2 min-w-0">
+                  <GiftIconImage
+                    gift={selectedGift}
+                    className="w-8 h-8 object-contain rounded-lg shrink-0"
+                    emojiClassName="text-xl shrink-0"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold text-white truncate">{selectedGift.name}</div>
+                    <div className="text-[10px] text-zinc-400 truncate">{selectedGift.description}</div>
                   </div>
                 </div>
 
