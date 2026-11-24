@@ -2999,12 +2999,14 @@ export async function adminAllocateAgencyCoinsInFirestore(
       if (!['coin_seller', 'coin seller agency', 'coin-seller'].includes(String(data.type || '').toLowerCase())) {
         throw new Error('Only Coin Seller agencies can hold coin stock.');
       }
-      const current = Math.max(0, Number(data.coinBalance) || 0, Number(data.agencyBalance) || 0, Number(data.coins) || 0);
+      const current = Math.max(0, Math.floor(Number(data.agencyBalance ?? data.coinBalance ?? data.coins ?? data.coinStock ?? data.stock ?? 0) || 0));
       nextBalance = current + safeAdd;
       tx.update(agencyRef, {
         agencyBalance: nextBalance,
         coinBalance: nextBalance,
         coins: nextBalance,
+        coinStock: nextBalance,
+        stock: nextBalance,
         updatedAt: new Date().toISOString(),
       });
     });
@@ -3052,11 +3054,16 @@ export async function deductCoinSellerAgencyBalanceInFirestore(
         throw new Error('Official agency record not found.');
       }
       const data = snap.data() as Record<string, any>;
-      const current = Math.max(0, Number(data.coinBalance) || 0, Number(data.agencyBalance) || 0, Number(data.coins) || 0);
+      // agencyBalance is the canonical live wallet. Older documents may still
+      // contain stale coinStock/stock aliases; never take the maximum of aliases.
+      const rawBalance = data.agencyBalance ?? data.coinBalance ?? data.coins ?? data.coinStock ?? data.stock ?? 0;
+      const current = Math.max(0, Math.floor(Number(rawBalance) || 0));
       if (safeAmount > current) {
         throw new Error(`Insufficient agency coin stock (${current.toLocaleString()} Coins available).`);
       }
       nextBalance = current - safeAmount;
+      // Keep all legacy aliases synchronized on trusted/admin writes where possible.
+      // Client rules permit canonical trio only; normalizers must prefer agencyBalance.
       tx.update(agencyRef, {
         agencyBalance: nextBalance,
         coinBalance: nextBalance,

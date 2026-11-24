@@ -39,9 +39,8 @@ function normalizeAdminCatalogGift(id: string, raw: Record<string, any>): Gift {
   const displayMode: GiftDisplayMode =
     modeRaw.includes('overlay') || modeRaw.includes('background') ? 'overlay_background'
       : modeRaw.includes('semi') ? 'semi_transparent' : 'transparent';
-  const statusRaw = String(raw.status || raw.publishStatus || 'active').trim().toLowerCase();
-  const truthyFlag = (value: any) => !(value === false || value === 0 || ['false', '0', 'no', 'hidden', 'off'].includes(String(value ?? '').trim().toLowerCase()));
-  const isActive = ['active', 'published', 'enabled', 'show', 'visible'].includes(statusRaw) && truthyFlag(raw.show) && truthyFlag(raw.isActive) && truthyFlag(raw.enabled) && truthyFlag(raw.visible);
+  const statusRaw = String(raw.status || 'Active').toLowerCase();
+  const isActive = ['active', 'published', 'enabled', 'show'].includes(statusRaw) && raw.show !== false && raw.isActive !== false;
   const timestampToIso = (value: any, fallback: string) => {
     if (value && typeof value.toDate === 'function') return value.toDate().toISOString();
     if (typeof value === 'string' && value) return value;
@@ -55,10 +54,10 @@ function normalizeAdminCatalogGift(id: string, raw: Record<string, any>): Gift {
     category: String(raw.category || 'Others'),
     coins,
     icon: String(raw.icon || '🎁'),
-    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || ''),
-    previewImageUrl: String(raw.previewImageUrl || raw.thumbnailUrl || raw.imageUrl || ''),
-    originalFileUrl: String(raw.originalFileUrl || assetUrl),
-    optimizedFileUrl: String(raw.optimizedFileUrl || assetUrl),
+    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || raw.iconUrl || ''),
+    previewImageUrl: String(raw.previewImageUrl || raw.thumbnailUrl || raw.imageUrl || raw.iconUrl || ''),
+    originalFileUrl: String(raw.originalFileUrl || raw.animationUrl || raw.assetUrl || raw.downloadUrl || assetUrl),
+    optimizedFileUrl: String(raw.optimizedFileUrl || raw.animationUrl || raw.assetUrl || raw.downloadUrl || assetUrl),
     animationUrl: assetUrl,
     format,
     displayMode,
@@ -93,7 +92,7 @@ function normalizeAdminCatalogGift(id: string, raw: Record<string, any>): Gift {
     coins,
     costInCoins: coins,
     animationType,
-    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || (rawFormat === 'png' ? assetUrl : '')) || undefined,
+    thumbnailUrl: String(raw.thumbnailUrl || raw.imageUrl || raw.iconUrl || (rawFormat === 'png' ? assetUrl : '')) || undefined,
     tier,
     durationMs,
     triggersScreenShake: coins >= 5_000,
@@ -414,7 +413,7 @@ function normalizeAdvancedGiftDoc(id: string, raw: Record<string, any>): Advance
     icon: typeof raw.icon === 'string' && raw.icon.trim() ? raw.icon.trim() : '🎁',
     thumbnailUrl: typeof raw.thumbnailUrl === 'string' ? raw.thumbnailUrl : undefined,
     previewImageUrl: typeof raw.previewImageUrl === 'string' ? raw.previewImageUrl : undefined,
-    originalFileUrl: String(raw.originalFileUrl || raw.assetUrl || raw.downloadUrl || raw.animationUrl || ''),
+    originalFileUrl: String(raw.originalFileUrl || raw.animationUrl || ''),
     optimizedFileUrl: typeof raw.optimizedFileUrl === 'string' ? raw.optimizedFileUrl : undefined,
     animationUrl: String(raw.optimizedFileUrl || raw.animationUrl || raw.assetUrl || raw.downloadUrl || raw.originalFileUrl || ''),
     format,
@@ -434,11 +433,9 @@ function normalizeAdvancedGiftDoc(id: string, raw: Record<string, any>): Advance
     enableSound: raw.enableSound !== false,
     edgeFeather,
     blendMode,
-    status: (() => {
-      const status = String(raw.status || raw.publishStatus || 'published').trim().toLowerCase();
-      if (['draft', 'processing', 'disabled', 'inactive', 'hidden', 'rejected', 'archived', 'paused'].includes(status)) return status === 'paused' || status === 'hidden' || status === 'inactive' ? 'disabled' : status;
-      return ['active', 'published', 'enabled', 'show', 'visible', 'approved'].includes(status) ? 'published' : 'disabled';
-    })(),
+    status: ['draft', 'processing', 'disabled'].includes(String(raw.status || '').toLowerCase())
+      ? String(raw.status).toLowerCase() as AdvancedGiftConfig['status']
+      : 'published',
     conversionStatus:
       raw.conversionStatus === 'pending' ||
       raw.conversionStatus === 'converting' ||

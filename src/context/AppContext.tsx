@@ -711,7 +711,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const publishedCatalogGifts = useMemo<Gift[]>(() => {
     const publishedAdvanced = advancedGifts
-      .filter((cfg) => cfg.status === 'published' && Boolean(String(cfg.optimizedFileUrl || cfg.animationUrl || cfg.originalFileUrl || '').trim()))
+      .filter((cfg) => cfg.status === 'published' && Boolean(cfg.optimizedFileUrl || cfg.animationUrl || cfg.originalFileUrl))
       .map(advancedGiftConfigToGift);
     const merged = new Map<string, Gift>();
     publishedAdvanced.forEach((gift) => merged.set(gift.id, gift));
