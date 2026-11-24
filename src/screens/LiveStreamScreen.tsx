@@ -71,7 +71,7 @@ import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } 
 import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
 import { enqueueByPriority } from '../services/giftAnimationEngine';
-import { prewarmGiftAnimationsInBackground } from '../services/giftMediaCache';
+import { prefetchCriticalGiftAssets } from '../services/giftMediaCache';
 
 const GIFT_COMBO_WINDOW_MS = 4200;
 
@@ -246,11 +246,12 @@ export const LiveStreamScreen: React.FC = () => {
     []
   );
 
-  // Quietly pre-warm published animated gift media into IndexedDB + blob URLs on broadcast entry
-  // so gift animations launch immediately (<30ms) for Host & all Viewers.
+  // Quietly pre-fetch critical gift assets (Supercar/Rocket/Dragon/Crown SFX & thumbnails) +
+  // published animated gift media into IndexedDB + blob URLs on broadcast entry so gift
+  // animations launch immediately (<30ms) and run to 100% completion regardless of network latency.
   useEffect(() => {
-    if (!activeStream?.id || !publishedCatalogGifts.length) return;
-    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 14);
+    if (!activeStream?.id) return;
+    void prefetchCriticalGiftAssets(publishedCatalogGifts);
   }, [activeStream?.id, publishedCatalogGifts]);
 
   // Top Givers Leaderboard State for Current Broadcast Session
@@ -1304,7 +1305,9 @@ export const LiveStreamScreen: React.FC = () => {
   // Parent-side inactivity fail-safe:
   // - For advanced video/animated gifts, NEVER cuts off an animation on a fixed wall-clock timer
   //   (8s, 10s, 12s, 20s+ play to natural onEnded even after slow-network pre-buffering).
-  // - Only intervenes if playback heartbeats go completely silent for 45s+ (dead Android WebView).
+  // - For CSS showcase gifts (Supercar, Rocket, Dragon, Crown), respects onProgress heartbeats
+  //   from GiftAnimationOverlay so natural `onAnimationEnd` always completes without truncation.
+  // - Only intervenes if playback heartbeats go completely silent or hit the hard safety ceiling.
   useEffect(() => {
     if (!activeGiftAnimation) return;
     const coins = Number(
@@ -1316,18 +1319,20 @@ export const LiveStreamScreen: React.FC = () => {
     liveLastGiftHeartbeatRef.current = { eventId, at: startedAt };
     let cleared = false;
 
-    const legacyMaxMs = coins <= 100 ? 3800 : 9500;
+    const legacyHardCeilingMs = coins <= 100 ? 5000 : 16_000;
+    const legacyInactivityLimitMs = coins <= 100 ? 4000 : 6000;
     const ADV_INACTIVITY_LIMIT_MS = 45_000;
     const ADV_HARD_CEILING_MS = 180_000;
 
     const isStuckOrExpired = () => {
       const now = Date.now();
-      if (!advConfig) {
-        return now - startedAt >= legacyMaxMs;
-      }
-      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
       const hb = liveLastGiftHeartbeatRef.current;
       const lastActiveAt = hb && hb.eventId === eventId ? hb.at : startedAt;
+      if (!advConfig) {
+        if (now - startedAt >= legacyHardCeilingMs) return true;
+        return now - lastActiveAt >= legacyInactivityLimitMs;
+      }
+      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
       return now - lastActiveAt >= ADV_INACTIVITY_LIMIT_MS;
     };
 

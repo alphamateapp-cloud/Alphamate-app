@@ -403,16 +403,134 @@ export async function downloadAllGiftsToLocalCache(
 }
 
 let backgroundPrewarmActive = false;
+let criticalAssetsPrefetched = false;
+let criticalAssetsPrefetchPromise: Promise<void> | null = null;
+const prefetchedImageUrls = new Set<string>();
+
+/**
+ * Critical showcase animation types that must always be pre-fetched with top priority
+ * so Supercar, Rocket, Dragon, and Crown run smoothly to completion regardless of network latency.
+ */
+const CRITICAL_SHOWCASE_ANIMATION_TYPES = new Set(['car', 'rocket', 'dragon', 'crown']);
+
+const BUNDLED_CRITICAL_GIFT_MEDIA: ReadonlyArray<{ id: string; url: string }> = [
+  { id: 'sample_alpha_crown', url: '/assets/gifts/sample_alpha_crown.svg' },
+  { id: 'gift_5651', url: '/assets/gifts/gift_5651.webm' },
+  { id: 'gift_5651_thumb', url: '/assets/gifts/gift_5651.png' },
+  { id: 'gift_6331', url: '/assets/gifts/gift_6331.webm' },
+  { id: 'gift_6331_thumb', url: '/assets/gifts/gift_6331.png' },
+  { id: 'gift_6370', url: '/assets/gifts/gift_6370.webm' },
+  { id: 'gift_6370_thumb', url: '/assets/gifts/gift_6370.png' },
+];
+
+function prefetchAndDecodeImage(url: string): Promise<void> {
+  if (typeof window === 'undefined' || !url || prefetchedImageUrls.has(url)) {
+    return Promise.resolve();
+  }
+  prefetchedImageUrls.add(url);
+  return new Promise<void>((resolve) => {
+    try {
+      const img = new Image();
+      img.decoding = 'async';
+      img.onload = () => {
+        if (typeof img.decode === 'function') {
+          img.decode().catch(() => {}).finally(resolve);
+        } else {
+          resolve();
+        }
+      };
+      img.onerror = () => resolve();
+      img.src = url;
+    } catch {
+      resolve();
+    }
+  });
+}
+
+function getGiftPrewarmPriority(gift: Gift): number {
+  const animType = String(gift.animationType || '').toLowerCase();
+  const name = String(gift.name || '').toLowerCase();
+  if (
+    CRITICAL_SHOWCASE_ANIMATION_TYPES.has(animType) ||
+    name.includes('supercar') ||
+    name.includes('rocket') ||
+    name.includes('dragon') ||
+    name.includes('crown')
+  ) {
+    return 0;
+  }
+  return 1;
+}
+
+/**
+ * Pre-fetches critical gift animation assets (Supercar, Rocket, Dragon, Crown SFX + thumbnails,
+ * bundled public/assets/gifts media, and prioritized catalog WebM/SVGA animations) ahead of playback
+ * so high-latency or flaky networks never cause frame hitches or premature animation truncation.
+ */
+export async function prefetchCriticalGiftAssets(catalogGifts: Gift[] = []): Promise<void> {
+  if (typeof window === 'undefined') return;
+
+  await hydrateGiftMediaCacheIndex();
+
+  // 1. Pre-fetch critical SFX & visual thumbnails for Supercar, Rocket, Dragon, Crown once per session
+  if (!criticalAssetsPrefetched) {
+    if (!criticalAssetsPrefetchPromise) {
+      criticalAssetsPrefetchPromise = (async () => {
+        try {
+          const [{ virtualGiftDatabase }, { audioManager }] = await Promise.all([
+            import('./virtual-gift-database'),
+            import('./audioManager'),
+          ]);
+
+          // Priority SFX decode for Supercar, Rocket, Dragon, Crown first, then all remaining SFX
+          void audioManager
+            .preloadGiftSfx(['car', 'rocket', 'dragon', 'crown', 'yacht', 'ring'])
+            .then(() => virtualGiftDatabase.preloadAllGiftAudio())
+            .catch(() => {});
+
+          // Decode built-in SVG/data-URI thumbnails so showcase banners paint in 0ms
+          const builtinGifts = virtualGiftDatabase.getAllGifts();
+          await Promise.allSettled(
+            builtinGifts.map((g) => prefetchAndDecodeImage(g.thumbnailUrl))
+          );
+
+          // Pre-warm bundled local public/assets/gifts assets into IndexedDB + memory Blobs
+          if (typeof navigator === 'undefined' || navigator.onLine !== false) {
+            const weakNet = isWeakNetworkConnection();
+            for (const item of BUNDLED_CRITICAL_GIFT_MEDIA) {
+              if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
+              if (!memoryObjectUrls.has(item.url) && !downloadingUrls.has(item.url)) {
+                await downloadMediaUrlToCache(item.url, item.id);
+                await new Promise((r) => setTimeout(r, weakNet ? 300 : 80));
+              }
+            }
+          }
+          criticalAssetsPrefetched = true;
+        } catch {
+          // Non-fatal; retryable on next entry
+        } finally {
+          criticalAssetsPrefetchPromise = null;
+        }
+      })();
+    }
+    await criticalAssetsPrefetchPromise;
+  }
+
+  // 2. Also pre-warm any published catalog animated gifts, prioritizing Supercar/Rocket/Dragon/Crown
+  if (catalogGifts.length > 0) {
+    void prewarmGiftAnimationsInBackground(catalogGifts, 16);
+  }
+}
 
 /**
  * Quietly pre-warms published animated gifts (WebM/SVGA/MP4) into persistent IndexedDB
  * + in-memory Blob URLs one-by-one when a user enters a Live Stream or Party Room,
- * so the moment ANY participant sends a gift, playback begins immediately in <30ms
- * and plays 100% from local device memory with zero mid-video buffering stalls.
+ * prioritizing Supercar, Rocket, Dragon, and Crown showcase gifts first so playback begins
+ * immediately in <30ms and runs 100% from local device memory with zero network stalls.
  */
 export async function prewarmGiftAnimationsInBackground(
   gifts: Gift[],
-  maxPreload = 14
+  maxPreload = 16
 ): Promise<void> {
   if (typeof window === 'undefined' || backgroundPrewarmActive) return;
   backgroundPrewarmActive = true;
@@ -421,7 +539,12 @@ export async function prewarmGiftAnimationsInBackground(
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
 
     const weakNet = isWeakNetworkConnection();
-    const candidates = gifts
+    const candidates = [...gifts]
+      .sort((a, b) => {
+        const prioDiff = getGiftPrewarmPriority(a) - getGiftPrewarmPriority(b);
+        if (prioDiff !== 0) return prioDiff;
+        return (b.costInCoins ?? b.coins ?? 0) - (a.costInCoins ?? a.coins ?? 0);
+      })
       .filter((g) => {
         const url = getGiftPrimaryAnimationUrl(g);
         return isCacheableUrl(url) && !memoryObjectUrls.has(url) && !downloadingUrls.has(url);

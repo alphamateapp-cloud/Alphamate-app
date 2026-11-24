@@ -48,7 +48,7 @@ import {
 } from '../services/audioFilter';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 import { GiftCacheBadge, GiftCacheBar, GiftIconImage } from '../components/live/GiftBoxMedia';
-import { prewarmGiftAnimationsInBackground } from '../services/giftMediaCache';
+import { prefetchCriticalGiftAssets } from '../services/giftMediaCache';
 import {
   Radio,
   Mic,
@@ -444,11 +444,12 @@ export const PartyRoomsScreen: React.FC = () => {
     []
   );
 
-  // Quietly pre-warm published animated gift media into IndexedDB + blob URLs on room entry
-  // so gift playback starts immediately (<30ms) for everyone in the Party Room.
+  // Quietly pre-fetch critical gift assets (Supercar/Rocket/Dragon/Crown SFX & thumbnails) +
+  // published animated gift media into IndexedDB + blob URLs on room entry so gift playback
+  // starts immediately (<30ms) and runs to 100% completion regardless of network latency.
   useEffect(() => {
-    if (!activePartyRoom?.id || !publishedCatalogGifts.length) return;
-    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 14);
+    if (!activePartyRoom?.id) return;
+    void prefetchCriticalGiftAssets(publishedCatalogGifts);
   }, [activePartyRoom?.id, publishedCatalogGifts]);
 
   useEffect(() => {
@@ -458,7 +459,9 @@ export const PartyRoomsScreen: React.FC = () => {
   // Parent-side inactivity fail-safe:
   // - For advanced video/animated gifts, NEVER cuts off an animation on a fixed wall-clock timer
   //   (8s, 10s, 12s, 20s+ play to natural onEnded even after slow-network pre-buffering).
-  // - Only intervenes if playback heartbeats go completely silent for 45s+ (dead Android WebView).
+  // - For CSS showcase gifts (Supercar, Rocket, Dragon, Crown), respects onProgress heartbeats
+  //   from GiftAnimationOverlay so natural `onAnimationEnd` always completes without truncation.
+  // - Only intervenes if playback heartbeats go completely silent or hit the hard safety ceiling.
   useEffect(() => {
     if (!activePartyGiftAnimation) return;
     const coins = Number(
@@ -470,18 +473,20 @@ export const PartyRoomsScreen: React.FC = () => {
     partyLastGiftHeartbeatRef.current = { eventId, at: startedAt };
     let cleared = false;
 
-    const legacyMaxMs = coins <= 100 ? 3800 : 9500;
+    const legacyHardCeilingMs = coins <= 100 ? 5000 : 16_000;
+    const legacyInactivityLimitMs = coins <= 100 ? 4000 : 6000;
     const ADV_INACTIVITY_LIMIT_MS = 45_000;
     const ADV_HARD_CEILING_MS = 180_000;
 
     const isStuckOrExpired = () => {
       const now = Date.now();
-      if (!advConfig) {
-        return now - startedAt >= legacyMaxMs;
-      }
-      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
       const hb = partyLastGiftHeartbeatRef.current;
       const lastActiveAt = hb && hb.eventId === eventId ? hb.at : startedAt;
+      if (!advConfig) {
+        if (now - startedAt >= legacyHardCeilingMs) return true;
+        return now - lastActiveAt >= legacyInactivityLimitMs;
+      }
+      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
       return now - lastActiveAt >= ADV_INACTIVITY_LIMIT_MS;
     };
 
@@ -3141,86 +3146,128 @@ export const PartyRoomsScreen: React.FC = () => {
         />
 
         {/* =====================================================================
-            2. ROOM HEADER & LEVEL SWITCHER (Layer 7 z-[45] — Always Above Animations)
+            2. TRANSPARENT ROOM HEADER & CONTROLS (Layer 7 z-[45] — Zero Top Black Shade)
            ===================================================================== */}
-        <div className="relative z-[45] pt-1.5 px-2.5 pb-1.5 flex flex-col gap-1.5 border-b border-[#A855F7]/15 bg-black/45 backdrop-blur-md shrink-0">
-          {/* Room identity on the left; exit action on the opposite/right edge */}
-          <div className="flex items-center justify-between gap-2 min-w-0">
+        <div className="relative z-[45] pt-1 px-2.5 pb-0.5 flex flex-col gap-1 bg-transparent shrink-0">
+          {/* Room identity + Host Name / Level / VIP Badges on the left; Exit on the right */}
+          <div className="flex items-start justify-between gap-2 min-w-0">
             <div className="flex items-center gap-2 min-w-0">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <img src={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar, DEFAULT_AVATAR_URL)} alt="Room cover" className="w-7 h-7 rounded-lg object-cover border border-[#EC4899]/50 shrink-0 shadow-sm" />
-                <Radio className="w-3.5 h-3.5 text-[#EC4899] animate-pulse shrink-0" />
-                <h2 className="text-xs sm:text-sm font-extrabold text-white truncate max-w-[120px] sm:max-w-[170px]">
-                  {activePartyRoom.title || `${activePartyRoom.host.displayName}'s Party Room`}
-                </h2>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-[10px] text-zinc-400">
-                <button
-                  onClick={() => setShowViewersModal(true)}
-                  className="flex items-center gap-1 text-[#C084FC] hover:text-white font-semibold cursor-pointer px-1.5 py-0.5 rounded-full bg-white/5 hover:bg-white/10 transition-colors"
-                  title="View All Audience & Live Viewers"
-                >
-                  <Eye className="w-3 h-3 text-cyan-400" />
-                  <span>{activeViewers.toLocaleString()}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    spawnHeart();
-                    if (activePartyRoom?.id) {
-                      sendLiveHeart('party', activePartyRoom.id, activePartyRoom.sessionId).catch((err) => console.warn('[Party hearts]', err));
-                    }
-                  }}
-                  className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-pink-500/15 border border-pink-400/40 text-pink-200 hover:bg-pink-500/25 active:scale-95 transition-all cursor-pointer shrink-0"
-                  title="Send a heart to this Party"
-                  aria-label="Send heart"
-                >
-                  <Heart className="w-3.5 h-3.5 fill-pink-500 text-pink-300" />
-                  <span className="text-[10px] font-black tabular-nums">{totalHeartCount.toLocaleString()}</span>
-                </button>
-                <span className="text-[9px] font-extrabold text-white truncate max-w-[92px]">{activePartyRoom.host.displayName}</span>
-                <span className="text-[7px] text-emerald-300 font-bold shrink-0">HOST</span>
-                <span>•</span>
-                {/* Party Room Leaderboard Capsule */}
-                <button
-                  onClick={() => setShowLeaderboardModal(true)}
-                  className="flex items-center gap-1 text-amber-300 hover:text-white font-black cursor-pointer px-1.5 py-0.5 rounded-full bg-gradient-to-r from-amber-500/25 to-yellow-500/15 border border-amber-400/40 hover:border-amber-400 transition-all shadow-xs"
-                  title="View Party Room Top Givers & Leaderboard"
-                >
-                  <Trophy className="w-2.5 h-2.5 text-amber-400 fill-amber-400" />
-                  <span className="text-[8.5px] font-black uppercase text-amber-300">Top</span>
-                  {partyGivers[0] && (
-                    <img
-                      src={safeImageSrc(partyGivers[0].user.avatar, DEFAULT_AVATAR_URL)}
-                      alt="Top Giver"
-                      className="w-3.5 h-3.5 rounded-full object-cover border border-amber-400/80 -mr-0.5"
-                    />
+              <img
+                src={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar, DEFAULT_AVATAR_URL)}
+                alt="Room cover"
+                className="w-8 h-8 rounded-xl object-cover border border-white/25 shrink-0 shadow-md"
+              />
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <Radio className="w-3 h-3 text-[#EC4899] animate-pulse shrink-0 drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]" />
+                  <h2 className="text-xs sm:text-sm font-extrabold text-white truncate max-w-[140px] sm:max-w-[195px] drop-shadow-[0_1px_4px_rgba(0,0,0,0.85)]">
+                    {activePartyRoom.title || `${activePartyRoom.host.displayName}'s Party Room`}
+                  </h2>
+                  {!isHost && (
+                    <button
+                      onClick={() => {
+                        const nextFollow = !isFollowingHost;
+                        setIsFollowingHost(nextFollow);
+                        if (nextFollow && activePartyRoom?.host?.id && activePartyRoom.host.id !== currentUser.id) {
+                          sendNotificationToUser({
+                            recipientId: activePartyRoom.host.id,
+                            type: 'follow',
+                            category: 'friendRequests',
+                            title: `⭐ ${currentUser.displayName} followed your Party Room!`,
+                            message: `${currentUser.displayName} started following you.`,
+                            screen: 'party_room',
+                            roomId: activePartyRoom.id,
+                          }).catch(() => {});
+                        }
+                        showToast(isFollowingHost ? 'Unfollowed Host' : 'Following Host! 💜');
+                      }}
+                      className={`px-2 py-0.5 rounded-full text-[8.5px] font-black transition-all cursor-pointer shrink-0 ${
+                        isFollowingHost
+                          ? 'bg-white/15 backdrop-blur-sm text-white/90 border border-white/20'
+                          : 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow-sm'
+                      }`}
+                    >
+                      {isFollowingHost ? 'Following' : '+ Follow'}
+                    </button>
                   )}
-                  <span className="text-[8.5px] text-white font-extrabold">
-                    {partyGivers.reduce((acc, g) => acc + g.totalCoins, 0) >= 1000
-                      ? `${(partyGivers.reduce((acc, g) => acc + g.totalCoins, 0) / 1000).toFixed(0)}k`
-                      : partyGivers.reduce((acc, g) => acc + g.totalCoins, 0)}
+                </div>
+
+                {/* Host Name, Level Badge, VIP Badge, Viewers & Hearts directly underneath Room Name */}
+                <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[10px] text-white/90">
+                  <span className="text-[9.5px] font-extrabold text-white truncate max-w-[92px] drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
+                    {activePartyRoom.host.displayName}
                   </span>
-                </button>
+                  <span className="px-1 py-[0.5px] rounded bg-amber-400/90 text-black text-[7px] font-black uppercase tracking-wide shrink-0">
+                    HOST
+                  </span>
+                  <LevelBadgeIcon level={activePartyRoom.host.level ?? 0} size="xs" />
+                  {(activePartyRoom.host.vipTier ?? 0) > 0 && (
+                    <span className="px-1.5 py-[0.5px] rounded bg-[#7928CA]/45 backdrop-blur-sm text-purple-100 text-[8px] font-black border border-[#C084FC]/45 shrink-0">
+                      VIP {activePartyRoom.host.vipTier}
+                    </span>
+                  )}
+                  <button
+                    onClick={() => setShowViewersModal(true)}
+                    className="flex items-center gap-0.5 text-white hover:text-cyan-200 font-bold cursor-pointer px-1.5 py-0.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/15 hover:bg-white/20 transition-colors"
+                    title="View All Audience & Live Viewers"
+                  >
+                    <Eye className="w-2.5 h-2.5 text-cyan-300" />
+                    <span className="text-[9px] tabular-nums">{activeViewers.toLocaleString()}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      spawnHeart();
+                      if (activePartyRoom?.id) {
+                        sendLiveHeart('party', activePartyRoom.id, activePartyRoom.sessionId).catch((err) => console.warn('[Party hearts]', err));
+                      }
+                    }}
+                    className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-white/10 backdrop-blur-sm border border-pink-300/35 text-pink-100 hover:bg-pink-500/25 active:scale-95 transition-all cursor-pointer shrink-0"
+                    title="Send a heart to this Party"
+                    aria-label="Send heart"
+                  >
+                    <Heart className="w-2.5 h-2.5 fill-pink-400 text-pink-300" />
+                    <span className="text-[9px] font-black tabular-nums">{totalHeartCount.toLocaleString()}</span>
+                  </button>
+                  {/* Party Room Top Givers Capsule */}
+                  <button
+                    onClick={() => setShowLeaderboardModal(true)}
+                    className="flex items-center gap-1 text-amber-200 hover:text-white font-black cursor-pointer px-1.5 py-0.5 rounded-full bg-white/10 backdrop-blur-sm border border-amber-300/35 hover:border-amber-300 transition-all"
+                    title="View Party Room Top Givers & Leaderboard"
+                  >
+                    <Trophy className="w-2.5 h-2.5 text-amber-300 fill-amber-300" />
+                    <span className="text-[8.5px] font-black uppercase text-amber-200">Top</span>
+                    {partyGivers[0] && (
+                      <img
+                        src={safeImageSrc(partyGivers[0].user.avatar, DEFAULT_AVATAR_URL)}
+                        alt="Top Giver"
+                        className="w-3 h-3 rounded-full object-cover border border-amber-300/80 -mr-0.5"
+                      />
+                    )}
+                    <span className="text-[8.5px] text-white font-extrabold tabular-nums">
+                      {partyGivers.reduce((acc, g) => acc + g.totalCoins, 0) >= 1000
+                        ? `${(partyGivers.reduce((acc, g) => acc + g.totalCoins, 0) / 1000).toFixed(0)}k`
+                        : partyGivers.reduce((acc, g) => acc + g.totalCoins, 0)}
+                    </span>
+                  </button>
+                </div>
               </div>
-            </div>
             </div>
             <button
               onClick={handleExitClick}
-              className="w-8 h-8 rounded-full bg-white/5 border border-white/10 flex items-center justify-center text-zinc-300 hover:text-white cursor-pointer shrink-0 active:scale-90 transition-transform"
+              className="w-7 h-7 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 flex items-center justify-center text-white hover:bg-white/20 cursor-pointer shrink-0 active:scale-90 transition-transform"
               title="Exit Lounge"
             >
-              <X className="w-4 h-4" />
+              <X className="w-3.5 h-3.5" />
             </button>
           </div>
 
-          {/* Right: Host & Moderator Room Controls + Share & Refresh */}
-          <div className="flex flex-wrap items-center justify-end gap-1 sm:gap-1.5 w-full min-w-0">
+          {/* Transparent Floating Room Controls Strip (Host / Mod + Share & Refresh) */}
+          <div className="flex flex-wrap items-center justify-end gap-1 w-full min-w-0">
             {/* Dynamic Level Switcher Capsule (4 / 8 / 12 / 16 Seats) — Host & Moderator only */}
             {canModerate && <div
-              className="flex items-center p-0.5 rounded-full bg-[#180C2E]/90 border border-[#A855F7]/40 shadow-inner"
+              className="flex items-center p-0.5 rounded-full bg-white/10 backdrop-blur-sm border border-white/20"
               title="Party Room Seat Capacity: 4, 8, 12, or 16 Seats"
             >
               {PARTY_TIER_SETTINGS.map((tier) => {
@@ -3233,16 +3280,16 @@ export const PartyRoomsScreen: React.FC = () => {
                   <button
                     key={tier.level}
                     onClick={() => handleConvertRoomLevel(tier.level)}
-                    className={`px-2 py-0.5 rounded-full text-[9px] font-black transition-all cursor-pointer flex items-center gap-0.5 ${
+                    className={`px-1.5 py-0.5 rounded-full text-[8.5px] font-black transition-all cursor-pointer flex items-center gap-0.5 ${
                       isActive
                         ? 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow-sm'
                         : isUnlocked
-                        ? 'text-zinc-400 hover:text-white'
-                        : 'text-zinc-600 hover:text-zinc-400'
+                        ? 'text-white/80 hover:text-white'
+                        : 'text-white/40 hover:text-white/70'
                     }`}
                     title={`${tier.name} (${tier.subLabel}) - ${isUnlocked ? 'Unlocked' : `Requires Lv.${tier.requiredLevel}`}`}
                   >
-                    {!isUnlocked && <Lock className="w-2 h-2 text-zinc-500" />}
+                    {!isUnlocked && <Lock className="w-2 h-2 text-white/50" />}
                     <span>Lv.{tier.level}</span>
                   </button>
                 );
@@ -3253,12 +3300,12 @@ export const PartyRoomsScreen: React.FC = () => {
             {canModerate && (
             <button
               onClick={handleOpenRoomPK}
-              className={`px-2.5 py-1 rounded-full text-[9px] font-black transition-all cursor-pointer flex items-center gap-1 shadow-sm ${
+              className={`px-2 py-0.5 rounded-full text-[8.5px] font-black transition-all cursor-pointer flex items-center gap-1 ${
                 isRoomPKActive
-                  ? 'bg-gradient-to-r from-[#EC4899] to-[#F43F5E] text-white animate-pulse border border-pink-400'
+                  ? 'bg-gradient-to-r from-[#EC4899] to-[#F43F5E] text-white animate-pulse border border-pink-300'
                   : partyLevel >= 3
-                  ? 'bg-[#180C2E] text-zinc-500 border border-white/5 opacity-70 cursor-pointer'
-                  : 'bg-gradient-to-r from-[#EC4899] to-[#7928CA] text-white hover:opacity-95 border border-[#EC4899]/50 shadow-md shadow-[#EC4899]/30'
+                  ? 'bg-white/10 backdrop-blur-sm text-white/50 border border-white/15 opacity-70 cursor-pointer'
+                  : 'bg-gradient-to-r from-[#EC4899]/85 to-[#7928CA]/85 backdrop-blur-sm text-white hover:opacity-95 border border-white/25'
               }`}
               title={
                 partyLevel >= 3
@@ -3268,18 +3315,40 @@ export const PartyRoomsScreen: React.FC = () => {
                   : 'Invite Another Room for 5-Min PK Battle'
               }
             >
-              <Swords className="w-3 h-3 text-white" />
+              <Swords className="w-2.5 h-2.5 text-white" />
               <span>{isRoomPKActive ? 'PK LIVE' : 'ROOM PK'}</span>
             </button>
+            )}
+
+            {/* Quick Mute All / Unmute All transparent pills — Host & Moderator only */}
+            {canModerate && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleMuteAllGuests}
+                  className="px-1.5 py-0.5 rounded-full bg-white/10 backdrop-blur-sm hover:bg-rose-500/40 border border-white/20 text-rose-100 hover:text-white text-[8px] font-bold cursor-pointer transition-colors"
+                  title="Mute All Guests"
+                >
+                  Mute All
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUnmuteAllGuests}
+                  className="px-1.5 py-0.5 rounded-full bg-white/10 backdrop-blur-sm hover:bg-emerald-500/40 border border-white/20 text-emerald-100 hover:text-white text-[8px] font-bold cursor-pointer transition-colors"
+                  title="Unmute All Guests"
+                >
+                  Unmute All
+                </button>
+              </>
             )}
 
             {/* Host/moderator-only leaderboard */}
             {canModerate && <button
               onClick={() => setShowLeaderboardModal(true)}
-              className="w-8 h-8 rounded-full bg-[#180C2E] border border-amber-400/40 flex items-center justify-center text-amber-400 hover:text-amber-200 cursor-pointer shadow-sm hover:border-amber-400 transition-colors"
+              className="w-7 h-7 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 flex items-center justify-center text-amber-300 hover:bg-white/20 cursor-pointer transition-colors"
               title="Party Room Leaderboard"
             >
-              <Trophy className="w-3.5 h-3.5 fill-current" />
+              <Trophy className="w-3 h-3 fill-current" />
             </button>}
 
             {/* Host & Moderator Session Insights dashboard button */}
@@ -3287,11 +3356,11 @@ export const PartyRoomsScreen: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowHostAnalyticsCard(true)}
-                className="w-8 h-8 rounded-full bg-[#180C2E] border border-sky-400/35 hover:border-sky-300 flex items-center justify-center text-sky-300 hover:text-sky-200 cursor-pointer shadow-sm transition-colors"
+                className="w-7 h-7 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 hover:bg-white/20 flex items-center justify-center text-sky-200 hover:text-white cursor-pointer transition-colors"
                 title="Session Insights"
                 aria-label="Session Insights"
               >
-                <TrendingUp className="w-3.5 h-3.5" />
+                <TrendingUp className="w-3 h-3" />
               </button>
             )}
 
@@ -3300,10 +3369,10 @@ export const PartyRoomsScreen: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowVoiceFilterModal(true)}
-                className="h-8 px-2.5 rounded-full bg-gradient-to-r from-[#7928CA] to-[#EC4899] border border-white/25 flex items-center gap-1 text-[10px] font-extrabold text-white shadow-md hover:brightness-110 cursor-pointer shrink-0 transition-all"
+                className="h-7 px-2 rounded-full bg-gradient-to-r from-[#7928CA]/85 to-[#EC4899]/85 backdrop-blur-sm border border-white/25 flex items-center gap-1 text-[9.5px] font-extrabold text-white hover:brightness-110 cursor-pointer shrink-0 transition-all"
                 title="Active Voice Filter — tap to switch or reset"
               >
-                <Wand2 className="w-3 h-3 text-amber-200 animate-pulse" />
+                <Wand2 className="w-2.5 h-2.5 text-amber-200 animate-pulse" />
                 <span>{audioFilter.getPresetMeta(activeVoiceFilter).shortLabel}</span>
               </button>
             )}
@@ -3313,11 +3382,11 @@ export const PartyRoomsScreen: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setShowBackgroundModal(true)}
-                className="w-8 h-8 rounded-full bg-[#180C2E] border border-[#EC4899]/35 hover:border-[#EC4899] flex items-center justify-center text-zinc-200 hover:text-white cursor-pointer transition-colors"
+                className="w-7 h-7 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 hover:bg-white/20 flex items-center justify-center text-white cursor-pointer transition-colors"
                 title="Party Room Background Themes"
                 aria-label="Party Room Background Themes"
               >
-                <Palette className="w-3.5 h-3.5 text-[#EC4899]" />
+                <Palette className="w-3 h-3 text-pink-300" />
               </button>
             )}
 
@@ -3334,7 +3403,7 @@ export const PartyRoomsScreen: React.FC = () => {
             <RefreshScopeButton
               scope="party_room"
               compact
-              className="w-8 h-8 bg-[#180C2E]"
+              className="w-7 h-7 !bg-white/10 backdrop-blur-sm !border-white/20 hover:!bg-white/20"
               title="Refresh Party Room & Voice"
             />
 
@@ -3342,11 +3411,11 @@ export const PartyRoomsScreen: React.FC = () => {
             <button
               type="button"
               onClick={() => setShowShareModal(true)}
-              className="w-8 h-8 rounded-full bg-[#180C2E] border border-amber-400/35 hover:border-amber-300 flex items-center justify-center text-amber-300 hover:text-amber-200 cursor-pointer transition-colors"
+              className="w-7 h-7 rounded-full bg-white/10 backdrop-blur-sm border border-white/20 hover:bg-white/20 flex items-center justify-center text-amber-200 hover:text-white cursor-pointer transition-colors"
               title="Share Party"
               aria-label="Share Party"
             >
-              <Share2 className="w-3.5 h-3.5" />
+              <Share2 className="w-3 h-3" />
             </button>
           </div>
         </div>
@@ -3448,13 +3517,13 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         ) : (
           <div
-            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-1 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
-              partyLevel === 4 ? 'h-[62%] max-h-[62%]' : 'h-[50%] max-h-[50%]'
+            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-0 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
+              partyLevel === 4 ? 'h-[60%] max-h-[60%]' : 'h-[48%] max-h-[48%]'
             }`}
           >
             {/* Floating Three-Star Seat Theme Selector — Host & Moderator only */}
             {canModerate && (
-              <div className="absolute right-2 top-1 z-30">
+              <div className="absolute right-2 top-0 z-30">
                 <PartySeatThemeStarSelector
                   selectedTheme={seatTheme}
                   onSelectTheme={handleSelectSeatTheme}
@@ -3464,7 +3533,7 @@ export const PartyRoomsScreen: React.FC = () => {
             )}
 
             {/* UPPER PROMINENCE ROW: Large Circular HOST Seat + VIP 1 (VIP GUEST) Seat Beside Host */}
-            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-0.5">
+            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-0">
               {/* 1. HOST SEAT (Large Circular Frame with Synchronized Animated Seat Theme) */}
               <div className="flex flex-col items-center shrink-0">
                 <div className="relative">
@@ -3510,19 +3579,6 @@ export const PartyRoomsScreen: React.FC = () => {
                           />
                         </div>
                       </AnimatedSeatThemeFrame>
-
-                      {/* Host Microphone Status Badge */}
-                      <div
-                        className={`absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full flex items-center justify-center border border-white/40 shadow-md z-30 ${
-                          effectiveHostMicMuted ? 'bg-rose-600 text-white' : 'bg-emerald-500 text-black'
-                        }`}
-                      >
-                        {effectiveHostMicMuted ? (
-                          <MicOff className="w-3 h-3" />
-                        ) : (
-                          <Mic className="w-3 h-3" />
-                        )}
-                      </div>
                     </div>
                   ) : (
                     <AnimatedSeatThemeFrame
@@ -3549,14 +3605,59 @@ export const PartyRoomsScreen: React.FC = () => {
                   )}
                 </div>
 
-                {/* HOST Label & Name Underneath */}
-                <div className="mt-1.5 flex items-center gap-1 justify-center">
-                  <span className="px-1.5 py-[1px] rounded-full bg-gradient-to-r from-amber-400 to-amber-500 text-black text-[8px] font-black tracking-wider uppercase shadow-sm">
-                    HOST
-                  </span>
-                  <span className="text-[10px] font-bold text-white truncate max-w-[78px]">
-                    {activePartyRoom.host.displayName.split(' ')[0]}
-                  </span>
+                {/* HOST Name + Mic Mute Toggle & Coins Played Underneath (Clean, No Extra VIP/Level Bar) */}
+                <div className="mt-1 flex flex-col items-center leading-tight">
+                  <div className="flex items-center gap-1 justify-center">
+                    <span className="text-[10.5px] font-extrabold text-white truncate max-w-[78px] drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
+                      {isHostSeatedOnThrone
+                        ? activePartyRoom.host.displayName.split(' ')[0]
+                        : 'Host Empty'}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (isHost) {
+                          const nextState = !isHostMicMuted;
+                          setIsHostMicMuted(nextState);
+                          agoraPartyEngine.toggleMicrophone(!nextState);
+                          showToast(nextState ? 'Host Mic Muted 🔇' : 'Host Mic Live 🎙️');
+                        }
+                      }}
+                      className={`w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-sm transition-transform active:scale-90 ${
+                        isHost ? 'cursor-pointer' : 'cursor-default'
+                      } ${
+                        effectiveHostMicMuted
+                          ? 'bg-rose-600/90 text-white'
+                          : 'bg-emerald-500/90 text-black'
+                      }`}
+                      title={
+                        isHost
+                          ? effectiveHostMicMuted
+                            ? 'Unmute Host Mic'
+                            : 'Mute Host Mic'
+                          : effectiveHostMicMuted
+                          ? 'Host Mic Muted'
+                          : 'Host Mic On'
+                      }
+                      aria-label={effectiveHostMicMuted ? 'Host Mic Muted' : 'Host Mic On'}
+                    >
+                      {effectiveHostMicMuted ? (
+                        <MicOff className="w-2.5 h-2.5" />
+                      ) : (
+                        <Mic className="w-2.5 h-2.5" />
+                      )}
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowLeaderboardModal(true)}
+                    className="mt-0.5 inline-flex items-center gap-0.5 px-1.5 py-[1px] rounded-full bg-white/10 backdrop-blur-sm border border-amber-300/30 text-amber-200 text-[8.5px] font-extrabold tabular-nums cursor-pointer hover:bg-white/20 transition-colors"
+                    title="Total Gift Coins Played"
+                  >
+                    <span>💰</span>
+                    <span>{(activePartyRoom.totalGiftCoins || 0).toLocaleString()}</span>
+                  </button>
                 </div>
               </div>
 
@@ -3660,82 +3761,10 @@ export const PartyRoomsScreen: React.FC = () => {
               </div>
             </div>
 
-            {/* Existing Host Badges + Quick Moderation Controls (Preserved Compactly) */}
-            <div className="mt-1 flex items-center gap-1 flex-wrap justify-center shrink-0">
-              {!isHostSeatedOnThrone && (
-                <span className="px-2 py-0.2 rounded-full bg-zinc-900/90 text-zinc-300 text-[8px] font-bold border border-white/15">
-                  Host Seat Empty
-                </span>
-              )}
-              <LevelBadgeIcon level={activePartyRoom.host.level ?? 0} size="xs" />
-              {(activePartyRoom.host.vipTier ?? 0) > 0 && (
-                <span className="px-1.5 py-0.2 rounded bg-[#7928CA]/30 text-[#C084FC] text-[8px] font-black border border-[#A855F7]/30">
-                  VIP {activePartyRoom.host.vipTier}
-                </span>
-              )}
-              <button
-                onClick={() => setShowLeaderboardModal(true)}
-                className="px-2 py-0.2 rounded-full bg-gradient-to-r from-amber-500/20 to-yellow-500/10 text-amber-300 text-[8px] font-bold border border-amber-400/30 flex items-center gap-1 cursor-pointer hover:border-amber-400 transition-colors"
-                title="Party Room Top Contributors Leaderboard"
-              >
-                <span>💰 {(activePartyRoom.totalGiftCoins || 0).toLocaleString()}</span>
-                <span className="text-[7.5px] font-black text-amber-400">🏆 Top</span>
-              </button>
-              <button
-                onClick={() => {
-                  const nextFollow = !isFollowingHost;
-                  setIsFollowingHost(nextFollow);
-                  if (nextFollow && activePartyRoom?.host?.id && activePartyRoom.host.id !== currentUser.id) {
-                    sendNotificationToUser({
-                      recipientId: activePartyRoom.host.id,
-                      type: 'follow',
-                      category: 'friendRequests',
-                      title: `⭐ ${currentUser.displayName} followed your Party Room!`,
-                      message: `${currentUser.displayName} started following you.`,
-                      screen: 'party_room',
-                      roomId: activePartyRoom.id,
-                    }).catch(() => {});
-                  }
-                  showToast(isFollowingHost ? 'Unfollowed Host' : 'Following Host! 💜');
-                }}
-                className={`px-2 py-0.5 rounded-full text-[8.5px] font-black transition-all cursor-pointer ${
-                  isFollowingHost
-                    ? 'bg-zinc-800 text-zinc-300 border border-white/10'
-                    : 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow-sm'
-                }`}
-              >
-                {isFollowingHost ? 'Following' : '+ Follow'}
-              </button>
-            </div>
-
-            {/* Quick moderation bar if Host or Mod */}
-            {canModerate && (
-              <div className="flex items-center justify-between max-w-xs mx-auto w-full bg-black/45 rounded-full border border-purple-500/20 px-2.5 py-0.5 text-[9px] mt-1 shrink-0">
-                <div className="flex items-center gap-1 text-amber-300 font-bold">
-                  <ShieldCheck className="w-3 h-3 text-cyan-400" />
-                  <span>{isHost ? '👑 Host' : '🛡️ MOD'}</span>
-                </div>
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={handleMuteAllGuests}
-                    className="px-2 py-0.2 rounded-full bg-rose-600/30 hover:bg-rose-600 border border-rose-500/40 text-rose-200 hover:text-white text-[8px] font-bold cursor-pointer transition-colors"
-                  >
-                    Mute All
-                  </button>
-                  <button
-                    onClick={handleUnmuteAllGuests}
-                    className="px-2 py-0.2 rounded-full bg-emerald-600/30 hover:bg-emerald-600 border border-emerald-500/40 text-emerald-200 hover:text-white text-[8px] font-bold cursor-pointer transition-colors"
-                  >
-                    Unmute All
-                  </button>
-                </div>
-              </div>
-            )}
-
             {/* ===================================================================
                 NORMAL CIRCULAR GUEST SEATS GRID (Progressive 4 / 8 / 12 / 16)
                =================================================================== */}
-            <div className="w-full mt-1.5 flex-1 flex flex-col justify-start">
+            <div className="w-full mt-2 flex-1 flex flex-col justify-start">
               {partyLevel === 1 && (
                 /* LEVEL 1: 4 normal circular seats (1 Row x 4) */
                 <div className="grid grid-cols-4 gap-x-3 gap-y-2.5 max-w-sm mx-auto w-full px-1">

@@ -57,9 +57,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'featured',
     imageUrl: royalCastleBg,
     fallbackGradient: 'from-[#161038] via-[#0D0A24] to-[#050311]',
-    imageClass: 'brightness-[0.82] contrast-[1.06] scale-[1.02]',
-    overlayGradient: 'from-[#090518]/75 via-[#090518]/18 to-[#05020D]/92',
-    ambientGlowClass: 'from-indigo-500/25 via-amber-400/10 to-transparent',
+    imageClass: 'brightness-[0.90] contrast-[1.05] scale-[1.02]',
+    overlayGradient: 'from-transparent via-transparent to-[#05020D]/80',
+    ambientGlowClass: 'from-indigo-500/20 via-amber-400/8 to-transparent',
     eqGradientClass: 'from-indigo-500 via-amber-300 to-sky-300',
     particleColors: ['bg-amber-200', 'bg-indigo-300', 'bg-sky-200', 'bg-amber-300'],
     showClubLasers: false,
@@ -72,9 +72,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'featured',
     imageUrl: starryNightBg,
     fallbackGradient: 'from-[#0B1026] via-[#060918] to-[#03040B]',
-    imageClass: 'brightness-[0.84] contrast-[1.08] scale-[1.02]',
-    overlayGradient: 'from-[#040714]/75 via-[#050918]/18 to-[#03040B]/92',
-    ambientGlowClass: 'from-blue-500/20 via-indigo-500/12 to-transparent',
+    imageClass: 'brightness-[0.90] contrast-[1.06] scale-[1.02]',
+    overlayGradient: 'from-transparent via-transparent to-[#03040B]/80',
+    ambientGlowClass: 'from-blue-500/18 via-indigo-500/10 to-transparent',
     eqGradientClass: 'from-blue-500 via-indigo-400 to-cyan-300',
     particleColors: ['bg-sky-200', 'bg-indigo-200', 'bg-white', 'bg-cyan-200'],
     showClubLasers: false,
@@ -87,9 +87,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'featured',
     imageUrl: sufiMaidenBg,
     fallbackGradient: 'from-[#1E130B] via-[#120B08] to-[#070405]',
-    imageClass: 'brightness-[0.80] contrast-[1.06] scale-[1.02] object-[center_22%]',
-    overlayGradient: 'from-[#100906]/78 via-[#120A07]/16 to-[#070305]/92',
-    ambientGlowClass: 'from-amber-500/25 via-orange-400/10 to-transparent',
+    imageClass: 'brightness-[0.88] contrast-[1.05] scale-[1.02] object-[center_22%]',
+    overlayGradient: 'from-transparent via-transparent to-[#070305]/80',
+    ambientGlowClass: 'from-amber-500/20 via-orange-400/8 to-transparent',
     eqGradientClass: 'from-amber-600 via-amber-400 to-yellow-200',
     particleColors: ['bg-amber-300', 'bg-yellow-200', 'bg-orange-300', 'bg-amber-100'],
     showClubLasers: false,
@@ -102,9 +102,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'featured',
     imageUrl: sufiCourtyardBg,
     fallbackGradient: 'from-[#1D120A] via-[#100A09] to-[#060306]',
-    imageClass: 'brightness-[0.80] contrast-[1.08] scale-[1.02]',
-    overlayGradient: 'from-[#0E0806]/78 via-[#100906]/16 to-[#060305]/92',
-    ambientGlowClass: 'from-amber-500/28 via-yellow-500/10 to-transparent',
+    imageClass: 'brightness-[0.88] contrast-[1.06] scale-[1.02]',
+    overlayGradient: 'from-transparent via-transparent to-[#060305]/80',
+    ambientGlowClass: 'from-amber-500/22 via-yellow-500/8 to-transparent',
     eqGradientClass: 'from-amber-500 via-yellow-400 to-orange-300',
     particleColors: ['bg-amber-300', 'bg-amber-200', 'bg-yellow-300', 'bg-orange-200'],
     showClubLasers: false,
@@ -117,9 +117,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'featured',
     imageUrl: sakuraMoonBg,
     fallbackGradient: 'from-[#22102B] via-[#12091E] to-[#07030E]',
-    imageClass: 'brightness-[0.82] contrast-[1.06] scale-[1.02]',
-    overlayGradient: 'from-[#11071A]/75 via-[#12081B]/16 to-[#06020C]/92',
-    ambientGlowClass: 'from-pink-400/24 via-fuchsia-400/10 to-transparent',
+    imageClass: 'brightness-[0.90] contrast-[1.05] scale-[1.02]',
+    overlayGradient: 'from-transparent via-transparent to-[#06020C]/80',
+    ambientGlowClass: 'from-pink-400/20 via-fuchsia-400/8 to-transparent',
     eqGradientClass: 'from-pink-500 via-rose-300 to-fuchsia-300',
     particleColors: ['bg-pink-300', 'bg-rose-200', 'bg-fuchsia-200', 'bg-white'],
     showClubLasers: false,
@@ -132,9 +132,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'featured',
     imageUrl: arabianPalaceBg,
     fallbackGradient: 'from-[#1C1226] via-[#120B1C] to-[#06040D]',
-    imageClass: 'brightness-[0.80] contrast-[1.08] scale-[1.02]',
-    overlayGradient: 'from-[#0E0818]/78 via-[#0E0916]/16 to-[#06030C]/92',
-    ambientGlowClass: 'from-amber-400/24 via-violet-500/12 to-transparent',
+    imageClass: 'brightness-[0.88] contrast-[1.06] scale-[1.02]',
+    overlayGradient: 'from-transparent via-transparent to-[#06030C]/80',
+    ambientGlowClass: 'from-amber-400/20 via-violet-500/10 to-transparent',
     eqGradientClass: 'from-amber-500 via-yellow-300 to-violet-400',
     particleColors: ['bg-amber-300', 'bg-yellow-200', 'bg-violet-300', 'bg-amber-100'],
     showClubLasers: false,
@@ -147,9 +147,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'featured',
     imageUrl: emeraldWaterfallBg,
     fallbackGradient: 'from-[#081E1E] via-[#061418] to-[#030A0D]',
-    imageClass: 'brightness-[0.82] contrast-[1.08] scale-[1.02]',
-    overlayGradient: 'from-[#041114]/76 via-[#051215]/16 to-[#02080A]/92',
-    ambientGlowClass: 'from-emerald-400/22 via-cyan-400/12 to-transparent',
+    imageClass: 'brightness-[0.90] contrast-[1.06] scale-[1.02]',
+    overlayGradient: 'from-transparent via-transparent to-[#02080A]/80',
+    ambientGlowClass: 'from-emerald-400/18 via-cyan-400/10 to-transparent',
     eqGradientClass: 'from-emerald-500 via-teal-300 to-cyan-300',
     particleColors: ['bg-emerald-300', 'bg-teal-200', 'bg-cyan-200', 'bg-lime-200'],
     showClubLasers: false,
@@ -168,8 +168,8 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     isThumbLogo: true,
     fallbackGradient: 'from-[#16082C] via-[#0C0418] to-[#05010B]',
     imageClass: 'object-contain opacity-40',
-    overlayGradient: 'from-black/50 via-transparent to-black/85',
-    ambientGlowClass: 'from-[#7928CA]/30 via-[#EC4899]/15 to-transparent',
+    overlayGradient: 'from-transparent via-transparent to-black/75',
+    ambientGlowClass: 'from-[#7928CA]/25 via-[#EC4899]/12 to-transparent',
     eqGradientClass: 'from-[#7928CA] via-[#A855F7] to-[#EC4899]',
     particleColors: ['bg-fuchsia-400', 'bg-purple-300', 'bg-pink-400', 'bg-cyan-300'],
     showClubLasers: true,
@@ -178,12 +178,12 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
   {
     id: 'dp',
     name: 'Host Profile Photo',
-    subtitle: "Host's profile picture with dark vignette",
+    subtitle: "Host's profile picture with soft vignette",
     category: 'classic',
     fallbackGradient: 'from-[#180A30] via-[#0E051E] to-[#07020F]',
-    imageClass: 'scale-105 brightness-[0.72] contrast-[1.12]',
-    overlayGradient: 'from-[#090314]/75 via-transparent to-[#05010B]/90',
-    ambientGlowClass: 'from-[#7928CA]/28 via-[#EC4899]/14 to-transparent',
+    imageClass: 'scale-105 brightness-[0.82] contrast-[1.08]',
+    overlayGradient: 'from-transparent via-transparent to-[#05010B]/80',
+    ambientGlowClass: 'from-[#7928CA]/24 via-[#EC4899]/12 to-transparent',
     eqGradientClass: 'from-[#7928CA] via-[#A855F7] to-[#EC4899]',
     particleColors: ['bg-fuchsia-400', 'bg-purple-300', 'bg-pink-400', 'bg-amber-300'],
     showClubLasers: true,
@@ -196,9 +196,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'classic',
     imageUrl: sunriseGlowBg,
     fallbackGradient: 'from-[#281326] via-[#16081A] to-[#080209]',
-    imageClass: 'brightness-[0.75] contrast-[1.06]',
-    overlayGradient: 'from-[#14061A]/75 via-transparent to-[#080209]/95',
-    ambientGlowClass: 'from-amber-400/24 via-rose-400/12 to-transparent',
+    imageClass: 'brightness-[0.86] contrast-[1.05]',
+    overlayGradient: 'from-transparent via-transparent to-[#080209]/82',
+    ambientGlowClass: 'from-amber-400/20 via-rose-400/10 to-transparent',
     eqGradientClass: 'from-amber-500 via-orange-400 to-rose-400',
     particleColors: ['bg-amber-300', 'bg-orange-200', 'bg-rose-300', 'bg-yellow-200'],
     showClubLasers: false,
@@ -211,9 +211,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'classic',
     imageUrl: sunsetTwilightBg,
     fallbackGradient: 'from-[#240F38] via-[#140724] to-[#07020F]',
-    imageClass: 'brightness-[0.78] contrast-[1.08]',
-    overlayGradient: 'from-[#120524]/75 via-transparent to-[#07020F]/95',
-    ambientGlowClass: 'from-pink-500/24 via-purple-500/14 to-transparent',
+    imageClass: 'brightness-[0.88] contrast-[1.06]',
+    overlayGradient: 'from-transparent via-transparent to-[#07020F]/82',
+    ambientGlowClass: 'from-pink-500/20 via-purple-500/12 to-transparent',
     eqGradientClass: 'from-purple-500 via-pink-400 to-amber-300',
     particleColors: ['bg-pink-300', 'bg-purple-300', 'bg-amber-200', 'bg-fuchsia-300'],
     showClubLasers: false,
@@ -226,9 +226,9 @@ export const PARTY_BACKGROUND_CATALOG: PartyBackgroundConfig[] = [
     category: 'classic',
     imageUrl: grandMosqueBg,
     fallbackGradient: 'from-[#0B1228] via-[#070B1A] to-[#03040A]',
-    imageClass: 'brightness-[0.76] contrast-[1.1]',
-    overlayGradient: 'from-[#060A17]/80 via-transparent to-[#03040A]/95',
-    ambientGlowClass: 'from-amber-400/20 via-indigo-500/12 to-transparent',
+    imageClass: 'brightness-[0.86] contrast-[1.06]',
+    overlayGradient: 'from-transparent via-transparent to-[#03040A]/82',
+    ambientGlowClass: 'from-amber-400/18 via-indigo-500/10 to-transparent',
     eqGradientClass: 'from-amber-400 via-yellow-300 to-sky-300',
     particleColors: ['bg-amber-300', 'bg-sky-200', 'bg-yellow-200', 'bg-indigo-300'],
     showClubLasers: false,
@@ -303,8 +303,7 @@ export const PartyRoomAtmosphere: React.FC<PartyRoomAtmosphereProps> = ({
               />
             </div>
           </div>
-          <div className="absolute inset-0 bg-radial-vignette opacity-85" />
-          <div className="absolute inset-0 bg-gradient-to-b from-black/50 via-transparent to-black/85" />
+          <div className="absolute inset-0 bg-gradient-to-b from-transparent via-transparent to-black/75" />
         </div>
       ) : (
         <div className="absolute inset-0 overflow-hidden">
@@ -319,13 +318,11 @@ export const PartyRoomAtmosphere: React.FC<PartyRoomAtmosphereProps> = ({
             />
           )}
 
-          {/* Measured Top & Bottom Contrast Scrims (Keeps header, seats & chat crisp) */}
+          {/* Clean Full-Bleed Top with Bottom-Only Chat Readability Scrim */}
           <div
             className={`absolute inset-0 bg-gradient-to-b ${activeConfig.overlayGradient} transition-all duration-700`}
           />
-          <div className="absolute top-0 left-0 right-0 h-32 bg-gradient-to-b from-black/55 to-transparent" />
-          <div className="absolute bottom-0 left-0 right-0 h-44 bg-gradient-to-t from-black/75 via-black/35 to-transparent" />
-          <div className="absolute inset-0 bg-radial-vignette opacity-40" />
+          <div className="absolute bottom-0 left-0 right-0 h-40 bg-gradient-to-t from-black/70 via-black/25 to-transparent" />
         </div>
       )}
 
@@ -374,7 +371,7 @@ export const PartyRoomAtmosphere: React.FC<PartyRoomAtmosphereProps> = ({
       )}
 
       {/* Subtle Theme-Matched Audio Equalizer Behind Host Seat */}
-      <div className="absolute top-24 left-1/2 -translate-x-1/2 w-64 h-14 flex items-end justify-between px-6 opacity-25">
+      <div className="absolute top-14 left-1/2 -translate-x-1/2 w-64 h-14 flex items-end justify-between px-6 opacity-25">
         {[24, 45, 68, 92, 54, 78, 36, 85, 96, 62, 48, 88, 70, 52, 34, 65, 82, 40].map((h, i) => (
           <div
             key={i}

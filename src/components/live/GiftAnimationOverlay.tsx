@@ -3,7 +3,15 @@ import { Gift } from '../../types';
 import { Sparkles, Flame, Volume2, VolumeX, Crown } from 'lucide-react';
 import { audioManager } from '../../services/audioManager';
 import { virtualGiftDatabase } from '../../services/virtual-gift-database';
+import { prefetchCriticalGiftAssets } from '../../services/giftMediaCache';
 import { UniversalGiftPlayer } from './UniversalGiftPlayer';
+
+const PRIMARY_CSS_SHOWCASE_TYPES = new Set(['car', 'rocket', 'dragon', 'crown', 'yacht', 'ring']);
+
+const PRIMARY_CSS_SHOWCASE_STYLE: React.CSSProperties = {
+  animationFillMode: 'forwards',
+  animationIterationCount: 1,
+};
 
 export interface ActiveGiftEvent {
   id: string;
@@ -48,10 +56,15 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
   const isAdvancedGift = Boolean(currentEvent?.gift?.advancedConfig);
 
-  // Keep latest callback in a ref so parent re-renders (e.g. 1s stream clock / 80ms combo bar)
-  // NEVER reset the auto-dismiss timer or interrupt running video animations!
+  // Keep latest callbacks in refs so parent re-renders (e.g. 1s stream clock / 80ms combo bar)
+  // NEVER reset timers or interrupt running animations!
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+  const onProgressRef = useRef(onProgress);
+  onProgressRef.current = onProgress;
+  const finishActiveCssEventRef = useRef<((eventId: string, withChromeFade?: boolean) => void) | null>(
+    null
+  );
 
   const handleUniversalGiftComplete = useCallback((finishedId: string) => {
     completedIdsRef.current.add(finishedId);
@@ -66,6 +79,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
   useEffect(() => {
     void virtualGiftDatabase.preloadAllGiftAudio();
+    void prefetchCriticalGiftAssets();
     return () => {
       audioManager.stopAll();
     };
@@ -74,6 +88,15 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   useEffect(() => {
     return audioManager.subscribeMute(setIsMuted);
   }, []);
+
+  const handlePrimaryShowcaseAnimationEnd = useCallback(
+    (e: React.AnimationEvent<HTMLDivElement>) => {
+      if (e.target !== e.currentTarget) return;
+      if (!currentEvent?.id) return;
+      finishActiveCssEventRef.current?.(currentEvent.id, true);
+    },
+    [currentEvent?.id]
+  );
 
   useEffect(() => {
     const eventId = currentEvent?.id;
@@ -86,23 +109,34 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       layer === 'background' ||
       completedIdsRef.current.has(eventId)
     ) {
+      finishActiveCssEventRef.current = null;
       setIsExiting(false);
       setShakeScreen(false);
       return;
     }
 
     const meta = virtualGiftDatabase.resolveGiftMetadata(currentEvent.gift);
+    const isPrimaryShowcaseCss =
+      !meta.isBannerOnly && PRIMARY_CSS_SHOWCASE_TYPES.has(meta.animationType);
     const durationMs = meta.isBannerOnly
       ? Math.min(2800, Math.max(1500, Number(meta.durationMs) || 2000))
       : Math.min(7800, Math.max(7000, Number(meta.durationMs) || 7400));
+
+    // For Supercar, Rocket, Dragon, Crown, Yacht, Ring:
+    // Completion is driven directly by the DOM `onAnimationEnd` event so network latency or
+    // frame delays NEVER truncate the animation early. The safety deadline only triggers if
+    // the browser suspends CSS animations in a background tab.
     const fadeLeadMs = meta.isBannerOnly ? 260 : 420;
-    const fadeAtMs = Date.now() + Math.max(200, durationMs - fadeLeadMs);
-    const deadlineMs = Date.now() + durationMs;
+    const startedAt = Date.now();
+    const fadeAtMs = startedAt + Math.max(200, durationMs - fadeLeadMs);
+    const safetyDeadlineMs = startedAt + (isPrimaryShowcaseCss ? durationMs + 4200 : durationMs);
     let finished = false;
+    let exitingTriggered = false;
 
     setIsExiting(false);
+    onProgressRef.current?.(eventId, 0, durationMs);
 
-    // Play mapped gift SFX safely (never block timer setup if WebView audio throws)
+    // Play mapped gift SFX safely (never block animation playback if WebView audio throws)
     try {
       Promise.resolve(
         virtualGiftDatabase.playGiftAudio(meta, {
@@ -124,11 +158,13 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
     let fadeTimer: ReturnType<typeof setTimeout> | null = null;
     let completeTimer: ReturnType<typeof setTimeout> | null = null;
+    let exitFinalizeTimer: ReturnType<typeof setTimeout> | null = null;
     let watchdogPoll: ReturnType<typeof setInterval> | null = null;
 
     const finishOnce = () => {
       if (finished) return;
       finished = true;
+      finishActiveCssEventRef.current = null;
       completedIdsRef.current.add(eventId);
       if (completedIdsRef.current.size > 80) {
         const firstKey = completedIdsRef.current.values().next().value;
@@ -137,6 +173,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       if (shakeTimer) clearTimeout(shakeTimer);
       if (fadeTimer) clearTimeout(fadeTimer);
       if (completeTimer) clearTimeout(completeTimer);
+      if (exitFinalizeTimer) clearTimeout(exitFinalizeTimer);
       if (watchdogPoll) clearInterval(watchdogPoll);
       setCompletedEventId(eventId);
       setIsExiting(false);
@@ -144,25 +181,50 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       onCompleteRef.current();
     };
 
+    const triggerNaturalComplete = (targetId: string, withChromeFade = true) => {
+      if (finished || targetId !== eventId) return;
+      if (withChromeFade && !exitingTriggered) {
+        exitingTriggered = true;
+        setIsExiting(true);
+        if (exitFinalizeTimer) clearTimeout(exitFinalizeTimer);
+        exitFinalizeTimer = setTimeout(finishOnce, 280);
+        return;
+      }
+      finishOnce();
+    };
+
+    finishActiveCssEventRef.current = triggerNaturalComplete;
+
     const checkWallClock = () => {
+      if (finished) return;
       const now = Date.now();
-      if (now >= deadlineMs) {
+      const elapsed = now - startedAt;
+      onProgressRef.current?.(eventId, Math.min(elapsed, durationMs), durationMs);
+
+      if (now >= safetyDeadlineMs) {
         finishOnce();
         return;
       }
-      if (now >= fadeAtMs) {
+      // Only auto-fade before deadline for banner/particle gifts; primary showcase CSS
+      // animations (Supercar/Rocket/Dragon/Crown/Yacht/Ring) fade AFTER onAnimationEnd!
+      if (!isPrimaryShowcaseCss && now >= fadeAtMs && !exitingTriggered) {
+        exitingTriggered = true;
         setIsExiting(true);
       }
     };
 
-    // Smooth fade-out right before completion
-    fadeTimer = setTimeout(() => {
-      if (!finished) setIsExiting(true);
-    }, Math.max(200, durationMs - fadeLeadMs));
+    if (!isPrimaryShowcaseCss) {
+      fadeTimer = setTimeout(() => {
+        if (!finished && !exitingTriggered) {
+          exitingTriggered = true;
+          setIsExiting(true);
+        }
+      }, Math.max(200, durationMs - fadeLeadMs));
+    }
 
-    // Primary auto-dismiss timer + Android WebView wall-clock watchdog
-    completeTimer = setTimeout(finishOnce, durationMs);
-    watchdogPoll = setInterval(checkWallClock, 250);
+    // Fallback safety timer + heartbeat poll (never cuts off active Supercar/Rocket/Dragon/Crown)
+    completeTimer = setTimeout(finishOnce, safetyDeadlineMs - startedAt);
+    watchdogPoll = setInterval(checkWallClock, 500);
 
     window.addEventListener('focus', checkWallClock);
     window.addEventListener('pageshow', checkWallClock);
@@ -170,9 +232,11 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
     return () => {
       finished = true;
+      finishActiveCssEventRef.current = null;
       if (shakeTimer) clearTimeout(shakeTimer);
       if (fadeTimer) clearTimeout(fadeTimer);
       if (completeTimer) clearTimeout(completeTimer);
+      if (exitFinalizeTimer) clearTimeout(exitFinalizeTimer);
       if (watchdogPoll) clearInterval(watchdogPoll);
       window.removeEventListener('focus', checkWallClock);
       window.removeEventListener('pageshow', checkWallClock);
@@ -543,7 +607,11 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
         {gift.animationType === 'ring' && (
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
-            <div className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}>
+            <div
+              className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}
+              style={PRIMARY_CSS_SHOWCASE_STYLE}
+              onAnimationEnd={handlePrimaryShowcaseAnimationEnd}
+            >
               <div className="absolute w-72 h-72 rounded-full bg-cyan-400/20 blur-3xl" />
               <div className="text-8xl sm:text-9xl drop-shadow-[0_0_45px_rgba(34,211,238,0.85)]">
                 💍
@@ -559,7 +627,11 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
         {gift.animationType === 'crown' && (
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
-            <div className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}>
+            <div
+              className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}
+              style={PRIMARY_CSS_SHOWCASE_STYLE}
+              onAnimationEnd={handlePrimaryShowcaseAnimationEnd}
+            >
               <div className="absolute w-72 h-72 rounded-full bg-amber-400/25 blur-3xl" />
               <div className="text-8xl sm:text-9xl drop-shadow-[0_0_55px_rgba(251,191,36,0.95)]">
                 👑
@@ -577,7 +649,11 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
         {gift.animationType === 'car' && (
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
-            <div className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}>
+            <div
+              className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}
+              style={PRIMARY_CSS_SHOWCASE_STYLE}
+              onAnimationEnd={handlePrimaryShowcaseAnimationEnd}
+            >
               <div className="absolute -left-12 -right-12 bottom-0 h-12 bg-purple-600/35 blur-2xl rounded-full" />
               <div className="text-8xl sm:text-9xl drop-shadow-[0_0_50px_rgba(168,85,247,0.9)] transform -scale-x-100">
                 🏎️
@@ -601,11 +677,17 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
                   left: fw.x,
                   top: fw.y,
                   animationDelay: fw.delay,
+                  animationFillMode: 'forwards',
+                  animationIterationCount: 1,
                 }}
               />
             ))}
 
-            <div className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}>
+            <div
+              className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}
+              style={PRIMARY_CSS_SHOWCASE_STYLE}
+              onAnimationEnd={handlePrimaryShowcaseAnimationEnd}
+            >
               <div className="absolute w-80 h-40 -bottom-4 bg-cyan-500/20 blur-2xl rounded-full" />
               <div className="text-8xl sm:text-9xl drop-shadow-[0_0_45px_rgba(6,182,212,0.85)]">
                 🛥️
@@ -619,7 +701,11 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
         {gift.animationType === 'rocket' && (
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
-            <div className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}>
+            <div
+              className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}
+              style={PRIMARY_CSS_SHOWCASE_STYLE}
+              onAnimationEnd={handlePrimaryShowcaseAnimationEnd}
+            >
               <div className="text-8xl sm:text-9xl drop-shadow-[0_0_60px_rgba(249,115,22,0.95)]">
                 🚀
               </div>
@@ -633,7 +719,11 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
 
         {gift.animationType === 'dragon' && (
           <div className="relative w-full h-full flex items-center justify-center overflow-hidden">
-            <div className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}>
+            <div
+              className={`relative flex flex-col items-center justify-center ${primaryAnimClass}`}
+              style={PRIMARY_CSS_SHOWCASE_STYLE}
+              onAnimationEnd={handlePrimaryShowcaseAnimationEnd}
+            >
               <div className="absolute w-88 h-88 rounded-full bg-red-600/20 blur-3xl" />
               <div className="text-9xl sm:text-[140px] drop-shadow-[0_0_70px_rgba(239,68,68,0.95)] transform scale-x-[-1]">
                 🐉

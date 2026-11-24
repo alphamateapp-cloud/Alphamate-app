@@ -87,7 +87,7 @@ define(['./workbox-cd5fc262'], (function (workbox) { 'use strict';
     "revision": "a6e80597ff150108cd35c1f3cc22c4ef"
   }, {
     "url": "index.html",
-    "revision": "5220aea2bbb4982b3d5a7822fe861ff0"
+    "revision": "73d0e0e448bd322910591f7648fb9428"
   }, {
     "url": "apple-touch-icon.png",
     "revision": "16f06d9fec1ba8387911107a2af854de"
@@ -101,22 +101,31 @@ define(['./workbox-cd5fc262'], (function (workbox) { 'use strict';
     "url": "assets/workbox-window.prod.es5-Bd17z0YL.js",
     "revision": null
   }, {
-    "url": "assets/web-CanhMtS9.js",
+    "url": "assets/web-DOKEs38S.js",
     "revision": null
   }, {
-    "url": "assets/web-BFyacxLL.js",
+    "url": "assets/web-CHA3LUfC.js",
     "revision": null
   }, {
-    "url": "assets/index-BZ2_wP-4.css",
+    "url": "assets/index-JFITwbAb.js",
     "revision": null
   }, {
-    "url": "assets/index-B9e7LNd_.js",
+    "url": "assets/index-CFHXN_PE.css",
     "revision": null
   }, {
-    "url": "assets/AgoraRTC_N-production-DKMFn39M.js",
+    "url": "assets/AgoraRTC_N-production-C-2YC49q.js",
     "revision": null
   }, {
     "url": "assets/gifts/sample_alpha_crown.svg",
+    "revision": null
+  }, {
+    "url": "assets/gifts/gift_6370.png",
+    "revision": null
+  }, {
+    "url": "assets/gifts/gift_6331.png",
+    "revision": null
+  }, {
+    "url": "assets/gifts/gift_5651.png",
     "revision": null
   }, {
     "url": "alpha-mate-logo-emblem.png",

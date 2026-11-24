@@ -36,6 +36,7 @@ import { pushService } from './services/pushNotificationService';
 import { keepScreenAwake } from './services/keepScreenAwake';
 import { startDeviceSecurityMonitoring, stopDeviceSecurityMonitoring } from './services/deviceSecurityService';
 import { initDeviceDimensions } from './services/deviceDimensions';
+import { prefetchCriticalGiftAssets } from './services/giftMediaCache';
 import { BatteryStatus } from './components/common/BatteryStatus';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
@@ -127,6 +128,15 @@ const NativePlatformBridge: React.FC = () => {
     void startDeviceSecurityMonitoring();
     return () => stopDeviceSecurityMonitoring();
   }, [isSessionReadyAndAuthed, isAccountAdminRestricted, currentUser?.id]);
+
+  // Early non-blocking pre-fetch of critical gift animation assets (Supercar, Rocket, Dragon, Crown + bundled media)
+  useEffect(() => {
+    if (!isSessionReadyAndAuthed || deviceMode === 'admin') return;
+    const timer = window.setTimeout(() => {
+      void prefetchCriticalGiftAssets();
+    }, 1200);
+    return () => window.clearTimeout(timer);
+  }, [isSessionReadyAndAuthed, deviceMode]);
 
   // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
   useEffect(() => {
