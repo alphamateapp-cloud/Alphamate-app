@@ -71,6 +71,7 @@ import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } 
 import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
 import { enqueueByPriority } from '../services/giftAnimationEngine';
+import { prewarmGiftAnimationsInBackground } from '../services/giftMediaCache';
 
 const GIFT_COMBO_WINDOW_MS = 4200;
 
@@ -181,6 +182,9 @@ export const LiveStreamScreen: React.FC = () => {
   // Spectacular Visual Gift Animation, Priority Queue & Rapid-Combo states (strictly scoped per streamId)
   const [activeGiftAnimation, setActiveGiftAnimation] = useState<ActiveGiftEvent | null>(null);
   const giftQueueRef = useRef<ActiveGiftEvent[]>([]);
+  const seenLiveGiftEventIdsRef = useRef<Set<string>>(new Set());
+  const liveMessagesHydratedRef = useRef<boolean>(false);
+  const liveDetectedGiftDurationRef = useRef<{ eventId: string; durationMs: number } | null>(null);
   const [activeGiftCombo, setActiveGiftCombo] = useState<LiveGiftComboState | null>(null);
   const [comboRemainingMs, setComboRemainingMs] = useState<number>(0);
   const [giftQuantityMultiplier, setGiftQuantityMultiplier] = useState<number>(1);
@@ -213,9 +217,25 @@ export const LiveStreamScreen: React.FC = () => {
   }, []);
 
   const handleGiftOverlayComplete = useCallback(() => {
+    liveDetectedGiftDurationRef.current = null;
     const nextQueued = giftQueueRef.current.shift() || null;
     setActiveGiftAnimation(nextQueued);
   }, []);
+
+  const handleLiveGiftDurationDetected = useCallback((eventId: string, durationMs: number) => {
+    if (!Number.isFinite(durationMs) || durationMs <= 0) return;
+    const current = liveDetectedGiftDurationRef.current;
+    if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
+      liveDetectedGiftDurationRef.current = { eventId, durationMs };
+    }
+  }, []);
+
+  // Quietly pre-warm published animated gift media into IndexedDB + blob URLs on broadcast entry
+  // so gift animations launch immediately (<30ms) for Host & all Viewers.
+  useEffect(() => {
+    if (!activeStream?.id || !publishedCatalogGifts.length) return;
+    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 8);
+  }, [activeStream?.id, publishedCatalogGifts]);
 
   // Top Givers Leaderboard State for Current Broadcast Session
   const [sessionGivers, setSessionGivers] = useState<SessionGiver[]>([]);
@@ -596,24 +616,31 @@ export const LiveStreamScreen: React.FC = () => {
         const sig = ev.signal;
         const sigTs = Number(sig.timestamp || ev.ts || Date.now());
         const now = Date.now();
-        // Only show fresh gift signals that occurred during this live broadcast session
+        const wsEventId =
+          String(sig.eventId || '').trim() || `ws_gift_${streamId}_${sigTs}`;
+        // Only show fresh gift signals that occurred during this live broadcast session (exact-once)
         if (
           sig.gift &&
-          typeof sig.comboCount === 'number' &&
-          sigTs >= streamJoinedAtRef.current - 1500 &&
-          Math.abs(now - sigTs) < 8000
+          !seenLiveGiftEventIdsRef.current.has(wsEventId) &&
+          sigTs >= streamJoinedAtRef.current - 2500 &&
+          Math.abs(now - sigTs) < 15000
         ) {
+          seenLiveGiftEventIdsRef.current.add(wsEventId);
           const incomingGift = sig.gift as Gift;
           const resolvedGift =
-            publishedCatalogGiftsRef.current.find((g) => g.id === incomingGift?.id) || incomingGift;
+            publishedCatalogGiftsRef.current.find(
+              (g) =>
+                (incomingGift?.id && g.id === incomingGift.id) ||
+                (incomingGift?.name && g.name.toLowerCase() === incomingGift.name.toLowerCase())
+            ) || incomingGift;
           enqueueLiveGiftAnimation({
-            id: `ws_gift_${streamId}_${sigTs}_${Math.random().toString(36).slice(2, 7)}`,
+            id: wsEventId,
             gift: resolvedGift,
             senderName: String(sig.senderName || 'Viewer'),
             senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
             senderVipTier: Number(sig.senderVipTier || 1),
             recipientName: String(sig.recipientName || activeStream.host.displayName || 'Host'),
-            comboCount: Number(sig.comboCount),
+            comboCount: Number(sig.comboCount || 1),
             quantity: Number(sig.quantity || 1),
             timestamp: sigTs,
             streamId,
@@ -1123,10 +1150,12 @@ export const LiveStreamScreen: React.FC = () => {
     }
   };
 
-  // Real-time Live Stream Comments subscription
+  // Real-time Live Stream Comments & reliable room-wide Gift Animation sync via Firestore
   useEffect(() => {
     if (!activeStream?.id) return;
-    const unsubscribe = subscribeToLiveStreamMessages(activeStream.id, (remoteComments) => {
+    const currentStreamId = activeStream.id;
+    liveMessagesHydratedRef.current = false;
+    const unsubscribe = subscribeToLiveStreamMessages(currentStreamId, (remoteComments) => {
       if (remoteComments && remoteComments.length > 0) {
         setComments(
           remoteComments.map((rc: any) => ({
@@ -1141,12 +1170,66 @@ export const LiveStreamScreen: React.FC = () => {
             isEntryNotice: rc.isEntryNotice,
           }))
         );
+
+        // Reliable room-wide gift animation sync for Host & ALL Viewers in THIS broadcast
+        // (deduplicated against WebSocket & local sender; initial snapshot never replays old history)
+        if (!liveMessagesHydratedRef.current) {
+          liveMessagesHydratedRef.current = true;
+          remoteComments.forEach((rc: any) => {
+            if (rc.isGiftHighlight) {
+              const key = String(rc.giftEventId || rc.id || '').trim();
+              if (key) seenLiveGiftEventIdsRef.current.add(key);
+            }
+          });
+        } else {
+          remoteComments.forEach((rc: any) => {
+            if (!rc.isGiftHighlight || (!rc.giftId && !rc.giftName)) return;
+            const eventKey = String(rc.giftEventId || rc.id || '').trim();
+            if (!eventKey || seenLiveGiftEventIdsRef.current.has(eventKey)) return;
+            const sentMs = Number(
+              rc.sentAtMs || (rc.createdAt?.toMillis ? rc.createdAt.toMillis() : Date.now())
+            );
+            if (sentMs < streamJoinedAtRef.current - 5000) {
+              seenLiveGiftEventIdsRef.current.add(eventKey);
+              return;
+            }
+            seenLiveGiftEventIdsRef.current.add(eventKey);
+            const resolvedGift: Gift =
+              publishedCatalogGiftsRef.current.find(
+                (g) =>
+                  (rc.giftId && g.id === rc.giftId) ||
+                  (rc.giftName && g.name.toLowerCase() === String(rc.giftName).toLowerCase())
+              ) || {
+                id: String(rc.giftId || eventKey),
+                name: String(rc.giftName || 'Gift'),
+                icon: String(rc.giftIcon || '🎁'),
+                coins: Math.max(1, Number(rc.giftCoins) || 100),
+                costInCoins: Math.max(1, Number(rc.giftCoins) || 100),
+                animationType: 'sparkle',
+                description: '',
+              };
+            enqueueLiveGiftAnimation({
+              id: eventKey,
+              gift: resolvedGift,
+              senderName: String(rc.user || 'Viewer'),
+              senderAvatar: rc.avatar ? String(rc.avatar) : undefined,
+              senderVipTier: Number(rc.vipLevel || 0),
+              recipientName: String(rc.recipientName || activeStream.host?.displayName || 'Host'),
+              comboCount: Math.max(1, Number(rc.comboCount || 1)),
+              quantity: Math.max(1, Number(rc.quantity || 1)),
+              timestamp: sentMs,
+              streamId: currentStreamId,
+            });
+          });
+        }
+      } else if (!liveMessagesHydratedRef.current) {
+        liveMessagesHydratedRef.current = true;
       }
     });
     return () => {
       unsubscribe();
     };
-  }, [activeStream?.id, liveRefreshTick]);
+  }, [activeStream?.id, liveRefreshTick, enqueueLiveGiftAnimation]);
 
   const handleSendComment = (e: React.FormEvent) => {
     e.preventDefault();
@@ -1179,6 +1262,10 @@ export const LiveStreamScreen: React.FC = () => {
   // Reset all gift animations, banners, and active gift combos when entering, switching, or leaving streams
   useEffect(() => {
     streamJoinedAtRef.current = Date.now();
+    seenLiveGiftEventIdsRef.current.clear();
+    liveMessagesHydratedRef.current = false;
+    liveDetectedGiftDurationRef.current = null;
+    giftQueueRef.current = [];
     comboTrackingRef.current = null;
     setActiveGiftAnimation(null);
     setActiveGiftCombo(null);
@@ -1187,6 +1274,8 @@ export const LiveStreamScreen: React.FC = () => {
     audioManager.stopAll();
 
     return () => {
+      liveDetectedGiftDurationRef.current = null;
+      giftQueueRef.current = [];
       comboTrackingRef.current = null;
       setActiveGiftAnimation(null);
       setActiveGiftCombo(null);
@@ -1197,7 +1286,7 @@ export const LiveStreamScreen: React.FC = () => {
   }, [activeStream?.id, clearActiveGiftBanner]);
 
   // Parent-side wall-clock fail-safe: ensures Android WebView timer throttling never leaves a gift stuck
-  // while NEVER cutting off a full-duration advanced gift video (e.g. 10s WebM/MOV/MP4) early.
+  // while NEVER cutting off a full-duration advanced gift video (10s, 15s, 20s+ WebM/MOV/MP4) early.
   useEffect(() => {
     if (!activeGiftAnimation) return;
     const coins = Number(
@@ -1211,27 +1300,36 @@ export const LiveStreamScreen: React.FC = () => {
         : 0;
     const playbackSpeed = Math.min(2, Math.max(0.5, advConfig?.playbackSpeed ?? 1));
     const effectiveAdvMs = Math.max(advDurationMs, analysisDurationMs);
-    const maxMs = effectiveAdvMs > 0
-      ? Math.min(72_000, Math.ceil(effectiveAdvMs / playbackSpeed) + 7000)
+    const baseMaxMs = advConfig
+      ? Math.min(120_000, Math.ceil((effectiveAdvMs > 0 ? effectiveAdvMs : 20_000) / playbackSpeed) + 15_000)
       : coins <= 100
-      ? 3000
-      : 8000;
+      ? 3500
+      : 9000;
     const startedAt = Date.now();
     const eventId = activeGiftAnimation.id;
     let cleared = false;
 
-    const clearIfExpired = (force = false) => {
+    const getEffectiveMaxMs = () => {
+      const detected = liveDetectedGiftDurationRef.current;
+      if (detected && detected.eventId === eventId && detected.durationMs > 0) {
+        return Math.max(baseMaxMs, Math.min(120_000, Math.ceil(detected.durationMs) + 15_000));
+      }
+      return baseMaxMs;
+    };
+
+    const clearIfExpired = () => {
       if (cleared) return;
-      if (force || Date.now() - startedAt >= maxMs) {
+      if (Date.now() - startedAt >= getEffectiveMaxMs()) {
         cleared = true;
+        liveDetectedGiftDurationRef.current = null;
         const nextQueued = giftQueueRef.current.shift() || null;
         setActiveGiftAnimation((prev) => (prev?.id === eventId ? nextQueued : prev));
       }
     };
 
-    const failSafeTimeout = setTimeout(() => clearIfExpired(true), maxMs);
-    const failSafePoll = setInterval(() => clearIfExpired(false), 500);
-    const onResume = () => clearIfExpired(false);
+    const failSafeTimeout = setTimeout(() => clearIfExpired(), baseMaxMs + 100);
+    const failSafePoll = setInterval(() => clearIfExpired(), 500);
+    const onResume = () => clearIfExpired();
 
     window.addEventListener('focus', onResume);
     window.addEventListener('pageshow', onResume);
@@ -1380,9 +1478,13 @@ export const LiveStreamScreen: React.FC = () => {
     });
     setComboRemainingMs(GIFT_COMBO_WINDOW_MS);
 
-    // Broadcast live combo event over room WebSocket so Host & Viewers in THIS stream see it
+    const giftEventId = `live_gift_${now}_${Math.random().toString(36).slice(2, 7)}`;
+    seenLiveGiftEventIdsRef.current.add(giftEventId);
+
+    // Broadcast live combo event over room WebSocket so Host & Viewers in THIS stream see it immediately
     realtimeSocket.sendRoomSignal('live', activeStream.id, {
       type: 'gift_combo',
+      eventId: giftEventId,
       streamId: activeStream.id,
       gift: giftToSend,
       senderName: currentUser.displayName,
@@ -1396,7 +1498,7 @@ export const LiveStreamScreen: React.FC = () => {
 
     // Trigger Scoped Gift Banner / Animation strictly for this streamId via priority queue
     enqueueLiveGiftAnimation({
-      id: `gift_anim_${activeStream.id}_${now}_${Math.random().toString(36).slice(2, 7)}`,
+      id: giftEventId,
       gift: giftToSend,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
@@ -1412,12 +1514,12 @@ export const LiveStreamScreen: React.FC = () => {
       nextCombo > 1 ? ` [Combo x${nextCombo} 🔥]` : ''
     }`;
 
-    // Add Highlighted Gift Notification into Live Chat Stream & sync to stream messages
+    // Add Highlighted Gift Notification into Live Chat Stream & sync gift metadata to Firestore
     const senderUid = auth.currentUser?.uid || currentUser.id;
     setComments((prev) => [
       ...prev,
       {
-        id: `gift_msg_${now}_${nextCombo}`,
+        id: giftEventId,
         senderId: senderUid,
         user: currentUser.displayName,
         avatar: currentUser.avatar,
@@ -1435,6 +1537,15 @@ export const LiveStreamScreen: React.FC = () => {
       level: currentUser.level ?? 0,
       isGiftHighlight: true,
       senderId: senderUid,
+      giftEventId,
+      giftId: giftToSend.id,
+      giftName: giftToSend.name,
+      giftIcon: giftToSend.icon,
+      giftCoins: unitCost,
+      recipientName,
+      quantity: qty,
+      comboCount: nextCombo,
+      sentAtMs: now,
     }).catch(() => {});
 
     // Spawn floating celebration hearts
@@ -1621,6 +1732,7 @@ export const LiveStreamScreen: React.FC = () => {
             : null
         }
         onComplete={handleGiftOverlayComplete}
+        onDurationDetected={handleLiveGiftDurationDetected}
       />
 
       {/* Floating Microphone Muted Indicator (Host or Viewer perspective) */}
@@ -1710,6 +1822,7 @@ export const LiveStreamScreen: React.FC = () => {
             : null
         }
         onComplete={handleGiftOverlayComplete}
+        onDurationDetected={handleLiveGiftDurationDetected}
       />
 
       {/* Interactive Rapid-Succession Gift Combo Counter HUD */}

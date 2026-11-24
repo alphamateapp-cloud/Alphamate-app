@@ -1,0 +1,100 @@
+[
+  {
+    "gift_id": "gift_6370",
+    "suggested_name": "Snow Leopard",
+    "animation_file": "gift_6370.webm",
+    "thumbnail_file": "gift_6370.png",
+    "animation_format": "webm",
+    "animation_mode": "overlay",
+    "source_file": "6370.mp4",
+    "source_has_alpha": false,
+    "note": "Original MP4 had no alpha channel; WEBM is opaque, not transparent.",
+    "webm_probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "vp9",
+          "codec_type": "video",
+          "width": 576,
+          "height": 1024,
+          "pix_fmt": "yuv420p"
+        },
+        {
+          "codec_name": "opus",
+          "codec_type": "audio"
+        }
+      ],
+      "format": {
+        "duration": "6.043000",
+        "size": "947458"
+      }
+    },
+    "webm_size_bytes": 947458,
+    "png_size_bytes": 647601
+  },
+  {
+    "gift_id": "gift_6331",
+    "suggested_name": "Butterfly Heart",
+    "animation_file": "gift_6331.webm",
+    "thumbnail_file": "gift_6331.png",
+    "animation_format": "webm",
+    "animation_mode": "overlay",
+    "source_file": "6331.mp4",
+    "source_has_alpha": false,
+    "note": "Original MP4 had no alpha channel; WEBM is opaque, not transparent.",
+    "webm_probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "vp9",
+          "codec_type": "video",
+          "width": 576,
+          "height": 760,
+          "pix_fmt": "yuv420p"
+        }
+      ],
+      "format": {
+        "duration": "5.100000",
+        "size": "532507"
+      }
+    },
+    "webm_size_bytes": 532507,
+    "png_size_bytes": 401635
+  },
+  {
+    "gift_id": "gift_5651",
+    "suggested_name": "Golden Dove Heart",
+    "animation_file": "gift_5651.webm",
+    "thumbnail_file": "gift_5651.png",
+    "animation_format": "webm",
+    "animation_mode": "overlay",
+    "source_file": "5651.mp4",
+    "source_has_alpha": false,
+    "note": "Original MP4 had no alpha channel; WEBM is opaque, not transparent.",
+    "webm_probe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "vp9",
+          "codec_type": "video",
+          "width": 480,
+          "height": 848,
+          "pix_fmt": "yuv420p"
+        },
+        {
+          "codec_name": "opus",
+          "codec_type": "audio"
+        }
+      ],
+      "format": {
+        "duration": "8.388000",
+        "size": "856908"
+      }
+    },
+    "webm_size_bytes": 856908,
+    "png_size_bytes": 520139
+  }
+]

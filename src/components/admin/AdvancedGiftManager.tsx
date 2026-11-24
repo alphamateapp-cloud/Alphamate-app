@@ -3,9 +3,11 @@ import {
   AdvancedGiftConfig,
   AdvancedGiftFormat,
   AdvancedGiftStatus,
+  GiftAnimationType,
   GiftDisplayMode,
   GiftEdgeBlendMode,
   GiftPlaybackPosition,
+  UnifiedGiftKind,
 } from '../../types';
 import { useApp } from '../../context/AppContext';
 import {
@@ -13,6 +15,7 @@ import {
   DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
   SAMPLE_TRANSPARENT_SVG_URL,
   UPLOADED_TEST_WEBM_URL,
+  UNIFIED_GIFT_SCHEMA_VERSION,
   advancedGiftConfigToGift,
   convertAdminGiftToWebm,
   detectDeviceGiftCapabilities,
@@ -44,43 +47,55 @@ import {
   Image as ImageIcon,
   Maximize2,
   X,
+  Search,
+  Database,
 } from 'lucide-react';
 
-function createBlankGiftConfig(): AdvancedGiftConfig {
-  const now = new Date().toISOString();
-  const id = `adv_gift_${Date.now().toString(36)}`;
+function createBlankGiftConfig(kind: UnifiedGiftKind = 'animated'): AdvancedGiftConfig {
+  const nowMs = Date.now();
+  const now = new Date(nowMs).toISOString();
+  const id = `gift_${nowMs.toString(36)}`;
   return {
     id,
-    name: 'New Alpha Gift',
-    description: 'Custom multi-format live room animation gift.',
-    category: 'VIP & Special',
-    coins: 500,
-    icon: '🎁',
+    schemaVersion: UNIFIED_GIFT_SCHEMA_VERSION,
+    giftKind: kind,
+    name: kind === 'static' ? 'New Sticker Gift' : 'New Animated Gift',
+    description:
+      kind === 'static'
+        ? 'Static PNG / sticker gift for Live & Party rooms.'
+        : 'Custom multi-format live room animation gift.',
+    category: kind === 'static' ? 'Stickers' : 'VIP & Special',
+    coins: kind === 'static' ? 50 : 500,
+    icon: kind === 'static' ? '✨' : '🎁',
     thumbnailUrl: SAMPLE_TRANSPARENT_SVG_URL,
     previewImageUrl: SAMPLE_TRANSPARENT_SVG_URL,
     originalFileUrl: '',
     optimizedFileUrl: undefined,
     animationUrl: '',
     format: 'webm',
+    animationType: 'sparkle',
     displayMode: 'semi_transparent',
     transparencyStatus: 'unknown',
     opacity: 90,
-    durationMs: 6000,
+    durationMs: kind === 'static' ? 4000 : 10000,
     loop: false,
     playbackSpeed: 1,
     position: 'fullscreen',
     scale: 1,
-    priority: 65,
+    priority: 50,
     enableParticles: true,
     enableSound: true,
-    edgeFeather: true,
+    edgeFeather: kind === 'animated',
     blendMode: 'normal',
     status: 'draft',
+    isActive: false,
+    show: false,
     conversionStatus: 'not_needed',
     isTestGift: false,
     createdAt: now,
-    createdAtMs: Date.now(),
+    createdAtMs: nowMs,
     updatedAt: now,
+    updatedAtMs: nowMs,
   };
 }
 
@@ -91,11 +106,62 @@ function formatBytes(bytes?: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-export const AdvancedGiftManager: React.FC = () => {
-  const { advancedGifts, saveAdvancedGift, deleteAdvancedGift, firebaseUser } = useApp();
+function detectLocalVideoDurationSec(file: File): Promise<number | null> {
+  if (typeof document === 'undefined' || !file.type.startsWith('video/')) {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    const objectUrl = URL.createObjectURL(file);
+    const video = document.createElement('video');
+    video.preload = 'metadata';
+    const cleanup = () => {
+      try {
+        URL.revokeObjectURL(objectUrl);
+      } catch {
+        // ignore
+      }
+    };
+    const timer = window.setTimeout(() => {
+      cleanup();
+      resolve(null);
+    }, 4500);
+    video.onloadedmetadata = () => {
+      window.clearTimeout(timer);
+      const dur = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : null;
+      cleanup();
+      resolve(dur);
+    };
+    video.onerror = () => {
+      window.clearTimeout(timer);
+      cleanup();
+      resolve(null);
+    };
+    video.src = objectUrl;
+  });
+}
 
+export const AdvancedGiftManager: React.FC = () => {
+  const {
+    unifiedCatalogGifts,
+    catalogSyncStats,
+    saveAdvancedGift,
+    deleteAdvancedGift,
+    migrateUnifiedGiftCatalog,
+    firebaseUser,
+  } = useApp();
+
+  const unifiedCatalogItems = unifiedCatalogGifts;
+
+  const [catalogFilter, setCatalogFilter] = useState<'all' | 'animated' | 'static' | 'published' | 'inactive'>('all');
+  const [catalogSearch, setCatalogSearch] = useState('');
+  const [catalogSort, setCatalogSort] = useState<'priority' | 'coins_asc' | 'coins_desc' | 'newest'>('priority');
+  const [isMigratingSchema, setIsMigratingSchema] = useState(false);
+  const [togglingGiftId, setTogglingGiftId] = useState<string | null>(null);
   const [draft, setDraft] = useState<AdvancedGiftConfig>(
-    () => advancedGifts.find((g) => g.id === ALPHA_MATE_TEST_GIFT_ID) || DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG
+    () =>
+      unifiedCatalogItems.find((g) => g.id === ALPHA_MATE_TEST_GIFT_ID) ||
+      unifiedCatalogItems[0] ||
+      DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG
   );
   const [isUploadingAnim, setIsUploadingAnim] = useState(false);
   const [isUploadingThumb, setIsUploadingThumb] = useState(false);
@@ -194,26 +260,36 @@ export const AdvancedGiftManager: React.FC = () => {
 
     setIsUploadingAnim(true);
     try {
-      const res = await uploadAdminGiftFile(file, 'animation');
+      const [localDurationSec, res] = await Promise.all([
+        detectLocalVideoDurationSec(file),
+        uploadAdminGiftFile(file, 'animation'),
+      ]);
       if (!res.success || !res.originalFileUrl || !res.format) {
         notify('err', res.error || 'Failed to upload animation file.');
         return;
       }
 
       const analysis = res.analysis;
-      const detectedDurationMs =
-        analysis?.durationSec && analysis.durationSec >= 1.5
-          ? Math.min(60_000, Math.round(analysis.durationSec * 1000))
-          : draft.durationMs;
+      const effectiveDurationSec =
+        analysis?.durationSec && analysis.durationSec >= 1.0
+          ? analysis.durationSec
+          : localDurationSec && localDurationSec >= 1.0
+          ? localDurationSec
+          : null;
+      const detectedDurationMs = effectiveDurationSec
+        ? Math.min(60_000, Math.max(1500, Math.round(effectiveDurationSec * 1000)))
+        : Math.max(10_000, draft.durationMs);
 
       const isTransparentNative =
         res.format === 'svga' || res.format === 'svg' || Boolean(analysis?.hasAlpha);
+      const isVideoUpload = res.format === 'webm' || res.format === 'mp4' || res.format === 'mov';
 
       setDraft((prev) => ({
         ...prev,
+        giftKind: 'animated',
         originalFileUrl: res.originalFileUrl!,
         optimizedFileUrl:
-          res.format === 'svga' || res.format === 'svg' || res.format === 'gif'
+          res.format === 'svga' || res.format === 'svg' || res.format === 'gif' || res.format === 'webm'
             ? res.originalFileUrl
             : undefined,
         animationUrl: res.originalFileUrl!,
@@ -224,6 +300,7 @@ export const AdvancedGiftManager: React.FC = () => {
         position: 'fullscreen',
         edgeFeather: !isTransparentNative,
         blendMode: 'normal',
+        loop: isVideoUpload ? false : prev.loop,
         durationMs: detectedDurationMs,
         conversionStatus: res.format === 'mov' ? 'pending' : 'not_needed',
         conversionMessage:
@@ -362,9 +439,14 @@ export const AdvancedGiftManager: React.FC = () => {
       notify('err', 'Gift name is required.');
       return;
     }
-    const playableUrl = draft.optimizedFileUrl || draft.animationUrl || draft.originalFileUrl;
-    if (!playableUrl) {
-      notify('err', 'Upload an animation file before saving or publishing.');
+    const playableUrl = draft.optimizedFileUrl || draft.animationUrl || draft.originalFileUrl || '';
+    const isStaticMode = draft.giftKind === 'static' || !playableUrl;
+    if (!isStaticMode && !playableUrl) {
+      notify('err', 'Upload a WebM/SVGA/MP4 animation or switch Gift Type to Static Sticker before saving.');
+      return;
+    }
+    if (isStaticMode && !draft.thumbnailUrl && !draft.icon) {
+      notify('err', 'Upload a PNG thumbnail or provide an icon for this static gift.');
       return;
     }
     if (draft.coins < 1) {
@@ -375,11 +457,19 @@ export const AdvancedGiftManager: React.FC = () => {
     setIsSaving(true);
     try {
       const nextStatus: AdvancedGiftStatus = overrideStatus || draft.status;
+      const effectiveKind: UnifiedGiftKind = isStaticMode ? 'static' : 'animated';
       const toSave: AdvancedGiftConfig = {
         ...draft,
+        schemaVersion: UNIFIED_GIFT_SCHEMA_VERSION,
+        giftKind: effectiveKind,
         status: nextStatus,
-        animationUrl: playableUrl,
+        isActive: nextStatus === 'published',
+        show: nextStatus === 'published',
+        animationUrl: effectiveKind === 'animated' ? playableUrl : '',
+        originalFileUrl: effectiveKind === 'animated' ? draft.originalFileUrl || playableUrl : '',
+        optimizedFileUrl: effectiveKind === 'animated' ? draft.optimizedFileUrl : undefined,
         updatedAt: new Date().toISOString(),
+        updatedAtMs: Date.now(),
       };
       const res = await saveAdvancedGift(toSave);
       if (res.success) {
@@ -390,6 +480,41 @@ export const AdvancedGiftManager: React.FC = () => {
       }
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const handleQuickToggleStatus = async (item: AdvancedGiftConfig) => {
+    setTogglingGiftId(item.id);
+    try {
+      const nextStatus: AdvancedGiftStatus = item.status === 'published' ? 'disabled' : 'published';
+      const res = await saveAdvancedGift({
+        ...item,
+        status: nextStatus,
+        isActive: nextStatus === 'published',
+        show: nextStatus === 'published',
+        updatedAt: new Date().toISOString(),
+        updatedAtMs: Date.now(),
+      });
+      if (res.success) {
+        if (draft.id === item.id) {
+          setDraft((prev) => ({ ...prev, status: nextStatus, isActive: nextStatus === 'published', show: nextStatus === 'published' }));
+        }
+        notify('ok', `"${item.name}" is now ${nextStatus === 'published' ? 'LIVE (Published)' : 'PAUSED (Hidden)'}.`);
+      } else {
+        notify('err', res.message);
+      }
+    } finally {
+      setTogglingGiftId(null);
+    }
+  };
+
+  const handleMigrateUnifiedSchema = async () => {
+    setIsMigratingSchema(true);
+    try {
+      const res = await migrateUnifiedGiftCatalog();
+      notify(res.success ? 'ok' : 'err', res.message);
+    } finally {
+      setIsMigratingSchema(false);
     }
   };
 
@@ -409,8 +534,45 @@ export const AdvancedGiftManager: React.FC = () => {
     }
   };
 
+  const filteredCatalogItems = useMemo(() => {
+    const q = catalogSearch.trim().toLowerCase();
+    const list = unifiedCatalogItems.filter((item) => {
+      const hasAnim =
+        item.giftKind === 'animated' &&
+        Boolean(item.optimizedFileUrl || item.animationUrl || item.originalFileUrl);
+      if (catalogFilter === 'animated' && !hasAnim) return false;
+      if (catalogFilter === 'static' && hasAnim) return false;
+      if (catalogFilter === 'published' && item.status !== 'published') return false;
+      if (catalogFilter === 'inactive' && item.status === 'published') return false;
+      if (!q) return true;
+      return (
+        item.name.toLowerCase().includes(q) ||
+        item.id.toLowerCase().includes(q) ||
+        (item.category || '').toLowerCase().includes(q) ||
+        String(item.coins).includes(q)
+      );
+    });
+    return [...list].sort((a, b) => {
+      if (catalogSort === 'coins_asc') return a.coins - b.coins;
+      if (catalogSort === 'coins_desc') return b.coins - a.coins;
+      if (catalogSort === 'newest') return (b.createdAtMs || 0) - (a.createdAtMs || 0);
+      if (a.isTestGift && !b.isTestGift) return -1;
+      if (!a.isTestGift && b.isTestGift) return 1;
+      const pDiff = (a.priority || 50) - (b.priority || 50);
+      if (pDiff !== 0) return pDiff;
+      return (b.createdAtMs || 0) - (a.createdAtMs || 0);
+    });
+  }, [unifiedCatalogItems, catalogFilter, catalogSearch, catalogSort]);
+
   // Build live preview event for the 7-Layer Live Room Stage Simulator
   const previewConfig: AdvancedGiftConfig = useMemo(() => {
+    if (draft.giftKind === 'static') {
+      return {
+        ...draft,
+        animationUrl: '',
+        optimizedFileUrl: undefined,
+      };
+    }
     const activeUrl =
       previewSource === 'original'
         ? draft.originalFileUrl || draft.animationUrl
@@ -423,7 +585,7 @@ export const AdvancedGiftManager: React.FC = () => {
   }, [draft, previewSource]);
 
   const previewEvent = useMemo(() => {
-    if (!previewConfig.animationUrl) return null;
+    if (previewConfig.giftKind === 'static' || !previewConfig.animationUrl) return null;
     return {
       id: `admin_preview_${previewConfig.id}_${previewNonce}`,
       gift: advancedGiftConfigToGift(previewConfig),
@@ -478,14 +640,14 @@ export const AdvancedGiftManager: React.FC = () => {
               <Sparkles className="w-4 h-4 text-white" />
             </div>
             <h2 className="text-base sm:text-lg font-black text-white">
-              Advanced Gift Animation Manager
+              Unified Gift Catalog & Animation Manager
             </h2>
             <span className="px-2 py-0.5 rounded-full bg-cyan-500/20 border border-cyan-400/40 text-cyan-200 text-[10px] font-mono font-bold uppercase">
-              WebM • SVGA • MOV • MP4 • SVG • GIF
+              /gifts Schema v2 • Static & Animated
             </span>
           </div>
           <p className="text-xs text-zinc-400 mt-1">
-            Upload WebM or transparent SVGA gifts, configure full-screen edge-feathered merging, test live full-screen, and publish directly to Live & Party rooms.
+            Single unified Firestore catalog for all static sticker gifts and animated WebM/SVGA/MP4 gifts — indexed by status, kind, category, and priority.
           </p>
         </div>
 
@@ -494,14 +656,14 @@ export const AdvancedGiftManager: React.FC = () => {
             type="button"
             onClick={() => {
               const testGift =
-                advancedGifts.find((g) => g.id === ALPHA_MATE_TEST_GIFT_ID) ||
+                unifiedCatalogItems.find((g) => g.id === ALPHA_MATE_TEST_GIFT_ID) ||
                 DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG;
               handleSelectExisting(testGift);
             }}
             className="px-3 py-1.5 rounded-xl bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-400/40 text-cyan-200 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
           >
             <FlaskConical className="w-3.5 h-3.5" />
-            <span>10,000 Coin Test Gift (WebM)</span>
+            <span>10,000 Coin Test Gift</span>
           </button>
           <button
             type="button"
@@ -509,21 +671,60 @@ export const AdvancedGiftManager: React.FC = () => {
             className="px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-400/40 text-emerald-200 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
           >
             <Wand2 className="w-3.5 h-3.5" />
-            <span>Transparent SVG Test</span>
+            <span>SVG Test</span>
           </button>
           <button
             type="button"
             onClick={() => {
-              setDraft(createBlankGiftConfig());
+              setDraft(createBlankGiftConfig('static'));
+              setPreviewNonce((n) => n + 1);
+            }}
+            className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/15 border border-white/15 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+          >
+            <Plus className="w-3.5 h-3.5" />
+            <span>New Static Gift</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDraft(createBlankGiftConfig('animated'));
               setPreviewNonce((n) => n + 1);
             }}
             className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-black inline-flex items-center gap-1.5 shadow-md cursor-pointer"
           >
             <Plus className="w-3.5 h-3.5" />
-            <span>New Gift</span>
+            <span>New Animated Gift</span>
           </button>
         </div>
       </div>
+
+      {/* Unified Schema Sync & Indexing Banner (shown whenever legacy /advancedGifts or pre-v2 docs exist) */}
+      {(catalogSyncStats.legacyCount > 0 || catalogSyncStats.unindexedCount > 0) && (
+        <div className="p-3.5 rounded-2xl bg-amber-500/12 border border-amber-400/35 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <Database className="w-4 h-4 text-amber-300 shrink-0 mt-0.5" />
+            <div className="text-xs text-amber-100">
+              <span className="font-bold">Unified Schema Indexing Available:</span>{' '}
+              {catalogSyncStats.legacyCount > 0 && (
+                <span>{catalogSyncStats.legacyCount} legacy <code className="font-mono">/advancedGifts</code> record{catalogSyncStats.legacyCount === 1 ? '' : 's'} </span>
+              )}
+              {catalogSyncStats.legacyCount > 0 && catalogSyncStats.unindexedCount > 0 && <span>• </span>}
+              {catalogSyncStats.unindexedCount > 0 && (
+                <span>{catalogSyncStats.unindexedCount} pre-v2 gift{catalogSyncStats.unindexedCount === 1 ? '' : 's'} missing unified index fields (<code className="font-mono">giftKind</code>, <code className="font-mono">priority</code>, <code className="font-mono">isActive</code>).</span>
+              )}
+            </div>
+          </div>
+          <button
+            type="button"
+            disabled={!isOfficialAdmin || isMigratingSchema}
+            onClick={handleMigrateUnifiedSchema}
+            className="px-3.5 py-2 rounded-xl bg-amber-400 hover:bg-amber-300 text-black text-xs font-black inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isMigratingSchema ? 'animate-spin' : ''}`} />
+            <span>{isMigratingSchema ? 'Unifying & Indexing...' : 'Unify & Index All Gifts'}</span>
+          </button>
+        </div>
+      )}
 
       {/* Status Notice */}
       {statusMessage && (
@@ -558,17 +759,81 @@ export const AdvancedGiftManager: React.FC = () => {
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
         {/* LEFT COLUMN (7 cols): Upload + Analysis + Conversion + Full Config Form */}
         <div className="xl:col-span-7 space-y-5">
-          {/* 1. Upload & Conversion Panel */}
+          {/* 1. Unified Gift Type + Upload & Conversion Panel */}
           <div className="p-4 rounded-2xl bg-[#180E30] border border-white/10 space-y-4">
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2">
                 <Film className="w-4 h-4 text-[#EC4899]" />
                 <h3 className="text-xs font-black uppercase tracking-wider text-zinc-200">
-                  1. Upload Animation & Server Media Analysis
+                  1. Gift Type, Thumbnail & Animation Media
                 </h3>
               </div>
               {transparencyBadge()}
             </div>
+
+            {/* Unified Gift Kind Selector: Static Sticker vs Animated Video/SVGA */}
+            <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-black/40 border border-white/10">
+              <button
+                type="button"
+                onClick={() =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    giftKind: 'animated',
+                  }))
+                }
+                className={`px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  (draft.giftKind || (draft.animationUrl ? 'animated' : 'static')) === 'animated'
+                    ? 'bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Animated Gift (WebM / SVGA / MP4)
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  setDraft((prev) => ({
+                    ...prev,
+                    giftKind: 'static',
+                    edgeFeather: false,
+                  }))
+                }
+                className={`px-3 py-2 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  draft.giftKind === 'static'
+                    ? 'bg-amber-500/25 border border-amber-400/50 text-amber-200 shadow'
+                    : 'text-zinc-400 hover:text-white'
+                }`}
+              >
+                Static Sticker Gift (PNG / Icon)
+              </button>
+            </div>
+
+            {draft.giftKind === 'static' && (
+              <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-400/25 flex flex-wrap items-center justify-between gap-2">
+                <div className="text-[11px] text-amber-100">
+                  <span className="font-bold">Static Gift Mode:</span> Displays your PNG icon in the Gift Box with particle/banner effects (no video file required).
+                </div>
+                <select
+                  value={draft.animationType || 'sparkle'}
+                  onChange={(e) =>
+                    setDraft((prev) => ({
+                      ...prev,
+                      animationType: e.target.value as GiftAnimationType,
+                    }))
+                  }
+                  className="px-2.5 py-1.5 rounded-lg bg-black/50 border border-white/15 text-xs text-white font-semibold"
+                >
+                  <option value="sparkle">Effect: Sparkle</option>
+                  <option value="heart">Effect: Heart Burst</option>
+                  <option value="crown">Effect: Royal Crown</option>
+                  <option value="ring">Effect: Diamond Ring</option>
+                  <option value="car">Effect: Supercar</option>
+                  <option value="yacht">Effect: Luxury Yacht</option>
+                  <option value="rocket">Effect: Rocket</option>
+                  <option value="dragon">Effect: Dragon</option>
+                </select>
+              </div>
+            )}
 
             {/* File Pickers */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1311,71 +1576,186 @@ export const AdvancedGiftManager: React.FC = () => {
             </div>
           </div>
 
-          {/* Gift Catalog List (Published, Draft, Disabled) */}
-          <div className="p-4 rounded-2xl bg-[#180E30] border border-white/10 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xs font-black uppercase tracking-wider text-zinc-200">
-                Managed Gift Animations ({advancedGifts.length})
-              </h3>
-              <span className="text-[10px] text-zinc-400 font-mono">
-                {advancedGifts.filter((g) => g.status === 'published').length} Published
+          {/* Single Canonical Unified Gift Catalog (/gifts — Static & Animated) */}
+          <div className="p-4 rounded-2xl bg-[#180E30] border border-white/10 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div>
+                <h3 className="text-xs font-black uppercase tracking-wider text-zinc-200">
+                  Unified Gift Catalog ({catalogSyncStats.total})
+                </h3>
+                <p className="text-[10px] text-zinc-400">
+                  All static & animated gifts from canonical <code className="font-mono text-purple-300">/gifts</code>. Select any item to edit, publish, pause, or delete.
+                </p>
+              </div>
+              <span className="text-[10px] text-emerald-300 font-mono">
+                {catalogSyncStats.animatedCount} Animated • {catalogSyncStats.staticCount} Static • {catalogSyncStats.publishedCount} Live
               </span>
             </div>
 
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              {advancedGifts.map((item) => {
-                const isSelected = draft.id === item.id;
-                return (
-                  <div
-                    key={item.id}
-                    onClick={() => handleSelectExisting(item)}
-                    className={`p-2.5 rounded-xl border cursor-pointer transition-all flex items-center justify-between gap-2 ${
-                      isSelected
-                        ? 'bg-[#7928CA]/25 border-[#EC4899]'
-                        : 'bg-black/30 border-white/10 hover:border-white/25'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <img
-                        src={item.thumbnailUrl || SAMPLE_TRANSPARENT_SVG_URL}
-                        alt={item.name}
-                        className="w-9 h-9 rounded-lg object-contain bg-black/40 p-1 shrink-0"
-                      />
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="text-xs font-bold text-white truncate max-w-[135px]">
-                            {item.name}
-                          </span>
-                          {item.isTestGift && (
-                            <span className="px-1.5 py-0.2 rounded bg-cyan-500/25 border border-cyan-400/40 text-cyan-200 text-[8.5px] font-black uppercase">
-                              TEST
-                            </span>
-                          )}
-                        </div>
-                        <div className="text-[10px] text-zinc-400 font-mono flex items-center gap-1.5 flex-wrap">
-                          <span className="text-amber-300 font-bold">{item.coins.toLocaleString()} 💰</span>
-                          <span>•</span>
-                          <span className="uppercase">{item.format}</span>
-                          <span>•</span>
-                          <span>{item.displayMode.replace('_', ' ')}</span>
-                        </div>
-                      </div>
-                    </div>
+            {/* Search & Index-Aligned Sort Controls */}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative flex-1 min-w-[160px]">
+                <Search className="w-3.5 h-3.5 text-zinc-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={catalogSearch}
+                  onChange={(e) => setCatalogSearch(e.target.value)}
+                  placeholder="Search name, category, ID, or coins..."
+                  className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-black/40 border border-white/10 text-[11px] text-white placeholder-zinc-500 focus:outline-none focus:border-[#A855F7]"
+                />
+              </div>
+              <select
+                value={catalogSort}
+                onChange={(e) => setCatalogSort(e.target.value as any)}
+                className="px-2.5 py-1.5 rounded-lg bg-black/40 border border-white/10 text-[10.5px] font-bold text-zinc-200 cursor-pointer"
+              >
+                <option value="priority">Sort: Priority (Indexed)</option>
+                <option value="coins_asc">Sort: Coins Low → High</option>
+                <option value="coins_desc">Sort: Coins High → Low</option>
+                <option value="newest">Sort: Newest First</option>
+              </select>
+            </div>
 
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[9px] font-black uppercase shrink-0 ${
-                        item.status === 'published'
-                          ? 'bg-emerald-500/20 text-emerald-300'
-                          : item.status === 'disabled'
-                          ? 'bg-rose-500/20 text-rose-300'
-                          : 'bg-amber-500/20 text-amber-300'
+            {/* Filter Pills */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              {([
+                { id: 'all', label: `All (${catalogSyncStats.total})` },
+                { id: 'animated', label: `Animated (${catalogSyncStats.animatedCount})` },
+                { id: 'static', label: `Static (${catalogSyncStats.staticCount})` },
+                { id: 'published', label: `Published (${catalogSyncStats.publishedCount})` },
+                { id: 'inactive', label: `Draft/Paused (${catalogSyncStats.draftOrPausedCount})` },
+              ] as const).map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setCatalogFilter(tab.id)}
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-bold transition-all cursor-pointer ${
+                    catalogFilter === tab.id
+                      ? 'bg-[#7928CA] text-white shadow'
+                      : 'bg-black/35 text-zinc-400 hover:text-white border border-white/10'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
+              {filteredCatalogItems.length === 0 ? (
+                <div className="p-6 text-center rounded-xl bg-black/25 border border-white/5 text-xs text-zinc-400">
+                  No gifts match your current search or filter.
+                </div>
+              ) : (
+                filteredCatalogItems.map((item) => {
+                  const isSelected = draft.id === item.id;
+                  const hasAnim =
+                    item.giftKind === 'animated' &&
+                    Boolean(item.optimizedFileUrl || item.animationUrl || item.originalFileUrl);
+                  return (
+                    <div
+                      key={item.id}
+                      onClick={() => handleSelectExisting(item)}
+                      className={`p-2.5 rounded-xl border cursor-pointer transition-all flex items-center justify-between gap-2 ${
+                        isSelected
+                          ? 'bg-[#7928CA]/25 border-[#EC4899]'
+                          : 'bg-black/30 border-white/10 hover:border-white/25'
                       }`}
                     >
-                      {item.status}
-                    </span>
-                  </div>
-                );
-              })}
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {item.thumbnailUrl ? (
+                          <img
+                            src={item.thumbnailUrl}
+                            alt={item.name}
+                            className="w-9 h-9 rounded-lg object-contain bg-black/40 p-1 shrink-0"
+                          />
+                        ) : (
+                          <div className="w-9 h-9 rounded-lg bg-black/40 flex items-center justify-center text-lg shrink-0">
+                            {item.icon || '🎁'}
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-xs font-bold text-white truncate max-w-[135px]">
+                              {item.name}
+                            </span>
+                            {item.isTestGift && (
+                              <span className="px-1.5 py-0.2 rounded bg-cyan-500/25 border border-cyan-400/40 text-cyan-200 text-[8.5px] font-black uppercase">
+                                TEST
+                              </span>
+                            )}
+                            <span
+                              className={`px-1.5 py-0.2 rounded border text-[8px] font-black uppercase ${
+                                hasAnim
+                                  ? 'bg-purple-500/20 border-purple-400/35 text-purple-200'
+                                  : 'bg-amber-500/20 border-amber-400/35 text-amber-200'
+                              }`}
+                            >
+                              {hasAnim ? item.format.toUpperCase() : 'STATIC'}
+                            </span>
+                            {item.needsSchemaSync && item.sourceCollection !== 'default' && (
+                              <span className="px-1.5 py-0.2 rounded bg-orange-500/20 border border-orange-400/40 text-orange-200 text-[8px] font-black uppercase">
+                                {item.sourceCollection === 'advancedGifts' ? 'LEGACY' : 'UNINDEXED'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[10px] text-zinc-400 font-mono flex items-center gap-1.5 flex-wrap">
+                            <span className="text-amber-300 font-bold">{item.coins.toLocaleString()} 💰</span>
+                            <span>•</span>
+                            <span>P{item.priority}</span>
+                            <span>•</span>
+                            <span className="truncate max-w-[90px]">{item.category}</span>
+                            {hasAnim && (
+                              <>
+                                <span>•</span>
+                                <span>{(item.durationMs / 1000).toFixed(1)}s</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          disabled={!isOfficialAdmin || togglingGiftId === item.id}
+                          title={item.status === 'published' ? 'Pause / hide from users' : 'Publish live to users'}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleQuickToggleStatus(item);
+                          }}
+                          className={`px-2 py-1 rounded-full text-[9px] font-black uppercase inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 ${
+                            item.status === 'published'
+                              ? 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'
+                              : item.status === 'disabled'
+                              ? 'bg-rose-500/20 text-rose-300 hover:bg-rose-500/30'
+                              : 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'
+                          }`}
+                        >
+                          {item.status === 'published' ? (
+                            <Eye className="w-2.5 h-2.5" />
+                          ) : (
+                            <EyeOff className="w-2.5 h-2.5" />
+                          )}
+                          <span>{item.status}</span>
+                        </button>
+                        {item.id !== ALPHA_MATE_TEST_GIFT_ID && (
+                          <button
+                            type="button"
+                            title="Delete gift from unified catalog"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDeleteGift(item.id);
+                            }}
+                            className="p-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 transition-colors cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>

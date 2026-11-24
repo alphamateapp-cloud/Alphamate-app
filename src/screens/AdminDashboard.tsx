@@ -190,7 +190,7 @@ export const AdminDashboard: React.FC = () => {
               }`}
             >
               <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-              <span>Advanced Gift Animation Manager</span>
+              <span>Unified Gift Catalog</span>
             </button>
           </div>
           <button

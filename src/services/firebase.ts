@@ -100,11 +100,11 @@ function isEmbeddedIframeContext(): boolean {
 }
 
 function createFirestoreInstance() {
-  // Force long-polling across web, embedded preview iframes, and Capacitor WebViews so
-  // HTTP/2 streaming proxies, VPNs, or restricted ISP firewalls never stall WebChannel
-  // for 10 seconds and trigger "Could not reach Cloud Firestore backend / client is offline".
+  // Use automatic long-polling detection instead of unconditionally forcing XHR long-polling.
+  // Modern browsers & Cloud Run proxies use fast native HTTP/2 Fetch streaming cleanly,
+  // while restrictive firewalls/proxies still auto-fallback to long-polling without stalling.
   const baseSettings = {
-    experimentalForceLongPolling: true,
+    experimentalAutoDetectLongPolling: true,
     ignoreUndefinedProperties: true,
   };
 
@@ -402,11 +402,20 @@ export async function testConnection(): Promise<boolean> {
   return false;
 }
 
-// Trigger initial verification after first microtask so app boot completes cleanly
+// Trigger initial verification after Firebase Auth resolves its initial state so we never
+// race an unauthenticated WatchStream/getDocFromServer against an incoming ID token.
 if (typeof window !== 'undefined') {
-  setTimeout(() => {
+  const waitForAuthReady =
+    typeof (auth as any)?.authStateReady === 'function'
+      ? Promise.race([
+          (auth as any).authStateReady().catch(() => {}),
+          new Promise<void>((resolve) => setTimeout(resolve, 2500)),
+        ])
+      : new Promise<void>((resolve) => setTimeout(resolve, 400));
+
+  waitForAuthReady.then(() => {
     testConnection().catch(() => {});
-  }, 250);
+  });
 } else {
   testConnection().catch(() => {});
 }

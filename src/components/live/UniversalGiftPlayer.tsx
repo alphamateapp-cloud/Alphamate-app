@@ -9,8 +9,8 @@ import {
 } from '../../types';
 import { resolvePlayableGiftUrl } from '../../services/giftAnimationEngine';
 import {
+  cacheMediaUrlAfterPlayback,
   getCachedGiftMediaUrlSync,
-  resolveCachedGiftMediaUrl,
 } from '../../services/giftMediaCache';
 import { audioManager } from '../../services/audioManager';
 import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
@@ -43,6 +43,8 @@ interface UniversalGiftPlayerProps {
   /** If true, keeps playing continuously (Admin preview mode) */
   previewLoopOverride?: boolean;
   onComplete?: (eventId: string) => void;
+  /** Reports real detected video/SVGA duration in ms so parent fail-safe timers never cut off long animations */
+  onDurationDetected?: (eventId: string, durationMs: number) => void;
 }
 
 const POSITION_CLASSES: Record<GiftPlaybackPosition, string> = {
@@ -228,16 +230,18 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   forceMuted = false,
   previewLoopOverride = false,
   onComplete,
+  onDurationDetected,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const completedIdRef = useRef<string | null>(null);
   const endTimerRef = useRef<number | undefined>(undefined);
   const exitTimerRef = useRef<number | undefined>(undefined);
 
-  // Store latest onComplete in a ref so parent re-renders (e.g. 1s live timer or 80ms combo ticks)
-  // NEVER trigger cleanup or interrupt the running animation.
+  // Store latest callbacks in refs so parent re-renders NEVER reset or interrupt running video animations.
   const onCompleteRef = useRef(onComplete);
   onCompleteRef.current = onComplete;
+  const onDurationDetectedRef = useRef(onDurationDetected);
+  onDurationDetectedRef.current = onDurationDetected;
 
   const [phase, setPhase] = useState<'enter' | 'visible' | 'exit'>('enter');
   const [isMediaReady, setIsMediaReady] = useState(false);
@@ -281,42 +285,18 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
 
   const effectiveFormat = resolvedMedia?.effectiveFormat || config?.format || 'webm';
   const remoteMediaUrl = resolvedMedia?.url || '';
-  const [resolvedLocalUrl, setResolvedLocalUrl] = useState<string>(() =>
-    remoteMediaUrl ? getCachedGiftMediaUrlSync(remoteMediaUrl) || remoteMediaUrl : ''
-  );
   const lastProgressAtRef = useRef<number>(Date.now());
-  const hasStartedPlayingRef = useRef<boolean>(false);
+  const lastVideoTimeRef = useRef<number>(0);
 
-  // Resolve local IndexedDB cached Blob URL for zero-buffering instant playback.
-  // Never swaps src mid-playback if the video has already started streaming.
-  useEffect(() => {
-    if (!remoteMediaUrl) {
-      setResolvedLocalUrl('');
-      return;
-    }
-    const syncHit = getCachedGiftMediaUrlSync(remoteMediaUrl);
-    if (syncHit) {
-      setResolvedLocalUrl(syncHit);
-      return;
-    }
-    let cancelled = false;
-    setResolvedLocalUrl(remoteMediaUrl);
-    void resolveCachedGiftMediaUrl(remoteMediaUrl, {
-      giftId: event?.gift.id || config?.id || 'gift',
-      autoCache: true,
-    }).then(({ playableUrl, fromCache }) => {
-      if (cancelled || !fromCache || !playableUrl) return;
-      // Only switch to the IndexedDB Blob URL if playback has not yet begun frames
-      if (!hasStartedPlayingRef.current) {
-        setResolvedLocalUrl(playableUrl);
-      }
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [remoteMediaUrl, event?.id, event?.gift.id, config?.id]);
+  // Lock the playable URL ONCE per event.id:
+  // - If already cached in IndexedDB/memory, play immediately from local Blob URL (<30ms, zero buffering).
+  // - Otherwise stream remoteMediaUrl cleanly WITHOUT competing download fetches or mid-playback src swaps,
+  //   and cache it into IndexedDB right AFTER playback finishes so every subsequent play is instant!
+  const mediaUrl = useMemo(() => {
+    if (!remoteMediaUrl) return '';
+    return getCachedGiftMediaUrlSync(remoteMediaUrl) || remoteMediaUrl;
+  }, [event?.id, remoteMediaUrl]);
 
-  const mediaUrl = resolvedLocalUrl || remoteMediaUrl;
   const isVideoFormat =
     effectiveFormat === 'webm' || effectiveFormat === 'mov' || effectiveFormat === 'mp4';
   const isSvgaFormat = effectiveFormat === 'svga';
@@ -331,7 +311,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
       : 0;
   const configuredDurationMs = Math.max(
     1500,
-    Math.min(60_000, Math.max(config?.durationMs || 6000, analysisDurationMs))
+    Math.min(120_000, Math.max(config?.durationMs || 10_000, analysisDurationMs))
   );
   const opacityFraction =
     displayMode === 'transparent' || isNativeTransparentAsset
@@ -340,7 +320,9 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   const scale = Math.min(1.5, Math.max(0.4, config?.scale ?? 1));
   const position: GiftPlaybackPosition = config?.position || 'fullscreen';
   const playbackSpeed = Math.min(2, Math.max(0.5, config?.playbackSpeed ?? 1));
-  const shouldLoop = previewLoopOverride || Boolean(config?.loop);
+  // In live/party rooms, video gifts ALWAYS play cleanly once from 0:00 to natural onEnded
+  // so stale `loop: true` + `durationMs: 5000` can never chop a 10s+ video halfway.
+  const shouldLoop = previewLoopOverride || (!isVideoFormat && Boolean(config?.loop));
 
   // Seamless Edge Feathering: auto-ON for opaque videos (removes 4 sharp corners & top/bottom/side edges),
   // auto-OFF for natively transparent SVGA/SVG/VP9-Alpha unless Admin explicitly toggles it.
@@ -367,6 +349,11 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
       endTimerRef.current = undefined;
     }
 
+    // Cache this remote asset into IndexedDB now that playback is finished (zero contention)
+    if (remoteMediaUrl && !mediaUrl.startsWith('blob:')) {
+      cacheMediaUrlAfterPlayback(remoteMediaUrl, event?.gift.id || config?.id || 'gift');
+    }
+
     if (withFade) {
       setPhase('exit');
       endTimerRef.current = window.setTimeout(() => {
@@ -383,18 +370,18 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
       window.clearTimeout(endTimerRef.current);
       endTimerRef.current = undefined;
     }
-    const checkMs = Math.min(75_000, Math.max(15_000, Math.round(durationHintMs) + 12_000));
+    const checkMs = Math.min(115_000, Math.max(16_000, Math.round(durationHintMs) + 12_000));
     endTimerRef.current = window.setTimeout(() => {
       const vid = videoRef.current;
-      // If the video is actively advancing frames and hasn't ended yet, NEVER cut it off prematurely!
-      if (
-        vid &&
-        !vid.ended &&
-        !vid.paused &&
-        Date.now() - lastProgressAtRef.current < 4000
-      ) {
-        armVideoStallWatchdog(eventId, 10_000);
-        return;
+      // Never cut off a video that is still advancing frames or has buffered data to play!
+      if (vid && !vid.ended) {
+        if (vid.paused && vid.readyState >= 2) {
+          vid.play().catch(() => {});
+        }
+        if (Date.now() - lastProgressAtRef.current < 12_000) {
+          armVideoStallWatchdog(eventId, 12_000);
+          return;
+        }
       }
       finishPlayback(eventId, true);
     }, checkMs);
@@ -406,8 +393,8 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
 
     const currentEventId = event.id;
     completedIdRef.current = null;
-    hasStartedPlayingRef.current = false;
     lastProgressAtRef.current = Date.now();
+    lastVideoTimeRef.current = 0;
     setIsMediaReady(!isVideoFormat && !isSvgaFormat);
     setVideoAspect(
       config.analysis?.width && config.analysis?.height
@@ -418,13 +405,12 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     );
     setPhase('enter');
 
-    const enterTimer = window.setTimeout(() => setPhase('visible'), 30);
+    const enterTimer = window.setTimeout(() => setPhase('visible'), 25);
 
     if (!previewLoopOverride && ownsCompletionLifecycle) {
       if (isVideoFormat && !shouldLoop) {
-        // Non-looping videos finish naturally via onEnded.
-        // Use a progress-aware watchdog so slow network buffering NEVER kills a 10s WebM at 5-6s!
-        armVideoStallWatchdog(currentEventId, Math.round(configuredDurationMs / playbackSpeed) + 8000);
+        // Non-looping videos finish naturally via onEnded (any duration: 6s, 10s, 15s, 30s+).
+        armVideoStallWatchdog(currentEventId, Math.round(configuredDurationMs / playbackSpeed) + 10_000);
       } else if (isSvgaFormat && !shouldLoop) {
         const stallSafetyMs = Math.min(
           65_000,
@@ -615,7 +601,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     if (isVideoFormat) {
       return (
         <video
-          key={`${event.id}_${mediaUrl}`}
+          key={event.id}
           ref={videoRef}
           src={mediaUrl}
           playsInline
@@ -636,25 +622,31 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
               vid.duration > 0
             ) {
               const realDurationMs = Math.ceil((vid.duration * 1000) / playbackSpeed);
+              onDurationDetectedRef.current?.(event.id, realDurationMs);
               armVideoStallWatchdog(event.id, realDurationMs);
             }
           }}
           onLoadedData={() => setIsMediaReady(true)}
           onPlaying={(e) => {
-            hasStartedPlayingRef.current = true;
             lastProgressAtRef.current = Date.now();
             setIsMediaReady(true);
             const vid = e.currentTarget;
             if (Number.isFinite(vid.duration) && vid.duration > 0) {
+              const realDurationMs = Math.ceil((vid.duration * 1000) / playbackSpeed);
+              onDurationDetectedRef.current?.(event.id, realDurationMs);
               const remainingMs = Math.max(
-                2000,
+                3000,
                 Math.ceil(((vid.duration - vid.currentTime) * 1000) / playbackSpeed)
               );
               armVideoStallWatchdog(event.id, remainingMs);
             }
           }}
-          onTimeUpdate={() => {
-            lastProgressAtRef.current = Date.now();
+          onTimeUpdate={(e) => {
+            const ct = e.currentTarget.currentTime;
+            if (ct > lastVideoTimeRef.current + 0.01) {
+              lastVideoTimeRef.current = ct;
+              lastProgressAtRef.current = Date.now();
+            }
           }}
           onCanPlay={(e) => {
             const vid = e.currentTarget;
@@ -663,11 +655,10 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
             }
           }}
           onWaiting={() => {
-            // Extend watchdog during transient network buffering so video finishes smoothly
-            armVideoStallWatchdog(event.id, 12_000);
+            armVideoStallWatchdog(event.id, 14_000);
           }}
           onStalled={(e) => {
-            armVideoStallWatchdog(event.id, 12_000);
+            armVideoStallWatchdog(event.id, 14_000);
             const vid = e.currentTarget;
             if (vid.paused && !vid.ended) {
               vid.play().catch(() => {});

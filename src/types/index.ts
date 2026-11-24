@@ -427,12 +427,28 @@ export interface GiftMediaAnalysis {
   };
 }
 
+export type UnifiedGiftKind = 'static' | 'animated';
+export type UnifiedGiftFormat = 'static' | 'png' | AdvancedGiftFormat;
+
+export interface UnifiedGiftCatalogSyncStats {
+  total: number;
+  animatedCount: number;
+  staticCount: number;
+  publishedCount: number;
+  draftOrPausedCount: number;
+  legacyCount: number;
+  unindexedCount: number;
+}
+
 export interface AdvancedGiftConfig {
   id: string;
+  schemaVersion?: number;
+  giftKind?: UnifiedGiftKind;
   name: string;
   description: string;
   category: string;
   coins: number;
+  tier?: GiftRarityTier;
   icon?: string;
   thumbnailUrl?: string;
   previewImageUrl?: string;
@@ -440,6 +456,7 @@ export interface AdvancedGiftConfig {
   optimizedFileUrl?: string;
   animationUrl: string;
   format: AdvancedGiftFormat;
+  animationType?: GiftAnimationType;
   displayMode: GiftDisplayMode;
   transparencyStatus: GiftTransparencyStatus;
   opacity: number; // 10..100
@@ -454,6 +471,8 @@ export interface AdvancedGiftConfig {
   edgeFeather?: boolean;
   blendMode?: GiftEdgeBlendMode;
   status: AdvancedGiftStatus;
+  isActive?: boolean;
+  show?: boolean;
   conversionStatus: GiftConversionStatus;
   conversionMessage?: string;
   analysis?: GiftMediaAnalysis;
@@ -461,8 +480,15 @@ export interface AdvancedGiftConfig {
   createdAt: string;
   createdAtMs: number;
   updatedAt: string;
+  updatedAtMs?: number;
   createdBy?: string;
+  /** Client-only telemetry: where this record was hydrated from before v2 unification */
+  sourceCollection?: 'gifts' | 'advancedGifts' | 'default';
+  /** Client-only flag: true if record lacks v2 unified schema or required index fields */
+  needsSchemaSync?: boolean;
 }
+
+export type UnifiedGiftConfig = AdvancedGiftConfig;
 
 export interface Gift {
   id: string;

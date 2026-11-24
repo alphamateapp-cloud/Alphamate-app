@@ -1551,18 +1551,101 @@ service cloud.firestore {
         && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 128));
     }
 
-    // Shared Admin Gift Management catalog. Read-only for app clients; Admin SDK writes bypass rules.
+    // Single Unified Gift Catalog Schema v2 (supports BOTH static sticker gifts & animated multi-format gifts)
+    function isValidUnifiedGift(data, giftId) {
+      return data.keys().hasAll([
+          'id', 'schemaVersion', 'giftKind', 'name', 'category', 'coins', 'format',
+          'displayMode', 'transparencyStatus', 'opacity', 'durationMs', 'loop',
+          'playbackSpeed', 'position', 'scale', 'priority', 'status', 'isActive',
+          'show', 'conversionStatus', 'createdAt', 'createdAtMs', 'updatedAt', 'updatedAtMs'
+        ])
+        && data.keys().hasOnly([
+          'id', 'schemaVersion', 'giftKind', 'name', 'description', 'category',
+          'coins', 'costInCoins', 'price', 'tier', 'icon', 'thumbnailUrl',
+          'previewImageUrl', 'iconUrl', 'imageUrl', 'format', 'animationType',
+          'originalFileUrl', 'optimizedFileUrl', 'animationUrl', 'videoUrl',
+          'webmUrl', 'svgaUrl', 'displayMode', 'transparencyStatus', 'opacity',
+          'durationMs', 'loop', 'playbackSpeed', 'position', 'scale', 'priority',
+          'order', 'enableParticles', 'enableSound', 'edgeFeather', 'blendMode',
+          'status', 'isActive', 'show', 'conversionStatus', 'conversionMessage',
+          'analysis', 'isTestGift', 'createdAt', 'createdAtMs', 'updatedAt',
+          'updatedAtMs', 'createdBy'
+        ])
+        && data.id == giftId
+        && data.schemaVersion is number && data.schemaVersion >= 1 && data.schemaVersion <= 10
+        && data.giftKind in ['static', 'animated']
+        && isNonEmptyString(data.name, 1, 100)
+        && (!('description' in data) || (data.description is string && data.description.size() <= 500))
+        && isNonEmptyString(data.category, 1, 64)
+        && data.coins is number && data.coins >= 1 && data.coins <= 10000000
+        && (!('costInCoins' in data) || (data.costInCoins is number && data.costInCoins >= 1 && data.costInCoins <= 10000000))
+        && (!('price' in data) || (data.price is number && data.price >= 1 && data.price <= 10000000))
+        && (!('tier' in data) || data.tier in ['common', 'rare', 'epic', 'legendary', 'mythic'])
+        && (!('icon' in data) || (data.icon is string && data.icon.size() <= 32))
+        && (!('thumbnailUrl' in data) || (data.thumbnailUrl is string && data.thumbnailUrl.size() <= 2048))
+        && (!('previewImageUrl' in data) || (data.previewImageUrl is string && data.previewImageUrl.size() <= 2048))
+        && (!('iconUrl' in data) || (data.iconUrl is string && data.iconUrl.size() <= 2048))
+        && (!('imageUrl' in data) || (data.imageUrl is string && data.imageUrl.size() <= 2048))
+        && (
+          (data.giftKind == 'static' && data.format in ['static', 'png'])
+          || (data.giftKind == 'animated' && data.format in ['webm', 'svga', 'mov', 'mp4', 'svg', 'gif'])
+        )
+        && (!('animationType' in data) || data.animationType in ['sparkle', 'heart', 'car', 'rocket', 'crown', 'dragon', 'yacht', 'ring'])
+        && (!('originalFileUrl' in data) || (data.originalFileUrl is string && data.originalFileUrl.size() <= 2048))
+        && (!('optimizedFileUrl' in data) || (data.optimizedFileUrl is string && data.optimizedFileUrl.size() <= 2048))
+        && (!('animationUrl' in data) || (data.animationUrl is string && data.animationUrl.size() <= 2048))
+        && (data.giftKind == 'static' || ('animationUrl' in data && isNonEmptyString(data.animationUrl, 1, 2048)))
+        && (!('videoUrl' in data) || (data.videoUrl is string && data.videoUrl.size() <= 2048))
+        && (!('webmUrl' in data) || (data.webmUrl is string && data.webmUrl.size() <= 2048))
+        && (!('svgaUrl' in data) || (data.svgaUrl is string && data.svgaUrl.size() <= 2048))
+        && data.displayMode in ['transparent', 'semi_transparent', 'overlay_background']
+        && data.transparencyStatus in ['alpha_verified', 'alpha_limited_gif', 'opaque_no_alpha', 'unknown']
+        && data.opacity is number && data.opacity >= 10 && data.opacity <= 100
+        && data.durationMs is number && data.durationMs >= 1500 && data.durationMs <= 60000
+        && data.loop is bool
+        && data.playbackSpeed is number && data.playbackSpeed >= 0.5 && data.playbackSpeed <= 2.0
+        && data.position in ['center', 'top', 'bottom', 'fullscreen']
+        && data.scale is number && data.scale >= 0.4 && data.scale <= 1.5
+        && data.priority is number && data.priority >= 1 && data.priority <= 100
+        && (!('order' in data) || (data.order is number && data.order >= 1 && data.order <= 100))
+        && (!('enableParticles' in data) || data.enableParticles is bool)
+        && (!('enableSound' in data) || data.enableSound is bool)
+        && (!('edgeFeather' in data) || data.edgeFeather is bool)
+        && (!('blendMode' in data) || data.blendMode in ['normal', 'screen', 'lighten'])
+        && data.status in ['draft', 'processing', 'published', 'disabled']
+        && data.isActive is bool
+        && data.show is bool
+        && data.conversionStatus in ['not_needed', 'pending', 'converting', 'completed', 'failed', 'unsupported']
+        && (!('conversionMessage' in data) || (data.conversionMessage is string && data.conversionMessage.size() <= 500))
+        && (!('analysis' in data) || data.analysis is map)
+        && (!('isTestGift' in data) || data.isTestGift is bool)
+        && data.createdAt is string && data.createdAt.size() <= 64
+        && data.createdAtMs is number
+        && data.updatedAt is string && data.updatedAt.size() <= 64
+        && data.updatedAtMs is number
+        && (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 128));
+    }
+
+    // Canonical Unified Gift Catalog (/gifts/{giftId}) — stores BOTH static and animated gifts.
     match /gifts/{giftId} {
-      allow get, list: if true;
-      allow create, update, delete: if isOfficialAdmin();
+      allow get: if isValidId(giftId) && (
+        isOfficialAdmin()
+        || (isSignedIn() && (resource == null || resource.data.isActive != false))
+      );
+      allow list: if isOfficialAdmin() || isSignedIn();
+      allow create, update: if isValidId(giftId)
+        && isOfficialAdmin()
+        && isValidUnifiedGift(request.resource.data, giftId);
+      allow delete: if isValidId(giftId) && isOfficialAdmin();
     }
 
     match /gift_catalog_meta/{metaId} {
-      allow get: if metaId == 'default_seed';
+      allow get: if isSignedIn() && metaId == 'default_seed';
       allow list: if false;
       allow create, update, delete: if isOfficialAdmin();
     }
 
+    // Deprecated legacy animated gifts collection (retained read/delete for migration into /gifts/{giftId})
     match /advancedGifts/{giftId} {
       allow get: if isValidId(giftId) && (
         isOfficialAdmin()

@@ -29,12 +29,14 @@ interface GiftAnimationOverlayProps {
    * - 'both': default single-container fallback (Moments / standalone)
    */
   layer?: 'background' | 'foreground' | 'both';
+  onDurationDetected?: (eventId: string, durationMs: number) => void;
 }
 
 export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   currentEvent,
   onComplete,
   layer = 'both',
+  onDurationDetected,
 }) => {
   const [isMuted, setIsMuted] = useState(() => audioManager.getIsMuted());
   const [shakeScreen, setShakeScreen] = useState(false);
@@ -222,6 +224,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
         event={currentEvent}
         layer={layer}
         onComplete={handleUniversalGiftComplete}
+        onDurationDetected={onDurationDetected}
       />
     );
   }

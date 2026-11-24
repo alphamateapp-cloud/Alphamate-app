@@ -31,14 +31,16 @@ import {
   AdminModerationState,
   AdminRestrictionDetail,
   AdvancedGiftConfig,
+  UnifiedGiftConfig,
+  UnifiedGiftCatalogSyncStats,
 } from '../types';
 import {
   DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
-  advancedGiftConfigToGift,
-  subscribeToAdvancedGifts,
-  subscribeToAdminGiftCatalog,
-  saveAdvancedGiftToFirestore,
-  deleteAdvancedGiftFromFirestore,
+  unifiedGiftToGift,
+  subscribeToUnifiedGiftCatalog,
+  saveUnifiedGiftToFirestore,
+  deleteUnifiedGiftFromFirestore,
+  migrateLegacyGiftsToUnifiedCatalog,
   validateGiftSendOnServer,
 } from '../services/giftAnimationEngine';
 import {
@@ -684,11 +686,15 @@ interface AppContextType {
     coinsToAdd: number
   ) => Promise<{ success: boolean; message: string }>;
 
-  // Advanced Multi-Format Gift Animation Engine
+  // Single Unified Firestore Gift Catalog (/gifts schema v2 — static & animated)
+  unifiedCatalogGifts: UnifiedGiftConfig[];
+  catalogSyncStats: UnifiedGiftCatalogSyncStats;
   advancedGifts: AdvancedGiftConfig[];
+  adminCatalogGifts: Gift[];
   publishedCatalogGifts: Gift[];
   saveAdvancedGift: (config: AdvancedGiftConfig) => Promise<{ success: boolean; message: string }>;
   deleteAdvancedGift: (giftId: string) => Promise<{ success: boolean; message: string }>;
+  migrateUnifiedGiftCatalog: () => Promise<{ success: boolean; message: string }>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -709,52 +715,54 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return [];
   });
 
-  const [advancedGifts, setAdvancedGifts] = useState<AdvancedGiftConfig[]>([
+  const [unifiedCatalogGifts, setUnifiedCatalogGifts] = useState<UnifiedGiftConfig[]>([
     DEFAULT_ALPHA_MATE_TEST_GIFT_CONFIG,
   ]);
-  const [adminCatalogGifts, setAdminCatalogGifts] = useState<Gift[]>([]);
+  const [catalogSyncStats, setCatalogSyncStats] = useState<UnifiedGiftCatalogSyncStats>({
+    total: 1,
+    animatedCount: 1,
+    staticCount: 0,
+    publishedCount: 1,
+    draftOrPausedCount: 0,
+    legacyCount: 0,
+    unindexedCount: 0,
+  });
   const [adminCatalogLoaded, setAdminCatalogLoaded] = useState(false);
 
-  const publishedCatalogGifts = useMemo<Gift[]>(() => {
-    const publishedAdvanced = advancedGifts
-      .filter((cfg) => cfg.status === 'published' && Boolean(cfg.optimizedFileUrl || cfg.animationUrl || cfg.originalFileUrl))
-      .map(advancedGiftConfigToGift);
-    const merged = new Map<string, Gift>();
-    publishedAdvanced.forEach((gift) => merged.set(gift.id, gift));
-    // Reserve IDs for inactive/hidden Admin gifts too, so local defaults cannot bring them back.
-    adminCatalogGifts.forEach((gift) => {
-      // Admin status is authoritative: paused/hidden catalog records must also suppress
-      // any same-ID legacy advanced gift so it cannot leak back into the gallery.
-      if (gift.catalogVisible === false) merged.delete(gift.id);
-      else merged.set(gift.id, gift);
-    });
-    // Local defaults are only a first-load fallback, never a way to override Admin pause/delete.
-    if (!adminCatalogLoaded) VIRTUAL_GIFTS.forEach((gift) => { if (!merged.has(gift.id)) merged.set(gift.id, gift); });
-    return Array.from(merged.values()).sort((a, b) => (a.priority || 0) - (b.priority || 0));
-  }, [advancedGifts, adminCatalogGifts, adminCatalogLoaded]);
+  // Backward-compatible aliases derived directly from the single canonical `/gifts` state
+  const advancedGifts = unifiedCatalogGifts;
+  const adminCatalogGifts = useMemo<Gift[]>(
+    () => unifiedCatalogGifts.map(unifiedGiftToGift),
+    [unifiedCatalogGifts]
+  );
 
-  useEffect(() => {
-    const unsubscribeAdvanced = subscribeToAdvancedGifts((items) => setAdvancedGifts(items));
-    const unsubscribeAdminCatalog = subscribeToAdminGiftCatalog(
-      (items, initialized) => { setAdminCatalogGifts(items); setAdminCatalogLoaded(initialized); },
-      (error) => { console.warn('Admin gift catalog unavailable; using local fallback.', error); }
-    );
-    return () => {
-      unsubscribeAdvanced();
-      unsubscribeAdminCatalog();
-    };
-  }, []);
+  const publishedCatalogGifts = useMemo<Gift[]>(() => {
+    const published = unifiedCatalogGifts
+      .filter((cfg) => cfg.status === 'published')
+      .map(unifiedGiftToGift);
+    if (!adminCatalogLoaded && published.length <= 1) {
+      const merged = new Map<string, Gift>();
+      published.forEach((gift) => merged.set(gift.id, gift));
+      VIRTUAL_GIFTS.forEach((gift) => {
+        if (!merged.has(gift.id)) merged.set(gift.id, gift);
+      });
+      return Array.from(merged.values()).sort((a, b) => (a.priority || 50) - (b.priority || 50));
+    }
+    return published.sort((a, b) => (a.priority || 50) - (b.priority || 50));
+  }, [unifiedCatalogGifts, adminCatalogLoaded]);
 
   const saveAdvancedGift = useCallback(
     async (config: AdvancedGiftConfig): Promise<{ success: boolean; message: string }> => {
       try {
-        await saveAdvancedGiftToFirestore(config);
-        setAdvancedGifts((prev) => {
-          const exists = prev.some((g) => g.id === config.id);
-          const next = exists ? prev.map((g) => (g.id === config.id ? config : g)) : [config, ...prev];
-          return next;
+        const saved = await saveUnifiedGiftToFirestore(config);
+        setUnifiedCatalogGifts((prev) => {
+          const exists = prev.some((g) => g.id === saved.id);
+          return exists ? prev.map((g) => (g.id === saved.id ? saved : g)) : [saved, ...prev];
         });
-        return { success: true, message: `Saved "${config.name}" (${config.status}).` };
+        return {
+          success: true,
+          message: `Saved "${saved.name}" (${saved.giftKind === 'animated' ? saved.format.toUpperCase() : 'STATIC'} • ${saved.status}) to Unified /gifts Catalog.`,
+        };
       } catch (err: any) {
         return {
           success: false,
@@ -768,9 +776,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const deleteAdvancedGift = useCallback(
     async (giftId: string): Promise<{ success: boolean; message: string }> => {
       try {
-        await deleteAdvancedGiftFromFirestore(giftId);
-        setAdvancedGifts((prev) => prev.filter((g) => g.id !== giftId));
-        return { success: true, message: 'Gift animation removed.' };
+        await deleteUnifiedGiftFromFirestore(giftId);
+        setUnifiedCatalogGifts((prev) => prev.filter((g) => g.id !== giftId));
+        return { success: true, message: 'Gift removed from Unified /gifts Catalog.' };
       } catch (err: any) {
         return {
           success: false,
@@ -780,6 +788,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     },
     []
   );
+
+  const migrateUnifiedGiftCatalog = useCallback(async (): Promise<{
+    success: boolean;
+    message: string;
+  }> => {
+    try {
+      const result = await migrateLegacyGiftsToUnifiedCatalog(unifiedCatalogGifts);
+      const totalSynced = result.migratedCount + result.normalizedCount;
+      if (totalSynced === 0) {
+        return {
+          success: true,
+          message: 'All gifts are already normalized and indexed in the unified /gifts schema (v2).',
+        };
+      }
+      return {
+        success: true,
+        message: `Unified ${totalSynced} gift${totalSynced === 1 ? '' : 's'} into /gifts schema v2 (${result.migratedCount} migrated from legacy /advancedGifts, ${result.normalizedCount} indexed in-place).`,
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        message: err?.message || 'Unable to migrate legacy gifts to unified schema.',
+      };
+    }
+  }, [unifiedCatalogGifts]);
 
   // Per-scope refresh epochs (trigger targeted re-subscriptions without leaving active rooms/screens)
   const [discoveryRefreshEpoch, setDiscoveryRefreshEpoch] = useState(0);
@@ -873,6 +906,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [firebaseAuthLoading, setFirebaseAuthLoading] = useState<boolean>(true);
   const [isEmailVerified, setIsEmailVerified] = useState<boolean>(false);
+
+  // Subscribe to single canonical `/gifts` Unified Gift Catalog once Firebase Auth is ready & signed in
+  useEffect(() => {
+    if (firebaseAuthLoading || !firebaseUser?.uid) return;
+    const unsubscribeUnified = subscribeToUnifiedGiftCatalog(
+      ({ gifts, initialized, stats }) => {
+        setUnifiedCatalogGifts(gifts);
+        setAdminCatalogLoaded(initialized);
+        setCatalogSyncStats(stats);
+      },
+      (error) => {
+        console.warn('Unified gift catalog listener fallback:', error);
+      }
+    );
+    return () => {
+      unsubscribeUnified();
+    };
+  }, [firebaseAuthLoading, firebaseUser?.uid]);
 
   // Multi-Account (Up to 5 Accounts on Device) & In-App Registration Window State
   const [savedAccounts, setSavedAccounts] = useState<SavedDeviceAccount[]>(() =>
@@ -1257,6 +1308,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Real-time Firestore + WebSocket discovery listeners (rebinds automatically on auth transitions)
   useEffect(() => {
+    if (firebaseAuthLoading) return;
     let firestoreRooms: PartyRoom[] = [];
     let firestoreStreams: LiveStream[] = [];
     const wsPartyMap = new Map<string, PartyRoom & { _localReceivedAtMs?: number }>();
@@ -1538,10 +1590,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       unsubscribeRooms();
       unsubscribeLiveStreams();
     };
-  }, [firebaseUser?.uid, discoveryRefreshEpoch]);
+  }, [firebaseAuthLoading, firebaseUser?.uid, discoveryRefreshEpoch]);
 
   // Real-time Firestore Reels & Cloudflare R2 Feed Subscription (independently refreshable for Moments)
   useEffect(() => {
+    if (firebaseAuthLoading) return;
     const uidKey = firebaseUser?.uid || 'guest';
     const readLikedSet = (): Set<string> => {
       try {
@@ -1615,7 +1668,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       unsubscribeReels();
     };
-  }, [firebaseUser?.uid, reelsRefreshEpoch]);
+  }, [firebaseAuthLoading, firebaseUser?.uid, reelsRefreshEpoch]);
 
   // =========================================================================
   // GLOBAL & WEEKLY LEADERBOARD (MONTHLY REFRESH + 1-MONTH RETENTION)
@@ -7281,10 +7334,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         submitAgencyApplication,
         reviewAgencyApplication,
         adminAllocateAgencyCoins,
+        unifiedCatalogGifts,
+        catalogSyncStats,
         advancedGifts,
+        adminCatalogGifts,
         publishedCatalogGifts,
         saveAdvancedGift,
         deleteAdvancedGift,
+        migrateUnifiedGiftCatalog,
       }}
     >
       {children}

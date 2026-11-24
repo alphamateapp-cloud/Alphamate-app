@@ -346,6 +346,50 @@ export async function downloadAllGiftsToLocalCache(
   return { cached, total };
 }
 
+let backgroundPrewarmActive = false;
+
+/**
+ * Quietly pre-warms published animated gifts (WebM/SVGA/MP4) into persistent IndexedDB
+ * + in-memory Blob URLs one-by-one when a user enters a Live Stream or Party Room,
+ * so the moment ANY participant sends a gift, playback begins immediately in <30ms.
+ */
+export async function prewarmGiftAnimationsInBackground(
+  gifts: Gift[],
+  maxPreload = 8
+): Promise<void> {
+  if (typeof window === 'undefined' || backgroundPrewarmActive) return;
+  backgroundPrewarmActive = true;
+  try {
+    await hydrateGiftMediaCacheIndex();
+    const candidates = gifts
+      .filter((g) => {
+        const url = getGiftPrimaryAnimationUrl(g);
+        return isCacheableUrl(url) && !cachedUrls.has(url) && !memoryObjectUrls.has(url) && !downloadingUrls.has(url);
+      })
+      .slice(0, maxPreload);
+
+    for (const gift of candidates) {
+      await downloadGiftToLocalCache(gift);
+      // Yield gently between files so room audio/video stays butter smooth
+      await new Promise((r) => setTimeout(r, 150));
+    }
+  } finally {
+    backgroundPrewarmActive = false;
+  }
+}
+
+/**
+ * Saves an uncached gift animation to local IndexedDB AFTER playback finishes,
+ * avoiding bandwidth competition with the active streaming <video> element.
+ */
+export function cacheMediaUrlAfterPlayback(remoteUrl: string, giftId: string): void {
+  if (!isCacheableUrl(remoteUrl)) return;
+  if (cachedUrls.has(remoteUrl) || memoryObjectUrls.has(remoteUrl) || downloadingUrls.has(remoteUrl)) return;
+  window.setTimeout(() => {
+    void downloadMediaUrlToCache(remoteUrl, giftId);
+  }, 250);
+}
+
 export function isGiftAnimationCached(gift: Gift): boolean {
   const animUrl = getGiftPrimaryAnimationUrl(gift);
   if (!animUrl) return false;

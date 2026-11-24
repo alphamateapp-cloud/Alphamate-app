@@ -48,6 +48,7 @@ import {
 } from '../services/audioFilter';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
 import { GiftCacheBadge, GiftCacheBar, GiftIconImage } from '../components/live/GiftBoxMedia';
+import { prewarmGiftAnimationsInBackground } from '../services/giftMediaCache';
 import {
   Radio,
   Mic,
@@ -355,6 +356,9 @@ export const PartyRoomsScreen: React.FC = () => {
   const [partyGivers, setPartyGivers] = useState<PartyLeaderboardEntry[]>([]);
   const [activePartyGiftAnimation, setActivePartyGiftAnimation] = useState<ActiveGiftEvent | null>(null);
   const partyGiftQueueRef = useRef<ActiveGiftEvent[]>([]);
+  const seenPartyGiftEventIdsRef = useRef<Set<string>>(new Set());
+  const partyMessagesHydratedRef = useRef<boolean>(false);
+  const partyDetectedGiftDurationRef = useRef<{ eventId: string; durationMs: number } | null>(null);
   const [activeVipEntry, setActiveVipEntry] = useState<VipEntryEvent | null>(null);
   const vipEntryQueueRef = useRef<VipEntryEvent[]>([]);
   const vipEntryNotifiedRef = useRef<Map<string, number>>(new Map());
@@ -410,16 +414,32 @@ export const PartyRoomsScreen: React.FC = () => {
   }, []);
 
   const handlePartyGiftOverlayComplete = useCallback(() => {
+    partyDetectedGiftDurationRef.current = null;
     const nextQueued = partyGiftQueueRef.current.shift() || null;
     setActivePartyGiftAnimation(nextQueued);
   }, []);
+
+  const handlePartyGiftDurationDetected = useCallback((eventId: string, durationMs: number) => {
+    if (!Number.isFinite(durationMs) || durationMs <= 0) return;
+    const current = partyDetectedGiftDurationRef.current;
+    if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
+      partyDetectedGiftDurationRef.current = { eventId, durationMs };
+    }
+  }, []);
+
+  // Quietly pre-warm published animated gift media into IndexedDB + blob URLs on room entry
+  // so gift playback starts immediately (<30ms) for everyone in the Party Room.
+  useEffect(() => {
+    if (!activePartyRoom?.id || !publishedCatalogGifts.length) return;
+    void prewarmGiftAnimationsInBackground(publishedCatalogGifts, 8);
+  }, [activePartyRoom?.id, publishedCatalogGifts]);
 
   useEffect(() => {
     return audioFilter.subscribe(setActiveVoiceFilter);
   }, []);
 
   // Parent-side wall-clock fail-safe: ensures Android WebView timer throttling never leaves a gift stuck
-  // while NEVER cutting off a full-duration advanced gift video (e.g. 10s WebM/MOV/MP4) early.
+  // while NEVER cutting off a full-duration advanced gift video (10s, 15s, 20s+ WebM/MOV/MP4) early.
   useEffect(() => {
     if (!activePartyGiftAnimation) return;
     const coins = Number(
@@ -433,27 +453,36 @@ export const PartyRoomsScreen: React.FC = () => {
         : 0;
     const playbackSpeed = Math.min(2, Math.max(0.5, advConfig?.playbackSpeed ?? 1));
     const effectiveAdvMs = Math.max(advDurationMs, analysisDurationMs);
-    const maxMs = effectiveAdvMs > 0
-      ? Math.min(72_000, Math.ceil(effectiveAdvMs / playbackSpeed) + 7000)
+    const baseMaxMs = advConfig
+      ? Math.min(120_000, Math.ceil((effectiveAdvMs > 0 ? effectiveAdvMs : 20_000) / playbackSpeed) + 15_000)
       : coins <= 100
-      ? 3000
-      : 8000;
+      ? 3500
+      : 9000;
     const startedAt = Date.now();
     const eventId = activePartyGiftAnimation.id;
     let cleared = false;
 
-    const clearIfExpired = (force = false) => {
+    const getEffectiveMaxMs = () => {
+      const detected = partyDetectedGiftDurationRef.current;
+      if (detected && detected.eventId === eventId && detected.durationMs > 0) {
+        return Math.max(baseMaxMs, Math.min(120_000, Math.ceil(detected.durationMs) + 15_000));
+      }
+      return baseMaxMs;
+    };
+
+    const clearIfExpired = () => {
       if (cleared) return;
-      if (force || Date.now() - startedAt >= maxMs) {
+      if (Date.now() - startedAt >= getEffectiveMaxMs()) {
         cleared = true;
+        partyDetectedGiftDurationRef.current = null;
         const nextQueued = partyGiftQueueRef.current.shift() || null;
         setActivePartyGiftAnimation((prev) => (prev?.id === eventId ? nextQueued : prev));
       }
     };
 
-    const failSafeTimeout = setTimeout(() => clearIfExpired(true), maxMs);
-    const failSafePoll = setInterval(() => clearIfExpired(false), 500);
-    const onResume = () => clearIfExpired(false);
+    const failSafeTimeout = setTimeout(() => clearIfExpired(), baseMaxMs + 100);
+    const failSafePoll = setInterval(() => clearIfExpired(), 500);
+    const onResume = () => clearIfExpired();
 
     window.addEventListener('focus', onResume);
     window.addEventListener('pageshow', onResume);
@@ -473,6 +502,10 @@ export const PartyRoomsScreen: React.FC = () => {
   useEffect(() => {
     partyJoinedAtRef.current = Date.now();
     seenPartyBannerIdsRef.current.clear();
+    seenPartyGiftEventIdsRef.current.clear();
+    partyMessagesHydratedRef.current = false;
+    partyDetectedGiftDurationRef.current = null;
+    partyGiftQueueRef.current = [];
     lastSyncedViewerCountRef.current = -1;
     setActivePartyGiftAnimation(null);
     setActiveVipEntry(null);
@@ -2054,16 +2087,24 @@ export const PartyRoomsScreen: React.FC = () => {
         const sig = ev.signal;
         const sigTs = Number(sig.timestamp || ev.ts || Date.now());
         const now = Date.now();
+        const wsEventId =
+          String(sig.eventId || '').trim() || `party_ws_gift_${roomId}_${sigTs}`;
         if (
           sig.gift &&
-          sigTs >= partyJoinedAtRef.current - 1500 &&
-          Math.abs(now - sigTs) < 8000
+          !seenPartyGiftEventIdsRef.current.has(wsEventId) &&
+          sigTs >= partyJoinedAtRef.current - 2500 &&
+          Math.abs(now - sigTs) < 15000
         ) {
+          seenPartyGiftEventIdsRef.current.add(wsEventId);
           const incomingGift = sig.gift as Gift;
           const resolvedGift =
-            publishedCatalogGiftsRef.current.find((g) => g.id === incomingGift?.id) || incomingGift;
+            publishedCatalogGiftsRef.current.find(
+              (g) =>
+                (incomingGift?.id && g.id === incomingGift.id) ||
+                (incomingGift?.name && g.name.toLowerCase() === incomingGift.name.toLowerCase())
+            ) || incomingGift;
           enqueuePartyGiftAnimation({
-            id: `party_ws_gift_${roomId}_${sigTs}_${Math.random().toString(36).slice(2, 7)}`,
+            id: wsEventId,
             gift: resolvedGift,
             senderName: String(sig.senderName || 'Guest'),
             senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
@@ -2449,13 +2490,16 @@ export const PartyRoomsScreen: React.FC = () => {
     }
   }, [activePartyRoom?.id, realViewersList.length, isHost]);
 
-  // Subscribe to real Firestore party-room comments & gift events, and hydrate session Top Givers when open.
+  // Subscribe to real Firestore party-room comments & gift events, hydrate Top Givers,
+  // and guarantee room-wide gift animations for EVERY Host, Seated Guest & Viewer in THIS room.
   useEffect(() => {
     if (!activePartyRoom?.id) return;
+    const currentRoomId = activePartyRoom.id;
     const roomSessionId = activePartyRoom.sessionId;
+    partyMessagesHydratedRef.current = false;
     let unsubscribed = false;
     const unsubscribe = subscribeToPartyRoomMessages(
-      activePartyRoom.id,
+      currentRoomId,
       (messages) => {
         if (unsubscribed) return;
         const mapped: ChatItem[] = messages.map((message: any) => ({
@@ -2474,6 +2518,57 @@ export const PartyRoomsScreen: React.FC = () => {
             : 'Just now',
         }));
         setChatItems(mapped);
+
+        // Reliable room-wide gift animation sync via Firestore (deduplicated against WebSocket & local sender):
+        // Initial snapshot marks historical gifts as seen so joining mid-session never replays old gifts.
+        if (!partyMessagesHydratedRef.current) {
+          partyMessagesHydratedRef.current = true;
+          messages.forEach((message: any) => {
+            if (message.type === 'gift' && message.id) {
+              seenPartyGiftEventIdsRef.current.add(String(message.id));
+            }
+          });
+        } else {
+          messages.forEach((message: any) => {
+            if (message.type !== 'gift') return;
+            const msgEventId = String(message.id || '').trim();
+            if (!msgEventId || seenPartyGiftEventIdsRef.current.has(msgEventId)) return;
+            const createdMs = message.createdAt?.toMillis
+              ? message.createdAt.toMillis()
+              : Date.now();
+            if (createdMs < partyJoinedAtRef.current - 5000) {
+              seenPartyGiftEventIdsRef.current.add(msgEventId);
+              return;
+            }
+            seenPartyGiftEventIdsRef.current.add(msgEventId);
+            const resolvedGift: Gift =
+              publishedCatalogGiftsRef.current.find(
+                (g) =>
+                  (message.giftId && g.id === message.giftId) ||
+                  (message.giftName && g.name.toLowerCase() === String(message.giftName).toLowerCase())
+              ) || {
+                id: String(message.giftId || msgEventId),
+                name: String(message.giftName || 'Gift'),
+                icon: String(message.giftIcon || '🎁'),
+                coins: Math.max(1, Number(message.giftCoins) || 100),
+                costInCoins: Math.max(1, Number(message.giftCoins) || 100),
+                animationType: 'sparkle',
+                description: '',
+              };
+            enqueuePartyGiftAnimation({
+              id: msgEventId,
+              gift: resolvedGift,
+              senderName: String(message.sender?.displayName || 'Guest'),
+              senderAvatar: message.sender?.avatar ? String(message.sender.avatar) : undefined,
+              senderVipTier: Number(message.sender?.vipTier || 0),
+              recipientName: String(message.recipientName || activePartyRoom.host?.displayName || 'Host'),
+              comboCount: 1,
+              quantity: Math.max(1, Number(message.quantity || 1)),
+              timestamp: createdMs,
+              roomId: currentRoomId,
+            });
+          });
+        }
 
         // Reconstruct accurate session leaderboard from persisted session gift messages
         const giverMap = new Map<string, PartyLeaderboardEntry>();
@@ -2655,11 +2750,14 @@ export const PartyRoomsScreen: React.FC = () => {
     clearActiveGiftBanner();
 
     const now = Date.now();
+    const giftEventId = `gift_${now}_${Math.random().toString(36).slice(2, 7)}`;
+    seenPartyGiftEventIdsRef.current.add(giftEventId);
     spawnHeart();
 
-    // Broadcast gift animation signal ONLY to participants inside this Party Room
+    // Broadcast gift animation signal ONLY to participants inside this Party Room (instant path)
     realtimeSocket.sendRoomSignal('party', activePartyRoom.id, {
       type: 'gift_combo',
+      eventId: giftEventId,
       roomId: activePartyRoom.id,
       gift: selectedGift,
       senderName: currentUser.displayName,
@@ -2671,9 +2769,9 @@ export const PartyRoomsScreen: React.FC = () => {
       timestamp: now,
     });
 
-    // Trigger scoped banner / animation via priority queue
+    // Trigger scoped banner / animation via priority queue immediately for sender
     enqueuePartyGiftAnimation({
-      id: `party_gift_${activePartyRoom.id}_${now}_${Math.random().toString(36).slice(2, 7)}`,
+      id: giftEventId,
       gift: selectedGift,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
@@ -2685,7 +2783,7 @@ export const PartyRoomsScreen: React.FC = () => {
       roomId: activePartyRoom.id,
     });
 
-    const giftMsgId = `gift_${now}_${Math.random().toString(36).slice(2, 7)}`;
+    const giftMsgId = giftEventId;
     const giftMsg: ChatItem = {
       id: giftMsgId,
       sender: {
@@ -2969,6 +3067,7 @@ export const PartyRoomsScreen: React.FC = () => {
               : null
           }
           onComplete={handlePartyGiftOverlayComplete}
+          onDurationDetected={handlePartyGiftDurationDetected}
         />
 
         {/* Toast Alert Feedback */}
@@ -3004,6 +3103,7 @@ export const PartyRoomsScreen: React.FC = () => {
               : null
           }
           onComplete={handlePartyGiftOverlayComplete}
+          onDurationDetected={handlePartyGiftDurationDetected}
         />
 
         {/* =====================================================================
