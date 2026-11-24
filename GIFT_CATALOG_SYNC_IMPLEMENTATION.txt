@@ -1,0 +1,21 @@
+ALPHA MATE — GIFT CATALOG SYNC IMPLEMENTATION
+
+Updated source: 24 Nov 2026
+
+What changed
+1. Normal Admin gift documents now normalize status case-insensitively and recognize Active/Published/Enabled/Show/Visible. Explicit false/0/no/hidden/off values in show, isActive, enabled, or visible keep the gift hidden.
+2. Advanced gifts now normalize status case-insensitively. Draft, Processing, Disabled, Inactive, Hidden, Rejected, Archived, and Paused are not published. Active, Published, Enabled, Show, Visible, and Approved are published.
+3. Advanced gift media URL resolution now accepts optimizedFileUrl, animationUrl, assetUrl, downloadUrl, and originalFileUrl consistently. A published advanced gift still needs a non-empty usable media URL to enter the send-gift gallery.
+4. The unified gallery continues to merge the regular gifts collection and advancedGifts collection by document ID. An explicit inactive/hidden regular Admin catalog row suppresses a same-ID advanced gift so paused gifts cannot reappear.
+
+Firestore collection contract
+- Simple/standard gifts: gifts/{giftId}
+  Recommended fields: name, coins (or costInCoins), icon, status, show, isActive, enabled, visible, priority/order, thumbnailUrl/imageUrl.
+- Advanced animated gifts: advancedGifts/{giftId}
+  Required to appear in App send-gift gallery: published/active status plus at least one valid media URL among optimizedFileUrl, animationUrl, assetUrl, downloadUrl, originalFileUrl.
+  Optional presentation fields include format, displayMode, opacity, durationMs/duration, loop, playbackSpeed, position, scale, priority, enableSound, enableParticles, edgeFeather, blendMode.
+
+Important
+- Admins may list draft/processing/inactive records for management; that does not mean those records are eligible to appear in the App gallery.
+- No Firestore records were changed by this source update. Push/deploy this app source, then verify the same gift IDs and media URLs in the live Firestore collections.
+- Build/typecheck could not be completed in this environment because dependencies are not installed and the available Node version is 22.16.0 while this project declares Node >=24.12.0.

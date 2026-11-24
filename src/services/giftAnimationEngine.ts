@@ -39,8 +39,9 @@ function normalizeAdminCatalogGift(id: string, raw: Record<string, any>): Gift {
   const displayMode: GiftDisplayMode =
     modeRaw.includes('overlay') || modeRaw.includes('background') ? 'overlay_background'
       : modeRaw.includes('semi') ? 'semi_transparent' : 'transparent';
-  const statusRaw = String(raw.status || 'Active').toLowerCase();
-  const isActive = ['active', 'published', 'enabled', 'show'].includes(statusRaw) && raw.show !== false && raw.isActive !== false;
+  const statusRaw = String(raw.status || raw.publishStatus || 'active').trim().toLowerCase();
+  const truthyFlag = (value: any) => !(value === false || value === 0 || ['false', '0', 'no', 'hidden', 'off'].includes(String(value ?? '').trim().toLowerCase()));
+  const isActive = ['active', 'published', 'enabled', 'show', 'visible'].includes(statusRaw) && truthyFlag(raw.show) && truthyFlag(raw.isActive) && truthyFlag(raw.enabled) && truthyFlag(raw.visible);
   const timestampToIso = (value: any, fallback: string) => {
     if (value && typeof value.toDate === 'function') return value.toDate().toISOString();
     if (typeof value === 'string' && value) return value;
@@ -413,9 +414,9 @@ function normalizeAdvancedGiftDoc(id: string, raw: Record<string, any>): Advance
     icon: typeof raw.icon === 'string' && raw.icon.trim() ? raw.icon.trim() : '🎁',
     thumbnailUrl: typeof raw.thumbnailUrl === 'string' ? raw.thumbnailUrl : undefined,
     previewImageUrl: typeof raw.previewImageUrl === 'string' ? raw.previewImageUrl : undefined,
-    originalFileUrl: String(raw.originalFileUrl || raw.animationUrl || ''),
+    originalFileUrl: String(raw.originalFileUrl || raw.assetUrl || raw.downloadUrl || raw.animationUrl || ''),
     optimizedFileUrl: typeof raw.optimizedFileUrl === 'string' ? raw.optimizedFileUrl : undefined,
-    animationUrl: String(raw.optimizedFileUrl || raw.animationUrl || raw.originalFileUrl || ''),
+    animationUrl: String(raw.optimizedFileUrl || raw.animationUrl || raw.assetUrl || raw.downloadUrl || raw.originalFileUrl || ''),
     format,
     displayMode,
     transparencyStatus,
@@ -433,10 +434,11 @@ function normalizeAdvancedGiftDoc(id: string, raw: Record<string, any>): Advance
     enableSound: raw.enableSound !== false,
     edgeFeather,
     blendMode,
-    status:
-      raw.status === 'draft' || raw.status === 'processing' || raw.status === 'disabled'
-        ? raw.status
-        : 'published',
+    status: (() => {
+      const status = String(raw.status || raw.publishStatus || 'published').trim().toLowerCase();
+      if (['draft', 'processing', 'disabled', 'inactive', 'hidden', 'rejected', 'archived', 'paused'].includes(status)) return status === 'paused' || status === 'hidden' || status === 'inactive' ? 'disabled' : status;
+      return ['active', 'published', 'enabled', 'show', 'visible', 'approved'].includes(status) ? 'published' : 'disabled';
+    })(),
     conversionStatus:
       raw.conversionStatus === 'pending' ||
       raw.conversionStatus === 'converting' ||
