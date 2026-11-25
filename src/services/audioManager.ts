@@ -139,7 +139,7 @@ class GiftAudioManager {
   private muteListeners = new Set<(muted: boolean) => void>();
 
   private isMuted: boolean = false;
-  private masterVolume: number = 0.85;
+  private masterVolume: number = 0.95;
   private unlocked: boolean = false;
   private listenersAttached: boolean = false;
 
@@ -210,19 +210,25 @@ class GiftAudioManager {
     }
   }
 
+  public isContextRunning(): boolean {
+    return Boolean(this.ctx && this.ctx.state === 'running');
+  }
+
   private ensureAudioGraph(): { ctx: AudioContext; masterGain: GainNode } | null {
     if (typeof window === 'undefined') return null;
     try {
-      if (!this.ctx) {
+      if (!this.ctx || this.ctx.state === 'closed') {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         if (!AudioCtx) return null;
         this.ctx = new AudioCtx();
+        this.compressor = null;
+        this.masterGain = null;
       }
       if (!this.compressor || !this.masterGain) {
         const compressor = this.ctx.createDynamicsCompressor();
-        compressor.threshold.setValueAtTime(-14, this.ctx.currentTime);
-        compressor.knee.setValueAtTime(18, this.ctx.currentTime);
-        compressor.ratio.setValueAtTime(6, this.ctx.currentTime);
+        compressor.threshold.setValueAtTime(-12, this.ctx.currentTime);
+        compressor.knee.setValueAtTime(16, this.ctx.currentTime);
+        compressor.ratio.setValueAtTime(5, this.ctx.currentTime);
         compressor.attack.setValueAtTime(0.005, this.ctx.currentTime);
         compressor.release.setValueAtTime(0.18, this.ctx.currentTime);
 
@@ -235,6 +241,8 @@ class GiftAudioManager {
         this.compressor = compressor;
         this.masterGain = gain;
       }
+      // Keep synth fallback bound to the EXACT same unlocked AudioContext & master gain!
+      giftSoundEngine.bindExternalAudioGraph(this.ctx, this.masterGain);
       return { ctx: this.ctx, masterGain: this.masterGain };
     } catch {
       return null;
@@ -492,8 +500,9 @@ class GiftAudioManager {
     }
 
     const isBlobUrl = assetPath.startsWith('blob:');
-    const timeoutMs = options.fetchTimeoutMs ?? (isBlobUrl ? 8000 : 3200);
-    const cacheMissingOnNetworkError = options.cacheMissingOnNetworkError ?? true;
+    const isVideoContainer = /\.(webm|mp4|mov)(\?|$)/i.test(cacheKey);
+    const timeoutMs = options.fetchTimeoutMs ?? (isBlobUrl ? 8000 : isVideoContainer ? 6500 : 3200);
+    const cacheMissingOnNetworkError = options.cacheMissingOnNetworkError ?? !isVideoContainer;
 
     const loadPromise = (async (): Promise<{
       buffer: AudioBuffer | null;
@@ -563,8 +572,11 @@ class GiftAudioManager {
           this.cacheDecodedBuffer(cacheKey, decoded);
           return { buffer: decoded };
         } catch {
-          // Valid media bytes fetched, but file contains no decodable audio track (e.g. silent WebM/MP4)
-          this.bufferCache.set(cacheKey, { status: 'missing' });
+          // Many browsers/WebViews reject decodeAudioData on VP8+Vorbis WebM / H.264 MP4 video containers;
+          // only permanently mark non-video SFX files as missing so video audio can still play natively.
+          if (!isVideoContainer) {
+            this.bufferCache.set(cacheKey, { status: 'missing' });
+          }
           return { buffer: null, reason: 'no_audio' };
         }
       } catch {
@@ -625,7 +637,13 @@ class GiftAudioManager {
       });
     }
 
-    const pathList = Array.from(paths);
+    const pathList = Array.from(paths).filter((p) => {
+      if (p.startsWith('/audio/') && !this.hasDecodedBuffer(p)) {
+        this.bufferCache.set(p, { status: 'missing' });
+        return false;
+      }
+      return true;
+    });
     const total = pathList.length;
     if (total === 0) return { decoded: 0, total: 0 };
 
@@ -866,13 +884,20 @@ class GiftAudioManager {
         ? 1 + Math.min(comboCount - 1, 10) * 0.03
         : 1);
 
-    const graph = await this.ensureRunningGraph(220);
+    const graph = await this.ensureRunningGraph(260);
     let playedFromAsset = false;
 
     if (graph && !this.isMuted) {
       for (const path of candidatePaths) {
         const cached = this.bufferCache.get(path);
         if (cached?.status === 'missing') continue;
+
+        // Skip synchronous network probe for built-in /audio/*.mp3 placeholders unless pre-decoded,
+        // so synthesized SFX fires immediately with 0ms delay inside the active audio context.
+        if (path.startsWith('/audio/') && cached?.status !== 'decoded') {
+          this.bufferCache.set(path, { status: 'missing' });
+          continue;
+        }
 
         const buffer =
           cached?.status === 'decoded'
@@ -943,6 +968,15 @@ class GiftAudioManager {
     }
 
     giftSoundEngine.playVipEntryFanfare(tier);
+    return 'synth';
+  }
+
+  public async playSeatPopIn(options: { volume?: number } = {}): Promise<SfxPlaybackSource> {
+    if (this.isMuted) return 'muted';
+    const graph = await this.ensureRunningGraph(180);
+    if (!graph || this.isMuted) return this.isMuted ? 'muted' : 'unavailable';
+    const volume = typeof options.volume === 'number' ? options.volume : 0.72;
+    giftSoundEngine.playSeatPopIn(volume);
     return 'synth';
   }
 

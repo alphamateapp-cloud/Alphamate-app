@@ -31,6 +31,7 @@ import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { realtimeSocket } from './realtimeSocket';
 import { User, SfuPublishedTrack } from '../types';
 import { audioFilter, VoiceFilterPresetId } from './audioFilter';
+import { smartNetworkService } from './smartNetworkService';
 
 export interface PeerConnectionConfig {
   iceServers?: RTCIceServer[];
@@ -182,10 +183,10 @@ export const CLOUDFLARE_TURN_URLS = [
 ];
 
 export const PARTY_PARTICIPANT_STALE_MS = 15_000;
-const PARTY_HEARTBEAT_INTERVAL_MS = 4000;
+const PARTY_HEARTBEAT_INTERVAL_MS = 8000;
 const RECONNECT_GRACE_MS = 2500;
 const MAX_RECONNECT_ATTEMPTS = 8;
-const LIVE_HEARTBEAT_INTERVAL_MS = 5000;
+const LIVE_HEARTBEAT_INTERVAL_MS = 15_000;
 
 class RealtimeSfuStreamingEngine {
   private localStream: MediaStream | null = null;
@@ -233,8 +234,8 @@ class RealtimeSfuStreamingEngine {
 
   constructor() {
     this.preferSameOriginProxy = this.isAiStudioPreviewHost();
-    this.fetchCloudflareTurnCredentials().catch(() => {});
-    this.ensureSfuBackendConfigured().catch(() => {});
+    // Lazy-load TURN & SFU config only when a user actually starts/joins a Live Stream
+    // instead of firing unnecessary Railway/Cloudflare API calls on every app launch.
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => {
         this.autoReconnectAllDisconnected();
@@ -950,9 +951,15 @@ class RealtimeSfuStreamingEngine {
             if (opus.length && 'setCodecPreferences' in transceiver) {
               transceiver.setCodecPreferences([...opus, ...otherAudio]);
             }
+            const policy = smartNetworkService.getPolicy();
             const params = transceiver.sender.getParameters();
             params.encodings = params.encodings?.length ? params.encodings : [{}];
-            params.encodings[0].maxBitrate = 32_000;
+            params.encodings[0].maxBitrate =
+              policy.voicePriorityMode === 'ultra_low_bandwidth'
+                ? 20_000
+                : policy.voicePriorityMode === 'low_bandwidth'
+                ? 24_000
+                : 32_000;
             (params.encodings[0] as any).priority = 'high';
             (params.encodings[0] as any).networkPriority = 'high';
             await transceiver.sender.setParameters(params);
@@ -961,10 +968,14 @@ class RealtimeSfuStreamingEngine {
           }
         } else if (item.track.kind === 'video') {
           try {
+            const policy = smartNetworkService.getPolicy();
             const params = transceiver.sender.getParameters();
             params.encodings = params.encodings?.length ? params.encodings : [{}];
-            params.encodings[0].maxBitrate = 700_000;
-            params.encodings[0].maxFramerate = 30;
+            params.encodings[0].maxBitrate = Math.max(180_000, policy.liveVideoMaxBitrateKbps * 1000);
+            params.encodings[0].maxFramerate = Math.max(12, policy.liveVideoMaxFramerate || 24);
+            if (policy.liveVideoScaleDownBy > 1) {
+              params.encodings[0].scaleResolutionDownBy = policy.liveVideoScaleDownBy;
+            }
             (params as any).degradationPreference = 'maintain-framerate';
             await transceiver.sender.setParameters(params);
           } catch (videoTuneErr) {
@@ -2389,6 +2400,58 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
+  public async adaptHostMediaBitrate(streamId: string): Promise<void> {
+    const session = this.hostSfuSessions.get(streamId);
+    if (!session || session.isClosed || session.pc.connectionState === 'closed') return;
+    try {
+      const stats = await this.getHostNetworkLatencyStats(streamId);
+      smartNetworkService.reportWebRtcQuality({
+        rttMs: stats.rttMs,
+        packetLossPct: stats.packetLossPct,
+      });
+      const policy = smartNetworkService.getPolicy();
+      for (const sender of session.pc.getSenders()) {
+        const track = sender.track;
+        if (!track) continue;
+        const params = sender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          params.encodings = [{}];
+        }
+        if (track.kind === 'video') {
+          const targetBitrate = Math.max(160_000, policy.liveVideoMaxBitrateKbps * 1000);
+          const targetFps = Math.max(12, policy.liveVideoMaxFramerate || 24);
+          const targetScale = Math.max(1, policy.liveVideoScaleDownBy || 1);
+          if (
+            params.encodings[0].maxBitrate !== targetBitrate ||
+            params.encodings[0].maxFramerate !== targetFps ||
+            params.encodings[0].scaleResolutionDownBy !== targetScale
+          ) {
+            params.encodings[0].maxBitrate = targetBitrate;
+            params.encodings[0].maxFramerate = targetFps;
+            params.encodings[0].scaleResolutionDownBy = targetScale;
+            (params as any).degradationPreference = 'maintain-framerate';
+            await sender.setParameters(params).catch(() => {});
+          }
+        } else if (track.kind === 'audio') {
+          const targetAudioBitrate =
+            policy.voicePriorityMode === 'ultra_low_bandwidth'
+              ? 20_000
+              : policy.voicePriorityMode === 'low_bandwidth'
+              ? 24_000
+              : 32_000;
+          if (params.encodings[0].maxBitrate !== targetAudioBitrate) {
+            params.encodings[0].maxBitrate = targetAudioBitrate;
+            (params.encodings[0] as any).priority = 'high';
+            (params.encodings[0] as any).networkPriority = 'high';
+            await sender.setParameters(params).catch(() => {});
+          }
+        }
+      }
+    } catch {
+      // Non-fatal bitrate adaptation error
+    }
+  }
+
   public startLiveStreamHeartbeat(streamId: string): void {
     if (!streamId) return;
     this.stopLiveStreamHeartbeat(streamId);
@@ -2400,6 +2463,7 @@ class RealtimeSfuStreamingEngine {
         return;
       }
       this.sendLiveStreamHeartbeat(streamId).catch(() => {});
+      void this.adaptHostMediaBitrate(streamId);
     }, LIVE_HEARTBEAT_INTERVAL_MS);
 
     this.hostHeartbeatTimers.set(streamId, timer);

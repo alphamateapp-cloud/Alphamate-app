@@ -1,6 +1,12 @@
 import http from 'http';
 import https from 'https';
 import net from 'net';
+import {
+  sendCachedJson,
+  serverCache,
+  sharedHttpAgent,
+  sharedHttpsAgent,
+} from './server-cache.js';
 
 const AUDIUS_API_BASE = 'https://api.audius.co/v1';
 const AUDIUS_APP_NAME = 'AlphaMateLive';
@@ -411,6 +417,7 @@ function pipeRemoteAudio(targetUrl, req, res, redirectDepth = 0) {
     {
       method: req.method === 'HEAD' ? 'HEAD' : 'GET',
       headers,
+      agent: parsed.protocol === 'https:' ? sharedHttpsAgent : sharedHttpAgent,
       timeout: 12000,
     },
     (upstreamRes) => {
@@ -530,44 +537,44 @@ export function registerMusicRoutes(app) {
     const mode = rawMode === 'full' || rawMode === 'popular' ? rawMode : 'all';
     const limit = Math.min(30, Math.max(4, Number.parseInt(String(req.query.limit || '20'), 10) || 20));
 
-    const cacheKey = `search:${mode}:${limit}:${q.toLowerCase()}`;
-    const cached = getBoundedCache(searchCache, cacheKey);
-    if (cached) {
-      return res.json({ success: true, query: q, mode, cached: true, tracks: cached });
-    }
-
+    const cacheKey = `music:search:${mode}:${limit}:${q.toLowerCase()}`;
     try {
-      let tracks = [];
-      if (mode === 'full') {
-        const [audiusTracks, jamendoTracks] = await Promise.all([
-          searchAudius(q, limit),
-          searchJamendo(q, Math.min(8, limit)),
-        ]);
-        tracks = deduplicateTracks([...audiusTracks, ...jamendoTracks], limit);
-      } else if (mode === 'popular') {
-        const [deezerTracks, itunesTracks] = await Promise.all([
-          searchDeezer(q, limit),
-          searchItunes(q, limit),
-        ]);
-        tracks = interleaveResults([], deezerTracks, itunesTracks, limit);
-      } else {
+      const { value: tracks, cached } = await serverCache.getOrSet(cacheKey, CACHE_TTL_MS, async () => {
+        if (mode === 'full') {
+          const [audiusTracks, jamendoTracks] = await Promise.all([
+            searchAudius(q, limit),
+            searchJamendo(q, Math.min(8, limit)),
+          ]);
+          return deduplicateTracks([...audiusTracks, ...jamendoTracks], limit);
+        }
+        if (mode === 'popular') {
+          const [deezerTracks, itunesTracks] = await Promise.all([
+            searchDeezer(q, limit),
+            searchItunes(q, limit),
+          ]);
+          return interleaveResults([], deezerTracks, itunesTracks, limit);
+        }
         const [audiusTracks, deezerTracks, itunesTracks, jamendoTracks] = await Promise.all([
           searchAudius(q, Math.ceil(limit * 0.6)),
           searchDeezer(q, Math.ceil(limit * 0.6)),
           searchItunes(q, Math.ceil(limit * 0.45)),
           searchJamendo(q, 4),
         ]);
-        tracks = interleaveResults([...audiusTracks, ...jamendoTracks], deezerTracks, itunesTracks, limit);
-      }
-
-      setBoundedCache(searchCache, cacheKey, tracks, CACHE_TTL_MS);
-      return res.json({
-        success: true,
-        query: q,
-        mode,
-        cached: false,
-        tracks,
+        return interleaveResults([...audiusTracks, ...jamendoTracks], deezerTracks, itunesTracks, limit);
       });
+
+      return sendCachedJson(
+        req,
+        res,
+        {
+          success: true,
+          query: q,
+          mode,
+          cached,
+          tracks,
+        },
+        { maxAgeSeconds: 180, staleWhileRevalidateSeconds: 600 }
+      );
     } catch (error) {
       console.error('[Music Search] Error:', error?.message || error);
       return res.status(502).json({
@@ -588,47 +595,47 @@ export function registerMusicRoutes(app) {
     const category = Object.prototype.hasOwnProperty.call(TRENDING_CATEGORY_MAP, rawCat) ? rawCat : 'all';
     const limit = Math.min(24, Math.max(6, Number.parseInt(String(req.query.limit || '18'), 10) || 18));
 
-    const cacheKey = `trending:${category}:${limit}`;
-    const cached = getBoundedCache(searchCache, cacheKey);
-    if (cached) {
-      return res.json({ success: true, category, cached: true, tracks: cached });
-    }
-
+    const cacheKey = `music:trending:${category}:${limit}`;
     try {
       const cfg = TRENDING_CATEGORY_MAP[category];
-      let tracks = [];
-
-      if (category === 'full') {
-        const [trendingAudius, lofiAudius] = await Promise.all([
-          fetchAudiusTrending('', Math.ceil(limit * 0.65)),
-          searchAudius(cfg.query, Math.ceil(limit * 0.5)),
-        ]);
-        tracks = deduplicateTracks([...trendingAudius, ...lofiAudius], limit);
-      } else if (category === 'lofi' || category === 'pop') {
-        const [audiusTrending, deezerHits, itunesHits] = await Promise.all([
-          fetchAudiusTrending(cfg.audiusGenre, Math.ceil(limit * 0.65)),
-          searchDeezer(cfg.query, Math.ceil(limit * 0.45)),
-          searchItunes(cfg.query, Math.ceil(limit * 0.35)),
-        ]);
-        tracks = interleaveResults(audiusTrending, deezerHits, itunesHits, limit);
-      } else if (category === 'urdu' || category === 'bollywood' || category === 'punjabi') {
-        const [audiusMatches, deezerHits, itunesHits] = await Promise.all([
-          searchAudius(cfg.query.split(' ').slice(0, 2).join(' '), Math.ceil(limit * 0.45)),
-          searchDeezer(cfg.query, Math.ceil(limit * 0.6)),
-          searchItunes(cfg.query, Math.ceil(limit * 0.45)),
-        ]);
-        tracks = interleaveResults(audiusMatches, deezerHits, itunesHits, limit);
-      } else {
+      const { value: tracks, cached } = await serverCache.getOrSet(cacheKey, CACHE_TTL_MS, async () => {
+        if (category === 'full') {
+          const [trendingAudius, lofiAudius] = await Promise.all([
+            fetchAudiusTrending('', Math.ceil(limit * 0.65)),
+            searchAudius(cfg.query, Math.ceil(limit * 0.5)),
+          ]);
+          return deduplicateTracks([...trendingAudius, ...lofiAudius], limit);
+        }
+        if (category === 'lofi' || category === 'pop') {
+          const [audiusTrending, deezerHits, itunesHits] = await Promise.all([
+            fetchAudiusTrending(cfg.audiusGenre, Math.ceil(limit * 0.65)),
+            searchDeezer(cfg.query, Math.ceil(limit * 0.45)),
+            searchItunes(cfg.query, Math.ceil(limit * 0.35)),
+          ]);
+          return interleaveResults(audiusTrending, deezerHits, itunesHits, limit);
+        }
+        if (category === 'urdu' || category === 'bollywood' || category === 'punjabi') {
+          const [audiusMatches, deezerHits, itunesHits] = await Promise.all([
+            searchAudius(cfg.query.split(' ').slice(0, 2).join(' '), Math.ceil(limit * 0.45)),
+            searchDeezer(cfg.query, Math.ceil(limit * 0.6)),
+            searchItunes(cfg.query, Math.ceil(limit * 0.45)),
+          ]);
+          return interleaveResults(audiusMatches, deezerHits, itunesHits, limit);
+        }
         const [audiusTrending, deezerDesi, itunesDesi] = await Promise.all([
           fetchAudiusTrending('', Math.ceil(limit * 0.55)),
           searchDeezer('Atif Aslam Arijit Singh', Math.ceil(limit * 0.45)),
           searchItunes('Coke Studio Bollywood hits', Math.ceil(limit * 0.35)),
         ]);
-        tracks = interleaveResults(audiusTrending, deezerDesi, itunesDesi, limit);
-      }
+        return interleaveResults(audiusTrending, deezerDesi, itunesDesi, limit);
+      });
 
-      setBoundedCache(searchCache, cacheKey, tracks, CACHE_TTL_MS);
-      return res.json({ success: true, category, cached: false, tracks });
+      return sendCachedJson(
+        req,
+        res,
+        { success: true, category, cached, tracks },
+        { maxAgeSeconds: 180, staleWhileRevalidateSeconds: 600 }
+      );
     } catch (error) {
       console.error('[Music Trending] Error:', error?.message || error);
       return res.status(502).json({ success: false, error: 'Unable to load trending music.', tracks: [] });

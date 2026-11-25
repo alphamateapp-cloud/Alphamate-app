@@ -59,6 +59,8 @@ export default defineConfig(() => {
           'pwa-512x512.png',
           'pwa-maskable-512x512.png',
           'apple-touch-icon.png',
+          'alpha-mate-logo-emblem.webp',
+          'alpha-mate-logo-full.webp',
           'alpha-mate-logo-emblem.png',
           'alpha-mate-logo-full.png',
         ],
@@ -100,9 +102,16 @@ export default defineConfig(() => {
           cleanupOutdatedCaches: true,
           clientsClaim: true,
           skipWaiting: true,
-          maximumFileSizeToCacheInBytes: 10 * 1024 * 1024,
-          globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2}'],
-          globIgnores: ['**/assets/aistudio/**', '**/uploads/gifts/**', '**/app-icon.png'],
+          maximumFileSizeToCacheInBytes: 6 * 1024 * 1024,
+          globPatterns: ['**/*.{html,ico,svg,woff,woff2}', 'assets/index-*.{js,css}', 'assets/vendor-react-*.js', 'assets/vendor-firebase-*.js'],
+          globIgnores: [
+            '**/assets/aistudio/**',
+            '**/uploads/gifts/**',
+            '**/app-icon.png',
+            '**/AgoraRTC*',
+            '**/vendor-agora*',
+            '**/AdminDashboard*',
+          ],
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api\//, /^\/ws/, /^\/__/, /^\/uploads\/gifts\//],
           runtimeCaching: [
@@ -111,6 +120,39 @@ export default defineConfig(() => {
               urlPattern: ({url}) =>
                 /^\/api\/(agora|sfu|webrtc|auth|account|reels\/upload|realtime|admin|gemini)/.test(url.pathname),
               handler: 'NetworkOnly',
+            },
+            // Cacheable public catalog/music API endpoints (StaleWhileRevalidate)
+            {
+              urlPattern: ({url}) => /^\/api\/music\/(search|trending)/.test(url.pathname),
+              handler: 'StaleWhileRevalidate',
+              options: {
+                cacheName: 'alphamate-music-api-v1',
+                expiration: {
+                  maxEntries: 60,
+                  maxAgeSeconds: 60 * 10, // 10 minutes
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
+            // Hashed lazy-loaded JS/CSS route & vendor chunks (cached on first visit)
+            {
+              urlPattern: ({url, request}) =>
+                url.origin === self.location.origin &&
+                url.pathname.startsWith('/assets/') &&
+                (request.destination === 'script' || request.destination === 'style'),
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'alphamate-lazy-chunks-v1',
+                expiration: {
+                  maxEntries: 120,
+                  maxAgeSeconds: 60 * 60 * 24 * 30, // 30 days
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
             },
             // Service Worker cached user profile snippets (served instantly offline and on cold boot)
             {
@@ -206,6 +248,30 @@ export default defineConfig(() => {
     resolve: {
       alias: {
         '@': path.resolve(import.meta.dirname, '.'),
+      },
+    },
+    build: {
+      target: 'es2020',
+      cssCodeSplit: true,
+      chunkSizeWarningLimit: 900,
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined;
+            if (id.includes('agora-rtc-sdk-ng')) return 'vendor-agora';
+            if (id.includes('firebase') || id.includes('@firebase')) return 'vendor-firebase';
+            if (id.includes('react-dom') || id.includes('/react/') || id.includes('scheduler')) {
+              return 'vendor-react';
+            }
+            if (id.includes('lucide-react')) return 'vendor-icons';
+            if (id.includes('motion') || id.includes('framer-motion')) return 'vendor-motion';
+            if (id.includes('svgaplayerweb') || id.includes('pako') || id.includes('protobufjs')) {
+              return 'vendor-svga';
+            }
+            if (id.includes('@capacitor')) return 'vendor-capacitor';
+            return undefined;
+          },
+        },
       },
     },
     server: {

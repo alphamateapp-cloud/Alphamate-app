@@ -33,6 +33,7 @@ import {
   memoryLocalCache,
   persistentLocalCache,
   persistentMultipleTabManager,
+  persistentSingleTabManager,
   doc,
   getDoc,
   getDocFromCache,
@@ -124,12 +125,16 @@ function createFirestoreInstance() {
 
   if (canUseIndexedDb) {
     try {
+      const isNativeApp = Capacitor.isNativePlatform();
       return initializeFirestore(
         app,
         {
           ...baseSettings,
           localCache: persistentLocalCache({
-            tabManager: persistentMultipleTabManager(),
+            cacheSizeBytes: 50 * 1024 * 1024, // 50 MB bounded offline disk cache
+            tabManager: isNativeApp
+              ? persistentSingleTabManager({})
+              : persistentMultipleTabManager(),
           }),
         },
         firebaseConfig.firestoreDatabaseId
@@ -966,54 +971,197 @@ export async function syncUserProfileToFirestore(
   }
 }
 
-/**
- * Fetch User Profile from Firestore
- */
-export async function getUserProfileFromFirestore(userId: string) {
-  const path = `users/${userId}`;
-  const userRef = doc(db, 'users', userId);
-  try {
-    const snap = await withFirestoreTimeout(
-      getDoc(userRef),
-      15000,
-      'Loading user profile'
-    );
-    return snap.exists() ? snap.data() : null;
-  } catch (error) {
-    if (isFirestoreQuotaExceededError(error)) {
-      notifyFirestoreQuotaExceeded();
-      console.warn(`Firestore quota reached loading profile (${path}); falling back to local cache.`);
-      throw error;
-    }
-    if (isTransientFirestoreNetworkError(error)) {
-      // Try Firestore IndexedDB local cache first before falling back to AppContext local/SW cache
-      try {
-        const cachedSnap = await getDocFromCache(userRef);
-        if (cachedSnap.exists()) {
-          return cachedSnap.data();
-        }
-      } catch {
-        // Not in Firestore local cache yet; let AppContext hydrate from localStorage/SW cache
-      }
-      const msg = error instanceof Error ? error.message : String(error);
-      console.warn(`Transient network delay loading profile (${path}): ${msg}; falling back to local cache.`);
-      throw error;
-    }
-    handleFirestoreError(error, OperationType.GET, path);
+// =========================================================================
+// SHARED USER PROFILE CACHE + REF-COUNTED LISTENER DEDUPLICATION
+// Eliminates redundant getDoc(users/{uid}) reads and duplicate onSnapshot streams.
+// =========================================================================
+const USER_PROFILE_CACHE_TTL_MS = 60_000;
+const USER_PROFILE_CACHE_MAX = 250;
+const userProfileMemoryCache = new Map<string, { data: any; expiresAt: number }>();
+const inflightUserProfileFetches = new Map<string, Promise<any>>();
+const sharedUserDocListeners = new Map<
+  string,
+  {
+    unsub: () => void;
+    subscribers: Set<(data: Record<string, any> | null) => void>;
+    lastSnapshot?: Record<string, any> | null;
+    hasSnapshot: boolean;
   }
+>();
+
+const firestoreReadStats = {
+  userProfileCacheHits: 0,
+  userProfileNetworkReads: 0,
+  dedupedListenerSubscriptions: 0,
+};
+
+export function getFirestoreOptimizationStats() {
+  return {
+    ...firestoreReadStats,
+    cachedProfiles: userProfileMemoryCache.size,
+    activeSharedUserListeners: sharedUserDocListeners.size,
+  };
+}
+
+function cacheUserProfile(userId: string, data: any): void {
+  if (!userId || !data) return;
+  if (userProfileMemoryCache.size >= USER_PROFILE_CACHE_MAX && !userProfileMemoryCache.has(userId)) {
+    const oldest = userProfileMemoryCache.keys().next().value;
+    if (oldest !== undefined) userProfileMemoryCache.delete(oldest);
+  }
+  userProfileMemoryCache.set(userId, {
+    data,
+    expiresAt: Date.now() + USER_PROFILE_CACHE_TTL_MS,
+  });
+}
+
+export function invalidateUserProfileCache(userId?: string): void {
+  if (!userId) {
+    userProfileMemoryCache.clear();
+    return;
+  }
+  userProfileMemoryCache.delete(userId);
 }
 
 /**
- * Real-time Listener for User Profile
+ * Fetch User Profile from Firestore (with 60s TTL cache + in-flight deduplication).
+ */
+export async function getUserProfileFromFirestore(
+  userId: string,
+  options?: { forceRefresh?: boolean }
+) {
+  const path = `users/${userId}`;
+  if (!options?.forceRefresh) {
+    const cached = userProfileMemoryCache.get(userId);
+    if (cached && Date.now() < cached.expiresAt) {
+      firestoreReadStats.userProfileCacheHits += 1;
+      return cached.data;
+    }
+    const inflight = inflightUserProfileFetches.get(userId);
+    if (inflight) {
+      firestoreReadStats.userProfileCacheHits += 1;
+      return inflight;
+    }
+  }
+
+  const userRef = doc(db, 'users', userId);
+  const fetchTask = (async () => {
+    try {
+      firestoreReadStats.userProfileNetworkReads += 1;
+      const snap = await withFirestoreTimeout(
+        getDoc(userRef),
+        15000,
+        'Loading user profile'
+      );
+      const data = snap.exists() ? snap.data() : null;
+      if (data) cacheUserProfile(userId, data);
+      return data;
+    } catch (error) {
+      if (isFirestoreQuotaExceededError(error)) {
+        notifyFirestoreQuotaExceeded();
+        console.warn(`Firestore quota reached loading profile (${path}); falling back to local cache.`);
+        throw error;
+      }
+      if (isTransientFirestoreNetworkError(error)) {
+        // Try Firestore IndexedDB local cache first before falling back to AppContext local/SW cache
+        try {
+          const cachedSnap = await getDocFromCache(userRef);
+          if (cachedSnap.exists()) {
+            const cachedData = cachedSnap.data();
+            cacheUserProfile(userId, cachedData);
+            return cachedData;
+          }
+        } catch {
+          // Not in Firestore local cache yet; let AppContext hydrate from localStorage/SW cache
+        }
+        const msg = error instanceof Error ? error.message : String(error);
+        console.warn(`Transient network delay loading profile (${path}): ${msg}; falling back to local cache.`);
+        throw error;
+      }
+      handleFirestoreError(error, OperationType.GET, path);
+    } finally {
+      inflightUserProfileFetches.delete(userId);
+    }
+  })();
+
+  inflightUserProfileFetches.set(userId, fetchTask);
+  return fetchTask;
+}
+
+function attachSharedUserDocListener(
+  userId: string,
+  onUpdate: (data: Record<string, any> | null) => void,
+  onError: (error: any) => void
+): () => void {
+  let entry = sharedUserDocListeners.get(userId);
+  if (entry) {
+    firestoreReadStats.dedupedListenerSubscriptions += 1;
+    entry.subscribers.add(onUpdate);
+    if (entry.hasSnapshot) {
+      try {
+        onUpdate(entry.lastSnapshot ?? null);
+      } catch {
+        // ignore subscriber callback error
+      }
+    }
+  } else {
+    const subscribers = new Set<(data: Record<string, any> | null) => void>([onUpdate]);
+    entry = {
+      subscribers,
+      hasSnapshot: false,
+      lastSnapshot: null,
+      unsub: () => {},
+    };
+    const currentEntry = entry;
+    currentEntry.unsub = onSnapshot(
+      doc(db, 'users', userId),
+      (snap) => {
+        const payload = snap.exists() ? ({ id: snap.id, ...snap.data() } as Record<string, any>) : null;
+        if (payload) cacheUserProfile(userId, payload);
+        currentEntry.lastSnapshot = payload;
+        currentEntry.hasSnapshot = true;
+        currentEntry.subscribers.forEach((cb) => {
+          try {
+            cb(payload);
+          } catch {
+            // ignore subscriber error
+          }
+        });
+      },
+      (error) => {
+        onError(error);
+      }
+    );
+    sharedUserDocListeners.set(userId, currentEntry);
+  }
+
+  let unsubscribed = false;
+  return () => {
+    if (unsubscribed) return;
+    unsubscribed = true;
+    const active = sharedUserDocListeners.get(userId);
+    if (!active) return;
+    active.subscribers.delete(onUpdate);
+    if (active.subscribers.size === 0) {
+      sharedUserDocListeners.delete(userId);
+      try {
+        active.unsub();
+      } catch {
+        // ignore cleanup error
+      }
+    }
+  };
+}
+
+/**
+ * Real-time Listener for User Profile (deduplicated per UID via ref-counted registry).
  */
 export function subscribeToUserProfile(userId: string, onUpdate: (data: any) => void) {
   const path = `users/${userId}`;
-  return onSnapshot(
-    doc(db, 'users', userId),
-    (snap) => {
-      if (snap.exists()) {
-        onUpdate(snap.data());
-      }
+  return attachSharedUserDocListener(
+    userId,
+    (data) => {
+      if (data) onUpdate(data);
     },
     (error) => {
       handleSnapshotListenerError(error, OperationType.GET, path);
@@ -1022,7 +1170,7 @@ export function subscribeToUserProfile(userId: string, onUpdate: (data: any) => 
 }
 
 /**
- * Safe real-time Listener for viewing another user's public Firestore profile
+ * Safe real-time Listener for viewing another user's public Firestore profile (deduplicated per UID).
  */
 export function subscribeToPublicUserProfile(
   userId: string,
@@ -1032,11 +1180,9 @@ export function subscribeToPublicUserProfile(
   if (!cleanId || !FIRESTORE_VALID_ID_RE.test(cleanId) || cleanId.startsWith('user_') || isFirestoreQuotaExceeded()) {
     return () => {};
   }
-  return onSnapshot(
-    doc(db, 'users', cleanId),
-    (snap) => {
-      onUpdate(snap.exists() ? ({ id: snap.id, ...snap.data() } as Record<string, any>) : null);
-    },
+  return attachSharedUserDocListener(
+    cleanId,
+    onUpdate,
     (error) => {
       if (isFirestoreQuotaExceededError(error)) {
         notifyFirestoreQuotaExceeded();

@@ -1,4 +1,5 @@
 import { Gift } from '../types';
+import { smartNetworkService } from './smartNetworkService';
 
 /**
  * Persistent On-Device Gift Media Cache (IndexedDB + In-Memory Blob URL Registry).
@@ -99,19 +100,13 @@ function openCacheDb(): Promise<IDBDatabase | null> {
 }
 
 /**
- * Detects constrained/weak mobile networks so background pre-warming yields
- * gracefully to live voice/video streams instead of saturating bandwidth.
+ * Detects constrained/weak mobile networks via SmartNetworkService (real RTT,
+ * measured throughput, Agora/WebRTC quality, Save-Data, and offline state)
+ * so background pre-warming yields to live voice/video streams.
  */
 export function isWeakNetworkConnection(): boolean {
-  if (typeof navigator === 'undefined') return false;
-  if (navigator.onLine === false) return true;
-  const conn = (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection;
-  if (!conn) return false;
-  if (conn.saveData === true) return true;
-  const eff = String(conn.effectiveType || '').toLowerCase();
-  if (eff === 'slow-2g' || eff === '2g' || eff === '3g') return true;
-  if (typeof conn.downlink === 'number' && conn.downlink > 0 && conn.downlink < 1.5) return true;
-  return false;
+  const tier = smartNetworkService.getTier();
+  return tier === 'weak_4g' || tier === 'very_weak' || tier === 'offline';
 }
 
 /**

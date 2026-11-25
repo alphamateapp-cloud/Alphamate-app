@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { PullToRefresh } from './components/common/PullToRefresh';
@@ -9,28 +9,72 @@ import { extractPartyRoomIdFromUrl } from './utils/partyDeepLink';
 import { DeviceFrame } from './components/layout/DeviceFrame';
 import { SplashScreen } from './screens/SplashScreen';
 import { WelcomeScreen } from './screens/WelcomeScreen';
-import { RegisterScreen } from './screens/RegisterScreen';
-import { SignInScreen } from './screens/SignInScreen';
 import { HomeScreen } from './screens/HomeScreen';
-import { LiveStreamScreen } from './screens/LiveStreamScreen';
-import { PKBattleScreen } from './screens/PKBattleScreen';
-import { PartyRoomsScreen } from './screens/PartyRoomsScreen';
-import { ChatScreen } from './screens/ChatScreen';
-import { VideoUploadScreen } from './screens/VideoUploadScreen';
-import { UserProfileScreen } from './screens/UserProfileScreen';
-import { WalletScreen } from './screens/WalletScreen';
-import { LevelSystemScreen } from './screens/LevelSystemScreen';
-import { NotificationsScreen } from './screens/NotificationsScreen';
-import { SearchScreen } from './screens/SearchScreen';
-import { SettingsScreen } from './screens/SettingsScreen';
-import { MomentsScreen } from './screens/MomentsScreen';
-import { StoreScreen } from './screens/StoreScreen';
-import { AdminDashboard } from './screens/AdminDashboard';
-import { AgencyManagementScreen } from './screens/AgencyManagementScreen';
-import { PrivacyPolicyScreen } from './screens/PrivacyPolicyScreen';
-import { TermsConditionsScreen } from './screens/TermsConditionsScreen';
-import { DeleteAccountScreen } from './screens/DeleteAccountScreen';
-import { AccountRecoveryScreen } from './screens/AccountRecoveryScreen';
+
+// Code-split secondary & heavy screens so initial boot only parses Splash/Welcome/Home
+const RegisterScreen = lazy(() =>
+  import('./screens/RegisterScreen').then((m) => ({ default: m.RegisterScreen }))
+);
+const SignInScreen = lazy(() =>
+  import('./screens/SignInScreen').then((m) => ({ default: m.SignInScreen }))
+);
+const LiveStreamScreen = lazy(() =>
+  import('./screens/LiveStreamScreen').then((m) => ({ default: m.LiveStreamScreen }))
+);
+const PKBattleScreen = lazy(() =>
+  import('./screens/PKBattleScreen').then((m) => ({ default: m.PKBattleScreen }))
+);
+const PartyRoomsScreen = lazy(() =>
+  import('./screens/PartyRoomsScreen').then((m) => ({ default: m.PartyRoomsScreen }))
+);
+const ChatScreen = lazy(() =>
+  import('./screens/ChatScreen').then((m) => ({ default: m.ChatScreen }))
+);
+const VideoUploadScreen = lazy(() =>
+  import('./screens/VideoUploadScreen').then((m) => ({ default: m.VideoUploadScreen }))
+);
+const UserProfileScreen = lazy(() =>
+  import('./screens/UserProfileScreen').then((m) => ({ default: m.UserProfileScreen }))
+);
+const WalletScreen = lazy(() =>
+  import('./screens/WalletScreen').then((m) => ({ default: m.WalletScreen }))
+);
+const LevelSystemScreen = lazy(() =>
+  import('./screens/LevelSystemScreen').then((m) => ({ default: m.LevelSystemScreen }))
+);
+const NotificationsScreen = lazy(() =>
+  import('./screens/NotificationsScreen').then((m) => ({ default: m.NotificationsScreen }))
+);
+const SearchScreen = lazy(() =>
+  import('./screens/SearchScreen').then((m) => ({ default: m.SearchScreen }))
+);
+const SettingsScreen = lazy(() =>
+  import('./screens/SettingsScreen').then((m) => ({ default: m.SettingsScreen }))
+);
+const MomentsScreen = lazy(() =>
+  import('./screens/MomentsScreen').then((m) => ({ default: m.MomentsScreen }))
+);
+const StoreScreen = lazy(() =>
+  import('./screens/StoreScreen').then((m) => ({ default: m.StoreScreen }))
+);
+const AdminDashboard = lazy(() =>
+  import('./screens/AdminDashboard').then((m) => ({ default: m.AdminDashboard }))
+);
+const AgencyManagementScreen = lazy(() =>
+  import('./screens/AgencyManagementScreen').then((m) => ({ default: m.AgencyManagementScreen }))
+);
+const PrivacyPolicyScreen = lazy(() =>
+  import('./screens/PrivacyPolicyScreen').then((m) => ({ default: m.PrivacyPolicyScreen }))
+);
+const TermsConditionsScreen = lazy(() =>
+  import('./screens/TermsConditionsScreen').then((m) => ({ default: m.TermsConditionsScreen }))
+);
+const DeleteAccountScreen = lazy(() =>
+  import('./screens/DeleteAccountScreen').then((m) => ({ default: m.DeleteAccountScreen }))
+);
+const AccountRecoveryScreen = lazy(() =>
+  import('./screens/AccountRecoveryScreen').then((m) => ({ default: m.AccountRecoveryScreen }))
+);
 import { BottomNavigation } from './components/navigation/BottomNavigation';
 import { pushService } from './services/pushNotificationService';
 import { keepScreenAwake } from './services/keepScreenAwake';
@@ -370,6 +414,12 @@ const NativePlatformBridge: React.FC = () => {
   return null;
 };
 
+const ScreenRouteFallback: React.FC = () => (
+  <div className="w-full h-full min-h-[100dvh] bg-[#F5F3FA] dark:bg-[#09070F] flex items-center justify-center">
+    <div className="w-8 h-8 rounded-full border-2 border-purple-500/30 border-t-purple-500 animate-spin" />
+  </div>
+);
+
 const AppContent: React.FC = () => {
   const {
     currentScreen,
@@ -382,55 +432,74 @@ const AppContent: React.FC = () => {
 
   // Admin Dashboard mode
   if (deviceMode === 'admin') {
-    return <AdminDashboard />;
+    return (
+      <Suspense fallback={<ScreenRouteFallback />}>
+        <AdminDashboard />
+      </Suspense>
+    );
   }
 
   // Public & legal full-screen views without bottom navigation
-  switch (currentScreen) {
-    case 'splash':
-      return <SplashScreen />;
-    case 'welcome':
-      return <WelcomeScreen />;
-    case 'register':
-      return <RegisterScreen />;
-    case 'signin':
-      return <SignInScreen />;
-    case 'privacy_policy':
-      return <PrivacyPolicyScreen />;
-    case 'terms_conditions':
-      return <TermsConditionsScreen />;
-    case 'delete_account':
-      return <DeleteAccountScreen />;
-    case 'account_recovery':
-      return <AccountRecoveryScreen />;
-    case 'live_stream':
-      return <LiveStreamScreen />;
-    case 'pk_battle':
-      return <PKBattleScreen />;
-    case 'wallet':
-      return <WalletScreen />;
-    case 'levels':
-      return <LevelSystemScreen />;
-    case 'notifications':
-      return <NotificationsScreen />;
-    case 'search':
-      return <SearchScreen />;
-    case 'settings':
-      return <SettingsScreen />;
-    case 'agency_management':
-      return <AgencyManagementScreen />;
-    default:
-      break;
+  const renderFullScreenRoute = () => {
+    switch (currentScreen) {
+      case 'splash':
+        return <SplashScreen />;
+      case 'welcome':
+        return <WelcomeScreen />;
+      case 'register':
+        return <RegisterScreen />;
+      case 'signin':
+        return <SignInScreen />;
+      case 'privacy_policy':
+        return <PrivacyPolicyScreen />;
+      case 'terms_conditions':
+        return <TermsConditionsScreen />;
+      case 'delete_account':
+        return <DeleteAccountScreen />;
+      case 'account_recovery':
+        return <AccountRecoveryScreen />;
+      case 'live_stream':
+        return <LiveStreamScreen />;
+      case 'pk_battle':
+        return <PKBattleScreen />;
+      case 'wallet':
+        return <WalletScreen />;
+      case 'levels':
+        return <LevelSystemScreen />;
+      case 'notifications':
+        return <NotificationsScreen />;
+      case 'search':
+        return <SearchScreen />;
+      case 'settings':
+        return <SettingsScreen />;
+      case 'agency_management':
+        return <AgencyManagementScreen />;
+      default:
+        return null;
+    }
+  };
+
+  const fullScreenElement = renderFullScreenRoute();
+  if (fullScreenElement) {
+    return <Suspense fallback={<ScreenRouteFallback />}>{fullScreenElement}</Suspense>;
   }
 
   // Inside party room full screen
   if (currentScreen === 'party_room' || activePartyRoom !== null) {
-    return <PartyRoomsScreen />;
+    return (
+      <Suspense fallback={<ScreenRouteFallback />}>
+        <PartyRoomsScreen />
+      </Suspense>
+    );
   }
 
   // Inside direct chat full screen
   if (currentScreen === 'chat_conversation' || activeConversation !== null) {
-    return <ChatScreen />;
+    return (
+      <Suspense fallback={<ScreenRouteFallback />}>
+        <ChatScreen />
+      </Suspense>
+    );
   }
 
   // Main navigation tab views with fixed bottom navigation
@@ -451,17 +520,19 @@ const AppContent: React.FC = () => {
             onRefresh={() => refreshScope()}
           />
         )}
-        {currentScreen === 'home' && <HomeScreen />}
-        {currentScreen === 'party' && (
-          <ModerationGuard scope="party">
-            <PartyRoomsScreen />
-          </ModerationGuard>
-        )}
-        {currentScreen === 'moments' && <MomentsScreen />}
-        {currentScreen === 'store' && <StoreScreen />}
-        {currentScreen === 'upload' && <VideoUploadScreen />}
-        {currentScreen === 'chat' && <ChatScreen />}
-        {currentScreen === 'profile' && <UserProfileScreen />}
+        <Suspense fallback={<ScreenRouteFallback />}>
+          {currentScreen === 'home' && <HomeScreen />}
+          {currentScreen === 'party' && (
+            <ModerationGuard scope="party">
+              <PartyRoomsScreen />
+            </ModerationGuard>
+          )}
+          {currentScreen === 'moments' && <MomentsScreen />}
+          {currentScreen === 'store' && <StoreScreen />}
+          {currentScreen === 'upload' && <VideoUploadScreen />}
+          {currentScreen === 'chat' && <ChatScreen />}
+          {currentScreen === 'profile' && <UserProfileScreen />}
+        </Suspense>
       </div>
 
       {/* Fixed Bottom Navigation (Home, Party, Upload, Chat, Me) */}

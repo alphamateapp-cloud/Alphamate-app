@@ -97,24 +97,42 @@ class GiftSoundEngine {
     }
   }
 
+  private externalCtx: AudioContext | null = null;
+  private externalOutput: AudioNode | null = null;
+
+  /**
+   * Shares the primary unlocked AudioContext & output node from GiftAudioManager
+   * so the app maintains ONE unified Web Audio graph across every room & gift cue.
+   */
+  public bindExternalAudioGraph(ctx: AudioContext, outputNode: AudioNode): void {
+    this.externalCtx = ctx;
+    this.externalOutput = outputNode;
+    this.unlocked = ctx.state === 'running';
+  }
+
   private getAudioContext(): AudioContext | null {
     if (typeof window === 'undefined') return null;
+    if (this.externalCtx && this.externalCtx.state !== 'closed') {
+      return this.externalCtx;
+    }
     try {
-      if (!this.ctx) {
+      if (!this.ctx || this.ctx.state === 'closed') {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         if (AudioCtx) {
           this.ctx = new AudioCtx();
+          this.compressor = null;
+          this.masterGain = null;
         }
       }
       if (this.ctx && (!this.compressor || !this.masterGain)) {
         const comp = this.ctx.createDynamicsCompressor();
-        comp.threshold.setValueAtTime(-16, this.ctx.currentTime);
-        comp.knee.setValueAtTime(18, this.ctx.currentTime);
+        comp.threshold.setValueAtTime(-12, this.ctx.currentTime);
+        comp.knee.setValueAtTime(16, this.ctx.currentTime);
         comp.ratio.setValueAtTime(5, this.ctx.currentTime);
         comp.connect(this.ctx.destination);
 
         const gain = this.ctx.createGain();
-        gain.gain.setValueAtTime(1, this.ctx.currentTime);
+        gain.gain.setValueAtTime(1.65, this.ctx.currentTime);
         gain.connect(comp);
 
         this.compressor = comp;
@@ -133,20 +151,26 @@ class GiftSoundEngine {
       if (ctx.state === 'suspended') {
         await Promise.race([
           ctx.resume(),
-          new Promise<void>((resolve) => setTimeout(resolve, 220)),
+          new Promise<void>((resolve) => setTimeout(resolve, 320)),
         ]);
       }
-      if (this.masterGain) {
-        const clamped = Math.max(0.05, Math.min(1.2, volumeScale));
+      if (ctx.state !== 'running') {
+        return null;
+      }
+      if (!this.externalCtx && this.masterGain) {
+        const clamped = Math.max(0.2, Math.min(2.2, volumeScale * 1.65));
         this.masterGain.gain.setValueAtTime(clamped, ctx.currentTime);
       }
       return ctx;
     } catch {
-      return ctx;
+      return ctx.state === 'running' ? ctx : null;
     }
   }
 
   private getOutputNode(ctx: AudioContext): AudioNode {
+    if (this.externalCtx === ctx && this.externalOutput) {
+      return this.externalOutput;
+    }
     return this.masterGain || this.compressor || ctx.destination;
   }
 
@@ -197,8 +221,20 @@ class GiftSoundEngine {
 
   public play(animationType: string, volumeScale = 1) {
     if (this.isMuted) return;
-    void this.ensureRunningContext(volumeScale).then((ctx) => {
-      if (!ctx || this.isMuted) return;
+    const runCue = (ctx: AudioContext) => {
+      if (!ctx || this.isMuted || ctx.state !== 'running') return;
+      // Wrap each synth cue in a clean per-cue boost gain so SFX cut clearly over mobile speakers
+      const cueBoost = ctx.createGain();
+      const clampedBoost = Math.max(0.25, Math.min(2.2, volumeScale * 1.75));
+      cueBoost.gain.setValueAtTime(clampedBoost, ctx.currentTime);
+      cueBoost.connect(this.getOutputNode(ctx));
+      const prevExternal = this.externalOutput;
+      const prevMaster = this.masterGain;
+      if (this.externalCtx === ctx) {
+        this.externalOutput = cueBoost;
+      } else {
+        this.masterGain = cueBoost;
+      }
       try {
         switch (animationType) {
           case 'heart':
@@ -230,7 +266,29 @@ class GiftSoundEngine {
         }
       } catch {
         // Audio autoplay policy or browser restriction
+      } finally {
+        if (this.externalCtx === ctx) {
+          this.externalOutput = prevExternal;
+        } else {
+          this.masterGain = prevMaster;
+        }
+        window.setTimeout(() => {
+          try {
+            cueBoost.disconnect();
+          } catch {
+            // ignore
+          }
+        }, 2600);
       }
+    };
+
+    const existingCtx = this.getAudioContext();
+    if (existingCtx && existingCtx.state === 'running') {
+      runCue(existingCtx);
+      return;
+    }
+    void this.ensureRunningContext(volumeScale).then((ctx) => {
+      if (ctx) runCue(ctx);
     });
   }
 
@@ -673,6 +731,91 @@ class GiftSoundEngine {
       } catch {
         // Fail gracefully if Web Audio is blocked prior to user interaction
       }
+    });
+  }
+  /**
+   * Subtle, tactile 'pop-in' glass-bubble UI sound effect triggered whenever
+   * a user takes an empty seat in a Party Room.
+   * Layered soft upward pitch-pop sine body + gentle lowpass-filtered crystal overtone.
+   */
+  public playSeatPopIn(volumeScale = 0.72) {
+    if (this.isMuted) return;
+
+    const triggerPop = (ctx: AudioContext) => {
+      if (!ctx || this.isMuted || ctx.state !== 'running') return;
+      try {
+        const now = ctx.currentTime;
+        const level = Math.max(0.15, Math.min(1.2, volumeScale));
+
+        // Master subtle output gain for the pop-in cue
+        const cueGain = ctx.createGain();
+        cueGain.gain.setValueAtTime(level, now);
+        cueGain.connect(this.getOutputNode(ctx));
+
+        // 1. Primary soft bubble pop-in body (smooth upward pitch glide, zero harsh click)
+        const popOsc = ctx.createOscillator();
+        const popEnv = ctx.createGain();
+        popOsc.type = 'sine';
+        popOsc.frequency.setValueAtTime(290, now);
+        popOsc.frequency.exponentialRampToValueAtTime(640, now + 0.055);
+        popOsc.frequency.exponentialRampToValueAtTime(540, now + 0.115);
+
+        popEnv.gain.setValueAtTime(0.0008, now);
+        popEnv.gain.linearRampToValueAtTime(0.24, now + 0.01);
+        popEnv.gain.exponentialRampToValueAtTime(0.0008, now + 0.13);
+
+        popOsc.connect(popEnv);
+        popEnv.connect(cueGain);
+        popOsc.start(now);
+        popOsc.stop(now + 0.145);
+
+        // 2. Delicate warm crystal overtone sparkle tail
+        const shimmerOsc = ctx.createOscillator();
+        const shimmerFilter = ctx.createBiquadFilter();
+        const shimmerEnv = ctx.createGain();
+        const shimmerStart = now + 0.018;
+
+        shimmerOsc.type = 'triangle';
+        shimmerOsc.frequency.setValueAtTime(1046.5, shimmerStart); // C6
+        shimmerOsc.frequency.exponentialRampToValueAtTime(1318.51, shimmerStart + 0.075); // E6
+
+        shimmerFilter.type = 'lowpass';
+        shimmerFilter.frequency.setValueAtTime(3200, shimmerStart);
+
+        shimmerEnv.gain.setValueAtTime(0.0008, shimmerStart);
+        shimmerEnv.gain.linearRampToValueAtTime(0.085, shimmerStart + 0.012);
+        shimmerEnv.gain.exponentialRampToValueAtTime(0.0008, shimmerStart + 0.115);
+
+        shimmerOsc.connect(shimmerFilter);
+        shimmerFilter.connect(shimmerEnv);
+        shimmerEnv.connect(cueGain);
+        shimmerOsc.start(shimmerStart);
+        shimmerOsc.stop(shimmerStart + 0.13);
+
+        window.setTimeout(() => {
+          try {
+            popOsc.disconnect();
+            popEnv.disconnect();
+            shimmerOsc.disconnect();
+            shimmerFilter.disconnect();
+            shimmerEnv.disconnect();
+            cueGain.disconnect();
+          } catch {
+            // ignore cleanup errors
+          }
+        }, 260);
+      } catch {
+        // Fail gracefully if Web Audio is unavailable
+      }
+    };
+
+    const existingCtx = this.getAudioContext();
+    if (existingCtx && existingCtx.state === 'running') {
+      triggerPop(existingCtx);
+      return;
+    }
+    void this.ensureRunningContext(volumeScale).then((ctx) => {
+      if (ctx) triggerPop(ctx);
     });
   }
 }

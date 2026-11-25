@@ -43,6 +43,11 @@ public class MainActivity extends BridgeActivity {
                 WebView webView = this.bridge.getWebView();
                 WebSettings settings = webView.getSettings();
                 settings.setMediaPlaybackRequiresUserGesture(false);
+                settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+                settings.setDomStorageEnabled(true);
+                settings.setDatabaseEnabled(true);
+                settings.setLoadsImagesAutomatically(true);
+                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null);
                 webView.setBackgroundColor(ALPHA_MATE_DARK_BG);
             }
         } catch (Exception ignored) {

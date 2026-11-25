@@ -284,7 +284,7 @@ export const ALPHA_MATE_10_ANIMATED_GIFTS: UnifiedGiftConfig[] = ALPHA_MATE_10_G
     scale: 1,
     priority: seed.priority,
     enableParticles: true,
-    enableSound: seed.hasAudio,
+    enableSound: true,
     edgeFeather: true,
     blendMode: 'normal',
     status: 'published',

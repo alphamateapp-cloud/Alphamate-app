@@ -12,6 +12,12 @@ import agoraTokenPkg from 'agora-token';
 import { registerGiftMediaRoutes } from './server-gift-media.js';
 import { registerGeminiRoutes } from './server-gemini.js';
 import { registerMusicRoutes } from './server-music.js';
+import {
+  createCompressionMiddleware,
+  createPerformanceMetricsMiddleware,
+  getBackendPerformanceSnapshot,
+  serverCache,
+} from './server-cache.js';
 
 const { RtcTokenBuilder, RtcRole } = agoraTokenPkg;
 
@@ -110,6 +116,9 @@ export function createApiApp() {
     .map((v) => v.trim())
     .filter(Boolean);
 
+  app.disable('x-powered-by');
+  app.use(createPerformanceMetricsMiddleware());
+  app.use(createCompressionMiddleware({ threshold: 1024 }));
   app.use(express.json({ limit: '1mb' }));
 
   app.use((req, res, next) => {
@@ -129,6 +138,15 @@ export function createApiApp() {
     res.header('Vary', 'Origin');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Content-Length, Accept, Authorization, X-Upload-Id, X-Chunk-Index');
+    if (
+      req.path.startsWith('/api/auth/') ||
+      req.path.startsWith('/api/agora/') ||
+      req.path.startsWith('/api/sfu/') ||
+      req.path.startsWith('/api/webrtc/') ||
+      req.path.startsWith('/api/account/')
+    ) {
+      res.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    }
     if (req.method === 'OPTIONS') return res.sendStatus(204);
     next();
   });
@@ -515,7 +533,11 @@ export function createApiApp() {
       }
       const forceFresh = req.query?.fresh === '1' || req.query?.fresh === 'true';
       const report = await validateSystemHealth(forceFresh);
-      return res.json(report);
+      res.setHeader('Cache-Control', 'public, max-age=15, stale-while-revalidate=45');
+      return res.json({
+        ...report,
+        performance: getBackendPerformanceSnapshot(),
+      });
     } catch (error) {
       console.error('[Health] Probe failed:', error);
       return res.status(500).json({
@@ -529,8 +551,26 @@ export function createApiApp() {
     }
   });
 
+  function decodeJwtExpMs(jwtToken) {
+    try {
+      const parts = String(jwtToken || '').split('.');
+      if (parts.length !== 3) return null;
+      const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+      return typeof payload?.exp === 'number' ? payload.exp * 1000 : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function verifyFirebaseIdToken(idToken) {
     if (!FIREBASE_API_KEY) throw new Error('FIREBASE_API_KEY is not configured on the backend server.');
+    const tokenHash = crypto.createHash('sha256').update(String(idToken)).digest('base64url').slice(0, 32);
+    const cacheKey = `fb_idtoken:${tokenHash}`;
+    const cachedUser = serverCache.getSync(cacheKey);
+    if (cachedUser) {
+      return cachedUser;
+    }
+
     const response = await fetchWithTimeout(
       `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
       {
@@ -543,7 +583,19 @@ export function createApiApp() {
     if (!response.ok) return null;
     const data = await response.json();
     const user = data.users?.[0];
-    return user?.localId ? { uid: user.localId, email: user.email || null, emailVerified: !!user.emailVerified } : null;
+    const verified = user?.localId
+      ? { uid: user.localId, email: user.email || null, emailVerified: !!user.emailVerified }
+      : null;
+
+    if (verified) {
+      const jwtExpMs = decodeJwtExpMs(idToken);
+      const remainingMs = jwtExpMs ? Math.max(0, jwtExpMs - Date.now() - 5000) : 45_000;
+      const ttlMs = Math.min(45_000, remainingMs);
+      if (ttlMs >= 2000) {
+        serverCache.setSync(cacheKey, verified, ttlMs);
+      }
+    }
+    return verified;
   }
 
   async function requireFirebaseAuth(req, res, next) {
@@ -910,29 +962,32 @@ export function createApiApp() {
 
   app.get('/api/admin/dashboard', requireFirebaseAuth, requireAdmin, async (_req, res) => {
     try {
-      const token = await getFirestoreAdminAccessToken();
-      const parent = `projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents`;
-      const names = ['users', 'partyRooms', 'liveStreams', 'reels'];
-      const totals = await Promise.all(names.map(async (name) => {
-        try {
-          const response = await fetchWithTimeout(`https://firestore.googleapis.com/v1/${parent}:runAggregationQuery`, {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
-            body: JSON.stringify({ structuredAggregationQuery: {
-              structuredQuery: { from: [{ collectionId: name }] },
-              aggregations: [{ count: {}, alias: 'total' }],
-            } }),
-          }, 12000);
-          const result = await response.json().catch(() => ({}));
-          if (!response.ok) throw new Error(result.error?.message || `Count query failed (${response.status}).`);
-          const count = result[0]?.aggregateFields?.total?.integerValue;
-          return [name, count === undefined ? null : Number(count)];
-        } catch (error) {
-          console.warn(`[Admin API] Count unavailable for ${name}:`, error.message);
-          return [name, null];
-        }
-      }));
-      return res.json({ success: true, counts: Object.fromEntries(totals), generatedAt: new Date().toISOString(),
+      const { value: counts, cached } = await serverCache.getOrSet('admin:dashboard:counts', 30_000, async () => {
+        const token = await getFirestoreAdminAccessToken();
+        const parent = `projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents`;
+        const names = ['users', 'partyRooms', 'liveStreams', 'reels'];
+        const totals = await Promise.all(names.map(async (name) => {
+          try {
+            const response = await fetchWithTimeout(`https://firestore.googleapis.com/v1/${parent}:runAggregationQuery`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Accept: 'application/json' },
+              body: JSON.stringify({ structuredAggregationQuery: {
+                structuredQuery: { from: [{ collectionId: name }] },
+                aggregations: [{ count: {}, alias: 'total' }],
+              } }),
+            }, 12000);
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error?.message || `Count query failed (${response.status}).`);
+            const count = result[0]?.aggregateFields?.total?.integerValue;
+            return [name, count === undefined ? null : Number(count)];
+          } catch (error) {
+            console.warn(`[Admin API] Count unavailable for ${name}:`, error.message);
+            return [name, null];
+          }
+        }));
+        return Object.fromEntries(totals);
+      });
+      return res.json({ success: true, counts, cached, generatedAt: new Date().toISOString(),
         readOnly: true, note: 'Counts are read from the Alpha Mate Firestore database. Null means this collection count could not be read; it is not a fabricated zero.' });
     } catch (error) { return sendAdminError(res, error, 'dashboard'); }
   });

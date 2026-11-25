@@ -15,7 +15,8 @@ async function startServer() {
 
   const server = http.createServer(app);
   server.requestTimeout = 0;
-  server.headersTimeout = 60_000;
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
@@ -28,9 +29,12 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
+    const HASHED_ASSET_RE = /[\\/]assets[\\/][^\\/]+-[A-Za-z0-9_-]{6,}\.(?:js|css|webp|avif|jpe?g|png|svg|woff2?)$/i;
     app.use(
       express.static(path.join(__dirname, 'dist'), {
         maxAge: '1d',
+        etag: true,
+        lastModified: true,
         index: false,
         setHeaders: (res, filePath) => {
           if (
@@ -40,6 +44,10 @@ async function startServer() {
             filePath.endsWith('manifest.json')
           ) {
             res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          } else if (HASHED_ASSET_RE.test(filePath)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          } else {
+            res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
           }
         },
       })

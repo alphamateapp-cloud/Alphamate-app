@@ -3,6 +3,7 @@ import { auth } from './firebase';
 import { agoraPartyNative } from './agoraPartyNative';
 import { audioFilter, VoiceFilterPresetId } from './audioFilter';
 import type { PartyParticipantPresence } from './webrtcService';
+import { smartNetworkService } from './smartNetworkService';
 
 export type PartyProfile = {
   userId: string;
@@ -691,6 +692,7 @@ class AgoraPartyEngine {
           connectionState: this.networkStats.connectionState === 'idle' ? 'connected' : this.networkStats.connectionState,
           updatedAtMs: Date.now(),
         };
+        smartNetworkService.reportAgoraNetworkQuality(this.networkStats.txQuality, this.networkStats.rxQuality, this.networkStats.rttMs);
       }),
       await agoraPartyNative.addListener('tokenWillExpire', () => {
         void this.renewSessionToken(roomId, true);
@@ -924,6 +926,11 @@ class AgoraPartyEngine {
         connectionState: this.networkStats.connectionState === 'idle' ? 'connected' : this.networkStats.connectionState,
         updatedAtMs: Date.now(),
       };
+      smartNetworkService.reportAgoraNetworkQuality(
+        this.networkStats.txQuality,
+        this.networkStats.rxQuality,
+        this.networkStats.rttMs
+      );
     });
 
     client.on('token-privilege-will-expire', () => {
@@ -1289,8 +1296,15 @@ class AgoraPartyEngine {
   ): Promise<any> {
     if (preset === 'normal') {
       this.releaseWebRawMicStream();
+      const policy = smartNetworkService.getPolicy();
+      const adaptiveEncoderConfig =
+        policy.agoraAudioProfile === 'speech_low_quality'
+          ? 'speech_low_quality'
+          : policy.agoraAudioProfile === 'music_standard'
+          ? 'music_standard'
+          : 'speech_standard';
       return AgoraRTC.createMicrophoneAudioTrack({
-        encoderConfig: 'speech_standard',
+        encoderConfig: adaptiveEncoderConfig,
         AEC: true,
         ANS: true,
         AGC: true,

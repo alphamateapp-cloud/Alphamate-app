@@ -142,7 +142,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = React.m
         Promise.resolve(
           virtualGiftDatabase.playGiftAudio(meta, {
             comboCount: currentEvent.comboCount,
-            volume: preserveVoiceAudio ? 0.68 : undefined,
+            volume: preserveVoiceAudio ? 0.92 : 1.0,
           })
         ).catch(() => {});
       } catch {

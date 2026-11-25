@@ -5,7 +5,8 @@ import { copyToClipboard } from '../utils/clipboard';
 import { CreateStoryModal } from '../components/story/CreateStoryModal';
 import { StoryViewerModal } from '../components/story/StoryViewerModal';
 import { VerificationTicks } from '../components/badges/VerificationTicks';
-import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
+import { DEFAULT_AVATAR_URL, getThumbnailImageUrl, safeImageSrc } from '../utils/imageHd';
+import { useSmartNetworkMode } from '../services/smartNetworkService';
 import {
   Plus,
   Heart,
@@ -80,10 +81,13 @@ export const MomentsScreen: React.FC = () => {
   // Saved Videos/Posts state (persisted in session)
   const [savedVideoIds, setSavedVideoIds] = useState<Record<string, boolean>>({});
 
+  const networkMode = useSmartNetworkMode();
+  const netPolicy = networkMode.policy;
+
   // Strictly track the single currently visible moment so only its video & audio can play
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
 
-  // Video playback states (manual pause overrides per video)
+  // Video playback states (manual pause/play overrides per video)
   const [isPlayingMap, setIsPlayingMap] = useState<Record<string, boolean>>({});
   const [showPlayPauseRipple, setShowPlayPauseRipple] = useState<{ id: string; playing: boolean } | null>(null);
 
@@ -276,8 +280,14 @@ export const MomentsScreen: React.FC = () => {
     const activeEl = videoRefsMap.current.get(activeVideoId);
     if (!activeEl) return;
 
+    const manualOverride = isPlayingMap[activeVideoId];
+    const allowAutoplay = netPolicy.autoplayVideos || manualOverride === true;
     const shouldPlay =
-      !isPageHidden && !isCoveredByStory && isPlayingMap[activeVideoId] !== false;
+      !isPageHidden &&
+      !isCoveredByStory &&
+      !netPolicy.isOffline &&
+      allowAutoplay &&
+      manualOverride !== false;
 
     if (!shouldPlay) {
       activeEl.muted = true;
@@ -325,7 +335,7 @@ export const MomentsScreen: React.FC = () => {
     return () => {
       cleanupGestureUnlock?.();
     };
-  }, [activeVideoId, isPlayingMap, viewingStoryFriend, filteredVideoIdsKey]);
+  }, [activeVideoId, isPlayingMap, viewingStoryFriend, filteredVideoIdsKey, netPolicy.autoplayVideos, netPolicy.isOffline]);
 
   // Pause and mute all videos when app goes to background or when leaving MomentsScreen
   useEffect(() => {
@@ -740,8 +750,10 @@ export const MomentsScreen: React.FC = () => {
 
                       {!video.textContent && safeImageSrc(video.thumbnail) && (
                         <img
-                          src={safeImageSrc(video.thumbnail)}
+                          src={getThumbnailImageUrl(video.thumbnail, DEFAULT_AVATAR_URL)}
                           alt={video.title}
+                          loading={isActiveSlide ? 'eager' : 'lazy'}
+                          decoding="async"
                           referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
                         />
@@ -751,38 +763,63 @@ export const MomentsScreen: React.FC = () => {
                       <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/15 to-black/35 pointer-events-none" />
                     </div>
                   ) : (
-                    /* Video Element: direct sound on active slide; non-active slides stay paused & muted */
-                    <video
-                      src={safeImageSrc(video.videoUrl)}
-                      poster={safeImageSrc(video.thumbnail)}
-                      loop
-                      muted={!isActiveSlide}
-                      playsInline
-                      preload={isActiveSlide || isNextSlide ? 'auto' : isAdjacentSlide ? 'metadata' : 'none'}
-                      className="w-full h-full object-cover"
-                      onPlay={() => {
-                        if (isActiveSlide && !viewedReelIdsRef.current.has(video.id)) {
-                          viewedReelIdsRef.current.add(video.id);
-                          incrementReelViews(video.id).catch(() => {});
+                    /* Video Element: Smart Network adaptive preload; autoplay disabled on very_weak/offline */
+                    <>
+                      <video
+                        src={safeImageSrc(video.videoUrl)}
+                        poster={getThumbnailImageUrl(video.thumbnail, DEFAULT_AVATAR_URL)}
+                        loop
+                        muted={!isActiveSlide}
+                        playsInline
+                        preload={
+                          isActiveSlide
+                            ? netPolicy.activeVideoPreload
+                            : isNextSlide
+                            ? netPolicy.nextVideoPreload
+                            : 'none'
                         }
-                      }}
-                      ref={(el) => {
-                        if (el) {
-                          videoRefsMap.current.set(video.id, el);
-                          if (!isActiveSlide) {
-                            el.muted = true;
-                            if (!el.paused) el.pause();
+                        className="w-full h-full object-cover"
+                        onPlay={() => {
+                          if (isActiveSlide && !viewedReelIdsRef.current.has(video.id)) {
+                            viewedReelIdsRef.current.add(video.id);
+                            incrementReelViews(video.id).catch(() => {});
                           }
-                        } else {
-                          const prevEl = videoRefsMap.current.get(video.id);
-                          if (prevEl) {
-                            prevEl.muted = true;
-                            prevEl.pause();
+                        }}
+                        ref={(el) => {
+                          if (el) {
+                            videoRefsMap.current.set(video.id, el);
+                            if (!isActiveSlide) {
+                              el.muted = true;
+                              if (!el.paused) el.pause();
+                            }
+                          } else {
+                            const prevEl = videoRefsMap.current.get(video.id);
+                            if (prevEl) {
+                              prevEl.muted = true;
+                              prevEl.pause();
+                            }
+                            videoRefsMap.current.delete(video.id);
                           }
-                          videoRefsMap.current.delete(video.id);
-                        }
-                      }}
-                    />
+                        }}
+                      />
+                      {isActiveSlide && !netPolicy.autoplayVideos && isPlayingMap[video.id] !== true && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setIsPlayingMap((prev) => ({ ...prev, [video.id]: true }));
+                          }}
+                          className="absolute z-20 flex flex-col items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-black/65 backdrop-blur-md border border-white/20 text-white shadow-xl"
+                        >
+                          <div className="w-12 h-12 rounded-full bg-white/15 flex items-center justify-center">
+                            <Play className="w-6 h-6 text-white fill-white ml-0.5" />
+                          </div>
+                          <span className="text-xs font-semibold">
+                            {netPolicy.isOffline ? 'Offline — Cached Preview' : 'Tap to Play (Data Saver)'}
+                          </span>
+                        </button>
+                      )}
+                    </>
                   )}
 
                   {/* Measured Bottom & Top Scrims for TikTok-clean legibility without darkening the video */}

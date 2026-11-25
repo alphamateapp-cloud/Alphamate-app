@@ -1698,6 +1698,10 @@ export const PartyRoomsScreen: React.FC = () => {
         roomId: activePartyRoom.id,
       }).catch(() => {});
     }
+    const wasVipEmpty = !existingVip?.user;
+    if (wasVipEmpty) {
+      triggerSeatPopInEffect(VIP_GUEST_SEAT_INDEX, viewer.id, 0.78);
+    }
     setShowSeatActionModal(null);
     showToast(`Assigned ${viewer.displayName} to VIP 1! 👑`);
     setChatItems((prev) => [
@@ -2077,13 +2081,66 @@ export const PartyRoomsScreen: React.FC = () => {
     remoteSpeakingPeerIds,
   ]);
 
+  // Track previous seat occupancy per room so we trigger a subtle Web Audio 'pop-in'
+  // whenever any empty seat becomes occupied (without bursting on initial room load or double-playing)
+  const prevSeatOccupantsRef = useRef<{ roomId: string | null; occupants: Map<number, string | null> }>({
+    roomId: null,
+    occupants: new Map(),
+  });
+  const recentPoppedSeatsRef = useRef<Map<string, number>>(new Map());
+
+  const triggerSeatPopInEffect = useCallback((seatIndex: number, occupantId: string, volume = 0.74) => {
+    if (!isSpeakerOnRef.current) return;
+    const now = Date.now();
+    const dedupeKey = `${seatIndex}:${occupantId}`;
+    const lastPlayedAt = recentPoppedSeatsRef.current.get(dedupeKey) || 0;
+    if (now - lastPlayedAt < 1800) return;
+
+    recentPoppedSeatsRef.current.set(dedupeKey, now);
+    if (recentPoppedSeatsRef.current.size > 32) {
+      for (const [k, ts] of recentPoppedSeatsRef.current.entries()) {
+        if (now - ts > 3000) recentPoppedSeatsRef.current.delete(k);
+      }
+    }
+    void audioManager.playSeatPopIn({ volume });
+  }, []);
+
   // Keep userSeatIndex and host-locked mute/unmute state in sync with Firestore snapshot
   useEffect(() => {
-    if (!activePartyRoom?.seats) {
+    const currentRoomId = activePartyRoom?.id || null;
+    if (!currentRoomId || !activePartyRoom?.seats) {
       setUserSeatIndex(null);
       wasHostMutedRef.current = false;
+      prevSeatOccupantsRef.current = { roomId: null, occupants: new Map() };
       return;
     }
+
+    // Detect empty -> occupied transitions across normal + VIP seats for subtle pop-in SFX
+    const nextOccupants = new Map<number, string | null>();
+    for (const s of activePartyRoom.seats) {
+      nextOccupants.set(Number(s.seatIndex), s.user?.id || null);
+    }
+    if (prevSeatOccupantsRef.current.roomId === currentRoomId) {
+      let poppedInBatch = false;
+      for (const [seatIdx, nextUid] of nextOccupants.entries()) {
+        const prevUid = prevSeatOccupantsRef.current.occupants.get(seatIdx) ?? null;
+        if (!prevUid && nextUid) {
+          if (!poppedInBatch) {
+            triggerSeatPopInEffect(
+              seatIdx,
+              nextUid,
+              nextUid === effectiveUserId ? 0.76 : 0.52
+            );
+            poppedInBatch = true;
+          } else {
+            // Mark concurrent snapshot joins as seen so they don't re-trigger
+            recentPoppedSeatsRef.current.set(`${seatIdx}:${nextUid}`, Date.now());
+          }
+        }
+      }
+    }
+    prevSeatOccupantsRef.current = { roomId: currentRoomId, occupants: nextOccupants };
+
     const mySeat = activePartyRoom.seats.find((s: any) => s.user?.id === effectiveUserId);
     setUserSeatIndex(mySeat ? Number(mySeat.seatIndex) : null);
 
@@ -2097,7 +2154,7 @@ export const PartyRoomsScreen: React.FC = () => {
       agoraPartyEngine.toggleMicrophone(!nextMuted);
     }
     wasHostMutedRef.current = nowHostMuted;
-  }, [activePartyRoom?.seats, effectiveUserId]);
+  }, [activePartyRoom?.id, activePartyRoom?.seats, effectiveUserId, triggerSeatPopInEffect]);
 
   // Guest seats occupancy and dynamic upgrade eligibility
   const occupiedGuestSeatsCount = useMemo(() => {
@@ -3542,8 +3599,10 @@ export const PartyRoomsScreen: React.FC = () => {
         return;
       }
 
+      void audioManager.unlock();
       const res = await toggleSeat(seat.seatIndex);
       if (res.success) {
+        triggerSeatPopInEffect(seat.seatIndex, effectiveUserId, 0.78);
         showToast(`Joined Seat ${seat.seatIndex + 1}! 🎙️`);
       } else if (res.reason === 'IN_PROGRESS') {
         return;
@@ -4987,8 +5046,10 @@ export const PartyRoomsScreen: React.FC = () => {
                           onClick={async () => {
                             const seatIdx = targetSeat.seatIndex;
                             setShowSeatActionModal(null);
+                            void audioManager.unlock();
                             const res = await toggleSeat(seatIdx);
                             if (res.success) {
+                              triggerSeatPopInEffect(seatIdx, effectiveUserId, 0.78);
                               showToast(`Joined Seat ${seatIdx + 1}! 🎙️`);
                             } else {
                               showToast('Seat is unavailable right now.');

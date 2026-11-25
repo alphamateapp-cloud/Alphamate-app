@@ -9,6 +9,7 @@ import {
   isWeakNetworkConnection,
   resolveCachedGiftMediaUrl,
 } from '../services/giftMediaCache';
+import { smartNetworkService } from '../services/smartNetworkService';
 
 export interface UsePartyGiftAudioPreloaderOptions {
   /** Active Party Room ID; eager preloading fires immediately whenever the user enters a party room */
@@ -172,9 +173,10 @@ export function usePartyGiftAudioPreloader({
 
           if (signal.aborted) return;
 
-          // Respect weak connections so Party Voice bandwidth is never starved
-          const weakNet = isWeakNetworkConnection();
-          const remoteCap = weakNet ? Math.min(2, maxUncachedVideoTracks) : maxUncachedVideoTracks;
+          // Respect Smart Network Mode so Party Voice & mobile data are never starved
+          const netPolicy = smartNetworkService.getPolicy();
+          const weakNet = isWeakNetworkConnection() || netPolicy.tier === 'weak_4g' || netPolicy.tier === 'very_weak' || netPolicy.isOffline;
+          const remoteCap = Math.min(maxUncachedVideoTracks, netPolicy.maxUncachedGiftAudioPreloads);
           const videoAudioQueue = [
             ...cachedVideoEntries,
             ...remoteVideoEntries.slice(0, Math.max(0, remoteCap)),

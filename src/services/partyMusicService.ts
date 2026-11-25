@@ -1,5 +1,6 @@
 import { Capacitor } from '@capacitor/core';
 import type { PartyMusicTrack } from '../types';
+import { smartFetchJson } from './httpClient';
 
 export type PartyMusicSearchMode = 'all' | 'full' | 'popular';
 export type PartyMusicCategory = 'all' | 'urdu' | 'bollywood' | 'punjabi' | 'lofi' | 'pop' | 'full';
@@ -101,20 +102,12 @@ export function sanitizePartyMusicTrackForFirestore(
 }
 
 async function fetchJsonWithTimeout(url: string, timeoutMs = 7000): Promise<any> {
-  const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: { Accept: 'application/json' },
-    });
-    if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
-    }
-    return await res.json();
-  } finally {
-    window.clearTimeout(timer);
-  }
+  return smartFetchJson(url, {
+    timeoutMs,
+    cacheTtlMs: CLIENT_CACHE_TTL_MS,
+    retries: 1,
+    persistOfflineKey: url.includes('/api/music/trending') ? `music_${url.slice(-32)}` : undefined,
+  });
 }
 
 async function fallbackClientAudiusSearch(query: string, limit: number): Promise<PartyMusicTrack[]> {

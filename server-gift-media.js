@@ -454,12 +454,17 @@ export async function convertVideoToOptimizedWebm(sourcePath) {
 export function registerGiftMediaRoutes(app, { requireFirebaseAuth, requireAdmin }) {
   ensureGiftDirectoriesSync();
 
-  // Serve uploaded/converted gift media with strict content security headers
+  // Serve uploaded/converted gift media with strict content security & CDN cache headers
   app.use(
     '/uploads/gifts',
     (req, res, next) => {
       res.setHeader('X-Content-Type-Options', 'nosniff');
       res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+      if (req.path.startsWith('/converted/')) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=2592000');
+      }
       if (req.path.toLowerCase().endsWith('.svg')) {
         res.setHeader('Content-Type', 'image/svg+xml; charset=utf-8');
         res.setHeader(
@@ -474,6 +479,8 @@ export function registerGiftMediaRoutes(app, { requireFirebaseAuth, requireAdmin
     },
     express.static(GIFTS_UPLOAD_ROOT, {
       maxAge: '7d',
+      etag: true,
+      lastModified: true,
       immutable: false,
       fallthrough: true,
     })

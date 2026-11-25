@@ -1,19 +1,19 @@
 import React, { useEffect, useState } from 'react';
 import { getHdImageUrl } from '../../utils/imageHd';
 
-// 7 Featured Scenic Party Room Themes (9:16 vertical HD artwork)
-import royalCastleBg from '../../assets/images/party_bg_castle_1795427421579.jpg';
-import starryNightBg from '../../assets/images/party_bg_night_1795427421040.jpg';
-import sufiMaidenBg from '../../assets/images/party_bg_sufi_girl_1795427421174.jpg';
-import sufiCourtyardBg from '../../assets/images/party_bg_sufi_hall_1795427420974.jpg';
-import sakuraMoonBg from '../../assets/images/party_bg_sakura_1795427420873.jpg';
-import arabianPalaceBg from '../../assets/images/party_bg_arabian_1795427421310.jpg';
-import emeraldWaterfallBg from '../../assets/images/party_bg_waterfall_1795427420906.jpg';
+// 7 Featured Scenic Party Room Themes (9:16 vertical HD WebP artwork — 87% smaller than raw JPG)
+import royalCastleBg from '../../assets/images/party_bg_castle_1795427421579.webp';
+import starryNightBg from '../../assets/images/party_bg_night_1795427421040.webp';
+import sufiMaidenBg from '../../assets/images/party_bg_sufi_girl_1795427421174.webp';
+import sufiCourtyardBg from '../../assets/images/party_bg_sufi_hall_1795427420974.webp';
+import sakuraMoonBg from '../../assets/images/party_bg_sakura_1795427420873.webp';
+import arabianPalaceBg from '../../assets/images/party_bg_arabian_1795427421310.webp';
+import emeraldWaterfallBg from '../../assets/images/party_bg_waterfall_1795427420906.webp';
 
-// Classic Scenic Room Backdrops
-import sunriseGlowBg from '../../assets/images/sunrise_morning_glow_1794219060916.jpg';
-import sunsetTwilightBg from '../../assets/images/sunset_twilight_sky_1794219061964.jpg';
-import grandMosqueBg from '../../assets/images/pakistan_grand_mosque_1794219062043.jpg';
+// Classic Scenic Room Backdrops (WebP)
+import sunriseGlowBg from '../../assets/images/sunrise_morning_glow_1794219060916.webp';
+import sunsetTwilightBg from '../../assets/images/sunset_twilight_sky_1794219061964.webp';
+import grandMosqueBg from '../../assets/images/pakistan_grand_mosque_1794219062043.webp';
 
 export type PartyBackgroundTheme =
   | 'royal_castle'

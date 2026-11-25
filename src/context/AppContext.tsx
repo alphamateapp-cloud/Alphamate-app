@@ -884,6 +884,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const initialLegalScreen = getLegalScreenFromPath();
   const [currentScreen, setCurrentScreenState] = useState<ScreenType>(initialLegalScreen || 'splash');
+  const [deviceMode, setDeviceMode] = useState<'mobile' | 'responsive' | 'admin'>('mobile');
   const [screenHistory, setScreenHistory] = useState<ScreenType[]>(
     initialLegalScreen ? ['welcome', initialLegalScreen] : ['splash']
   );
@@ -1597,9 +1598,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [firebaseAuthLoading, firebaseUser?.uid, discoveryRefreshEpoch]);
 
-  // Real-time Firestore Reels & Cloudflare R2 Feed Subscription (independently refreshable for Moments)
+  // Real-time Firestore Reels & Cloudflare R2 Feed Subscription (screen-scoped: active on Moments/Upload/Admin, disposed on exit)
+  const shouldSubscribeReels =
+    deviceMode === 'admin' ||
+    currentScreen === 'moments' ||
+    currentScreen === 'upload' ||
+    currentScreen === 'admin_dashboard';
   useEffect(() => {
-    if (firebaseAuthLoading) return;
+    if (firebaseAuthLoading || !shouldSubscribeReels) return;
     const uidKey = firebaseUser?.uid || 'guest';
     const readLikedSet = (): Set<string> => {
       try {
@@ -1673,7 +1679,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return () => {
       unsubscribeReels();
     };
-  }, [firebaseAuthLoading, firebaseUser?.uid, reelsRefreshEpoch]);
+  }, [firebaseAuthLoading, firebaseUser?.uid, reelsRefreshEpoch, shouldSubscribeReels]);
 
   // =========================================================================
   // GLOBAL & WEEKLY LEADERBOARD (MONTHLY REFRESH + 1-MONTH RETENTION)
@@ -1715,7 +1721,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setPreviousMonthLeaderboardEntries(entries);
   };
 
-  // Prune leaderboard records older than 1 previous month & subscribe to current month Firestore feed
+  // Prune leaderboard records older than 1 previous month & subscribe ONLY when Leaderboard modal or Admin is open
+  // (Eliminates 200 eager Firestore reads on every cold app startup)
+  const shouldSubscribeLeaderboard =
+    showLeaderboardModal || deviceMode === 'admin' || currentScreen === 'admin_dashboard';
   useEffect(() => {
     pruneExpiredLocalLeaderboardMonths(leaderboardMonthKey, leaderboardPreviousMonthKey);
     setLocalLeaderboardOverrides(loadLocalLeaderboardOverrides(leaderboardMonthKey));
@@ -1724,18 +1733,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setFirestoreLeaderboardEntries([]);
       return;
     }
+    if (!shouldSubscribeLeaderboard) return;
 
     const unsub = subscribeToMonthlyLeaderboard(
       leaderboardMonthKey,
       (entries) => {
         setFirestoreLeaderboardEntries(entries);
       },
-      200
+      120
     );
     return () => {
       unsub();
     };
-  }, [firebaseUser?.uid, isEmailVerified, leaderboardMonthKey, leaderboardPreviousMonthKey, leaderboardRefreshEpoch]);
+  }, [
+    firebaseUser?.uid,
+    isEmailVerified,
+    leaderboardMonthKey,
+    leaderboardPreviousMonthKey,
+    leaderboardRefreshEpoch,
+    shouldSubscribeLeaderboard,
+  ]);
 
   // Active time-spent heartbeat (counts active minutes & handles automatic monthly/weekly resets)
   useEffect(() => {
@@ -2704,159 +2721,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       );
 
       secondaryUnsubs.push(
-        subscribeToGiftTransactions({ userId: uid, isAdmin }, (remoteGifts) => {
-          const normalized = remoteGifts as GiftTransactionRecord[];
-          setGiftTransactions((prev) => {
-            const remoteIds = new Set(normalized.map((g) => g.id));
-            const localDemoOnly = prev.filter((g) => !remoteIds.has(g.id) && g.id.startsWith('local_gift_'));
-            const merged = [...normalized, ...localDemoOnly];
-            try {
-              localStorage.setItem('alphamate_gift_transactions', JSON.stringify(merged.slice(0, 100)));
-            } catch {}
-            return merged;
-          });
-        })
-      );
-
-      secondaryUnsubs.push(
-        subscribeToRealUsers(
-          (usersList) => {
-            setRealUsers(usersList);
-            setRegisteredUsers(usersList);
-          },
-          undefined,
-          { maxUsers: 80, forceRefresh: userSyncRefreshEpoch > 0 }
-        )
-      );
-
-      secondaryUnsubs.push(
         subscribeToMyFollowEdges(uid, (edges) => {
           setFollowingUserIds(edges.followingIds);
           setFollowerUserIds(edges.followerIds);
         })
       );
-
-      secondaryUnsubs.push(
-        isAdmin
-          ? subscribeToAllAgencyApplications((apps) => {
-              setAgencyApplications(apps as AgencyApplication[]);
-            })
-          : subscribeToMyAgencyApplications(uid, (apps) => {
-              setAgencyApplications(apps as AgencyApplication[]);
-            })
-      );
-
-      secondaryUnsubs.push(
-        subscribeToApprovedAgencies((docs) => {
-          setApprovedAgencyDocs(docs);
-        })
-      );
-
-      secondaryUnsubs.push(
-        subscribeToAgencyTransactions({ senderUid: uid, isAdmin }, (remoteAgencyTxs) => {
-          const mapped: AgencyTransaction[] = remoteAgencyTxs.map((tx: any) => {
-            const ms = Number(tx.createdAtMs) || Date.now();
-            const dateLabel = new Date(ms).toLocaleString(undefined, {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            });
-            return {
-              id: String(tx.id),
-              type: tx.type === 'order_delivery' ? 'order_delivery' : 'direct_send',
-              agencyId: tx.agencyId,
-              agencyName: tx.agencyName,
-              agencyCode: tx.agencyCode,
-              senderUid: tx.senderUid,
-              recipientId: String(tx.recipientId || ''),
-              recipientUniqueId: String(tx.recipientUniqueId || tx.recipientId || ''),
-              recipientName: String(tx.recipientName || 'Alpha Mate User'),
-              recipientAvatar: String(tx.recipientAvatar || ''),
-              coins: Number(tx.coins) || 0,
-              previousAgencyBalance:
-                typeof tx.previousAgencyBalance === 'number' ? tx.previousAgencyBalance : undefined,
-              remainingBalance: Number(tx.remainingBalance) || 0,
-              previousRecipientCoins:
-                typeof tx.previousRecipientCoins === 'number' ? tx.previousRecipientCoins : undefined,
-              nextRecipientCoins:
-                typeof tx.nextRecipientCoins === 'number' ? tx.nextRecipientCoins : undefined,
-              timestamp: dateLabel,
-              createdAtMs: ms,
-              referenceId: tx.referenceId,
-            };
-          });
-          setAgencyTransactions(mapped);
-          try {
-            localStorage.setItem('alphamate_agency_transactions', JSON.stringify(mapped.slice(0, 100)));
-          } catch {}
-        })
-      );
-
-      secondaryUnsubs.push(
-        subscribeToUserWalletTransactions(uid, (remoteWalletTxs) => {
-          const normalized: WalletTransaction[] = remoteWalletTxs.map((tx: any) => {
-            const ms = Number(tx.createdAtMs) || Date.now();
-            const dateLabel = new Date(ms).toLocaleString(undefined, {
-              month: 'short',
-              day: 'numeric',
-              hour: '2-digit',
-              minute: '2-digit',
-            });
-            return {
-              id: String(tx.id),
-              type: (tx.type || 'recharge') as WalletTransaction['type'],
-              amount: Number(tx.amount) || 0,
-              currency: tx.currency === 'diamonds' ? 'diamonds' : 'coins',
-              walletType: tx.walletType === 'earnings' ? 'earnings' : 'gifting',
-              direction: tx.direction === 'debit' ? 'debit' : 'credit',
-              balanceBefore: typeof tx.balanceBefore === 'number' ? tx.balanceBefore : undefined,
-              balanceAfter: typeof tx.balanceAfter === 'number' ? tx.balanceAfter : undefined,
-              referenceId: tx.referenceId,
-              title: String(tx.title || 'Wallet Transaction'),
-              date: dateLabel,
-              createdAtMs: ms,
-              status: tx.status === 'pending' ? 'pending' : 'completed',
-            };
-          });
-          setTransactions((prev) => {
-            const remoteIds = new Set(normalized.map((item) => item.id));
-            const remoteRefs = new Set(normalized.map((item) => item.referenceId).filter(Boolean));
-            const localOnly = prev.filter((item) => {
-              if (remoteIds.has(item.id)) return false;
-              if (item.referenceId && remoteRefs.has(item.referenceId)) return false;
-              // Drop temporary optimistic gift placeholders once Firestore ledger arrives
-              if (item.id.startsWith('tx_gift_') || item.id.startsWith('tx_earn_')) {
-                return false;
-              }
-              return true;
-            });
-            return [...normalized, ...localOnly].sort(
-              (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
-            );
-          });
-        })
-      );
-
-      secondaryUnsubs.push(
-        subscribeToMyHostAgencyRequests(uid, (rawReqs) => {
-          const normalized = rawReqs
-            .map((r) => normalizeHostAgencyRequestDoc(r))
-            .filter((r): r is HostJoinRequest => Boolean(r));
-          setMyHostAgencyRequests(normalized);
-        })
-      );
-
-      if (isAdmin) {
-        secondaryUnsubs.push(
-          subscribeToAllHostAgencyRequests((rawReqs) => {
-            const normalized = rawReqs
-              .map((r) => normalizeHostAgencyRequestDoc(r))
-              .filter((r): r is HostJoinRequest => Boolean(r));
-            setHostJoinRequests(normalized);
-          })
-        );
-      }
     }, 300);
 
     return () => {
@@ -2873,6 +2742,217 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
     };
   }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified, userSyncRefreshEpoch, publishMergedNotifications]);
+
+  // Screen-scoped Firestore Listeners: subscribe ONLY when user opens Wallet/Agency/Directory/Admin
+  // and cleanly dispose on screen exit to slash idle Firestore document reads & mobile data usage.
+  const shouldSubscribeUserDirectory =
+    deviceMode === 'admin' ||
+    currentScreen === 'search' ||
+    currentScreen === 'chat' ||
+    currentScreen === 'chat_conversation' ||
+    currentScreen === 'admin_dashboard' ||
+    currentScreen === 'agency_management' ||
+    currentScreen === 'party_room' ||
+    currentScreen === 'live_stream' ||
+    currentScreen === 'pk_battle' ||
+    currentScreen === 'profile';
+
+  useEffect(() => {
+    if (!firebaseUser?.uid || !isEmailVerified || !shouldSubscribeUserDirectory) return;
+    return subscribeToRealUsers(
+      (usersList) => {
+        setRealUsers(usersList);
+        setRegisteredUsers(usersList);
+      },
+      undefined,
+      { maxUsers: 80, forceRefresh: userSyncRefreshEpoch > 0 }
+    );
+  }, [firebaseUser?.uid, isEmailVerified, shouldSubscribeUserDirectory, userSyncRefreshEpoch]);
+
+  const shouldSubscribeFinancialLedgers =
+    deviceMode === 'admin' ||
+    currentScreen === 'wallet' ||
+    currentScreen === 'profile' ||
+    currentScreen === 'store' ||
+    currentScreen === 'levels' ||
+    currentScreen === 'agency_management' ||
+    currentScreen === 'admin_dashboard';
+
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (!uid || !isEmailVerified || !shouldSubscribeFinancialLedgers) return;
+    const isAdmin = (firebaseUser?.email || '').toLowerCase() === 'alphamateapp@gmail.com';
+
+    const unsubGifts = subscribeToGiftTransactions({ userId: uid, isAdmin }, (remoteGifts) => {
+      const normalized = remoteGifts as GiftTransactionRecord[];
+      setGiftTransactions((prev) => {
+        const remoteIds = new Set(normalized.map((g) => g.id));
+        const localDemoOnly = prev.filter((g) => !remoteIds.has(g.id) && g.id.startsWith('local_gift_'));
+        const merged = [...normalized, ...localDemoOnly];
+        try {
+          localStorage.setItem('alphamate_gift_transactions', JSON.stringify(merged.slice(0, 100)));
+        } catch {}
+        return merged;
+      });
+    });
+
+    const unsubWallet = subscribeToUserWalletTransactions(uid, (remoteWalletTxs) => {
+      const normalized: WalletTransaction[] = remoteWalletTxs.map((tx: any) => {
+        const ms = Number(tx.createdAtMs) || Date.now();
+        const dateLabel = new Date(ms).toLocaleString(undefined, {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        return {
+          id: String(tx.id),
+          type: (tx.type || 'recharge') as WalletTransaction['type'],
+          amount: Number(tx.amount) || 0,
+          currency: tx.currency === 'diamonds' ? 'diamonds' : 'coins',
+          walletType: tx.walletType === 'earnings' ? 'earnings' : 'gifting',
+          direction: tx.direction === 'debit' ? 'debit' : 'credit',
+          balanceBefore: typeof tx.balanceBefore === 'number' ? tx.balanceBefore : undefined,
+          balanceAfter: typeof tx.balanceAfter === 'number' ? tx.balanceAfter : undefined,
+          referenceId: tx.referenceId,
+          title: String(tx.title || 'Wallet Transaction'),
+          date: dateLabel,
+          createdAtMs: ms,
+          status: tx.status === 'pending' ? 'pending' : 'completed',
+        };
+      });
+      setTransactions((prev) => {
+        const remoteIds = new Set(normalized.map((item) => item.id));
+        const remoteRefs = new Set(normalized.map((item) => item.referenceId).filter(Boolean));
+        const localOnly = prev.filter((item) => {
+          if (remoteIds.has(item.id)) return false;
+          if (item.referenceId && remoteRefs.has(item.referenceId)) return false;
+          if (item.id.startsWith('tx_gift_') || item.id.startsWith('tx_earn_')) {
+            return false;
+          }
+          return true;
+        });
+        return [...normalized, ...localOnly].sort(
+          (a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0)
+        );
+      });
+    });
+
+    return () => {
+      unsubGifts();
+      unsubWallet();
+    };
+  }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified, shouldSubscribeFinancialLedgers]);
+
+  const shouldSubscribeApprovedAgencies =
+    deviceMode === 'admin' ||
+    currentScreen === 'home' ||
+    currentScreen === 'wallet' ||
+    currentScreen === 'agency_management' ||
+    currentScreen === 'profile' ||
+    currentScreen === 'admin_dashboard';
+
+  useEffect(() => {
+    if (!firebaseUser?.uid || !isEmailVerified || !shouldSubscribeApprovedAgencies) return;
+    return subscribeToApprovedAgencies((docs) => {
+      setApprovedAgencyDocs(docs);
+    });
+  }, [firebaseUser?.uid, isEmailVerified, shouldSubscribeApprovedAgencies]);
+
+  const shouldSubscribeAgencyManagement =
+    deviceMode === 'admin' ||
+    currentScreen === 'agency_management' ||
+    currentScreen === 'wallet' ||
+    currentScreen === 'profile' ||
+    currentScreen === 'admin_dashboard';
+
+  useEffect(() => {
+    const uid = firebaseUser?.uid;
+    if (!uid || !isEmailVerified || !shouldSubscribeAgencyManagement) return;
+    const isAdmin = (firebaseUser?.email || '').toLowerCase() === 'alphamateapp@gmail.com';
+    const unsubs: Array<() => void> = [];
+
+    unsubs.push(
+      isAdmin
+        ? subscribeToAllAgencyApplications((apps) => {
+            setAgencyApplications(apps as AgencyApplication[]);
+          })
+        : subscribeToMyAgencyApplications(uid, (apps) => {
+            setAgencyApplications(apps as AgencyApplication[]);
+          })
+    );
+
+    unsubs.push(
+      subscribeToAgencyTransactions({ senderUid: uid, isAdmin }, (remoteAgencyTxs) => {
+        const mapped: AgencyTransaction[] = remoteAgencyTxs.map((tx: any) => {
+          const ms = Number(tx.createdAtMs) || Date.now();
+          const dateLabel = new Date(ms).toLocaleString(undefined, {
+            month: 'short',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          return {
+            id: String(tx.id),
+            type: tx.type === 'order_delivery' ? 'order_delivery' : 'direct_send',
+            agencyId: tx.agencyId,
+            agencyName: tx.agencyName,
+            agencyCode: tx.agencyCode,
+            senderUid: tx.senderUid,
+            recipientId: String(tx.recipientId || ''),
+            recipientUniqueId: String(tx.recipientUniqueId || tx.recipientId || ''),
+            recipientName: String(tx.recipientName || 'Alpha Mate User'),
+            recipientAvatar: String(tx.recipientAvatar || ''),
+            coins: Number(tx.coins) || 0,
+            previousAgencyBalance:
+              typeof tx.previousAgencyBalance === 'number' ? tx.previousAgencyBalance : undefined,
+            remainingBalance: Number(tx.remainingBalance) || 0,
+            previousRecipientCoins:
+              typeof tx.previousRecipientCoins === 'number' ? tx.previousRecipientCoins : undefined,
+            nextRecipientCoins:
+              typeof tx.nextRecipientCoins === 'number' ? tx.nextRecipientCoins : undefined,
+            timestamp: dateLabel,
+            createdAtMs: ms,
+            referenceId: tx.referenceId,
+          };
+        });
+        setAgencyTransactions(mapped);
+        try {
+          localStorage.setItem('alphamate_agency_transactions', JSON.stringify(mapped.slice(0, 100)));
+        } catch {}
+      })
+    );
+
+    unsubs.push(
+      subscribeToMyHostAgencyRequests(uid, (rawReqs) => {
+        const normalized = rawReqs
+          .map((r) => normalizeHostAgencyRequestDoc(r))
+          .filter((r): r is HostJoinRequest => Boolean(r));
+        setMyHostAgencyRequests(normalized);
+      })
+    );
+
+    if (isAdmin) {
+      unsubs.push(
+        subscribeToAllHostAgencyRequests((rawReqs) => {
+          const normalized = rawReqs
+            .map((r) => normalizeHostAgencyRequestDoc(r))
+            .filter((r): r is HostJoinRequest => Boolean(r));
+          setHostJoinRequests(normalized);
+        })
+      );
+    }
+
+    return () => {
+      unsubs.forEach((u) => {
+        try {
+          u();
+        } catch {
+          // ignore
+        }
+      });
+    };
+  }, [firebaseUser?.uid, firebaseUser?.email, isEmailVerified, shouldSubscribeAgencyManagement]);
 
   // Real-time Moderation State Transition Enforcement & Restoration Notifications
   useEffect(() => {
@@ -3087,9 +3167,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Search
   const [searchQuery, setSearchQuery] = useState<string>('');
-
-  // Device preview mode
-  const [deviceMode, setDeviceMode] = useState<'mobile' | 'responsive' | 'admin'>('mobile');
 
   // Custom logo from localStorage if available
   const [customLogoUrl, setCustomLogoUrlState] = useState<string | null>(() => {

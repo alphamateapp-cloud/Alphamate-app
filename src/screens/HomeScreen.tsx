@@ -8,7 +8,7 @@ import { PKComingSoonModal } from '../components/modals/PKComingSoonModal';
 import { CoinSellerAgenciesCarousel } from '../components/home/CoinSellerAgenciesCarousel';
 import { LiveStream, FriendStory } from '../types';
 import { auth, getCanonicalLiveStreamId } from '../services/firebase';
-import { DEFAULT_AVATAR_URL, safeImageSrc } from '../utils/imageHd';
+import { DEFAULT_AVATAR_URL, getThumbnailImageUrl, safeImageSrc } from '../utils/imageHd';
 import {
   Radio,
   Users,
@@ -323,8 +323,9 @@ export const HomeScreen: React.FC = () => {
               }`}
             >
               <img
-                src={safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL)}
+                src={getThumbnailImageUrl(currentUser.avatar, DEFAULT_AVATAR_URL, 160)}
                 alt={currentUser.displayName}
+                decoding="async"
                 className="w-full h-full rounded-full object-cover"
               />
               {/* Plus Button to add story */}
@@ -384,8 +385,10 @@ export const HomeScreen: React.FC = () => {
                   }`}
                 >
                   <img
-                    src={safeImageSrc(friend.user.avatar, DEFAULT_AVATAR_URL)}
+                    src={getThumbnailImageUrl(friend.user.avatar, DEFAULT_AVATAR_URL, 160)}
                     alt={friend.user.displayName}
+                    loading="lazy"
+                    decoding="async"
                     className="w-full h-full rounded-full object-cover"
                   />
 
@@ -474,8 +477,9 @@ export const HomeScreen: React.FC = () => {
                     {/* Thumbnail Container */}
                     <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#1E143B]">
                       <img
-                        src={safeImageSrc(stream.thumbnail || stream.host.avatar, DEFAULT_AVATAR_URL)}
+                        src={getThumbnailImageUrl(stream.thumbnail || stream.host.avatar, DEFAULT_AVATAR_URL)}
                         alt={stream.title}
+                        decoding="async"
                         className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                       />
 
@@ -521,8 +525,10 @@ export const HomeScreen: React.FC = () => {
                       <div className="absolute bottom-2 left-2 right-2 flex flex-col gap-1">
                         <div className="flex items-center gap-1.5">
                           <img
-                            src={safeImageSrc(stream.host.avatar, DEFAULT_AVATAR_URL)}
+                            src={getThumbnailImageUrl(stream.host.avatar, DEFAULT_AVATAR_URL, 96)}
                             alt={stream.host.displayName}
+                            loading="lazy"
+                            decoding="async"
                             className={`w-5 h-5 rounded-full object-cover border ${
                               isTop1 ? 'border-amber-400' : 'border-[#EC4899]'
                             }`}
@@ -614,8 +620,10 @@ export const HomeScreen: React.FC = () => {
                   {/* Thumbnail Container */}
                   <div className="relative aspect-[4/5] w-full overflow-hidden bg-[#1E143B]">
                     <img
-                      src={safeImageSrc(stream.thumbnail || stream.host.avatar, DEFAULT_AVATAR_URL)}
+                      src={getThumbnailImageUrl(stream.thumbnail || stream.host.avatar, DEFAULT_AVATAR_URL)}
                       alt={stream.title}
+                      loading="lazy"
+                      decoding="async"
                       className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
                     />
 

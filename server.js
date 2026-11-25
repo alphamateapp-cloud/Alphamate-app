@@ -12,9 +12,12 @@ const PORT = process.env.PORT || 3000;
 const app = createApiApp();
 
 // Serve the built app from the same Railway service when configured as a combined deployment.
+const HASHED_ASSET_RE = /[\\/]assets[\\/][^\\/]+-[A-Za-z0-9_-]{6,}\.(?:js|css|webp|avif|jpe?g|png|svg|woff2?)$/i;
 app.use(
   express.static(path.join(__dirname, 'dist'), {
     maxAge: '1d',
+    etag: true,
+    lastModified: true,
     index: false,
     setHeaders: (res, filePath) => {
       if (
@@ -24,6 +27,10 @@ app.use(
         filePath.endsWith('manifest.json')
       ) {
         res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+      } else if (HASHED_ASSET_RE.test(filePath)) {
+        res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
       }
     },
   })
@@ -35,7 +42,8 @@ app.get('*', (_req, res) => {
 
 const server = http.createServer(app);
 server.requestTimeout = 0;
-server.headersTimeout = 60_000;
+server.keepAliveTimeout = 65_000;
+server.headersTimeout = 66_000;
 attachRealtimeWebSocketServer(server, {
   app,
   verifyFirebaseIdToken: app.locals.verifyFirebaseIdToken,
