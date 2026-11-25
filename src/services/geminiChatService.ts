@@ -1,5 +1,8 @@
 const PRODUCTION_API_URL = 'https://api.alphamate.app';
 
+// Temporarily paused on user request — set to true to re-enable Alpha AI across Inbox, Live, and Party Rooms
+export const GEMINI_CHATBOT_ENABLED = false;
+
 export const GEMINI_ASSISTANT_CONVERSATION_ID = 'gemini_assistant_inbox';
 export const GEMINI_ASSISTANT_USER_ID = 'alpha_mate_gemini_ai';
 export const GEMINI_ASSISTANT_NAME = 'Alpha AI';

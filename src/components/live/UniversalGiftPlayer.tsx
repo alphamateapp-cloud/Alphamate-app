@@ -15,7 +15,7 @@ import {
 } from '../../services/giftMediaCache';
 import { audioManager } from '../../services/audioManager';
 import { DEFAULT_AVATAR_URL, safeImageSrc } from '../../utils/imageHd';
-import { Sparkles } from 'lucide-react';
+import { Sparkles, Volume2, VolumeX } from 'lucide-react';
 
 export interface UniversalGiftEvent {
   id: string;
@@ -39,8 +39,16 @@ interface UniversalGiftPlayerProps {
   layer: 'background' | 'foreground' | 'both';
   /** Optional override for live previewing display mode or opacity in Admin Manager */
   overrideConfig?: Partial<AdvancedGiftConfig>;
-  /** Keep sound muted in silent previews or when live voice (Agora/WebRTC) must stay uninterrupted */
+  /** Hard-mute sound (e.g. silent Admin previews) */
   forceMuted?: boolean;
+  /**
+   * Voice-Safe Audio mode for Party Rooms & Live Streams:
+   * Keeps <video muted={true}> (100% autoplay-proof & zero Android AudioFocus theft for Agora Voice)
+   * while playing the gift's decoded audio track / SFX cleanly via Web Audio API!
+   */
+  voiceSafeAudio?: boolean;
+  /** Respects room-level speaker mute (e.g., Party Room speaker off or Live Stream muted) */
+  roomSpeakerMuted?: boolean;
   /** Concurrent playback lane (0, 1, 2) so 2-3 simultaneous gifts render & stack sender capsules cleanly */
   slotIndex?: number;
   /** If true, keeps playing continuously (Admin preview mode) */
@@ -233,6 +241,8 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   layer,
   overrideConfig,
   forceMuted = false,
+  voiceSafeAudio = false,
+  roomSpeakerMuted = false,
   slotIndex = 0,
   previewLoopOverride = false,
   onComplete,
@@ -245,6 +255,8 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   const exitTimerRef = useRef<number | undefined>(undefined);
   const playRetryTimerRef = useRef<number | undefined>(undefined);
   const lastHeartbeatEmitAtRef = useRef<number>(0);
+  const stopMediaAudioRef = useRef<(() => void) | null>(null);
+  const audioTriggeredEventIdRef = useRef<string | null>(null);
 
   // Store latest callbacks in refs so parent re-renders NEVER reset or interrupt running video animations.
   const onCompleteRef = useRef(onComplete);
@@ -257,6 +269,11 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   const [phase, setPhase] = useState<'enter' | 'visible' | 'exit'>('enter');
   const [isMediaReady, setIsMediaReady] = useState(false);
   const [videoAspect, setVideoAspect] = useState<'portrait' | 'landscape' | null>(null);
+  const [isSfxMuted, setIsSfxMuted] = useState(() => audioManager.getIsMuted());
+
+  useEffect(() => {
+    return audioManager.subscribeMute(setIsSfxMuted);
+  }, []);
 
   const baseConfig = event?.gift.advancedConfig;
   const config: AdvancedGiftConfig | null = useMemo(() => {
@@ -400,9 +417,119 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     onProgressRef.current?.(eventId, currentTimeMs, durationMs);
   };
 
+  const stopActiveGiftAudio = () => {
+    if (stopMediaAudioRef.current) {
+      try {
+        stopMediaAudioRef.current();
+      } catch {
+        // ignore stop errors
+      }
+      stopMediaAudioRef.current = null;
+    }
+  };
+
+  /**
+   * Unified Voice-Safe Gift Audio Trigger:
+   * - Fires ONCE per gift event on the owning layer only (never doubled across bg + fg layers).
+   * - For Video gifts in voice-safe mode (or after autoplay fallback): decodes & plays the
+   *   embedded audio track through Web Audio API synced to video.currentTime so EVERY user
+   *   hears the exact soundtrack alongside Agora Party Voice without ever stealing AudioFocus.
+   * - If the video has no audio track or remote fetch times out/is CORS-blocked, immediately
+   *   falls back to gift SFX so no user ever gets silence.
+   * - For SVGA / GIF / SVG gifts: plays the mapped gift SFX cleanly via Web Audio API.
+   */
+  const triggerGiftAudioForEvent = (useVideoWebAudio: boolean) => {
+    if (
+      !event ||
+      !config ||
+      !ownsCompletionLifecycle ||
+      forceMuted ||
+      roomSpeakerMuted ||
+      config.enableSound === false ||
+      audioManager.getIsMuted() ||
+      completedIdRef.current === event.id
+    ) {
+      return;
+    }
+
+    const targetEventId = event.id;
+    if (audioTriggeredEventIdRef.current === targetEventId) return;
+    audioTriggeredEventIdRef.current = targetEventId;
+
+    const targetGift = event.gift;
+    const targetCombo = event.comboCount;
+    const sfxVol = voiceSafeAudio ? 0.68 : 0.85;
+
+    if (isVideoFormat && useVideoWebAudio && mediaUrl) {
+      const targetUrl = mediaUrl;
+      const stableCacheKey = remoteMediaUrl || mediaUrl;
+      void audioManager
+        .playMediaAudioTrack(targetUrl, {
+          cacheKey: stableCacheKey,
+          volume: voiceSafeAudio ? 0.72 : 0.85,
+          playbackRate: playbackSpeed,
+          getOffsetSec: () => {
+            const v = videoRef.current;
+            return v && Number.isFinite(v.currentTime) ? v.currentTime : 0;
+          },
+        })
+        .then((res) => {
+          // If the gift already ended, unmounted, or was muted while decoding -> stop immediately
+          if (
+            completedIdRef.current === targetEventId ||
+            audioTriggeredEventIdRef.current !== targetEventId ||
+            audioManager.getIsMuted() ||
+            roomSpeakerMuted ||
+            forceMuted
+          ) {
+            res.stop();
+            return;
+          }
+
+          if (res.played) {
+            stopActiveGiftAudio();
+            stopMediaAudioRef.current = res.stop;
+            return;
+          }
+
+          if (res.reason !== 'muted') {
+            // Silent video (no audio track) or CORS/slow-net fetch fallback -> play crisp gift SFX
+            void audioManager.playGiftSfx(targetGift, {
+              comboCount: targetCombo,
+              volume: sfxVol,
+            });
+          }
+        })
+        .catch(() => {
+          if (
+            completedIdRef.current !== targetEventId &&
+            audioTriggeredEventIdRef.current === targetEventId &&
+            !audioManager.getIsMuted() &&
+            !roomSpeakerMuted &&
+            !forceMuted
+          ) {
+            void audioManager.playGiftSfx(targetGift, {
+              comboCount: targetCombo,
+              volume: sfxVol,
+            });
+          }
+        });
+      return;
+    }
+
+    // SVGA / GIF / SVG advanced gifts -> play mapped celebration SFX via Web Audio API
+    if (!isVideoFormat) {
+      void audioManager.playGiftSfx(targetGift, {
+        comboCount: targetCombo,
+        volume: sfxVol,
+      });
+    }
+  };
+
   const finishPlayback = (eventId: string, withFade = true) => {
     if (completedIdRef.current === eventId) return;
     completedIdRef.current = eventId;
+    stopActiveGiftAudio();
 
     if (playRetryTimerRef.current !== undefined) {
       window.clearTimeout(playRetryTimerRef.current);
@@ -511,6 +638,8 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
 
     const currentEventId = event.id;
     completedIdRef.current = null;
+    audioTriggeredEventIdRef.current = null;
+    stopActiveGiftAudio();
     lastProgressAtRef.current = Date.now();
     lastVideoTimeRef.current = 0;
     stallRecoveryAttemptsRef.current = 0;
@@ -525,6 +654,11 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     setPhase('enter');
 
     const enterTimer = window.setTimeout(() => setPhase('visible'), 25);
+
+    // Non-video, non-SVGA advanced gifts (GIF / SVG) play their celebration SFX immediately
+    if (!isVideoFormat && !isSvgaFormat && ownsCompletionLifecycle) {
+      triggerGiftAudioForEvent(false);
+    }
 
     if (!previewLoopOverride && ownsCompletionLifecycle) {
       if (isVideoFormat && !shouldLoop) {
@@ -553,6 +687,8 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     }
 
     return () => {
+      stopActiveGiftAudio();
+      audioTriggeredEventIdRef.current = null;
       window.clearTimeout(enterTimer);
       if (playRetryTimerRef.current !== undefined) {
         window.clearTimeout(playRetryTimerRef.current);
@@ -588,14 +724,61 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     ownsCompletionLifecycle,
   ]);
 
+  // React immediately when user toggles SFX Mute or Room Speaker Mute mid-gift
+  useEffect(() => {
+    const effectivelyMuted =
+      forceMuted || roomSpeakerMuted || isSfxMuted || config?.enableSound === false;
+    if (effectivelyMuted) {
+      stopActiveGiftAudio();
+      audioTriggeredEventIdRef.current = null;
+      if (videoRef.current) {
+        videoRef.current.muted = true;
+      }
+      return;
+    }
+
+    // User unmuted mid-animation -> start synced audio right away!
+    if (
+      event?.id &&
+      ownsCompletionLifecycle &&
+      completedIdRef.current !== event.id &&
+      audioTriggeredEventIdRef.current !== event.id
+    ) {
+      if (isVideoFormat) {
+        if (voiceSafeAudio) {
+          if (videoRef.current && !videoRef.current.paused) {
+            triggerGiftAudioForEvent(true);
+          }
+        } else if (videoRef.current) {
+          videoRef.current.muted = false;
+        }
+      } else {
+        triggerGiftAudioForEvent(false);
+      }
+    }
+  }, [
+    isSfxMuted,
+    roomSpeakerMuted,
+    forceMuted,
+    voiceSafeAudio,
+    config?.enableSound,
+    event?.id,
+    isVideoFormat,
+    ownsCompletionLifecycle,
+  ]);
+
   // Configure video playback rate & autoplay safely without crashing or aborting on slow networks
   useEffect(() => {
     const v = videoRef.current;
     if (!v || !isVideoFormat || !shouldRenderAnimationOnThisLayer || !mediaUrl) return;
 
     let cancelled = false;
-    const appMuted = forceMuted || audioManager.getIsMuted() || config?.enableSound === false;
-    v.muted = appMuted;
+    // In voiceSafeAudio mode (Party Rooms / Live Streams), <video> stays muted 100% of the time
+    // so Agora Voice NEVER loses Android AudioFocus and passive listeners NEVER hit NotAllowedError.
+    // The decoded audio track is played cleanly in parallel through Web Audio API!
+    const videoElMuted =
+      voiceSafeAudio || forceMuted || roomSpeakerMuted || isSfxMuted || config?.enableSound === false;
+    v.muted = videoElMuted;
     v.playbackRate = playbackSpeed;
     v.loop = shouldLoop;
 
@@ -613,10 +796,13 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
         await el.play();
       } catch {
         if (cancelled) return;
-        // Retry muted first (mobile WebView autoplay policy), then wait gently for buffered data
+        // Retry muted first (mobile WebView autoplay policy), and route audio via Web Audio API!
         try {
           el.muted = true;
           await el.play();
+          if (!voiceSafeAudio && !forceMuted && !roomSpeakerMuted && !audioManager.getIsMuted()) {
+            triggerGiftAudioForEvent(true);
+          }
         } catch {
           if (cancelled) return;
           if (retryCount < 4) {
@@ -645,6 +831,8 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     playbackSpeed,
     shouldLoop,
     forceMuted,
+    voiceSafeAudio,
+    roomSpeakerMuted,
     config?.enableSound,
     previewLoopOverride,
     ownsCompletionLifecycle,
@@ -706,6 +894,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
           contentMode={position === 'fullscreen' || isOverlayBackgroundMode ? 'AspectFill' : 'AspectFit'}
           onReady={(svgaDurationMs) => {
             setIsMediaReady(true);
+            triggerGiftAudioForEvent(false);
             if (
               !shouldLoop &&
               !previewLoopOverride &&
@@ -748,7 +937,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
           autoPlay
           loop={shouldLoop}
           preload="auto"
-          muted={forceMuted || audioManager.getIsMuted() || config.enableSound === false}
+          muted={voiceSafeAudio || forceMuted || roomSpeakerMuted || isSfxMuted || config.enableSound === false}
           onLoadedMetadata={(e) => {
             const vid = e.currentTarget;
             lastProgressAtRef.current = Date.now();
@@ -777,6 +966,9 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
             stallRecoveryAttemptsRef.current = 0;
             setIsMediaReady(true);
             const vid = e.currentTarget;
+            if (voiceSafeAudio || vid.muted) {
+              triggerGiftAudioForEvent(true);
+            }
             const realDurationMs =
               Number.isFinite(vid.duration) && vid.duration > 0
                 ? Math.ceil((vid.duration * 1000) / playbackSpeed)
@@ -994,6 +1186,39 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
               </span>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Compact Gift SFX On/Off Toggle (so users who previously muted gift sound can always unmute with 1 tap) */}
+      {shouldRenderSenderCapsule && slotIndex === 0 && !forceMuted && !previewLoopOverride && !roomSpeakerMuted && (
+        <div
+          data-keep-dark="true"
+          style={{ top: `${capsuleTopPx}px` }}
+          className="absolute right-3 z-[37] pointer-events-auto"
+        >
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              void audioManager.unlock();
+              const muted = audioManager.toggleMute();
+              setIsSfxMuted(muted);
+            }}
+            title={isSfxMuted ? 'Unmute Gift Sound' : 'Mute Gift Sound'}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-black/55 backdrop-blur-md border border-white/20 text-white text-[10px] font-bold hover:bg-black/75 transition-all cursor-pointer shadow-lg"
+          >
+            {isSfxMuted ? (
+              <>
+                <VolumeX className="w-3.5 h-3.5 text-zinc-400" />
+                <span className="text-zinc-300">SFX Off</span>
+              </>
+            ) : (
+              <>
+                <Volume2 className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-amber-300">SFX On</span>
+              </>
+            )}
+          </button>
         </div>
       )}
     </>

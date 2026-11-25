@@ -38,8 +38,10 @@ interface GiftAnimationOverlayProps {
   layer?: 'background' | 'foreground' | 'both';
   /** Concurrent playback lane (0, 1, 2) so 2-3 simultaneous users' gifts render without overlapping capsules */
   slotIndex?: number;
-  /** Keeps HTML5 <video> muted so live Party Voice / WebRTC audio never loses Android AudioFocus */
+  /** Uses voice-safe Web Audio mixing so live Party Voice / WebRTC audio never loses Android AudioFocus */
   preserveVoiceAudio?: boolean;
+  /** Respects room-level speaker mute (Party Room speaker muted / Live Stream muted) */
+  roomSpeakerMuted?: boolean;
   onDurationDetected?: (eventId: string, durationMs: number) => void;
   onProgress?: (eventId: string, currentTimeMs: number, durationMs: number) => void;
 }
@@ -50,6 +52,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = React.m
   layer = 'both',
   slotIndex = 0,
   preserveVoiceAudio = false,
+  roomSpeakerMuted = false,
   onDurationDetected,
   onProgress,
 }) => {
@@ -133,12 +136,13 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = React.m
     setIsExiting(false);
     onProgressRef.current?.(eventId, 0, durationMs);
 
-    // Play mapped gift SFX safely (skip when preserving active Party Voice so WebView never steals audio focus)
-    if (!preserveVoiceAudio) {
+    // Play mapped gift SFX safely via Web Audio API (mixes cleanly alongside Agora Party Voice without AudioFocus theft)
+    if (!roomSpeakerMuted) {
       try {
         Promise.resolve(
           virtualGiftDatabase.playGiftAudio(meta, {
             comboCount: currentEvent.comboCount,
+            volume: preserveVoiceAudio ? 0.68 : undefined,
           })
         ).catch(() => {});
       } catch {
@@ -245,6 +249,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = React.m
 
   const handleToggleMute = (e: React.MouseEvent) => {
     e.stopPropagation();
+    void audioManager.unlock();
     const muted = audioManager.toggleMute();
     setIsMuted(muted);
   };
@@ -289,7 +294,9 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = React.m
         event={currentEvent}
         layer={layer}
         slotIndex={slotIndex}
-        forceMuted={preserveVoiceAudio}
+        forceMuted={false}
+        voiceSafeAudio={preserveVoiceAudio}
+        roomSpeakerMuted={roomSpeakerMuted}
         onComplete={handleUniversalGiftComplete}
         onDurationDetected={onDurationDetected}
         onProgress={onProgress}
@@ -410,8 +417,8 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = React.m
         isExiting ? 'opacity-0' : 'opacity-100'
       } ${shakeClassName}`}
     >
-      {/* Sound Mute/Unmute Float Toggle (hidden when preserving live Party Voice) */}
-      {!preserveVoiceAudio && slotIndex === 0 && (
+      {/* Sound Mute/Unmute Float Toggle (accessible in Party Rooms & Live Streams so muted users can unmute anytime) */}
+      {!roomSpeakerMuted && slotIndex === 0 && (
         <div className="absolute top-24 right-4 z-50 pointer-events-auto">
           <button
             onClick={handleToggleMute}

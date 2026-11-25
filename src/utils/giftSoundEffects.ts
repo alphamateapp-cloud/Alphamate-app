@@ -7,13 +7,66 @@
 class GiftSoundEngine {
   private ctx: AudioContext | null = null;
   private compressor: DynamicsCompressorNode | null = null;
+  private masterGain: GainNode | null = null;
   private noiseBuffer: AudioBuffer | null = null;
   private isMuted: boolean = false;
+  private unlocked: boolean = false;
+  private listenersAttached: boolean = false;
 
   constructor() {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('am_gift_sfx_muted');
-      this.isMuted = saved === 'true';
+      try {
+        const saved = localStorage.getItem('am_gift_sfx_muted');
+        this.isMuted = saved === 'true';
+      } catch {
+        // ignore storage errors
+      }
+      this.attachGlobalUnlockListeners();
+    }
+  }
+
+  private attachGlobalUnlockListeners() {
+    if (typeof window === 'undefined' || this.listenersAttached) return;
+    this.listenersAttached = true;
+
+    const handleGesture = () => {
+      void this.unlock();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && this.ctx && this.ctx.state === 'suspended') {
+        void this.ctx.resume().catch(() => {});
+      }
+    };
+
+    window.addEventListener('pointerdown', handleGesture, { capture: true, passive: true });
+    window.addEventListener('touchstart', handleGesture, { capture: true, passive: true });
+    window.addEventListener('click', handleGesture, { capture: true, passive: true });
+    window.addEventListener('keydown', handleGesture, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', handleVisibility);
+  }
+
+  public async unlock(): Promise<boolean> {
+    const ctx = this.getAudioContext();
+    if (!ctx) return false;
+    try {
+      if (ctx.state === 'suspended') {
+        await Promise.race([
+          ctx.resume(),
+          new Promise<void>((resolve) => setTimeout(resolve, 180)),
+        ]);
+      }
+      if (!this.unlocked && ctx.state === 'running') {
+        // 1-sample silent buffer prime unlocks Web Audio on iOS Safari & strict Android WebViews
+        const silentBuf = ctx.createBuffer(1, 1, ctx.sampleRate || 44100);
+        const src = ctx.createBufferSource();
+        src.buffer = silentBuf;
+        src.connect(ctx.destination);
+        src.start(0);
+        this.unlocked = true;
+      }
+      return ctx.state === 'running';
+    } catch {
+      return false;
     }
   }
 
@@ -24,7 +77,11 @@ class GiftSoundEngine {
   public toggleMute(): boolean {
     this.isMuted = !this.isMuted;
     if (typeof window !== 'undefined') {
-      localStorage.setItem('am_gift_sfx_muted', String(this.isMuted));
+      try {
+        localStorage.setItem('am_gift_sfx_muted', String(this.isMuted));
+      } catch {
+        // ignore
+      }
     }
     return this.isMuted;
   }
@@ -32,7 +89,11 @@ class GiftSoundEngine {
   public setMuted(muted: boolean) {
     this.isMuted = muted;
     if (typeof window !== 'undefined') {
-      localStorage.setItem('am_gift_sfx_muted', String(this.isMuted));
+      try {
+        localStorage.setItem('am_gift_sfx_muted', String(this.isMuted));
+      } catch {
+        // ignore
+      }
     }
   }
 
@@ -45,16 +106,19 @@ class GiftSoundEngine {
           this.ctx = new AudioCtx();
         }
       }
-      if (this.ctx && this.ctx.state === 'suspended') {
-        this.ctx.resume().catch(() => {});
-      }
-      if (this.ctx && !this.compressor) {
+      if (this.ctx && (!this.compressor || !this.masterGain)) {
         const comp = this.ctx.createDynamicsCompressor();
         comp.threshold.setValueAtTime(-16, this.ctx.currentTime);
         comp.knee.setValueAtTime(18, this.ctx.currentTime);
         comp.ratio.setValueAtTime(5, this.ctx.currentTime);
         comp.connect(this.ctx.destination);
+
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(1, this.ctx.currentTime);
+        gain.connect(comp);
+
         this.compressor = comp;
+        this.masterGain = gain;
       }
       return this.ctx;
     } catch {
@@ -62,8 +126,28 @@ class GiftSoundEngine {
     }
   }
 
+  private async ensureRunningContext(volumeScale = 1): Promise<AudioContext | null> {
+    const ctx = this.getAudioContext();
+    if (!ctx) return null;
+    try {
+      if (ctx.state === 'suspended') {
+        await Promise.race([
+          ctx.resume(),
+          new Promise<void>((resolve) => setTimeout(resolve, 220)),
+        ]);
+      }
+      if (this.masterGain) {
+        const clamped = Math.max(0.05, Math.min(1.2, volumeScale));
+        this.masterGain.gain.setValueAtTime(clamped, ctx.currentTime);
+      }
+      return ctx;
+    } catch {
+      return ctx;
+    }
+  }
+
   private getOutputNode(ctx: AudioContext): AudioNode {
-    return this.compressor || ctx.destination;
+    return this.masterGain || this.compressor || ctx.destination;
   }
 
   private playFilteredNoise(
@@ -111,69 +195,72 @@ class GiftSoundEngine {
     src.stop(opts.startTime + opts.duration + 0.05);
   }
 
-  public play(animationType: string) {
+  public play(animationType: string, volumeScale = 1) {
     if (this.isMuted) return;
-    try {
-      const ctx = this.getAudioContext();
-      if (!ctx) return;
-
-      switch (animationType) {
-        case 'heart':
-          this.playHarpChime(ctx, [523.25, 659.25, 783.99, 1046.5]); // C5, E5, G5, C6
-          break;
-        case 'sparkle':
-          this.playSparkleBells(ctx);
-          break;
-        case 'ring':
-          this.playDiamondChime(ctx);
-          break;
-        case 'crown':
-          this.playRoyalFanfare(ctx);
-          break;
-        case 'car':
-          this.playSupercarRev(ctx);
-          break;
-        case 'yacht':
-          this.playYachtCelebration(ctx);
-          break;
-        case 'rocket':
-          this.playRocketLaunch(ctx);
-          break;
-        case 'dragon':
-          this.playDragonRoar(ctx);
-          break;
-        default:
-          this.playHarpChime(ctx, [440, 554.37, 659.25, 880]);
+    void this.ensureRunningContext(volumeScale).then((ctx) => {
+      if (!ctx || this.isMuted) return;
+      try {
+        switch (animationType) {
+          case 'heart':
+            this.playHarpChime(ctx, [523.25, 659.25, 783.99, 1046.5]); // C5, E5, G5, C6
+            break;
+          case 'sparkle':
+            this.playSparkleBells(ctx);
+            break;
+          case 'ring':
+            this.playDiamondChime(ctx);
+            break;
+          case 'crown':
+            this.playRoyalFanfare(ctx);
+            break;
+          case 'car':
+            this.playSupercarRev(ctx);
+            break;
+          case 'yacht':
+            this.playYachtCelebration(ctx);
+            break;
+          case 'rocket':
+            this.playRocketLaunch(ctx);
+            break;
+          case 'dragon':
+            this.playDragonRoar(ctx);
+            break;
+          default:
+            this.playHarpChime(ctx, [440, 554.37, 659.25, 880]);
+        }
+      } catch {
+        // Audio autoplay policy or browser restriction
       }
-    } catch {
-      // Audio autoplay policy or browser restriction
-    }
+    });
   }
 
   // Play Combo Pop Sound
-  public playComboSound(multiplier: number) {
+  public playComboSound(multiplier: number, volumeScale = 1) {
     if (this.isMuted) return;
-    try {
-      const ctx = this.getAudioContext();
-      if (!ctx) return;
-      const now = ctx.currentTime;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
+    void this.ensureRunningContext(volumeScale).then((ctx) => {
+      if (!ctx || this.isMuted) return;
+      try {
+        const now = ctx.currentTime;
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
 
-      const baseFreq = 400 + Math.min(multiplier * 50, 1200);
-      osc.type = 'triangle';
-      osc.frequency.setValueAtTime(baseFreq, now);
-      osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + 0.12);
+        const baseFreq = 400 + Math.min(multiplier * 50, 1200);
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(baseFreq, now);
+        osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + 0.12);
 
-      gain.gain.setValueAtTime(0.2, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+        gain.gain.setValueAtTime(0.2, now);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
 
-      osc.connect(gain);
-      gain.connect(ctx.destination);
+        osc.connect(gain);
+        gain.connect(this.getOutputNode(ctx));
 
-      osc.start(now);
-      osc.stop(now + 0.16);
-    } catch {}
+        osc.start(now);
+        osc.stop(now + 0.16);
+      } catch {
+        // ignore
+      }
+    });
   }
 
   // Soft Harp Arpeggio (Lucky Rose)
@@ -192,7 +279,7 @@ class GiftSoundEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.6);
 
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
 
       osc.start(startTime);
       osc.stop(startTime + 0.65);
@@ -215,7 +302,7 @@ class GiftSoundEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.45);
 
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
 
       osc.start(startTime);
       osc.stop(startTime + 0.5);
@@ -238,7 +325,7 @@ class GiftSoundEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, startTime + 0.8);
 
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
 
       osc.start(startTime);
       osc.stop(startTime + 0.85);
@@ -270,7 +357,7 @@ class GiftSoundEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, startTime + item.d);
 
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
 
       osc.start(startTime);
       osc.stop(startTime + item.d + 0.05);
@@ -294,7 +381,7 @@ class GiftSoundEngine {
     gain.gain.exponentialRampToValueAtTime(0.001, now + 1.3);
 
     osc.connect(gain);
-    gain.connect(ctx.destination);
+    gain.connect(this.getOutputNode(ctx));
 
     osc.start(now);
     osc.stop(now + 1.35);
@@ -341,7 +428,7 @@ class GiftSoundEngine {
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
 
       osc.connect(gain);
-      gain.connect(ctx.destination);
+      gain.connect(this.getOutputNode(ctx));
 
       osc.start(now);
       osc.stop(now + 0.95);
@@ -359,7 +446,7 @@ class GiftSoundEngine {
       popGain.gain.exponentialRampToValueAtTime(0.001, now + delay + 0.22);
 
       popOsc.connect(popGain);
-      popGain.connect(ctx.destination);
+      popGain.connect(this.getOutputNode(ctx));
 
       popOsc.start(now + delay);
       popOsc.stop(now + delay + 0.25);
@@ -456,12 +543,11 @@ class GiftSoundEngine {
    */
   public playVipEntryFanfare(vipTier: number) {
     if (this.isMuted) return;
-    try {
-      const ctx = this.getAudioContext();
-      if (!ctx) return;
-
-      const now = ctx.currentTime;
-      const tier = Math.max(1, Math.min(12, Math.floor(Number(vipTier) || 3)));
+    void this.ensureRunningContext(0.9).then((ctx) => {
+      if (!ctx || this.isMuted) return;
+      try {
+        const now = ctx.currentTime;
+        const tier = Math.max(1, Math.min(12, Math.floor(Number(vipTier) || 3)));
 
       if (tier >= 9) {
         // Sovereign Emperor Class (VIP 9-12): Regal velvet chord swell + crystalline cascade
@@ -584,9 +670,10 @@ class GiftSoundEngine {
           osc.stop(st + 0.65);
         });
       }
-    } catch {
-      // Fail gracefully if Web Audio is blocked prior to user interaction
-    }
+      } catch {
+        // Fail gracefully if Web Audio is blocked prior to user interaction
+      }
+    });
   }
 }
 

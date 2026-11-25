@@ -49649,7 +49649,7 @@ var __vitePreload = function preload(baseModule, deps, importerUrl) {
 	});
 };
 // node_modules/@capacitor-firebase/authentication/dist/esm/index.js
-var FirebaseAuthentication = registerPlugin("FirebaseAuthentication", { web: () => __vitePreload(() => import("./web-CJ005oGg.js").then((m) => new m.FirebaseAuthenticationWeb()), []) });
+var FirebaseAuthentication = registerPlugin("FirebaseAuthentication", { web: () => __vitePreload(() => import("./web-BC1eIJ3M.js").then((m) => new m.FirebaseAuthenticationWeb()), []) });
 // node_modules/@firebase/auth/dist/esm/index-NmqYMaDt.js
 /**
 * @license
@@ -64021,11 +64021,62 @@ var GiftSoundEngine = class {
 	constructor() {
 		this.ctx = null;
 		this.compressor = null;
+		this.masterGain = null;
 		this.noiseBuffer = null;
 		this.isMuted = false;
+		this.unlocked = false;
+		this.listenersAttached = false;
 		if (typeof window !== "undefined") {
-			const saved = localStorage.getItem("am_gift_sfx_muted");
-			this.isMuted = saved === "true";
+			try {
+				const saved = localStorage.getItem("am_gift_sfx_muted");
+				this.isMuted = saved === "true";
+			} catch {}
+			this.attachGlobalUnlockListeners();
+		}
+	}
+	attachGlobalUnlockListeners() {
+		if (typeof window === "undefined" || this.listenersAttached) return;
+		this.listenersAttached = true;
+		const handleGesture = () => {
+			this.unlock();
+		};
+		const handleVisibility = () => {
+			if (document.visibilityState === "visible" && this.ctx && this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+		};
+		window.addEventListener("pointerdown", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("touchstart", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("click", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("keydown", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		document.addEventListener("visibilitychange", handleVisibility);
+	}
+	async unlock() {
+		const ctx = this.getAudioContext();
+		if (!ctx) return false;
+		try {
+			if (ctx.state === "suspended") await Promise.race([ctx.resume(), new Promise((resolve) => setTimeout(resolve, 180))]);
+			if (!this.unlocked && ctx.state === "running") {
+				const silentBuf = ctx.createBuffer(1, 1, ctx.sampleRate || 44100);
+				const src = ctx.createBufferSource();
+				src.buffer = silentBuf;
+				src.connect(ctx.destination);
+				src.start(0);
+				this.unlocked = true;
+			}
+			return ctx.state === "running";
+		} catch {
+			return false;
 		}
 	}
 	getIsMuted() {
@@ -64033,12 +64084,16 @@ var GiftSoundEngine = class {
 	}
 	toggleMute() {
 		this.isMuted = !this.isMuted;
-		if (typeof window !== "undefined") localStorage.setItem("am_gift_sfx_muted", String(this.isMuted));
+		if (typeof window !== "undefined") try {
+			localStorage.setItem("am_gift_sfx_muted", String(this.isMuted));
+		} catch {}
 		return this.isMuted;
 	}
 	setMuted(muted) {
 		this.isMuted = muted;
-		if (typeof window !== "undefined") localStorage.setItem("am_gift_sfx_muted", String(this.isMuted));
+		if (typeof window !== "undefined") try {
+			localStorage.setItem("am_gift_sfx_muted", String(this.isMuted));
+		} catch {}
 	}
 	getAudioContext() {
 		if (typeof window === "undefined") return null;
@@ -64047,22 +64102,39 @@ var GiftSoundEngine = class {
 				const AudioCtx = window.AudioContext || window.webkitAudioContext;
 				if (AudioCtx) this.ctx = new AudioCtx();
 			}
-			if (this.ctx && this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
-			if (this.ctx && !this.compressor) {
+			if (this.ctx && (!this.compressor || !this.masterGain)) {
 				const comp = this.ctx.createDynamicsCompressor();
 				comp.threshold.setValueAtTime(-16, this.ctx.currentTime);
 				comp.knee.setValueAtTime(18, this.ctx.currentTime);
 				comp.ratio.setValueAtTime(5, this.ctx.currentTime);
 				comp.connect(this.ctx.destination);
+				const gain = this.ctx.createGain();
+				gain.gain.setValueAtTime(1, this.ctx.currentTime);
+				gain.connect(comp);
 				this.compressor = comp;
+				this.masterGain = gain;
 			}
 			return this.ctx;
 		} catch {
 			return null;
 		}
 	}
+	async ensureRunningContext(volumeScale = 1) {
+		const ctx = this.getAudioContext();
+		if (!ctx) return null;
+		try {
+			if (ctx.state === "suspended") await Promise.race([ctx.resume(), new Promise((resolve) => setTimeout(resolve, 220))]);
+			if (this.masterGain) {
+				const clamped = Math.max(.05, Math.min(1.2, volumeScale));
+				this.masterGain.gain.setValueAtTime(clamped, ctx.currentTime);
+			}
+			return ctx;
+		} catch {
+			return ctx;
+		}
+	}
 	getOutputNode(ctx) {
-		return this.compressor || ctx.destination;
+		return this.masterGain || this.compressor || ctx.destination;
 	}
 	playFilteredNoise(ctx, opts) {
 		if (!this.noiseBuffer) {
@@ -64088,69 +64160,71 @@ var GiftSoundEngine = class {
 		src.start(opts.startTime);
 		src.stop(opts.startTime + opts.duration + .05);
 	}
-	play(animationType) {
+	play(animationType, volumeScale = 1) {
 		if (this.isMuted) return;
-		try {
-			const ctx = this.getAudioContext();
-			if (!ctx) return;
-			switch (animationType) {
-				case "heart":
-					this.playHarpChime(ctx, [
-						523.25,
+		this.ensureRunningContext(volumeScale).then((ctx) => {
+			if (!ctx || this.isMuted) return;
+			try {
+				switch (animationType) {
+					case "heart":
+						this.playHarpChime(ctx, [
+							523.25,
+							659.25,
+							783.99,
+							1046.5
+						]);
+						break;
+					case "sparkle":
+						this.playSparkleBells(ctx);
+						break;
+					case "ring":
+						this.playDiamondChime(ctx);
+						break;
+					case "crown":
+						this.playRoyalFanfare(ctx);
+						break;
+					case "car":
+						this.playSupercarRev(ctx);
+						break;
+					case "yacht":
+						this.playYachtCelebration(ctx);
+						break;
+					case "rocket":
+						this.playRocketLaunch(ctx);
+						break;
+					case "dragon":
+						this.playDragonRoar(ctx);
+						break;
+					default: this.playHarpChime(ctx, [
+						440,
+						554.37,
 						659.25,
-						783.99,
-						1046.5
+						880
 					]);
-					break;
-				case "sparkle":
-					this.playSparkleBells(ctx);
-					break;
-				case "ring":
-					this.playDiamondChime(ctx);
-					break;
-				case "crown":
-					this.playRoyalFanfare(ctx);
-					break;
-				case "car":
-					this.playSupercarRev(ctx);
-					break;
-				case "yacht":
-					this.playYachtCelebration(ctx);
-					break;
-				case "rocket":
-					this.playRocketLaunch(ctx);
-					break;
-				case "dragon":
-					this.playDragonRoar(ctx);
-					break;
-				default: this.playHarpChime(ctx, [
-					440,
-					554.37,
-					659.25,
-					880
-				]);
-			}
-		} catch {}
+				}
+			} catch {}
+		});
 	}
-	playComboSound(multiplier) {
+	playComboSound(multiplier, volumeScale = 1) {
 		if (this.isMuted) return;
-		try {
-			const ctx = this.getAudioContext();
-			if (!ctx) return;
-			const now = ctx.currentTime;
-			const osc = ctx.createOscillator();
-			const gain = ctx.createGain();
-			const baseFreq = 400 + Math.min(multiplier * 50, 1200);
-			osc.type = "triangle";
-			osc.frequency.setValueAtTime(baseFreq, now);
-			osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + .12);
-			gain.gain.setValueAtTime(.2, now);
-			gain.gain.exponentialRampToValueAtTime(.001, now + .15);
-			osc.connect(gain);
-			gain.connect(ctx.destination);
-			osc.start(now);
-			osc.stop(now + .16);
-		} catch {}
+		this.ensureRunningContext(volumeScale).then((ctx) => {
+			if (!ctx || this.isMuted) return;
+			try {
+				const now = ctx.currentTime;
+				const osc = ctx.createOscillator();
+				const gain = ctx.createGain();
+				const baseFreq = 400 + Math.min(multiplier * 50, 1200);
+				osc.type = "triangle";
+				osc.frequency.setValueAtTime(baseFreq, now);
+				osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, now + .12);
+				gain.gain.setValueAtTime(.2, now);
+				gain.gain.exponentialRampToValueAtTime(.001, now + .15);
+				osc.connect(gain);
+				gain.connect(this.getOutputNode(ctx));
+				osc.start(now);
+				osc.stop(now + .16);
+			} catch {}
+		});
 	}
 	playHarpChime(ctx, freqs) {
 		const now = ctx.currentTime;
@@ -64164,7 +64238,7 @@ var GiftSoundEngine = class {
 			gain.gain.linearRampToValueAtTime(.18, startTime + .02);
 			gain.gain.exponentialRampToValueAtTime(.001, startTime + .6);
 			osc.connect(gain);
-			gain.connect(ctx.destination);
+			gain.connect(this.getOutputNode(ctx));
 			osc.start(startTime);
 			osc.stop(startTime + .65);
 		});
@@ -64186,7 +64260,7 @@ var GiftSoundEngine = class {
 			gain.gain.setValueAtTime(.15, startTime);
 			gain.gain.exponentialRampToValueAtTime(.001, startTime + .45);
 			osc.connect(gain);
-			gain.connect(ctx.destination);
+			gain.connect(this.getOutputNode(ctx));
 			osc.start(startTime);
 			osc.stop(startTime + .5);
 		});
@@ -64207,7 +64281,7 @@ var GiftSoundEngine = class {
 			gain.gain.setValueAtTime(.16, startTime);
 			gain.gain.exponentialRampToValueAtTime(.001, startTime + .8);
 			osc.connect(gain);
-			gain.connect(ctx.destination);
+			gain.connect(this.getOutputNode(ctx));
 			osc.start(startTime);
 			osc.stop(startTime + .85);
 		});
@@ -64254,7 +64328,7 @@ var GiftSoundEngine = class {
 			gain.gain.setValueAtTime(.12, startTime);
 			gain.gain.exponentialRampToValueAtTime(.001, startTime + item.d);
 			osc.connect(gain);
-			gain.connect(ctx.destination);
+			gain.connect(this.getOutputNode(ctx));
 			osc.start(startTime);
 			osc.stop(startTime + item.d + .05);
 		});
@@ -64271,7 +64345,7 @@ var GiftSoundEngine = class {
 		gain.gain.linearRampToValueAtTime(.2, now + .4);
 		gain.gain.exponentialRampToValueAtTime(.001, now + 1.3);
 		osc.connect(gain);
-		gain.connect(ctx.destination);
+		gain.connect(this.getOutputNode(ctx));
 		osc.start(now);
 		osc.stop(now + 1.35);
 		const turboOsc = ctx.createOscillator();
@@ -64304,7 +64378,7 @@ var GiftSoundEngine = class {
 			gain.gain.setValueAtTime(.12, now);
 			gain.gain.exponentialRampToValueAtTime(.001, now + .9);
 			osc.connect(gain);
-			gain.connect(ctx.destination);
+			gain.connect(this.getOutputNode(ctx));
 			osc.start(now);
 			osc.stop(now + .95);
 		});
@@ -64317,7 +64391,7 @@ var GiftSoundEngine = class {
 			popGain.gain.setValueAtTime(.15, now + delay);
 			popGain.gain.exponentialRampToValueAtTime(.001, now + delay + .22);
 			popOsc.connect(popGain);
-			popGain.connect(ctx.destination);
+			popGain.connect(this.getOutputNode(ctx));
 			popOsc.start(now + delay);
 			popOsc.stop(now + delay + .25);
 		});
@@ -64394,123 +64468,124 @@ var GiftSoundEngine = class {
 	*/
 	playVipEntryFanfare(vipTier) {
 		if (this.isMuted) return;
-		try {
-			const ctx = this.getAudioContext();
-			if (!ctx) return;
-			const now = ctx.currentTime;
-			const tier = Math.max(1, Math.min(12, Math.floor(Number(vipTier) || 3)));
-			if (tier >= 9) {
-				this.playFilteredNoise(ctx, {
-					startTime: now,
-					duration: .45,
-					filterType: "bandpass",
-					startFreq: 600,
-					endFreq: 2400,
-					peakGain: .06
-				});
-				[
-					220,
-					329.63,
-					440
-				].forEach((freq) => {
-					const osc = ctx.createOscillator();
-					const gain = ctx.createGain();
-					const filter = ctx.createBiquadFilter();
-					osc.type = "triangle";
-					osc.frequency.setValueAtTime(freq, now);
-					filter.type = "lowpass";
-					filter.frequency.setValueAtTime(1400, now);
-					filter.frequency.exponentialRampToValueAtTime(2600, now + .55);
-					gain.gain.setValueAtTime(.001, now);
-					gain.gain.linearRampToValueAtTime(.085, now + .12);
-					gain.gain.exponentialRampToValueAtTime(.001, now + 1.35);
-					osc.connect(filter);
-					filter.connect(gain);
-					gain.connect(this.getOutputNode(ctx));
-					osc.start(now);
-					osc.stop(now + 1.4);
-				});
-				[
-					554.37,
+		this.ensureRunningContext(.9).then((ctx) => {
+			if (!ctx || this.isMuted) return;
+			try {
+				const now = ctx.currentTime;
+				const tier = Math.max(1, Math.min(12, Math.floor(Number(vipTier) || 3)));
+				if (tier >= 9) {
+					this.playFilteredNoise(ctx, {
+						startTime: now,
+						duration: .45,
+						filterType: "bandpass",
+						startFreq: 600,
+						endFreq: 2400,
+						peakGain: .06
+					});
+					[
+						220,
+						329.63,
+						440
+					].forEach((freq) => {
+						const osc = ctx.createOscillator();
+						const gain = ctx.createGain();
+						const filter = ctx.createBiquadFilter();
+						osc.type = "triangle";
+						osc.frequency.setValueAtTime(freq, now);
+						filter.type = "lowpass";
+						filter.frequency.setValueAtTime(1400, now);
+						filter.frequency.exponentialRampToValueAtTime(2600, now + .55);
+						gain.gain.setValueAtTime(.001, now);
+						gain.gain.linearRampToValueAtTime(.085, now + .12);
+						gain.gain.exponentialRampToValueAtTime(.001, now + 1.35);
+						osc.connect(filter);
+						filter.connect(gain);
+						gain.connect(this.getOutputNode(ctx));
+						osc.start(now);
+						osc.stop(now + 1.4);
+					});
+					[
+						554.37,
+						659.25,
+						880,
+						1108.73,
+						1318.51
+					].forEach((freq, idx) => {
+						const osc = ctx.createOscillator();
+						const gain = ctx.createGain();
+						const st = now + .1 + idx * .085;
+						osc.type = "sine";
+						osc.frequency.setValueAtTime(freq, st);
+						gain.gain.setValueAtTime(.001, st);
+						gain.gain.linearRampToValueAtTime(.11, st + .02);
+						gain.gain.exponentialRampToValueAtTime(.001, st + .85);
+						osc.connect(gain);
+						gain.connect(this.getOutputNode(ctx));
+						osc.start(st);
+						osc.stop(st + .9);
+					});
+				} else if (tier >= 6) {
+					this.playFilteredNoise(ctx, {
+						startTime: now,
+						duration: .35,
+						filterType: "highpass",
+						startFreq: 900,
+						endFreq: 2800,
+						peakGain: .045
+					});
+					[293.66, 440].forEach((freq) => {
+						const osc = ctx.createOscillator();
+						const gain = ctx.createGain();
+						osc.type = "triangle";
+						osc.frequency.setValueAtTime(freq, now);
+						gain.gain.setValueAtTime(.001, now);
+						gain.gain.linearRampToValueAtTime(.07, now + .09);
+						gain.gain.exponentialRampToValueAtTime(.001, now + 1.05);
+						osc.connect(gain);
+						gain.connect(this.getOutputNode(ctx));
+						osc.start(now);
+						osc.stop(now + 1.1);
+					});
+					[
+						587.33,
+						739.99,
+						880,
+						1174.66
+					].forEach((freq, idx) => {
+						const osc = ctx.createOscillator();
+						const gain = ctx.createGain();
+						const st = now + .08 + idx * .08;
+						osc.type = "sine";
+						osc.frequency.setValueAtTime(freq, st);
+						gain.gain.setValueAtTime(.001, st);
+						gain.gain.linearRampToValueAtTime(.1, st + .018);
+						gain.gain.exponentialRampToValueAtTime(.001, st + .7);
+						osc.connect(gain);
+						gain.connect(this.getOutputNode(ctx));
+						osc.start(st);
+						osc.stop(st + .75);
+					});
+				} else [
+					523.25,
 					659.25,
-					880,
-					1108.73,
-					1318.51
+					783.99,
+					1046.5
 				].forEach((freq, idx) => {
 					const osc = ctx.createOscillator();
 					const gain = ctx.createGain();
-					const st = now + .1 + idx * .085;
+					const st = now + idx * .075;
 					osc.type = "sine";
 					osc.frequency.setValueAtTime(freq, st);
 					gain.gain.setValueAtTime(.001, st);
-					gain.gain.linearRampToValueAtTime(.11, st + .02);
-					gain.gain.exponentialRampToValueAtTime(.001, st + .85);
+					gain.gain.linearRampToValueAtTime(.095, st + .015);
+					gain.gain.exponentialRampToValueAtTime(.001, st + .62);
 					osc.connect(gain);
 					gain.connect(this.getOutputNode(ctx));
 					osc.start(st);
-					osc.stop(st + .9);
+					osc.stop(st + .65);
 				});
-			} else if (tier >= 6) {
-				this.playFilteredNoise(ctx, {
-					startTime: now,
-					duration: .35,
-					filterType: "highpass",
-					startFreq: 900,
-					endFreq: 2800,
-					peakGain: .045
-				});
-				[293.66, 440].forEach((freq) => {
-					const osc = ctx.createOscillator();
-					const gain = ctx.createGain();
-					osc.type = "triangle";
-					osc.frequency.setValueAtTime(freq, now);
-					gain.gain.setValueAtTime(.001, now);
-					gain.gain.linearRampToValueAtTime(.07, now + .09);
-					gain.gain.exponentialRampToValueAtTime(.001, now + 1.05);
-					osc.connect(gain);
-					gain.connect(this.getOutputNode(ctx));
-					osc.start(now);
-					osc.stop(now + 1.1);
-				});
-				[
-					587.33,
-					739.99,
-					880,
-					1174.66
-				].forEach((freq, idx) => {
-					const osc = ctx.createOscillator();
-					const gain = ctx.createGain();
-					const st = now + .08 + idx * .08;
-					osc.type = "sine";
-					osc.frequency.setValueAtTime(freq, st);
-					gain.gain.setValueAtTime(.001, st);
-					gain.gain.linearRampToValueAtTime(.1, st + .018);
-					gain.gain.exponentialRampToValueAtTime(.001, st + .7);
-					osc.connect(gain);
-					gain.connect(this.getOutputNode(ctx));
-					osc.start(st);
-					osc.stop(st + .75);
-				});
-			} else [
-				523.25,
-				659.25,
-				783.99,
-				1046.5
-			].forEach((freq, idx) => {
-				const osc = ctx.createOscillator();
-				const gain = ctx.createGain();
-				const st = now + idx * .075;
-				osc.type = "sine";
-				osc.frequency.setValueAtTime(freq, st);
-				gain.gain.setValueAtTime(.001, st);
-				gain.gain.linearRampToValueAtTime(.095, st + .015);
-				gain.gain.exponentialRampToValueAtTime(.001, st + .62);
-				osc.connect(gain);
-				gain.connect(this.getOutputNode(ctx));
-				osc.start(st);
-				osc.stop(st + .65);
-			});
-		} catch {}
+			} catch {}
+		});
 	}
 };
 var giftSoundEngine = new GiftSoundEngine();
@@ -64581,6 +64656,8 @@ var GIFT_ID_SFX_ASSET_MAP = {
 	gift_rocket: "/audio/gift-rocket.mp3",
 	gift_dragon: "/audio/gift-dragon.mp3"
 };
+var NOOP = () => {};
+var MAX_DECODED_BUFFER_CACHE = 28;
 var GiftAudioManager = class {
 	constructor() {
 		this.ctx = null;
@@ -64593,6 +64670,8 @@ var GiftAudioManager = class {
 		this.muteListeners = /* @__PURE__ */ new Set();
 		this.isMuted = false;
 		this.masterVolume = .85;
+		this.unlocked = false;
+		this.listenersAttached = false;
 		if (typeof window !== "undefined") {
 			try {
 				this.isMuted = localStorage.getItem(MUTE_STORAGE_KEY) === "true";
@@ -64600,6 +64679,58 @@ var GiftAudioManager = class {
 				if (!Number.isNaN(savedVol) && savedVol >= 0 && savedVol <= 1) this.masterVolume = savedVol;
 			} catch {}
 			giftSoundEngine.setMuted(this.isMuted);
+			this.attachGlobalUnlockListeners();
+		}
+	}
+	attachGlobalUnlockListeners() {
+		if (typeof window === "undefined" || this.listenersAttached) return;
+		this.listenersAttached = true;
+		const handleGesture = () => {
+			this.unlock();
+		};
+		const handleVisibility = () => {
+			if (document.visibilityState === "visible" && this.ctx && this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+		};
+		window.addEventListener("pointerdown", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("touchstart", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("click", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("keydown", handleGesture, {
+			capture: true,
+			passive: true
+		});
+		document.addEventListener("visibilitychange", handleVisibility);
+	}
+	async unlock() {
+		const graph = this.ensureAudioGraph();
+		const synthUnlock = giftSoundEngine.unlock();
+		if (!graph) {
+			await synthUnlock;
+			return false;
+		}
+		try {
+			if (graph.ctx.state === "suspended") await Promise.race([graph.ctx.resume(), new Promise((resolve) => setTimeout(resolve, 180))]);
+			if (!this.unlocked && graph.ctx.state === "running") {
+				const silentBuf = graph.ctx.createBuffer(1, 1, graph.ctx.sampleRate || 44100);
+				const src = graph.ctx.createBufferSource();
+				src.buffer = silentBuf;
+				src.connect(graph.ctx.destination);
+				src.start(0);
+				this.unlocked = true;
+			}
+			await synthUnlock;
+			return graph.ctx.state === "running";
+		} catch {
+			await synthUnlock;
+			return false;
 		}
 	}
 	ensureAudioGraph() {
@@ -64610,7 +64741,6 @@ var GiftAudioManager = class {
 				if (!AudioCtx) return null;
 				this.ctx = new AudioCtx();
 			}
-			if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
 			if (!this.compressor || !this.masterGain) {
 				const compressor = this.ctx.createDynamicsCompressor();
 				compressor.threshold.setValueAtTime(-14, this.ctx.currentTime);
@@ -64631,6 +64761,30 @@ var GiftAudioManager = class {
 			};
 		} catch {
 			return null;
+		}
+	}
+	async ensureRunningGraph(timeoutMs = 220) {
+		const graph = this.ensureAudioGraph();
+		if (!graph) return null;
+		if (graph.ctx.state === "suspended") try {
+			await Promise.race([graph.ctx.resume(), new Promise((resolve) => setTimeout(resolve, timeoutMs))]);
+		} catch {}
+		return graph;
+	}
+	cacheDecodedBuffer(key, buffer) {
+		this.bufferCache.delete(key);
+		this.bufferCache.set(key, {
+			status: "decoded",
+			buffer
+		});
+		let decodedCount = 0;
+		for (const entry of this.bufferCache.values()) if (entry.status === "decoded") decodedCount += 1;
+		if (decodedCount > MAX_DECODED_BUFFER_CACHE) {
+			for (const [k, v] of this.bufferCache.entries()) if (v.status === "decoded") {
+				this.bufferCache.delete(k);
+				decodedCount -= 1;
+				if (decodedCount <= MAX_DECODED_BUFFER_CACHE) break;
+			}
 		}
 	}
 	getIsMuted() {
@@ -64723,45 +64877,101 @@ var GiftAudioManager = class {
 	getAssetPath(giftOrTrigger, giftIdOverride) {
 		return this.resolveTriggerConfig(giftOrTrigger, giftIdOverride).candidatePaths[0];
 	}
-	async loadAndDecodeAsset(assetPath) {
-		const cached = this.bufferCache.get(assetPath);
-		if (cached) return cached.status === "decoded" ? cached.buffer : null;
-		const existingInflight = this.inflightLoads.get(assetPath);
+	async loadAndDecodeAssetDetailed(assetPath, options = {}) {
+		const cacheKey = options.cacheKey || assetPath;
+		const cached = this.bufferCache.get(cacheKey);
+		if (cached) return cached.status === "decoded" ? { buffer: cached.buffer } : {
+			buffer: null,
+			reason: "no_audio"
+		};
+		const existingInflight = this.inflightLoads.get(cacheKey);
 		if (existingInflight) return existingInflight;
 		const graph = this.ensureAudioGraph();
-		if (!graph || typeof fetch === "undefined") return null;
+		if (!graph || typeof fetch === "undefined") return {
+			buffer: null,
+			reason: "fetch_failed"
+		};
+		const isBlobUrl = assetPath.startsWith("blob:");
+		const timeoutMs = options.fetchTimeoutMs ?? (isBlobUrl ? 8e3 : 3200);
+		const cacheMissingOnNetworkError = options.cacheMissingOnNetworkError ?? true;
 		const loadPromise = (async () => {
+			let timerId = null;
+			const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+			let timedOut = false;
 			try {
-				const res = await fetch(assetPath, { cache: "force-cache" });
+				if (controller && timeoutMs > 0) timerId = setTimeout(() => {
+					timedOut = true;
+					controller.abort();
+				}, timeoutMs);
+				const res = await fetch(assetPath, {
+					cache: isBlobUrl ? "no-store" : "force-cache",
+					signal: controller?.signal
+				});
 				if (!res.ok) {
-					this.bufferCache.set(assetPath, { status: "missing" });
-					return null;
+					if (cacheMissingOnNetworkError && res.status === 404) this.bufferCache.set(cacheKey, { status: "missing" });
+					return {
+						buffer: null,
+						reason: "fetch_failed"
+					};
 				}
 				const contentType = (res.headers.get("content-type") || "").toLowerCase();
 				if (contentType.includes("text/html") || contentType.includes("application/json")) {
-					this.bufferCache.set(assetPath, { status: "missing" });
-					return null;
+					this.bufferCache.set(cacheKey, { status: "missing" });
+					return {
+						buffer: null,
+						reason: "no_audio"
+					};
 				}
 				const arrayBuffer = await res.arrayBuffer();
-				if (arrayBuffer.byteLength < 64) {
-					this.bufferCache.set(assetPath, { status: "missing" });
-					return null;
+				if (timerId) {
+					clearTimeout(timerId);
+					timerId = null;
 				}
-				const decoded = await graph.ctx.decodeAudioData(arrayBuffer.slice(0));
-				this.bufferCache.set(assetPath, {
-					status: "decoded",
-					buffer: decoded
-				});
-				return decoded;
+				if (arrayBuffer.byteLength < 64) {
+					this.bufferCache.set(cacheKey, { status: "missing" });
+					return {
+						buffer: null,
+						reason: "no_audio"
+					};
+				}
+				try {
+					const decoded = await graph.ctx.decodeAudioData(arrayBuffer.slice(0));
+					if (!decoded || decoded.duration <= .02) {
+						this.bufferCache.set(cacheKey, { status: "missing" });
+						return {
+							buffer: null,
+							reason: "no_audio"
+						};
+					}
+					this.cacheDecodedBuffer(cacheKey, decoded);
+					return { buffer: decoded };
+				} catch {
+					this.bufferCache.set(cacheKey, { status: "missing" });
+					return {
+						buffer: null,
+						reason: "no_audio"
+					};
+				}
 			} catch {
-				this.bufferCache.set(assetPath, { status: "missing" });
-				return null;
+				if (timedOut) return {
+					buffer: null,
+					reason: "timeout"
+				};
+				if (cacheMissingOnNetworkError) this.bufferCache.set(cacheKey, { status: "missing" });
+				return {
+					buffer: null,
+					reason: "fetch_failed"
+				};
 			} finally {
-				this.inflightLoads.delete(assetPath);
+				if (timerId) clearTimeout(timerId);
+				this.inflightLoads.delete(cacheKey);
 			}
 		})();
-		this.inflightLoads.set(assetPath, loadPromise);
+		this.inflightLoads.set(cacheKey, loadPromise);
 		return loadPromise;
+	}
+	async loadAndDecodeAsset(assetPath) {
+		return (await this.loadAndDecodeAssetDetailed(assetPath)).buffer;
 	}
 	async preloadGiftSfx(triggers) {
 		const keys = triggers && triggers.length > 0 ? triggers : Object.keys(GIFT_SFX_ASSET_MAP);
@@ -64776,10 +64986,10 @@ var GiftAudioManager = class {
 	preloadAll() {
 		return this.preloadGiftSfx();
 	}
-	playDecodedBuffer(buffer, volume, playbackRate = 1) {
-		const graph = this.ensureAudioGraph();
-		if (!graph) return false;
+	startDecodedBuffer(graph, buffer, volume, playbackRate = 1, offsetSec = 0) {
 		try {
+			const safeOffset = Math.max(0, offsetSec);
+			if (safeOffset >= Math.max(.05, buffer.duration - .05)) return null;
 			const source = graph.ctx.createBufferSource();
 			source.buffer = buffer;
 			source.playbackRate.setValueAtTime(Math.max(.5, Math.min(2, playbackRate)), graph.ctx.currentTime);
@@ -64787,19 +64997,86 @@ var GiftAudioManager = class {
 			cueGain.gain.setValueAtTime(Math.max(0, Math.min(1.5, volume)), graph.ctx.currentTime);
 			source.connect(cueGain);
 			cueGain.connect(graph.masterGain);
+			let stopped = false;
+			const cleanup = () => {
+				if (stopped) return;
+				stopped = true;
+				this.activeSources.delete(source);
+				try {
+					source.stop();
+				} catch {}
+				try {
+					source.disconnect();
+					cueGain.disconnect();
+				} catch {}
+			};
 			this.activeSources.add(source);
 			source.onended = () => {
+				stopped = true;
 				this.activeSources.delete(source);
 				try {
 					source.disconnect();
 					cueGain.disconnect();
 				} catch {}
 			};
-			source.start(0);
-			return true;
+			source.start(0, safeOffset);
+			return cleanup;
 		} catch {
-			return false;
+			return null;
 		}
+	}
+	/**
+	* Voice-Safe Embedded Media Audio Player:
+	* Demuxes & decodes the embedded audio track from WebM / MP4 / MOV gift videos through
+	* Web Audio API so EVERY user (sender + passive remote listeners) hears crystal-clear
+	* gift sound alongside live Agora Party Voice — with ZERO Android AudioFocus loss and
+	* ZERO <video> autoplay NotAllowedError!
+	*/
+	async playMediaAudioTrack(mediaUrl, options = {}) {
+		if (this.isMuted || !mediaUrl) return {
+			played: false,
+			reason: "muted",
+			stop: NOOP
+		};
+		if (!await this.ensureRunningGraph(240)) return {
+			played: false,
+			reason: "context_unavailable",
+			stop: NOOP
+		};
+		const decodedRes = await this.loadAndDecodeAssetDetailed(mediaUrl, {
+			cacheKey: options.cacheKey || mediaUrl,
+			fetchTimeoutMs: options.fetchTimeoutMs ?? (mediaUrl.startsWith("blob:") ? 8e3 : 2800),
+			cacheMissingOnNetworkError: false
+		});
+		if (this.isMuted) return {
+			played: false,
+			reason: "muted",
+			stop: NOOP
+		};
+		if (!decodedRes.buffer) return {
+			played: false,
+			reason: decodedRes.reason || "no_audio",
+			stop: NOOP
+		};
+		const activeGraph = await this.ensureRunningGraph(140);
+		if (!activeGraph || this.isMuted) return {
+			played: false,
+			reason: this.isMuted ? "muted" : "context_unavailable",
+			stop: NOOP
+		};
+		const offsetSec = Math.max(0, Number(options.getOffsetSec?.() ?? 0) || 0);
+		const volume = typeof options.volume === "number" ? options.volume : .78;
+		const playbackRate = typeof options.playbackRate === "number" ? options.playbackRate : 1;
+		const stopHandle = this.startDecodedBuffer(activeGraph, decodedRes.buffer, volume, playbackRate, offsetSec);
+		if (!stopHandle) return {
+			played: false,
+			reason: "context_unavailable",
+			stop: NOOP
+		};
+		return {
+			played: true,
+			stop: stopHandle
+		};
 	}
 	async playGiftSfx(giftOrTrigger, options = {}) {
 		if (this.isMuted) return "muted";
@@ -64807,27 +65084,31 @@ var GiftAudioManager = class {
 		const comboCount = Number(options.comboCount || 1);
 		const effectiveVolume = typeof options.volume === "number" ? options.volume : cueConfig.defaultVolume;
 		const computedPlaybackRate = options.playbackRate ?? (cueConfig.allowComboPitchShift && comboCount > 1 ? 1 + Math.min(comboCount - 1, 10) * .03 : 1);
+		const graph = await this.ensureRunningGraph(220);
 		let playedFromAsset = false;
-		for (const path of candidatePaths) {
+		if (graph && !this.isMuted) for (const path of candidatePaths) {
 			const cached = this.bufferCache.get(path);
 			if (cached?.status === "missing") continue;
 			const buffer = cached?.status === "decoded" ? cached.buffer : await this.loadAndDecodeAsset(path);
-			if (buffer && this.playDecodedBuffer(buffer, effectiveVolume, computedPlaybackRate)) {
+			if (this.isMuted) return "muted";
+			if (buffer && this.startDecodedBuffer(graph, buffer, effectiveVolume, computedPlaybackRate)) {
 				playedFromAsset = true;
 				break;
 			}
 		}
-		if (!playedFromAsset) giftSoundEngine.play(animationType);
-		if (comboCount > 1 && !options.skipComboSfx) this.playComboSfx(comboCount);
+		if (!playedFromAsset && !this.isMuted) giftSoundEngine.play(animationType, effectiveVolume);
+		if (comboCount > 1 && !options.skipComboSfx && !this.isMuted) this.playComboSfx(comboCount);
 		return playedFromAsset ? "asset" : "synth";
 	}
 	async playComboSfx(multiplier) {
 		if (this.isMuted) return "muted";
 		const rate = 1 + Math.min(Math.max(multiplier - 1, 0), 14) * .04;
 		const cached = this.bufferCache.get(COMBO_SFX_ASSET_PATH);
-		if (cached?.status !== "missing") {
+		const graph = await this.ensureRunningGraph(180);
+		if (graph && cached?.status !== "missing") {
 			const buffer = cached?.status === "decoded" ? cached.buffer : await this.loadAndDecodeAsset(COMBO_SFX_ASSET_PATH);
-			if (buffer && this.playDecodedBuffer(buffer, .75, rate)) return "asset";
+			if (this.isMuted) return "muted";
+			if (buffer && this.startDecodedBuffer(graph, buffer, .75, rate)) return "asset";
 		}
 		giftSoundEngine.playComboSound(multiplier);
 		return "synth";
@@ -64837,9 +65118,11 @@ var GiftAudioManager = class {
 		const tier = Math.max(1, Math.min(12, Math.floor(Number(vipTier) || 3)));
 		const assetPath = tier >= 9 ? "/audio/vip-entry-sovereign.mp3" : tier >= 6 ? "/audio/vip-entry-imperial.mp3" : "/audio/vip-entry-gold.mp3";
 		const cached = this.bufferCache.get(assetPath);
-		if (cached?.status !== "missing") {
+		const graph = await this.ensureRunningGraph(200);
+		if (graph && cached?.status !== "missing") {
 			const buffer = cached?.status === "decoded" ? cached.buffer : await this.loadAndDecodeAsset(assetPath);
-			if (buffer && this.playDecodedBuffer(buffer, .85, 1)) return "asset";
+			if (this.isMuted) return "muted";
+			if (buffer && this.startDecodedBuffer(graph, buffer, .85, 1)) return "asset";
 		}
 		giftSoundEngine.playVipEntryFanfare(tier);
 		return "synth";
@@ -70619,7 +70902,7 @@ var AgoraPartyEngine = class {
 		}
 	}
 	async startWebAgoraFallback(roomId, payload) {
-		const mod = await __vitePreload(() => import("./AgoraRTC_N-production-GF3xToiW.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+		const mod = await __vitePreload(() => import("./AgoraRTC_N-production-PQzfx1Na.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 		const AgoraRTC = mod.default || mod;
 		if (this.manualStop || this.roomId !== roomId) return;
 		try {
@@ -70874,7 +71157,7 @@ var AgoraPartyEngine = class {
 			await agoraPartyNative.renewToken(payload.token);
 			await agoraPartyNative.setMuted(this.muted);
 		} else if (this.webClient && this.webJoined) {
-			const mod = await __vitePreload(() => import("./AgoraRTC_N-production-GF3xToiW.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+			const mod = await __vitePreload(() => import("./AgoraRTC_N-production-PQzfx1Na.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 			const AgoraRTC = mod.default || mod;
 			if (effectiveCanSpeak) {
 				await this.webClient.renewToken(payload.token).catch(() => {});
@@ -71138,7 +71421,7 @@ var AgoraPartyEngine = class {
 		await this.enqueueOp(async () => {
 			if (this.manualStop || this.roomId !== roomId || !this.webClient || !this.webJoined || !this.canPublish || this.listenOnly) return;
 			try {
-				const mod = await __vitePreload(() => import("./AgoraRTC_N-production-GF3xToiW.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+				const mod = await __vitePreload(() => import("./AgoraRTC_N-production-PQzfx1Na.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 				const AgoraRTC = mod.default || mod;
 				const keepRawMic = applied !== "normal";
 				await this.unpublishAndCloseWebLocalAudioTrack(keepRawMic);
@@ -85438,7 +85721,7 @@ var RefreshScopeButton = ({ scope, onAfterRefresh, onBeforeRefresh, compact = fa
 	});
 };
 // node_modules/@capacitor/app/dist/esm/index.js
-var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-B8bhZ5Sm.js").then((m) => new m.AppWeb()), []) });
+var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-BwTSkxt-.js").then((m) => new m.AppWeb()), []) });
 // node_modules/@capacitor/status-bar/dist/esm/definitions.js
 var Style;
 (function(Style) {
@@ -109495,13 +109778,15 @@ var SvgaGiftCanvas = ({ url, shouldLoop, contentMode, onReady, onFinished, onErr
 		}
 	});
 };
-var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, slotIndex = 0, previewLoopOverride = false, onComplete, onDurationDetected, onProgress }) => {
+var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, voiceSafeAudio = false, roomSpeakerMuted = false, slotIndex = 0, previewLoopOverride = false, onComplete, onDurationDetected, onProgress }) => {
 	const videoRef = (0, import_react.useRef)(null);
 	const completedIdRef = (0, import_react.useRef)(null);
 	const endTimerRef = (0, import_react.useRef)(void 0);
 	const exitTimerRef = (0, import_react.useRef)(void 0);
 	const playRetryTimerRef = (0, import_react.useRef)(void 0);
 	const lastHeartbeatEmitAtRef = (0, import_react.useRef)(0);
+	const stopMediaAudioRef = (0, import_react.useRef)(null);
+	const audioTriggeredEventIdRef = (0, import_react.useRef)(null);
 	const onCompleteRef = (0, import_react.useRef)(onComplete);
 	onCompleteRef.current = onComplete;
 	const onDurationDetectedRef = (0, import_react.useRef)(onDurationDetected);
@@ -109511,6 +109796,10 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 	const [phase, setPhase] = (0, import_react.useState)("enter");
 	const [isMediaReady, setIsMediaReady] = (0, import_react.useState)(false);
 	const [videoAspect, setVideoAspect] = (0, import_react.useState)(null);
+	const [isSfxMuted, setIsSfxMuted] = (0, import_react.useState)(() => audioManager.getIsMuted());
+	(0, import_react.useEffect)(() => {
+		return audioManager.subscribeMute(setIsSfxMuted);
+	}, []);
 	const baseConfig = event?.gift.advancedConfig;
 	const config = (0, import_react.useMemo)(() => {
 		if (!baseConfig) return null;
@@ -109609,9 +109898,74 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 		lastHeartbeatEmitAtRef.current = now;
 		onProgressRef.current?.(eventId, currentTimeMs, durationMs);
 	};
+	const stopActiveGiftAudio = () => {
+		if (stopMediaAudioRef.current) {
+			try {
+				stopMediaAudioRef.current();
+			} catch {}
+			stopMediaAudioRef.current = null;
+		}
+	};
+	/**
+	* Unified Voice-Safe Gift Audio Trigger:
+	* - Fires ONCE per gift event on the owning layer only (never doubled across bg + fg layers).
+	* - For Video gifts in voice-safe mode (or after autoplay fallback): decodes & plays the
+	*   embedded audio track through Web Audio API synced to video.currentTime so EVERY user
+	*   hears the exact soundtrack alongside Agora Party Voice without ever stealing AudioFocus.
+	* - If the video has no audio track or remote fetch times out/is CORS-blocked, immediately
+	*   falls back to gift SFX so no user ever gets silence.
+	* - For SVGA / GIF / SVG gifts: plays the mapped gift SFX cleanly via Web Audio API.
+	*/
+	const triggerGiftAudioForEvent = (useVideoWebAudio) => {
+		if (!event || !config || !ownsCompletionLifecycle || forceMuted || roomSpeakerMuted || config.enableSound === false || audioManager.getIsMuted() || completedIdRef.current === event.id) return;
+		const targetEventId = event.id;
+		if (audioTriggeredEventIdRef.current === targetEventId) return;
+		audioTriggeredEventIdRef.current = targetEventId;
+		const targetGift = event.gift;
+		const targetCombo = event.comboCount;
+		const sfxVol = voiceSafeAudio ? .68 : .85;
+		if (isVideoFormat && useVideoWebAudio && mediaUrl) {
+			const targetUrl = mediaUrl;
+			const stableCacheKey = remoteMediaUrl || mediaUrl;
+			audioManager.playMediaAudioTrack(targetUrl, {
+				cacheKey: stableCacheKey,
+				volume: voiceSafeAudio ? .72 : .85,
+				playbackRate: playbackSpeed,
+				getOffsetSec: () => {
+					const v = videoRef.current;
+					return v && Number.isFinite(v.currentTime) ? v.currentTime : 0;
+				}
+			}).then((res) => {
+				if (completedIdRef.current === targetEventId || audioTriggeredEventIdRef.current !== targetEventId || audioManager.getIsMuted() || roomSpeakerMuted || forceMuted) {
+					res.stop();
+					return;
+				}
+				if (res.played) {
+					stopActiveGiftAudio();
+					stopMediaAudioRef.current = res.stop;
+					return;
+				}
+				if (res.reason !== "muted") audioManager.playGiftSfx(targetGift, {
+					comboCount: targetCombo,
+					volume: sfxVol
+				});
+			}).catch(() => {
+				if (completedIdRef.current !== targetEventId && audioTriggeredEventIdRef.current === targetEventId && !audioManager.getIsMuted() && !roomSpeakerMuted && !forceMuted) audioManager.playGiftSfx(targetGift, {
+					comboCount: targetCombo,
+					volume: sfxVol
+				});
+			});
+			return;
+		}
+		if (!isVideoFormat) audioManager.playGiftSfx(targetGift, {
+			comboCount: targetCombo,
+			volume: sfxVol
+		});
+	};
 	const finishPlayback = (eventId, withFade = true) => {
 		if (completedIdRef.current === eventId) return;
 		completedIdRef.current = eventId;
+		stopActiveGiftAudio();
 		if (playRetryTimerRef.current !== void 0) {
 			window.clearTimeout(playRetryTimerRef.current);
 			playRetryTimerRef.current = void 0;
@@ -109691,6 +110045,8 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 		if (!event || !config) return;
 		const currentEventId = event.id;
 		completedIdRef.current = null;
+		audioTriggeredEventIdRef.current = null;
+		stopActiveGiftAudio();
 		lastProgressAtRef.current = Date.now();
 		lastVideoTimeRef.current = 0;
 		stallRecoveryAttemptsRef.current = 0;
@@ -109698,6 +110054,7 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 		setVideoAspect(config.analysis?.width && config.analysis?.height ? config.analysis.width > config.analysis.height ? "landscape" : "portrait" : null);
 		setPhase("enter");
 		const enterTimer = window.setTimeout(() => setPhase("visible"), 25);
+		if (!isVideoFormat && !isSvgaFormat && ownsCompletionLifecycle) triggerGiftAudioForEvent(false);
 		if (!previewLoopOverride && ownsCompletionLifecycle) {
 			if (isVideoFormat && !shouldLoop) armVideoStallWatchdog(currentEventId, 16e3);
 			else if (isSvgaFormat && !shouldLoop) {
@@ -109717,6 +110074,8 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 			}
 		}
 		return () => {
+			stopActiveGiftAudio();
+			audioTriggeredEventIdRef.current = null;
 			window.clearTimeout(enterTimer);
 			if (playRetryTimerRef.current !== void 0) {
 				window.clearTimeout(playRetryTimerRef.current);
@@ -109746,10 +110105,34 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 		ownsCompletionLifecycle
 	]);
 	(0, import_react.useEffect)(() => {
+		if (forceMuted || roomSpeakerMuted || isSfxMuted || config?.enableSound === false) {
+			stopActiveGiftAudio();
+			audioTriggeredEventIdRef.current = null;
+			if (videoRef.current) videoRef.current.muted = true;
+			return;
+		}
+		if (event?.id && ownsCompletionLifecycle && completedIdRef.current !== event.id && audioTriggeredEventIdRef.current !== event.id) {
+			if (isVideoFormat) {
+				if (voiceSafeAudio) {
+					if (videoRef.current && !videoRef.current.paused) triggerGiftAudioForEvent(true);
+				} else if (videoRef.current) videoRef.current.muted = false;
+			} else triggerGiftAudioForEvent(false);
+		}
+	}, [
+		isSfxMuted,
+		roomSpeakerMuted,
+		forceMuted,
+		voiceSafeAudio,
+		config?.enableSound,
+		event?.id,
+		isVideoFormat,
+		ownsCompletionLifecycle
+	]);
+	(0, import_react.useEffect)(() => {
 		const v = videoRef.current;
 		if (!v || !isVideoFormat || !shouldRenderAnimationOnThisLayer || !mediaUrl) return;
 		let cancelled = false;
-		v.muted = forceMuted || audioManager.getIsMuted() || config?.enableSound === false;
+		v.muted = voiceSafeAudio || forceMuted || roomSpeakerMuted || isSfxMuted || config?.enableSound === false;
 		v.playbackRate = playbackSpeed;
 		v.loop = shouldLoop;
 		const attemptStart = async (retryCount = 0) => {
@@ -109765,6 +110148,7 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 				try {
 					el.muted = true;
 					await el.play();
+					if (!voiceSafeAudio && !forceMuted && !roomSpeakerMuted && !audioManager.getIsMuted()) triggerGiftAudioForEvent(true);
 				} catch {
 					if (cancelled) return;
 					if (retryCount < 4) playRetryTimerRef.current = window.setTimeout(() => {
@@ -109789,6 +110173,8 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 		playbackSpeed,
 		shouldLoop,
 		forceMuted,
+		voiceSafeAudio,
+		roomSpeakerMuted,
 		config?.enableSound,
 		previewLoopOverride,
 		ownsCompletionLifecycle
@@ -109811,6 +110197,7 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 			contentMode: position === "fullscreen" || isOverlayBackgroundMode ? "AspectFill" : "AspectFit",
 			onReady: (svgaDurationMs) => {
 				setIsMediaReady(true);
+				triggerGiftAudioForEvent(false);
 				if (!shouldLoop && !previewLoopOverride && ownsCompletionLifecycle && svgaDurationMs && svgaDurationMs > 0) {
 					if (endTimerRef.current !== void 0) window.clearTimeout(endTimerRef.current);
 					endTimerRef.current = window.setTimeout(() => {
@@ -109834,7 +110221,7 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 				autoPlay: true,
 				loop: shouldLoop,
 				preload: "auto",
-				muted: forceMuted || audioManager.getIsMuted() || config.enableSound === false,
+				muted: voiceSafeAudio || forceMuted || roomSpeakerMuted || isSfxMuted || config.enableSound === false,
 				onLoadedMetadata: (e) => {
 					const vid = e.currentTarget;
 					lastProgressAtRef.current = Date.now();
@@ -109855,6 +110242,7 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 					stallRecoveryAttemptsRef.current = 0;
 					setIsMediaReady(true);
 					const vid = e.currentTarget;
+					if (voiceSafeAudio || vid.muted) triggerGiftAudioForEvent(true);
 					const realDurationMs = Number.isFinite(vid.duration) && vid.duration > 0 ? Math.ceil(vid.duration * 1e3 / playbackSpeed) : configuredDurationMs;
 					onDurationDetectedRef.current?.(event.id, realDurationMs);
 					emitProgressHeartbeat(event.id, Math.round((vid.currentTime || 0) * 1e3), realDurationMs, true);
@@ -110017,6 +110405,29 @@ var UniversalGiftPlayer = ({ event, layer, overrideConfig, forceMuted = false, s
 					})
 				]
 			})
+		}),
+		shouldRenderSenderCapsule && slotIndex === 0 && !forceMuted && !previewLoopOverride && !roomSpeakerMuted && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+			"data-keep-dark": "true",
+			style: { top: `${capsuleTopPx}px` },
+			className: "absolute right-3 z-[37] pointer-events-auto",
+			children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+				type: "button",
+				onClick: (e) => {
+					e.stopPropagation();
+					audioManager.unlock();
+					const muted = audioManager.toggleMute();
+					setIsSfxMuted(muted);
+				},
+				title: isSfxMuted ? "Unmute Gift Sound" : "Mute Gift Sound",
+				className: "flex items-center gap-1 px-2.5 py-1.5 rounded-full bg-black/55 backdrop-blur-md border border-white/20 text-white text-[10px] font-bold hover:bg-black/75 transition-all cursor-pointer shadow-lg",
+				children: isSfxMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(VolumeX, { className: "w-3.5 h-3.5 text-zinc-400" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: "text-zinc-300",
+					children: "SFX Off"
+				})] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Volume2, { className: "w-3.5 h-3.5 text-amber-400" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+					className: "text-amber-300",
+					children: "SFX On"
+				})] })
+			})
 		})
 	] });
 };
@@ -110033,7 +110444,7 @@ var PRIMARY_CSS_SHOWCASE_STYLE = {
 	animationFillMode: "forwards",
 	animationIterationCount: 1
 };
-var GiftAnimationOverlay = import_react.memo(({ currentEvent, onComplete, layer = "both", slotIndex = 0, preserveVoiceAudio = false, onDurationDetected, onProgress }) => {
+var GiftAnimationOverlay = import_react.memo(({ currentEvent, onComplete, layer = "both", slotIndex = 0, preserveVoiceAudio = false, roomSpeakerMuted = false, onDurationDetected, onProgress }) => {
 	const [isMuted, setIsMuted] = (0, import_react.useState)(() => audioManager.getIsMuted());
 	const [shakeScreen, setShakeScreen] = (0, import_react.useState)(false);
 	const [isExiting, setIsExiting] = (0, import_react.useState)(false);
@@ -110078,8 +110489,11 @@ var GiftAnimationOverlay = import_react.memo(({ currentEvent, onComplete, layer 
 		let exitingTriggered = false;
 		setIsExiting(false);
 		onProgressRef.current?.(eventId, 0, durationMs);
-		if (!preserveVoiceAudio) try {
-			Promise.resolve(virtualGiftDatabase.playGiftAudio(meta, { comboCount: currentEvent.comboCount })).catch(() => {});
+		if (!roomSpeakerMuted) try {
+			Promise.resolve(virtualGiftDatabase.playGiftAudio(meta, {
+				comboCount: currentEvent.comboCount,
+				volume: preserveVoiceAudio ? .68 : void 0
+			})).catch(() => {});
 		} catch {}
 		let shakeTimer = null;
 		if (!meta.isBannerOnly && meta.triggersScreenShake) {
@@ -110165,6 +110579,7 @@ var GiftAnimationOverlay = import_react.memo(({ currentEvent, onComplete, layer 
 	]);
 	const handleToggleMute = (e) => {
 		e.stopPropagation();
+		audioManager.unlock();
 		const muted = audioManager.toggleMute();
 		setIsMuted(muted);
 	};
@@ -110226,7 +110641,9 @@ var GiftAnimationOverlay = import_react.memo(({ currentEvent, onComplete, layer 
 			event: currentEvent,
 			layer,
 			slotIndex,
-			forceMuted: preserveVoiceAudio,
+			forceMuted: false,
+			voiceSafeAudio: preserveVoiceAudio,
+			roomSpeakerMuted,
 			onComplete: handleUniversalGiftComplete,
 			onDurationDetected,
 			onProgress
@@ -110313,7 +110730,7 @@ var GiftAnimationOverlay = import_react.memo(({ currentEvent, onComplete, layer 
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 		className: `fixed inset-0 z-[55] pointer-events-none flex flex-col justify-between overflow-hidden transition-opacity duration-400 ${isExiting ? "opacity-0" : "opacity-100"} ${shakeClassName}`,
 		children: [
-			!preserveVoiceAudio && slotIndex === 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+			!roomSpeakerMuted && slotIndex === 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 				className: "absolute top-24 right-4 z-50 pointer-events-auto",
 				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
 					onClick: handleToggleMute,
@@ -113071,41 +113488,8 @@ var LiveStreamScreen = () => {
 		let cancelled = false;
 		seenLiveViewerIdsRef.current = /* @__PURE__ */ new Set([uid]);
 		liveViewersSeededRef.current = false;
-		const postLiveAiWelcome = (targetName, targetUid, isSelf, vipTier = 0) => {
-			const welcomeKey = `live:${streamId}:${targetUid}`;
-			if (hasWelcomedInSession(welcomeKey)) return;
-			if (!isSelf) {
-				const now = Date.now();
-				if (now - lastLiveRemoteWelcomeAtRef.current < 8e3) return;
-				lastLiveRemoteWelcomeAtRef.current = now;
-			}
-			markWelcomedInSession(welcomeKey);
-			requestGeminiWelcome({
-				userName: targetName || "Friend",
-				roomType: "live",
-				roomTitle: activeStream.title || "",
-				hostName: activeStream.host?.displayName || "",
-				isSelf,
-				vipTier
-			}).then(({ text }) => {
-				if (cancelled || !text) return;
-				const nowMs = Date.now();
-				setComments((prev) => [...prev.slice(-149), {
-					id: `ai_welcome_${streamId}_${targetUid}_${nowMs}`,
-					senderId: GEMINI_ASSISTANT_USER_ID,
-					user: GEMINI_ASSISTANT_NAME,
-					avatar: GEMINI_ASSISTANT_AVATAR,
-					text,
-					vipLevel: 0,
-					level: 0,
-					isAiBot: true,
-					createdAtMs: nowMs
-				}]);
-			}).catch((err) => {
-				console.warn("[Gemini Live Welcome]", err?.message || err);
-			});
-		};
-		postLiveAiWelcome(currentUser.displayName || "Friend", uid, true, currentUser.vipTier ?? 0);
+		const postLiveAiWelcome = (targetName, targetUid, isSelf, vipTier = 0) => {};
+		currentUser.displayName, currentUser.vipTier;
 		const heartbeatTimer = setInterval(() => {
 			joinLiveStreamViewer(streamId, profile).catch(() => {});
 		}, 25e3);
@@ -113121,7 +113505,7 @@ var LiveStreamScreen = () => {
 				} else for (const v of incomingViewers) {
 					if (!v?.id || v.id === uid || seenLiveViewerIdsRef.current.has(v.id)) continue;
 					seenLiveViewerIdsRef.current.add(v.id);
-					postLiveAiWelcome(v.displayName || "Viewer", v.id, false, Number(v.vipTier || 0));
+					v.displayName, v.id, Number(v.vipTier || 0);
 					break;
 				}
 			} else if (ev.type === "room:signal" && ev.signal?.type === "stream_ended" && !isHost) setIsBroadcastEnded(true);
@@ -113156,7 +113540,6 @@ var LiveStreamScreen = () => {
 		};
 		window.addEventListener("pagehide", handleLeavePage);
 		return () => {
-			cancelled = true;
 			clearInterval(heartbeatTimer);
 			window.removeEventListener("pagehide", handleLeavePage);
 			unsubWsRoom();
@@ -113523,6 +113906,7 @@ var LiveStreamScreen = () => {
 	const handleUnmuteRemoteAudio = () => {
 		setIsRemoteAudioMuted(false);
 		setAutoplayBlocked(false);
+		audioManager.unlock();
 		if (remoteVideoRef.current) {
 			remoteVideoRef.current.muted = true;
 			remoteVideoRef.current.play().catch(() => {});
@@ -113676,7 +114060,7 @@ var LiveStreamScreen = () => {
 		e.preventDefault();
 		const rawText = inputComment.trim();
 		if (!rawText || !activeStream?.id) return;
-		const shouldAskAi = askAiMode || isBotMentionMessage(rawText);
+		const shouldAskAi = false;
 		const uid = auth.currentUser?.uid || currentUser.id;
 		const nowMs = Date.now();
 		const newComment = {
@@ -113703,38 +114087,6 @@ var LiveStreamScreen = () => {
 			level: currentUser.level ?? 0,
 			senderId: uid
 		}).catch((err) => console.warn("Failed to send live comment:", err));
-		if (shouldAskAi && !aiBotReplying) {
-			const cleanPrompt = stripBotMention(rawText);
-			const currentStreamId = activeStream.id;
-			setAiBotReplying(true);
-			requestGeminiChat({
-				message: cleanPrompt,
-				history: recentHistory,
-				mode: "live",
-				context: {
-					userName: currentUser.displayName || "Viewer",
-					roomTitle: activeStream.title || "",
-					hostName: activeStream.host?.displayName || ""
-				}
-			}).then(({ reply }) => {
-				const replyMs = Date.now();
-				setComments((prev) => [...prev.slice(-149), {
-					id: `ai_reply_${currentStreamId}_${replyMs}`,
-					senderId: GEMINI_ASSISTANT_USER_ID,
-					user: GEMINI_ASSISTANT_NAME,
-					avatar: GEMINI_ASSISTANT_AVATAR,
-					text: reply,
-					vipLevel: 0,
-					level: 0,
-					isAiBot: true,
-					createdAtMs: replyMs
-				}]);
-			}).catch((err) => {
-				showToast(err instanceof Error ? err.message : "Alpha AI could not reply right now.");
-			}).finally(() => {
-				setAiBotReplying(false);
-			});
-		}
 	};
 	(0, import_react.useEffect)(() => {
 		streamJoinedAtRef.current = Date.now();
@@ -114058,6 +114410,7 @@ var LiveStreamScreen = () => {
 				layer: "background",
 				slotIndex: idx,
 				preserveVoiceAudio: true,
+				roomSpeakerMuted: activeRole === "viewer" && isRemoteAudioMuted,
 				currentEvent: giftEv,
 				onComplete: handleGiftOverlayComplete,
 				onDurationDetected: handleLiveGiftDurationDetected,
@@ -114127,6 +114480,7 @@ var LiveStreamScreen = () => {
 				layer: "foreground",
 				slotIndex: idx,
 				preserveVoiceAudio: true,
+				roomSpeakerMuted: activeRole === "viewer" && isRemoteAudioMuted,
 				currentEvent: giftEv,
 				onComplete: handleGiftOverlayComplete,
 				onDurationDetected: handleLiveGiftDurationDetected,
@@ -114350,19 +114704,13 @@ var LiveStreamScreen = () => {
 								onSubmit: handleSendComment,
 								className: "flex-1 flex items-center relative",
 								children: [
-									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-										type: "button",
-										onClick: () => setAskAiMode((v) => !v),
-										className: `absolute left-1 h-6.5 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${askAiMode ? "bg-indigo-600 text-white" : "bg-white/10 text-zinc-300 hover:bg-white/20"}`,
-										title: "Toggle Ask Alpha AI mode (or type @ai)",
-										children: "AI"
-									}),
+									false,
 									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
 										type: "text",
-										placeholder: askAiMode ? "Ask Alpha AI in live chat..." : "Say something nice (or @ai)...",
+										placeholder: "Say something nice...",
 										value: inputComment,
 										onChange: (e) => setInputComment(e.target.value),
-										className: "w-full h-8.5 pl-10 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+										className: `w-full h-8.5 pl-3 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]`
 									}),
 									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
 										type: "submit",
@@ -114396,19 +114744,13 @@ var LiveStreamScreen = () => {
 							onSubmit: handleSendComment,
 							className: "w-full flex items-center relative",
 							children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-									type: "button",
-									onClick: () => setAskAiMode((v) => !v),
-									className: `absolute left-1 h-6 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${askAiMode ? "bg-indigo-600 text-white" : "bg-white/10 text-zinc-300 hover:bg-white/20"}`,
-									title: "Toggle Ask Alpha AI mode (or type @ai)",
-									children: "AI"
-								}),
+								false,
 								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
 									type: "text",
-									placeholder: askAiMode ? "Ask Alpha AI in live chat..." : "Chat with audience (or type @ai)...",
+									placeholder: "Chat with your audience as Host...",
 									value: inputComment,
 									onChange: (e) => setInputComment(e.target.value),
-									className: "w-full h-8 pl-10 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+									className: `w-full h-8 pl-3 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]`
 								}),
 								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
 									type: "submit",
@@ -121258,6 +121600,7 @@ var PartyRoomsScreen = () => {
 	}, []);
 	const unlockAllRemoteAudioPlayback = (0, import_react.useCallback)(async () => {
 		agoraPartyEngine.resumeAudioPlayback();
+		audioManager.unlock();
 		const targets = [];
 		partyAudioElsRef.current.forEach((audioEl) => {
 			if (!audioEl || !audioEl.srcObject) return;
@@ -121518,49 +121861,8 @@ var PartyRoomsScreen = () => {
 		partyRoomDataService.joinPartyRoom(roomId, wsJoinProfile, 0, roomSessionId);
 		wsViewersSeededRef.current = false;
 		seenPartyWelcomeIdsRef.current = /* @__PURE__ */ new Set([effectiveUserId]);
-		const postPartyAiWelcome = (targetName, targetUid, isSelf, vipTier = 0) => {
-			const welcomeKey = `party:${roomId}:${roomSessionId || "live"}:${targetUid}`;
-			if (hasWelcomedInSession(welcomeKey)) return;
-			if (!isSelf) {
-				const now = Date.now();
-				if (now - lastPartyRemoteWelcomeAtRef.current < 8e3) return;
-				lastPartyRemoteWelcomeAtRef.current = now;
-			}
-			markWelcomedInSession(welcomeKey);
-			requestGeminiWelcome({
-				userName: targetName || "Guest",
-				roomType: "party",
-				roomTitle: activePartyRoom.title || "",
-				hostName: activePartyRoom.host?.displayName || "",
-				isSelf,
-				vipTier
-			}).then(({ text }) => {
-				if (cancelled || !text) return;
-				const nowMs = Date.now();
-				setChatItems((prev) => [...prev.slice(-149), {
-					id: `ai_party_welcome_${roomId}_${targetUid}_${nowMs}`,
-					sender: {
-						id: GEMINI_ASSISTANT_USER_ID,
-						displayName: GEMINI_ASSISTANT_NAME,
-						avatar: GEMINI_ASSISTANT_AVATAR,
-						vipTier: 0,
-						level: 0,
-						isHost: false
-					},
-					text,
-					type: "system",
-					timestamp: new Date(nowMs).toLocaleTimeString([], {
-						hour: "2-digit",
-						minute: "2-digit"
-					}),
-					isAiBot: true,
-					createdAtMs: nowMs
-				}]);
-			}).catch((err) => {
-				console.warn("[Gemini Party Welcome]", err?.message || err);
-			});
-		};
-		postPartyAiWelcome(currentUser.displayName || "Guest", effectiveUserId, true, currentUser.vipTier ?? 0);
+		const postPartyAiWelcome = (targetName, targetUid, isSelf, vipTier = 0) => {};
+		currentUser.displayName, currentUser.vipTier;
 		const selfVipTier = Number(currentUser.vipTier || 0);
 		if (selfVipTier >= 3) {
 			const joinTs = Date.now();
@@ -121659,7 +121961,7 @@ var PartyRoomsScreen = () => {
 							seenPartyWelcomeIdsRef.current.add(v.id);
 							if (!welcomedRemoteInBatch) {
 								welcomedRemoteInBatch = true;
-								postPartyAiWelcome(v.displayName || "Guest", v.id, false, viewerVipTier);
+								v.displayName, v.id;
 							}
 						}
 						if (viewerVipTier >= 3) enqueueVipEntry({
@@ -122216,7 +122518,7 @@ var PartyRoomsScreen = () => {
 		e.preventDefault();
 		const rawText = inputChat.trim();
 		if (!activePartyRoom || !rawText) return;
-		const shouldAskAi = askAiMode || isBotMentionMessage(rawText);
+		const shouldAskAi = false;
 		const isHost = activePartyRoom.host?.id === currentUser.id;
 		const nowMs = Date.now();
 		const msgId = `chat_${nowMs}_${Math.random().toString(36).slice(2, 7)}`;
@@ -122254,46 +122556,6 @@ var PartyRoomsScreen = () => {
 			text: newMsg.text,
 			type: isHost ? "host" : "room"
 		}, activePartyRoom.sessionId).catch((error) => showToast(error instanceof Error ? error.message : "Message could not be sent."));
-		if (shouldAskAi && !aiBotReplying) {
-			const cleanPrompt = stripBotMention(rawText);
-			const targetRoomId = activePartyRoom.id;
-			setAiBotReplying(true);
-			requestGeminiChat({
-				message: cleanPrompt,
-				history: recentHistory,
-				mode: "party",
-				context: {
-					userName: currentUser.displayName || "Guest",
-					roomTitle: activePartyRoom.title || "",
-					hostName: activePartyRoom.host?.displayName || ""
-				}
-			}).then(({ reply }) => {
-				const replyMs = Date.now();
-				setChatItems((prev) => [...prev.slice(-149), {
-					id: `ai_party_reply_${targetRoomId}_${replyMs}`,
-					sender: {
-						id: GEMINI_ASSISTANT_USER_ID,
-						displayName: GEMINI_ASSISTANT_NAME,
-						avatar: GEMINI_ASSISTANT_AVATAR,
-						vipTier: 0,
-						level: 0,
-						isHost: false
-					},
-					text: reply,
-					type: "system",
-					timestamp: new Date(replyMs).toLocaleTimeString([], {
-						hour: "2-digit",
-						minute: "2-digit"
-					}),
-					isAiBot: true,
-					createdAtMs: replyMs
-				}]);
-			}).catch((err) => {
-				showToast(err instanceof Error ? err.message : "Alpha AI could not reply right now.");
-			}).finally(() => {
-				setAiBotReplying(false);
-			});
-		}
 	};
 	const handleSendSelectedGift = () => {
 		if (!activePartyRoom?.id) return;
@@ -122509,6 +122771,7 @@ var PartyRoomsScreen = () => {
 					layer: "background",
 					slotIndex: idx,
 					preserveVoiceAudio: true,
+					roomSpeakerMuted: !isSpeakerOn,
 					currentEvent: giftEv,
 					onComplete: handlePartyGiftOverlayComplete,
 					onDurationDetected: handlePartyGiftDurationDetected,
@@ -122533,6 +122796,7 @@ var PartyRoomsScreen = () => {
 					layer: "foreground",
 					slotIndex: idx,
 					preserveVoiceAudio: true,
+					roomSpeakerMuted: !isSpeakerOn,
 					currentEvent: giftEv,
 					onComplete: handlePartyGiftOverlayComplete,
 					onDurationDetected: handlePartyGiftDurationDetected,
@@ -123091,19 +123355,13 @@ var PartyRoomsScreen = () => {
 									onSubmit: handleSendChat,
 									className: "w-full flex items-center relative",
 									children: [
-										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-											type: "button",
-											onClick: () => setAskAiMode((v) => !v),
-											className: `absolute left-1 h-6 sm:h-7 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${askAiMode ? "bg-indigo-600 text-white" : "bg-white/10 text-zinc-300 hover:bg-white/20"}`,
-											title: "Toggle Ask Alpha AI mode (or type @ai)",
-											children: "AI"
-										}),
+										false,
 										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
 											type: "text",
-											placeholder: askAiMode ? "Ask Alpha AI in party chat..." : "Say something nice (or @ai)...",
+											placeholder: "Say something nice...",
 											value: inputChat,
 											onChange: (e) => setInputChat(e.target.value),
-											className: "w-full h-8 sm:h-9 pl-10 pr-9 rounded-full bg-black/55 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#EC4899]"
+											className: `w-full h-8 sm:h-9 pl-3.5 pr-9 rounded-full bg-black/55 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#EC4899]`
 										}),
 										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
 											type: "submit",
@@ -125060,51 +125318,7 @@ var ChatScreen = () => {
 		setGeminiInboxMessages(stored);
 		setGeminiError(null);
 	}, [currentUser.id]);
-	(0, import_react.useEffect)(() => {
-		if (!currentUser.id) return;
-		if (geminiInboxMessages.length > 0) {
-			geminiWelcomedUserRef.current = currentUser.id;
-			return;
-		}
-		if (geminiWelcomedUserRef.current === currentUser.id) return;
-		geminiWelcomedUserRef.current = currentUser.id;
-		let cancelled = false;
-		setGeminiWelcoming(true);
-		requestGeminiWelcome({
-			userName: currentUser.displayName || "Friend",
-			roomType: "inbox",
-			isSelf: true,
-			vipTier: currentUser.vipTier ?? 0
-		}).then(({ text, model }) => {
-			if (cancelled) return;
-			const welcomeEntry = {
-				id: `gemini_welcome_${Date.now()}`,
-				role: "model",
-				text,
-				timestamp: (/* @__PURE__ */ new Date()).toLocaleTimeString([], {
-					hour: "2-digit",
-					minute: "2-digit"
-				}),
-				createdAtMs: Date.now(),
-				model,
-				isWelcome: true
-			};
-			setGeminiInboxMessages((prev) => {
-				if (prev.length > 0) return prev;
-				const next = [welcomeEntry];
-				saveInboxBotHistory(currentUser.id, next);
-				return next;
-			});
-		}).catch((err) => {
-			if (cancelled) return;
-			console.warn("[Gemini Inbox Welcome]", err?.message || err);
-		}).finally(() => {
-			if (!cancelled) setGeminiWelcoming(false);
-		});
-		return () => {
-			cancelled = true;
-		};
-	}, [
+	(0, import_react.useEffect)(() => {}, [
 		currentUser.id,
 		currentUser.displayName,
 		currentUser.vipTier,
@@ -125432,7 +125646,7 @@ var ChatScreen = () => {
 		currentUser.id
 	]);
 	const allConversations = (0, import_react.useMemo)(() => [
-		geminiAssistantConversation,
+		...[],
 		...firebaseChats,
 		...outgoingPendingConversations,
 		...localGroups.filter((g) => !firebaseChats.some((f) => f.id === g.id)),

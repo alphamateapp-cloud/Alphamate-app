@@ -64,6 +64,7 @@ import {
   GEMINI_ASSISTANT_NAME,
   GEMINI_ASSISTANT_PUBLIC_ID,
   GEMINI_ASSISTANT_USER_ID,
+  GEMINI_CHATBOT_ENABLED,
   GeminiInboxMessage,
   clearInboxBotHistory,
   loadInboxBotHistory,
@@ -215,7 +216,7 @@ export const ChatScreen: React.FC = () => {
 
   // Automatically welcome every user in their Inbox when their Alpha AI thread is empty
   useEffect(() => {
-    if (!currentUser.id) return;
+    if (!GEMINI_CHATBOT_ENABLED || !currentUser.id) return;
     if (geminiInboxMessages.length > 0) {
       geminiWelcomedUserRef.current = currentUser.id;
       return;
@@ -625,7 +626,7 @@ export const ChatScreen: React.FC = () => {
 
   const allConversations = useMemo(
     () => [
-      geminiAssistantConversation,
+      ...(GEMINI_CHATBOT_ENABLED ? [geminiAssistantConversation] : []),
       ...firebaseChats,
       ...outgoingPendingConversations,
       ...localGroups.filter((g) => !firebaseChats.some((f) => f.id === g.id)),

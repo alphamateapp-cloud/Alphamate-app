@@ -25,6 +25,19 @@ const VOLUME_STORAGE_KEY = 'am_gift_sfx_volume';
 
 export const COMBO_SFX_ASSET_PATH = '/audio/gift-combo.mp3';
 
+export const VIP_ENTRY_SFX_PATHS = [
+  '/audio/vip-entry-gold.mp3',
+  '/audio/vip-entry-imperial.mp3',
+  '/audio/vip-entry-sovereign.mp3',
+] as const;
+
+export interface GiftAudioPreloadProgress {
+  status: 'idle' | 'preloading' | 'ready';
+  loaded: number;
+  total: number;
+  decodedCount: number;
+}
+
 /**
  * Canonical mapping between gift animation triggers and external SFX asset paths.
  * High-quality MP3 assets placed in `public/audio/` are preloaded and played cleanly;
@@ -94,19 +107,41 @@ type BufferCacheEntry =
   | { status: 'decoded'; buffer: AudioBuffer }
   | { status: 'missing' };
 
+export interface MediaAudioTrackOptions {
+  /** Stable cache key (e.g. remote CDN URL even when playing from a local blob: URL) */
+  cacheKey?: string;
+  volume?: number;
+  playbackRate?: number;
+  /** Returns current video playback time in seconds right as audio starts so tracks stay in sync */
+  getOffsetSec?: () => number;
+  /** Abort remote audio fetch if slow network exceeds this timeout so fallback SFX plays promptly */
+  fetchTimeoutMs?: number;
+}
+
+export interface MediaAudioTrackResult {
+  played: boolean;
+  reason?: 'muted' | 'no_audio' | 'fetch_failed' | 'timeout' | 'context_unavailable';
+  stop: () => void;
+}
+
+const NOOP = () => {};
+const MAX_DECODED_BUFFER_CACHE = 48;
+
 class GiftAudioManager {
   private ctx: AudioContext | null = null;
   private masterGain: GainNode | null = null;
   private compressor: DynamicsCompressorNode | null = null;
 
   private bufferCache = new Map<string, BufferCacheEntry>();
-  private inflightLoads = new Map<string, Promise<AudioBuffer | null>>();
+  private inflightLoads = new Map<string, Promise<{ buffer: AudioBuffer | null; reason?: 'no_audio' | 'fetch_failed' | 'timeout' }>>();
   private activeSources = new Set<AudioBufferSourceNode>();
   private customTriggerOverrides = new Map<string, string>();
   private muteListeners = new Set<(muted: boolean) => void>();
 
   private isMuted: boolean = false;
   private masterVolume: number = 0.85;
+  private unlocked: boolean = false;
+  private listenersAttached: boolean = false;
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -120,6 +155,58 @@ class GiftAudioManager {
         // ignore storage errors
       }
       giftSoundEngine.setMuted(this.isMuted);
+      this.attachGlobalUnlockListeners();
+    }
+  }
+
+  private attachGlobalUnlockListeners(): void {
+    if (typeof window === 'undefined' || this.listenersAttached) return;
+    this.listenersAttached = true;
+
+    const handleGesture = () => {
+      void this.unlock();
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible' && this.ctx && this.ctx.state === 'suspended') {
+        void this.ctx.resume().catch(() => {});
+      }
+    };
+
+    window.addEventListener('pointerdown', handleGesture, { capture: true, passive: true });
+    window.addEventListener('touchstart', handleGesture, { capture: true, passive: true });
+    window.addEventListener('click', handleGesture, { capture: true, passive: true });
+    window.addEventListener('keydown', handleGesture, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', handleVisibility);
+  }
+
+  public async unlock(): Promise<boolean> {
+    const graph = this.ensureAudioGraph();
+    const synthUnlock = giftSoundEngine.unlock();
+    if (!graph) {
+      await synthUnlock;
+      return false;
+    }
+    try {
+      if (graph.ctx.state === 'suspended') {
+        await Promise.race([
+          graph.ctx.resume(),
+          new Promise<void>((resolve) => setTimeout(resolve, 180)),
+        ]);
+      }
+      if (!this.unlocked && graph.ctx.state === 'running') {
+        // Prime with 1-sample silent buffer so iOS Safari & Android WebView unlock immediately
+        const silentBuf = graph.ctx.createBuffer(1, 1, graph.ctx.sampleRate || 44100);
+        const src = graph.ctx.createBufferSource();
+        src.buffer = silentBuf;
+        src.connect(graph.ctx.destination);
+        src.start(0);
+        this.unlocked = true;
+      }
+      await synthUnlock;
+      return graph.ctx.state === 'running';
+    } catch {
+      await synthUnlock;
+      return false;
     }
   }
 
@@ -130,9 +217,6 @@ class GiftAudioManager {
         const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
         if (!AudioCtx) return null;
         this.ctx = new AudioCtx();
-      }
-      if (this.ctx.state === 'suspended') {
-        this.ctx.resume().catch(() => {});
       }
       if (!this.compressor || !this.masterGain) {
         const compressor = this.ctx.createDynamicsCompressor();
@@ -154,6 +238,43 @@ class GiftAudioManager {
       return { ctx: this.ctx, masterGain: this.masterGain };
     } catch {
       return null;
+    }
+  }
+
+  private async ensureRunningGraph(
+    timeoutMs = 220
+  ): Promise<{ ctx: AudioContext; masterGain: GainNode } | null> {
+    const graph = this.ensureAudioGraph();
+    if (!graph) return null;
+    if (graph.ctx.state === 'suspended') {
+      try {
+        await Promise.race([
+          graph.ctx.resume(),
+          new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+        ]);
+      } catch {
+        // continue with best-effort playback
+      }
+    }
+    return graph;
+  }
+
+  private cacheDecodedBuffer(key: string, buffer: AudioBuffer): void {
+    this.bufferCache.delete(key);
+    this.bufferCache.set(key, { status: 'decoded', buffer });
+    // Cap decoded AudioBuffer memory during long Party Room sessions
+    let decodedCount = 0;
+    for (const entry of this.bufferCache.values()) {
+      if (entry.status === 'decoded') decodedCount += 1;
+    }
+    if (decodedCount > MAX_DECODED_BUFFER_CACHE) {
+      for (const [k, v] of this.bufferCache.entries()) {
+        if (v.status === 'decoded') {
+          this.bufferCache.delete(k);
+          decodedCount -= 1;
+          if (decodedCount <= MAX_DECODED_BUFFER_CACHE) break;
+        }
+      }
     }
   }
 
@@ -223,6 +344,7 @@ class GiftAudioManager {
 
   public registerAssetMapping(trigger: string, assetPath: string): void {
     if (!trigger || !assetPath) return;
+    if (this.customTriggerOverrides.get(trigger) === assetPath) return;
     this.customTriggerOverrides.set(trigger, assetPath);
     this.bufferCache.delete(assetPath);
   }
@@ -324,58 +446,166 @@ class GiftAudioManager {
     return this.resolveTriggerConfig(giftOrTrigger, giftIdOverride).candidatePaths[0];
   }
 
-  private async loadAndDecodeAsset(assetPath: string): Promise<AudioBuffer | null> {
-    const cached = this.bufferCache.get(assetPath);
+  public hasDecodedBuffer(cacheKey: string): boolean {
+    return this.bufferCache.get(cacheKey)?.status === 'decoded';
+  }
+
+  public getBufferStats(): { decodedCount: number; missingCount: number } {
+    let decodedCount = 0;
+    let missingCount = 0;
+    for (const entry of this.bufferCache.values()) {
+      if (entry.status === 'decoded') decodedCount += 1;
+      else missingCount += 1;
+    }
+    return { decodedCount, missingCount };
+  }
+
+  private async loadAndDecodeAssetDetailed(
+    assetPath: string,
+    options: {
+      cacheKey?: string;
+      fetchTimeoutMs?: number;
+      cacheMissingOnNetworkError?: boolean;
+      signal?: AbortSignal;
+    } = {}
+  ): Promise<{ buffer: AudioBuffer | null; reason?: 'no_audio' | 'fetch_failed' | 'timeout' }> {
+    const cacheKey = options.cacheKey || assetPath;
+    const cached = this.bufferCache.get(cacheKey);
     if (cached) {
-      return cached.status === 'decoded' ? cached.buffer : null;
+      return cached.status === 'decoded'
+        ? { buffer: cached.buffer }
+        : { buffer: null, reason: 'no_audio' };
     }
 
-    const existingInflight = this.inflightLoads.get(assetPath);
+    if (options.signal?.aborted) {
+      return { buffer: null, reason: 'timeout' };
+    }
+
+    const existingInflight = this.inflightLoads.get(cacheKey);
     if (existingInflight) {
       return existingInflight;
     }
 
     const graph = this.ensureAudioGraph();
     if (!graph || typeof fetch === 'undefined') {
-      return null;
+      return { buffer: null, reason: 'fetch_failed' };
     }
 
-    const loadPromise = (async (): Promise<AudioBuffer | null> => {
+    const isBlobUrl = assetPath.startsWith('blob:');
+    const timeoutMs = options.fetchTimeoutMs ?? (isBlobUrl ? 8000 : 3200);
+    const cacheMissingOnNetworkError = options.cacheMissingOnNetworkError ?? true;
+
+    const loadPromise = (async (): Promise<{
+      buffer: AudioBuffer | null;
+      reason?: 'no_audio' | 'fetch_failed' | 'timeout';
+    }> => {
+      let timerId: ReturnType<typeof setTimeout> | null = null;
+      const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+      let timedOut = false;
+      let externallyAborted = false;
+
+      const onExternalAbort = () => {
+        externallyAborted = true;
+        controller?.abort();
+      };
+
+      if (options.signal) {
+        if (options.signal.aborted) {
+          return { buffer: null, reason: 'timeout' };
+        }
+        options.signal.addEventListener('abort', onExternalAbort, { once: true });
+      }
+
       try {
-        const res = await fetch(assetPath, { cache: 'force-cache' });
+        if (controller && timeoutMs > 0) {
+          timerId = setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, timeoutMs);
+        }
+
+        const res = await fetch(assetPath, {
+          cache: isBlobUrl ? 'no-store' : 'force-cache',
+          signal: controller?.signal,
+        });
         if (!res.ok) {
-          this.bufferCache.set(assetPath, { status: 'missing' });
-          return null;
+          if (cacheMissingOnNetworkError && res.status === 404) {
+            this.bufferCache.set(cacheKey, { status: 'missing' });
+          }
+          return { buffer: null, reason: 'fetch_failed' };
         }
         // Guard against SPA HTML fallbacks (e.g. Vite returning 200 index.html for missing assets)
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
         if (contentType.includes('text/html') || contentType.includes('application/json')) {
-          this.bufferCache.set(assetPath, { status: 'missing' });
-          return null;
+          this.bufferCache.set(cacheKey, { status: 'missing' });
+          return { buffer: null, reason: 'no_audio' };
         }
 
         const arrayBuffer = await res.arrayBuffer();
+        if (timerId) {
+          clearTimeout(timerId);
+          timerId = null;
+        }
+        if (externallyAborted || options.signal?.aborted) {
+          return { buffer: null, reason: 'timeout' };
+        }
         if (arrayBuffer.byteLength < 64) {
-          this.bufferCache.set(assetPath, { status: 'missing' });
-          return null;
+          this.bufferCache.set(cacheKey, { status: 'missing' });
+          return { buffer: null, reason: 'no_audio' };
         }
 
-        const decoded = await graph.ctx.decodeAudioData(arrayBuffer.slice(0));
-        this.bufferCache.set(assetPath, { status: 'decoded', buffer: decoded });
-        return decoded;
+        try {
+          const decoded = await graph.ctx.decodeAudioData(arrayBuffer.slice(0));
+          if (!decoded || decoded.duration <= 0.02) {
+            this.bufferCache.set(cacheKey, { status: 'missing' });
+            return { buffer: null, reason: 'no_audio' };
+          }
+          this.cacheDecodedBuffer(cacheKey, decoded);
+          return { buffer: decoded };
+        } catch {
+          // Valid media bytes fetched, but file contains no decodable audio track (e.g. silent WebM/MP4)
+          this.bufferCache.set(cacheKey, { status: 'missing' });
+          return { buffer: null, reason: 'no_audio' };
+        }
       } catch {
-        this.bufferCache.set(assetPath, { status: 'missing' });
-        return null;
+        if (timedOut || externallyAborted) {
+          return { buffer: null, reason: 'timeout' };
+        }
+        if (cacheMissingOnNetworkError) {
+          this.bufferCache.set(cacheKey, { status: 'missing' });
+        }
+        return { buffer: null, reason: 'fetch_failed' };
       } finally {
-        this.inflightLoads.delete(assetPath);
+        if (timerId) clearTimeout(timerId);
+        if (options.signal) {
+          options.signal.removeEventListener('abort', onExternalAbort);
+        }
+        this.inflightLoads.delete(cacheKey);
       }
     })();
 
-    this.inflightLoads.set(assetPath, loadPromise);
+    this.inflightLoads.set(cacheKey, loadPromise);
     return loadPromise;
   }
 
-  public async preloadGiftSfx(triggers?: GiftAnimationTrigger[]): Promise<void> {
+  private async loadAndDecodeAsset(
+    assetPath: string,
+    signal?: AbortSignal
+  ): Promise<AudioBuffer | null> {
+    const res = await this.loadAndDecodeAssetDetailed(assetPath, { signal });
+    return res.buffer;
+  }
+
+  public async preloadGiftSfx(
+    triggers?: GiftAnimationTrigger[],
+    options: {
+      extraPaths?: string[];
+      includeVipEntry?: boolean;
+      concurrency?: number;
+      signal?: AbortSignal;
+      onItemComplete?: (done: number, total: number) => void;
+    } = {}
+  ): Promise<{ decoded: number; total: number }> {
     const keys =
       triggers && triggers.length > 0
         ? triggers
@@ -386,21 +616,130 @@ class GiftAudioManager {
       this.customTriggerOverrides.forEach((p) => paths.add(p));
     }
     paths.add(COMBO_SFX_ASSET_PATH);
-    await Promise.allSettled(Array.from(paths).map((p) => this.loadAndDecodeAsset(p)));
+    if (options.includeVipEntry !== false) {
+      VIP_ENTRY_SFX_PATHS.forEach((p) => paths.add(p));
+    }
+    if (options.extraPaths) {
+      options.extraPaths.forEach((p) => {
+        if (typeof p === 'string' && p.trim()) paths.add(p.trim());
+      });
+    }
+
+    const pathList = Array.from(paths);
+    const total = pathList.length;
+    if (total === 0) return { decoded: 0, total: 0 };
+
+    const concurrency = Math.max(1, Math.min(6, options.concurrency ?? 4));
+    let cursor = 0;
+    let done = 0;
+    let decoded = 0;
+
+    const worker = async () => {
+      while (cursor < pathList.length) {
+        if (options.signal?.aborted) return;
+        const nextPath = pathList[cursor++];
+        const buf = await this.loadAndDecodeAsset(nextPath, options.signal);
+        if (buf) decoded += 1;
+        done += 1;
+        options.onItemComplete?.(done, total);
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+    return { decoded, total };
   }
 
-  public preloadAll(): Promise<void> {
-    return this.preloadGiftSfx();
+  public async preloadMediaAudioTrack(
+    mediaUrl: string,
+    options: { cacheKey?: string; fetchTimeoutMs?: number; signal?: AbortSignal } = {}
+  ): Promise<boolean> {
+    if (!mediaUrl || options.signal?.aborted) return false;
+    const cacheKey = options.cacheKey || mediaUrl;
+    const existing = this.bufferCache.get(cacheKey);
+    if (existing) {
+      return existing.status === 'decoded';
+    }
+    const res = await this.loadAndDecodeAssetDetailed(mediaUrl, {
+      cacheKey,
+      fetchTimeoutMs: options.fetchTimeoutMs ?? (mediaUrl.startsWith('blob:') ? 8000 : 4500),
+      cacheMissingOnNetworkError: false,
+      signal: options.signal,
+    });
+    return Boolean(res.buffer);
   }
 
-  private playDecodedBuffer(
+  public async preloadMediaAudioTracks(
+    entries: Array<{ url: string; cacheKey?: string }>,
+    options: {
+      concurrency?: number;
+      signal?: AbortSignal;
+      onItemComplete?: (done: number, total: number) => void;
+    } = {}
+  ): Promise<{ decoded: number; skipped: number; failed: number }> {
+    const deduped: Array<{ url: string; cacheKey: string }> = [];
+    const seen = new Set<string>();
+    for (const item of entries) {
+      if (!item?.url) continue;
+      const key = item.cacheKey || item.url;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push({ url: item.url, cacheKey: key });
+    }
+
+    const total = deduped.length;
+    if (total === 0) return { decoded: 0, skipped: 0, failed: 0 };
+
+    const concurrency = Math.max(1, Math.min(4, options.concurrency ?? 2));
+    let cursor = 0;
+    let done = 0;
+    let decoded = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    const worker = async () => {
+      while (cursor < deduped.length) {
+        if (options.signal?.aborted) return;
+        const entry = deduped[cursor++];
+        const existing = this.bufferCache.get(entry.cacheKey);
+        if (existing) {
+          if (existing.status === 'decoded') decoded += 1;
+          else skipped += 1;
+          done += 1;
+          options.onItemComplete?.(done, total);
+          continue;
+        }
+        const ok = await this.preloadMediaAudioTrack(entry.url, {
+          cacheKey: entry.cacheKey,
+          signal: options.signal,
+        });
+        if (ok) decoded += 1;
+        else failed += 1;
+        done += 1;
+        options.onItemComplete?.(done, total);
+      }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+    return { decoded, skipped, failed };
+  }
+
+  public async preloadAll(): Promise<void> {
+    await this.preloadGiftSfx();
+  }
+
+  private startDecodedBuffer(
+    graph: { ctx: AudioContext; masterGain: GainNode },
     buffer: AudioBuffer,
     volume: number,
-    playbackRate: number = 1
-  ): boolean {
-    const graph = this.ensureAudioGraph();
-    if (!graph) return false;
+    playbackRate: number = 1,
+    offsetSec: number = 0
+  ): (() => void) | null {
     try {
+      const safeOffset = Math.max(0, offsetSec);
+      if (safeOffset >= Math.max(0.05, buffer.duration - 0.05)) {
+        return null;
+      }
+
       const source = graph.ctx.createBufferSource();
       source.buffer = buffer;
       source.playbackRate.setValueAtTime(
@@ -414,8 +753,27 @@ class GiftAudioManager {
       source.connect(cueGain);
       cueGain.connect(graph.masterGain);
 
+      let stopped = false;
+      const cleanup = () => {
+        if (stopped) return;
+        stopped = true;
+        this.activeSources.delete(source);
+        try {
+          source.stop();
+        } catch {
+          // already ended
+        }
+        try {
+          source.disconnect();
+          cueGain.disconnect();
+        } catch {
+          // ignore
+        }
+      };
+
       this.activeSources.add(source);
       source.onended = () => {
+        stopped = true;
         this.activeSources.delete(source);
         try {
           source.disconnect();
@@ -425,11 +783,68 @@ class GiftAudioManager {
         }
       };
 
-      source.start(0);
-      return true;
+      source.start(0, safeOffset);
+      return cleanup;
     } catch {
-      return false;
+      return null;
     }
+  }
+
+  /**
+   * Voice-Safe Embedded Media Audio Player:
+   * Demuxes & decodes the embedded audio track from WebM / MP4 / MOV gift videos through
+   * Web Audio API so EVERY user (sender + passive remote listeners) hears crystal-clear
+   * gift sound alongside live Agora Party Voice — with ZERO Android AudioFocus loss and
+   * ZERO <video> autoplay NotAllowedError!
+   */
+  public async playMediaAudioTrack(
+    mediaUrl: string,
+    options: MediaAudioTrackOptions = {}
+  ): Promise<MediaAudioTrackResult> {
+    if (this.isMuted || !mediaUrl) {
+      return { played: false, reason: 'muted', stop: NOOP };
+    }
+
+    const graph = await this.ensureRunningGraph(240);
+    if (!graph) {
+      return { played: false, reason: 'context_unavailable', stop: NOOP };
+    }
+
+    const decodedRes = await this.loadAndDecodeAssetDetailed(mediaUrl, {
+      cacheKey: options.cacheKey || mediaUrl,
+      fetchTimeoutMs: options.fetchTimeoutMs ?? (mediaUrl.startsWith('blob:') ? 8000 : 2800),
+      cacheMissingOnNetworkError: false,
+    });
+
+    if (this.isMuted) {
+      return { played: false, reason: 'muted', stop: NOOP };
+    }
+    if (!decodedRes.buffer) {
+      return { played: false, reason: decodedRes.reason || 'no_audio', stop: NOOP };
+    }
+
+    // Re-ensure context is running right before scheduling in case tab resumed mid-decode
+    const activeGraph = await this.ensureRunningGraph(140);
+    if (!activeGraph || this.isMuted) {
+      return { played: false, reason: this.isMuted ? 'muted' : 'context_unavailable', stop: NOOP };
+    }
+
+    const offsetSec = Math.max(0, Number(options.getOffsetSec?.() ?? 0) || 0);
+    const volume = typeof options.volume === 'number' ? options.volume : 0.78;
+    const playbackRate = typeof options.playbackRate === 'number' ? options.playbackRate : 1;
+
+    const stopHandle = this.startDecodedBuffer(
+      activeGraph,
+      decodedRes.buffer,
+      volume,
+      playbackRate,
+      offsetSec
+    );
+
+    if (!stopHandle) {
+      return { played: false, reason: 'context_unavailable', stop: NOOP };
+    }
+    return { played: true, stop: stopHandle };
   }
 
   public async playGiftSfx(
@@ -451,28 +866,32 @@ class GiftAudioManager {
         ? 1 + Math.min(comboCount - 1, 10) * 0.03
         : 1);
 
+    const graph = await this.ensureRunningGraph(220);
     let playedFromAsset = false;
 
-    for (const path of candidatePaths) {
-      const cached = this.bufferCache.get(path);
-      if (cached?.status === 'missing') continue;
+    if (graph && !this.isMuted) {
+      for (const path of candidatePaths) {
+        const cached = this.bufferCache.get(path);
+        if (cached?.status === 'missing') continue;
 
-      const buffer =
-        cached?.status === 'decoded'
-          ? cached.buffer
-          : await this.loadAndDecodeAsset(path);
+        const buffer =
+          cached?.status === 'decoded'
+            ? cached.buffer
+            : await this.loadAndDecodeAsset(path);
 
-      if (buffer && this.playDecodedBuffer(buffer, effectiveVolume, computedPlaybackRate)) {
-        playedFromAsset = true;
-        break;
+        if (this.isMuted) return 'muted';
+        if (buffer && this.startDecodedBuffer(graph, buffer, effectiveVolume, computedPlaybackRate)) {
+          playedFromAsset = true;
+          break;
+        }
       }
     }
 
-    if (!playedFromAsset) {
-      giftSoundEngine.play(animationType);
+    if (!playedFromAsset && !this.isMuted) {
+      giftSoundEngine.play(animationType, effectiveVolume);
     }
 
-    if (comboCount > 1 && !options.skipComboSfx) {
+    if (comboCount > 1 && !options.skipComboSfx && !this.isMuted) {
       void this.playComboSfx(comboCount);
     }
 
@@ -483,13 +902,15 @@ class GiftAudioManager {
     if (this.isMuted) return 'muted';
     const rate = 1 + Math.min(Math.max(multiplier - 1, 0), 14) * 0.04;
     const cached = this.bufferCache.get(COMBO_SFX_ASSET_PATH);
+    const graph = await this.ensureRunningGraph(180);
 
-    if (cached?.status !== 'missing') {
+    if (graph && cached?.status !== 'missing') {
       const buffer =
         cached?.status === 'decoded'
           ? cached.buffer
           : await this.loadAndDecodeAsset(COMBO_SFX_ASSET_PATH);
-      if (buffer && this.playDecodedBuffer(buffer, 0.75, rate)) {
+      if (this.isMuted) return 'muted';
+      if (buffer && this.startDecodedBuffer(graph, buffer, 0.75, rate)) {
         return 'asset';
       }
     }
@@ -509,12 +930,14 @@ class GiftAudioManager {
         : '/audio/vip-entry-gold.mp3';
 
     const cached = this.bufferCache.get(assetPath);
-    if (cached?.status !== 'missing') {
+    const graph = await this.ensureRunningGraph(200);
+    if (graph && cached?.status !== 'missing') {
       const buffer =
         cached?.status === 'decoded'
           ? cached.buffer
           : await this.loadAndDecodeAsset(assetPath);
-      if (buffer && this.playDecodedBuffer(buffer, 0.85, 1)) {
+      if (this.isMuted) return 'muted';
+      if (buffer && this.startDecodedBuffer(graph, buffer, 0.85, 1)) {
         return 'asset';
       }
     }

@@ -29,6 +29,7 @@ import {
 } from '../components/party/AnimatedSeatThemeFrame';
 import { PartyRemoteAudioPlayer } from '../components/party/PartyRemoteAudioPlayer';
 import { PartyMusicVinylWidget } from '../components/party/PartyMusicVinylWidget';
+import { PartyAudioVisualizer } from '../components/party/PartyAudioVisualizer';
 import { SharePartyModal } from '../components/party/SharePartyModal';
 import { VoiceModulationModal } from '../components/party/VoiceModulationModal';
 import { buildPartyRoomDeepLink } from '../utils/partyDeepLink';
@@ -54,6 +55,7 @@ import {
   GEMINI_ASSISTANT_AVATAR,
   GEMINI_ASSISTANT_NAME,
   GEMINI_ASSISTANT_USER_ID,
+  GEMINI_CHATBOT_ENABLED,
   hasWelcomedInSession,
   isBotMentionMessage,
   markWelcomedInSession,
@@ -305,6 +307,7 @@ export const PartyRoomsScreen: React.FC = () => {
   const lastSyncedViewerCountRef = useRef<number>(-1);
   const lastSelfSpeakingSyncedRef = useRef<boolean>(false);
   const partyRoomRootRef = useRef<HTMLDivElement>(null);
+  const partyStageRef = useRef<HTMLDivElement | null>(null);
   const lastHandledPartyRefreshTickRef = useRef<number>(partyRefreshTick);
   const lastVoiceRoomIdRef = useRef<string | null>(null);
 
@@ -1751,6 +1754,7 @@ export const PartyRoomsScreen: React.FC = () => {
 
   const unlockAllRemoteAudioPlayback = useCallback(async () => {
     agoraPartyEngine.resumeAudioPlayback();
+    void audioManager.unlock();
     const targets: HTMLAudioElement[] = [];
     partyAudioElsRef.current.forEach((audioEl) => {
       if (!audioEl || !audioEl.srcObject) return;
@@ -2054,6 +2058,7 @@ export const PartyRoomsScreen: React.FC = () => {
     seenPartyWelcomeIdsRef.current = new Set([effectiveUserId]);
 
     const postPartyAiWelcome = (targetName: string, targetUid: string, isSelf: boolean, vipTier = 0) => {
+      if (!GEMINI_CHATBOT_ENABLED) return;
       const welcomeKey = `party:${roomId}:${roomSessionId || 'live'}:${targetUid}`;
       if (hasWelcomedInSession(welcomeKey)) return;
       if (!isSelf) {
@@ -2830,7 +2835,7 @@ export const PartyRoomsScreen: React.FC = () => {
     const rawText = inputChat.trim();
     if (!activePartyRoom || !rawText) return;
 
-    const shouldAskAi = askAiMode || isBotMentionMessage(rawText);
+    const shouldAskAi = GEMINI_CHATBOT_ENABLED && (askAiMode || isBotMentionMessage(rawText));
     const isHost = activePartyRoom.host?.id === currentUser.id;
     const nowMs = Date.now();
     const msgId = `chat_${nowMs}_${Math.random().toString(36).slice(2, 7)}`;
@@ -3255,6 +3260,7 @@ export const PartyRoomsScreen: React.FC = () => {
               layer="background"
               slotIndex={idx}
               preserveVoiceAudio={true}
+              roomSpeakerMuted={!isSpeakerOn}
               currentEvent={giftEv}
               onComplete={handlePartyGiftOverlayComplete}
               onDurationDetected={handlePartyGiftDurationDetected}
@@ -3295,6 +3301,7 @@ export const PartyRoomsScreen: React.FC = () => {
               layer="foreground"
               slotIndex={idx}
               preserveVoiceAudio={true}
+              roomSpeakerMuted={!isSpeakerOn}
               currentEvent={giftEv}
               onComplete={handlePartyGiftOverlayComplete}
               onDurationDetected={handlePartyGiftDurationDetected}
@@ -3666,13 +3673,14 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         ) : (
           <div
-            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-0 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
-              partyLevel === 4 ? 'h-[60%] max-h-[60%]' : 'h-[48%] max-h-[48%]'
+            ref={partyStageRef}
+            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-5 sm:pt-6 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
+              partyLevel === 4 ? 'h-[62%] max-h-[62%]' : 'h-[51%] max-h-[51%]'
             }`}
           >
             {/* Floating Three-Star Seat Theme Selector — Host & Moderator only */}
             {canModerate && (
-              <div className="absolute right-2 top-0 z-30">
+              <div className="absolute right-2 top-4 sm:top-5 z-30">
                 <PartySeatThemeStarSelector
                   selectedTheme={seatTheme}
                   onSelectTheme={handleSelectSeatTheme}
@@ -3682,7 +3690,7 @@ export const PartyRoomsScreen: React.FC = () => {
             )}
 
             {/* UPPER PROMINENCE ROW: Large Circular HOST Seat + VIP 1 (VIP GUEST) Seat Beside Host */}
-            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-0">
+            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-1">
               {/* 1. HOST SEAT (Large Circular Frame with Synchronized Animated Seat Theme) */}
               <div className="flex flex-col items-center shrink-0">
                 <div className="relative">
@@ -3910,10 +3918,21 @@ export const PartyRoomsScreen: React.FC = () => {
               </div>
             </div>
 
+            {/* Real-Time Frequency-Based Audio Visualizer (Web Audio AnalyserNode, synced with Seat Theme) */}
+            <PartyAudioVisualizer
+              roomId={activePartyRoom.id}
+              theme={seatTheme}
+              isSpeakerOn={isSpeakerOn}
+              isMusicPlaying={isMusicPlaying}
+              remoteStreams={remotePartyStreams}
+              stageContainerRef={partyStageRef}
+              compact={partyLevel === 4}
+            />
+
             {/* ===================================================================
                 NORMAL CIRCULAR GUEST SEATS GRID (Progressive 4 / 8 / 12 / 16)
                =================================================================== */}
-            <div className="w-full mt-2 flex-1 flex flex-col justify-start">
+            <div className="w-full mt-1 flex-1 flex flex-col justify-start">
               {partyLevel === 1 && (
                 /* LEVEL 1: 4 normal circular seats (1 Row x 4) */
                 <div className="grid grid-cols-4 gap-x-3 gap-y-2.5 max-w-sm mx-auto w-full px-1">
@@ -4088,26 +4107,34 @@ export const PartyRoomsScreen: React.FC = () => {
 
           {/* Unified Bottom Controls Bar (No Hard Divider Lines) */}
           <div className="flex flex-col gap-2">
-            {/* Upper row: Comment input field + AI toggle + Send button */}
+            {/* Upper row: Comment input field + Send button */}
             <form onSubmit={handleSendChat} className="w-full flex items-center relative">
-              <button
-                type="button"
-                onClick={() => setAskAiMode((v) => !v)}
-                className={`absolute left-1 h-6 sm:h-7 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
-                  askAiMode
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-white/10 text-zinc-300 hover:bg-white/20'
-                }`}
-                title="Toggle Ask Alpha AI mode (or type @ai)"
-              >
-                AI
-              </button>
+              {GEMINI_CHATBOT_ENABLED && (
+                <button
+                  type="button"
+                  onClick={() => setAskAiMode((v) => !v)}
+                  className={`absolute left-1 h-6 sm:h-7 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                    askAiMode
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white/10 text-zinc-300 hover:bg-white/20'
+                  }`}
+                  title="Toggle Ask Alpha AI mode (or type @ai)"
+                >
+                  AI
+                </button>
+              )}
               <input
                 type="text"
-                placeholder={askAiMode ? 'Ask Alpha AI in party chat...' : 'Say something nice (or @ai)...'}
+                placeholder={
+                  GEMINI_CHATBOT_ENABLED
+                    ? askAiMode
+                      ? 'Ask Alpha AI in party chat...'
+                      : 'Say something nice (or @ai)...'
+                    : 'Say something nice...'
+                }
                 value={inputChat}
                 onChange={(e) => setInputChat(e.target.value)}
-                className="w-full h-8 sm:h-9 pl-10 pr-9 rounded-full bg-black/55 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#EC4899]"
+                className={`w-full h-8 sm:h-9 ${GEMINI_CHATBOT_ENABLED ? 'pl-10' : 'pl-3.5'} pr-9 rounded-full bg-black/55 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#EC4899]`}
               />
               <button
                 type="submit"

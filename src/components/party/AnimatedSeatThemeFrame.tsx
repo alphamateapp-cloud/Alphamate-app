@@ -81,8 +81,27 @@ export const AnimatedSeatThemeFrame: React.FC<AnimatedSeatThemeFrameProps> = ({
       ? 'shadow-[0_0_16px_rgba(217,70,239,0.44)]'
       : 'shadow-[0_0_16px_rgba(56,189,248,0.48)]';
 
+  const reactiveAuraColor =
+    theme === 'royal_gold_diya'
+      ? 'rgba(251, 191, 36, 0.55)'
+      : theme === 'royal_purple_lotus'
+      ? 'rgba(217, 70, 239, 0.55)'
+      : 'rgba(56, 189, 248, 0.58)';
+
   return (
     <div className={`relative ${sizeClass} rounded-full flex items-center justify-center shrink-0`}>
+      {/* Synchronized Audio-Reactive Seat Theme Aura (driven by Web Audio AnalyserNode --party-audio-energy) */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none select-none absolute -inset-[12%] rounded-full z-[4]"
+        style={{
+          background: `radial-gradient(circle, ${reactiveAuraColor} 0%, transparent 70%)`,
+          opacity: 'calc(var(--party-audio-energy, 0) * 0.72)',
+          transform: 'scale(calc(0.96 + var(--party-audio-energy, 0) * 0.24)) translateZ(0)',
+          willChange: 'transform, opacity',
+        }}
+      />
+
       {/* Inner Circular Aperture — 100% unobstructed user DP / empty seat placeholder */}
       <div
         className={`relative z-10 w-full h-full rounded-full overflow-hidden ${ringGlowShadow}`}
@@ -94,6 +113,10 @@ export const AnimatedSeatThemeFrame: React.FC<AnimatedSeatThemeFrameProps> = ({
       <div
         aria-hidden="true"
         className="pointer-events-none select-none absolute -inset-[25%] z-[15]"
+        style={{
+          transform: 'scale(calc(1 + var(--party-audio-bass, 0) * 0.035)) translateZ(0)',
+          willChange: 'transform',
+        }}
       >
         {theme === 'royal_gold_diya' && (
           <RoyalGoldDiyaSvg uid={uid} isHero={role !== 'guest'} compact={compact} />

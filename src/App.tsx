@@ -37,6 +37,7 @@ import { keepScreenAwake } from './services/keepScreenAwake';
 import { startDeviceSecurityMonitoring, stopDeviceSecurityMonitoring } from './services/deviceSecurityService';
 import { initDeviceDimensions } from './services/deviceDimensions';
 import { hydrateGiftMediaCacheIndex } from './services/giftMediaCache';
+import { usePartyGiftAudioPreloader } from './hooks/usePartyGiftAudioPreloader';
 import { BatteryStatus } from './components/common/BatteryStatus';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { PushNotificationBanner } from './components/notifications/PushNotificationBanner';
@@ -78,6 +79,7 @@ const NativePlatformBridge: React.FC = () => {
     closeLiveStream,
     navigateBack,
     currentUser,
+    publishedCatalogGifts,
   } = useApp();
 
   const [pendingDeepLinkPartyId, setPendingDeepLinkPartyId] = useState<string | null>(() => {
@@ -137,6 +139,19 @@ const NativePlatformBridge: React.FC = () => {
     }, 600);
     return () => window.clearTimeout(timer);
   }, [isSessionReadyAndAuthed, deviceMode]);
+
+  // Global Audio Preloading Hook: eagerly decodes gift animation SFX & video audio tracks
+  // into Web Audio API buffers whenever the user enters a Party Room for synchronized playback
+  usePartyGiftAudioPreloader({
+    roomId: activePartyRoom?.id ?? null,
+    gifts: publishedCatalogGifts,
+    enabled: Boolean(
+      isSessionReadyAndAuthed &&
+        deviceMode !== 'admin' &&
+        !isAccountAdminRestricted &&
+        !isPartyRestricted
+    ),
+  });
 
   // Push Notifications Setup (Capacitor FCM & Real-Time Engagement)
   useEffect(() => {

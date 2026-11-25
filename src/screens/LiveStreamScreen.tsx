@@ -76,6 +76,7 @@ import {
   GEMINI_ASSISTANT_AVATAR,
   GEMINI_ASSISTANT_NAME,
   GEMINI_ASSISTANT_USER_ID,
+  GEMINI_CHATBOT_ENABLED,
   hasWelcomedInSession,
   isBotMentionMessage,
   markWelcomedInSession,
@@ -654,6 +655,7 @@ export const LiveStreamScreen: React.FC = () => {
     liveViewersSeededRef.current = false;
 
     const postLiveAiWelcome = (targetName: string, targetUid: string, isSelf: boolean, vipTier = 0) => {
+      if (!GEMINI_CHATBOT_ENABLED) return;
       const welcomeKey = `live:${streamId}:${targetUid}`;
       if (hasWelcomedInSession(welcomeKey)) return;
       if (!isSelf) {
@@ -1169,6 +1171,7 @@ export const LiveStreamScreen: React.FC = () => {
   const handleUnmuteRemoteAudio = () => {
     setIsRemoteAudioMuted(false);
     setAutoplayBlocked(false);
+    void audioManager.unlock();
     if (remoteVideoRef.current) {
       remoteVideoRef.current.muted = true; // audio is rendered by the dedicated audio element
       remoteVideoRef.current.play().catch(() => {});
@@ -1351,7 +1354,7 @@ export const LiveStreamScreen: React.FC = () => {
     const rawText = inputComment.trim();
     if (!rawText || !activeStream?.id) return;
 
-    const shouldAskAi = askAiMode || isBotMentionMessage(rawText);
+    const shouldAskAi = GEMINI_CHATBOT_ENABLED && (askAiMode || isBotMentionMessage(rawText));
     const uid = auth.currentUser?.uid || currentUser.id;
     const nowMs = Date.now();
     const newComment = {
@@ -1879,6 +1882,7 @@ export const LiveStreamScreen: React.FC = () => {
             layer="background"
             slotIndex={idx}
             preserveVoiceAudio={true}
+            roomSpeakerMuted={activeRole === 'viewer' && isRemoteAudioMuted}
             currentEvent={giftEv}
             onComplete={handleGiftOverlayComplete}
             onDurationDetected={handleLiveGiftDurationDetected}
@@ -1973,6 +1977,7 @@ export const LiveStreamScreen: React.FC = () => {
             layer="foreground"
             slotIndex={idx}
             preserveVoiceAudio={true}
+            roomSpeakerMuted={activeRole === 'viewer' && isRemoteAudioMuted}
             currentEvent={giftEv}
             onComplete={handleGiftOverlayComplete}
             onDurationDetected={handleLiveGiftDurationDetected}
@@ -2280,24 +2285,32 @@ export const LiveStreamScreen: React.FC = () => {
 
             {/* 2. Send Comment */}
             <form onSubmit={handleSendComment} className="flex-1 flex items-center relative">
-              <button
-                type="button"
-                onClick={() => setAskAiMode((v) => !v)}
-                className={`absolute left-1 h-6.5 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
-                  askAiMode
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-white/10 text-zinc-300 hover:bg-white/20'
-                }`}
-                title="Toggle Ask Alpha AI mode (or type @ai)"
-              >
-                AI
-              </button>
+              {GEMINI_CHATBOT_ENABLED && (
+                <button
+                  type="button"
+                  onClick={() => setAskAiMode((v) => !v)}
+                  className={`absolute left-1 h-6.5 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                    askAiMode
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white/10 text-zinc-300 hover:bg-white/20'
+                  }`}
+                  title="Toggle Ask Alpha AI mode (or type @ai)"
+                >
+                  AI
+                </button>
+              )}
               <input
                 type="text"
-                placeholder={askAiMode ? 'Ask Alpha AI in live chat...' : 'Say something nice (or @ai)...'}
+                placeholder={
+                  GEMINI_CHATBOT_ENABLED
+                    ? askAiMode
+                      ? 'Ask Alpha AI in live chat...'
+                      : 'Say something nice (or @ai)...'
+                    : 'Say something nice...'
+                }
                 value={inputComment}
                 onChange={(e) => setInputComment(e.target.value)}
-                className="w-full h-8.5 pl-10 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+                className={`w-full h-8.5 ${GEMINI_CHATBOT_ENABLED ? 'pl-10' : 'pl-3'} pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]`}
               />
               <button
                 type="submit"
@@ -2334,24 +2347,32 @@ export const LiveStreamScreen: React.FC = () => {
           <div className="flex flex-col gap-1.5">
             {/* Top row: Comment input */}
             <form onSubmit={handleSendComment} className="w-full flex items-center relative">
-              <button
-                type="button"
-                onClick={() => setAskAiMode((v) => !v)}
-                className={`absolute left-1 h-6 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
-                  askAiMode
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-white/10 text-zinc-300 hover:bg-white/20'
-                }`}
-                title="Toggle Ask Alpha AI mode (or type @ai)"
-              >
-                AI
-              </button>
+              {GEMINI_CHATBOT_ENABLED && (
+                <button
+                  type="button"
+                  onClick={() => setAskAiMode((v) => !v)}
+                  className={`absolute left-1 h-6 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                    askAiMode
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white/10 text-zinc-300 hover:bg-white/20'
+                  }`}
+                  title="Toggle Ask Alpha AI mode (or type @ai)"
+                >
+                  AI
+                </button>
+              )}
               <input
                 type="text"
-                placeholder={askAiMode ? 'Ask Alpha AI in live chat...' : 'Chat with audience (or type @ai)...'}
+                placeholder={
+                  GEMINI_CHATBOT_ENABLED
+                    ? askAiMode
+                      ? 'Ask Alpha AI in live chat...'
+                      : 'Chat with audience (or type @ai)...'
+                    : 'Chat with your audience as Host...'
+                }
                 value={inputComment}
                 onChange={(e) => setInputComment(e.target.value)}
-                className="w-full h-8 pl-10 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+                className={`w-full h-8 ${GEMINI_CHATBOT_ENABLED ? 'pl-10' : 'pl-3'} pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]`}
               />
               <button
                 type="submit"

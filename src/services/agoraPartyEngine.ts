@@ -59,6 +59,8 @@ class AgoraPartyEngine {
   private remoteUsers = new Map<number, PartyPresenceRecord>();
   private remoteMutedByUid = new Map<number, boolean>();
   private remoteSpeakingUntilMs = new Map<number, number>();
+  private remoteVolumeByUid = new Map<number, number>();
+  private audioTrackListeners = new Set<() => void>();
   private lastEmittedLocalSpeaking = false;
   private speakingSweepTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -85,6 +87,23 @@ class AgoraPartyEngine {
   private webReconnectingWatchdog: ReturnType<typeof setTimeout> | null = null;
   private webRemoteAudioTracks = new Map<number, any>();
   private networkListenersBound = false;
+
+  private notifyAudioTrackListeners(): void {
+    this.audioTrackListeners.forEach((listener) => {
+      try {
+        listener();
+      } catch {
+        // ignore listener errors
+      }
+    });
+  }
+
+  public subscribeAudioTracks(listener: () => void): () => void {
+    this.audioTrackListeners.add(listener);
+    return () => {
+      this.audioTrackListeners.delete(listener);
+    };
+  }
 
   constructor() {
     this.bindNetworkRecoveryListeners();
@@ -752,6 +771,7 @@ class AgoraPartyEngine {
             changed = true;
           }
           const presence = this.remoteUsers.get(uid)!;
+          this.remoteVolumeByUid.set(uid, presence.isMuted ? 0 : Math.min(255, Math.max(0, vol)));
           if (!presence.isMuted && vol >= NATIVE_SPEAKING_VOLUME_THRESHOLD) {
             this.remoteSpeakingUntilMs.set(uid, now + SPEAKING_HOLD_MS);
             if (!presence.isSpeaking) {
@@ -932,7 +952,9 @@ class AgoraPartyEngine {
       this.remoteUsers.delete(numericUid);
       this.remoteMutedByUid.delete(numericUid);
       this.remoteSpeakingUntilMs.delete(numericUid);
+      this.remoteVolumeByUid.delete(numericUid);
       this.webRemoteAudioTracks.delete(numericUid);
+      this.notifyAudioTrackListeners();
       this.emitParticipants();
       this.callbacks.onParticipantLeft?.({ uid: existing?.userId || String(user.uid) });
     });
@@ -952,6 +974,7 @@ class AgoraPartyEngine {
         } catch {
           // autoplay may need gesture
         }
+        this.notifyAudioTrackListeners();
       }
       const presence = this.remoteUsers.get(numericUid) || this.buildRemotePresence(numericUid, roomId);
       presence.isMuted = false;
@@ -965,7 +988,9 @@ class AgoraPartyEngine {
       const numericUid = Number(user.uid);
       this.remoteMutedByUid.set(numericUid, true);
       this.remoteSpeakingUntilMs.delete(numericUid);
+      this.remoteVolumeByUid.delete(numericUid);
       this.webRemoteAudioTracks.delete(numericUid);
+      this.notifyAudioTrackListeners();
       const presence = this.remoteUsers.get(numericUid);
       if (presence) {
         presence.isMuted = true;
@@ -990,6 +1015,9 @@ class AgoraPartyEngine {
           continue;
         }
         const presence = this.remoteUsers.get(uid);
+        if (presence) {
+          this.remoteVolumeByUid.set(uid, presence.isMuted ? 0 : Math.min(255, Math.round(level * 2.55)));
+        }
         if (presence && !presence.isMuted && level >= WEB_SPEAKING_VOLUME_THRESHOLD) {
           this.remoteSpeakingUntilMs.set(uid, now + SPEAKING_HOLD_MS);
           if (!presence.isSpeaking) {
@@ -1048,6 +1076,7 @@ class AgoraPartyEngine {
         this.webLocalAudioTrack = micTrack;
         await micTrack.setMuted(this.muted);
         await client.publish([micTrack]);
+        this.notifyAudioTrackListeners();
       } catch (micErr: any) {
         this.canPublish = false;
         this.muted = true;
@@ -1182,9 +1211,11 @@ class AgoraPartyEngine {
         if (!alreadyPublished) {
           await this.webClient.publish([this.webLocalAudioTrack]);
         }
+        this.notifyAudioTrackListeners();
       } else {
         // CRITICAL: Agora Web SDK forbids setClientRole('audience') while any stream is still published.
         await this.switchWebClientToAudience(roomId, payload);
+        this.notifyAudioTrackListeners();
       }
     }
     this.emitSpeakingSnapshot();
@@ -1365,6 +1396,7 @@ class AgoraPartyEngine {
     this.listeners = [];
     this.remoteUsers.clear();
     this.remoteMutedByUid.clear();
+    this.remoteVolumeByUid.clear();
 
     try {
       if (agoraPartyNative.isAvailable()) {
@@ -1388,6 +1420,7 @@ class AgoraPartyEngine {
           }
         });
         this.webRemoteAudioTracks.clear();
+        this.notifyAudioTrackListeners();
         if (this.webClient) {
           this.webSessionToken += 1;
           this.clearWebReconnectingWatchdog();
@@ -1467,9 +1500,13 @@ class AgoraPartyEngine {
     if (this.webLocalAudioTrack) {
       return this.webLocalAudioTrack
         .setMuted(this.muted)
-        .then(() => ({ muted: this.muted }))
+        .then(() => {
+          this.notifyAudioTrackListeners();
+          return { muted: this.muted };
+        })
         .catch(() => ({ muted: this.muted }));
     }
+    this.notifyAudioTrackListeners();
     return Promise.resolve({ muted: this.muted });
   }
 
@@ -1484,6 +1521,92 @@ class AgoraPartyEngine {
 
   public getSpeakingVolume() {
     return this.muted || !this.canPublish ? 0 : this.localVolume;
+  }
+
+  /**
+   * Read-only extraction of active local & remote MediaStreamTracks for Web Audio API
+   * AnalyserNode frequency visualization (never stops, mutes, or alters Agora playback).
+   */
+  public getVisualizerAudioTracks(
+    roomId: string
+  ): Array<{ id: string; track: MediaStreamTrack; kind: 'local' | 'remote' }> {
+    if (!roomId || this.roomId !== roomId) return [];
+    const results: Array<{ id: string; track: MediaStreamTrack; kind: 'local' | 'remote' }> = [];
+
+    if (!this.muted && this.canPublish && this.webLocalAudioTrack) {
+      try {
+        const localTrack: MediaStreamTrack | undefined =
+          this.webLocalAudioTrack.getMediaStreamTrack?.();
+        if (localTrack && localTrack.kind === 'audio' && localTrack.readyState === 'live') {
+          results.push({ id: `local:${localTrack.id}`, track: localTrack, kind: 'local' });
+        }
+      } catch {
+        // ignore track inspection errors
+      }
+    }
+
+    if (this.speakerEnabled) {
+      this.webRemoteAudioTracks.forEach((agoraTrack, uid) => {
+        const presence = this.remoteUsers.get(uid);
+        if (presence?.isMuted) return;
+        try {
+          const remoteTrack: MediaStreamTrack | undefined = agoraTrack?.getMediaStreamTrack?.();
+          if (remoteTrack && remoteTrack.kind === 'audio' && remoteTrack.readyState === 'live') {
+            results.push({ id: `remote:${uid}:${remoteTrack.id}`, track: remoteTrack, kind: 'remote' });
+          }
+        } catch {
+          // ignore
+        }
+      });
+    }
+
+    return results;
+  }
+
+  /**
+   * Real-time normalized speaker audio energy snapshot (0..1) from Agora volume callbacks
+   * — works identically on Web and Native Android Capacitor SDKs.
+   */
+  public getAudioEnergySnapshot(roomId: string): {
+    peakVolume: number;
+    activeSpeakers: number;
+    speakerLevels: number[];
+  } {
+    if (!roomId || this.roomId !== roomId) {
+      return { peakVolume: 0, activeSpeakers: 0, speakerLevels: [] };
+    }
+    const now = Date.now();
+    const levels: number[] = [];
+    let peak = 0;
+
+    if (!this.muted && this.canPublish) {
+      const localNorm = Math.min(1, Math.max(0, (this.localVolume || 0) / 255));
+      if (localNorm > 0.02 || this.localSpeakingUntilMs > now) {
+        const effective = Math.max(localNorm, this.localSpeakingUntilMs > now ? 0.22 : 0);
+        levels.push(effective);
+        if (effective > peak) peak = effective;
+      }
+    }
+
+    if (this.speakerEnabled) {
+      this.remoteUsers.forEach((presence, uid) => {
+        if (presence.isMuted) return;
+        const rawVol = this.remoteVolumeByUid.get(uid) || 0;
+        const norm = Math.min(1, Math.max(0, rawVol / 255));
+        const speakingHold = (this.remoteSpeakingUntilMs.get(uid) || 0) > now;
+        if (norm > 0.02 || presence.isSpeaking || speakingHold) {
+          const effective = Math.max(norm, speakingHold || presence.isSpeaking ? 0.24 : 0);
+          levels.push(effective);
+          if (effective > peak) peak = effective;
+        }
+      });
+    }
+
+    return {
+      peakVolume: peak,
+      activeSpeakers: levels.length,
+      speakerLevels: levels,
+    };
   }
 
   public getActivePartyRemoteStreams(_roomId: string): Array<{ peerId: string; stream: MediaStream }> {
