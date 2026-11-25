@@ -186,19 +186,25 @@ export const PartyMusicVinylWidget: React.FC<PartyMusicVinylWidgetProps> = ({
           isPlaying ? 'text-amber-200/95' : 'text-zinc-400/80'
         }`}
       >
-        {isPlaying ? shortTitle : 'Paused'}
+        {isPlaying ? shortTitle : 'Music'}
       </span>
     </div>
   );
 
-  if (canModerate && onOpenMusicModal) {
+  if (onOpenMusicModal) {
     return (
       <button
         type="button"
         onClick={onOpenMusicModal}
         className="group flex flex-col items-center cursor-pointer active:scale-95 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#EC4899] rounded-full"
-        title={`Now Playing: ${trackTitle} — Tap to change music`}
-        aria-label={`Music turntable: ${isPlaying ? `playing ${trackTitle}` : 'paused'}. Tap to open music playlist.`}
+        title={
+          isPlaying
+            ? `Now Playing: ${trackTitle} — Tap for Music DJ & Volume`
+            : canModerate
+            ? 'Tap to search & play background music'
+            : 'Tap to open Party Music & Volume'
+        }
+        aria-label={`Music turntable: ${isPlaying ? `playing ${trackTitle}` : 'idle'}. Tap to open Party Music.`}
       >
         {content}
       </button>
@@ -215,3 +221,4 @@ export const PartyMusicVinylWidget: React.FC<PartyMusicVinylWidgetProps> = ({
     </div>
   );
 };
+

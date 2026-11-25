@@ -49649,7 +49649,7 @@ var __vitePreload = function preload(baseModule, deps, importerUrl) {
 	});
 };
 // node_modules/@capacitor-firebase/authentication/dist/esm/index.js
-var FirebaseAuthentication = registerPlugin("FirebaseAuthentication", { web: () => __vitePreload(() => import("./web-BC1eIJ3M.js").then((m) => new m.FirebaseAuthenticationWeb()), []) });
+var FirebaseAuthentication = registerPlugin("FirebaseAuthentication", { web: () => __vitePreload(() => import("./web-C7vVGJ-A.js").then((m) => new m.FirebaseAuthenticationWeb()), []) });
 // node_modules/@firebase/auth/dist/esm/index-NmqYMaDt.js
 /**
 * @license
@@ -60936,8 +60936,14 @@ async function syncPartyRoomToFirestore(room, options) {
 			backgroundTheme: room.backgroundTheme || "royal_castle",
 			seatTheme: room.seatTheme || "royal_gold_diya",
 			nowPlaying: room.nowPlaying || "",
-			isMusicPlaying: typeof room.isMusicPlaying === "boolean" ? room.isMusicPlaying : true,
+			isMusicPlaying: typeof room.isMusicPlaying === "boolean" ? room.isMusicPlaying : false,
 			musicTrackIndex: typeof room.musicTrackIndex === "number" && Number.isFinite(room.musicTrackIndex) ? Math.max(0, Math.floor(room.musicTrackIndex)) : 0,
+			...room.musicTrack !== void 0 ? { musicTrack: room.musicTrack } : {},
+			...typeof room.musicStartedAtMs === "number" ? { musicStartedAtMs: room.musicStartedAtMs } : {},
+			...typeof room.musicPositionSec === "number" ? { musicPositionSec: room.musicPositionSec } : {},
+			...Array.isArray(room.musicQueue) ? { musicQueue: room.musicQueue.slice(0, 15) } : {},
+			...typeof room.musicLoop === "boolean" ? { musicLoop: room.musicLoop } : {},
+			...typeof room.musicUpdatedBy === "string" ? { musicUpdatedBy: room.musicUpdatedBy.slice(0, 64) } : {},
 			moderatorIds: (room.moderatorIds || []).slice(0, 10),
 			kickedUserIds: (room.kickedUserIds || []).slice(0, 100),
 			blockedUserIds: (room.blockedUserIds || []).slice(0, 100),
@@ -64593,6 +64599,11 @@ var giftSoundEngine = new GiftSoundEngine();
 var MUTE_STORAGE_KEY = "am_gift_sfx_muted";
 var VOLUME_STORAGE_KEY = "am_gift_sfx_volume";
 var COMBO_SFX_ASSET_PATH = "/audio/gift-combo.mp3";
+var VIP_ENTRY_SFX_PATHS = [
+	"/audio/vip-entry-gold.mp3",
+	"/audio/vip-entry-imperial.mp3",
+	"/audio/vip-entry-sovereign.mp3"
+];
 /**
 * Canonical mapping between gift animation triggers and external SFX asset paths.
 * High-quality MP3 assets placed in `public/audio/` are preloaded and played cleanly;
@@ -64657,7 +64668,7 @@ var GIFT_ID_SFX_ASSET_MAP = {
 	gift_dragon: "/audio/gift-dragon.mp3"
 };
 var NOOP = () => {};
-var MAX_DECODED_BUFFER_CACHE = 28;
+var MAX_DECODED_BUFFER_CACHE = 48;
 var GiftAudioManager = class {
 	constructor() {
 		this.ctx = null;
@@ -64827,6 +64838,7 @@ var GiftAudioManager = class {
 	}
 	registerAssetMapping(trigger, assetPath) {
 		if (!trigger || !assetPath) return;
+		if (this.customTriggerOverrides.get(trigger) === assetPath) return;
 		this.customTriggerOverrides.set(trigger, assetPath);
 		this.bufferCache.delete(assetPath);
 	}
@@ -64877,12 +64889,29 @@ var GiftAudioManager = class {
 	getAssetPath(giftOrTrigger, giftIdOverride) {
 		return this.resolveTriggerConfig(giftOrTrigger, giftIdOverride).candidatePaths[0];
 	}
+	hasDecodedBuffer(cacheKey) {
+		return this.bufferCache.get(cacheKey)?.status === "decoded";
+	}
+	getBufferStats() {
+		let decodedCount = 0;
+		let missingCount = 0;
+		for (const entry of this.bufferCache.values()) if (entry.status === "decoded") decodedCount += 1;
+		else missingCount += 1;
+		return {
+			decodedCount,
+			missingCount
+		};
+	}
 	async loadAndDecodeAssetDetailed(assetPath, options = {}) {
 		const cacheKey = options.cacheKey || assetPath;
 		const cached = this.bufferCache.get(cacheKey);
 		if (cached) return cached.status === "decoded" ? { buffer: cached.buffer } : {
 			buffer: null,
 			reason: "no_audio"
+		};
+		if (options.signal?.aborted) return {
+			buffer: null,
+			reason: "timeout"
 		};
 		const existingInflight = this.inflightLoads.get(cacheKey);
 		if (existingInflight) return existingInflight;
@@ -64898,6 +64927,18 @@ var GiftAudioManager = class {
 			let timerId = null;
 			const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
 			let timedOut = false;
+			let externallyAborted = false;
+			const onExternalAbort = () => {
+				externallyAborted = true;
+				controller?.abort();
+			};
+			if (options.signal) {
+				if (options.signal.aborted) return {
+					buffer: null,
+					reason: "timeout"
+				};
+				options.signal.addEventListener("abort", onExternalAbort, { once: true });
+			}
 			try {
 				if (controller && timeoutMs > 0) timerId = setTimeout(() => {
 					timedOut = true;
@@ -64927,6 +64968,10 @@ var GiftAudioManager = class {
 					clearTimeout(timerId);
 					timerId = null;
 				}
+				if (externallyAborted || options.signal?.aborted) return {
+					buffer: null,
+					reason: "timeout"
+				};
 				if (arrayBuffer.byteLength < 64) {
 					this.bufferCache.set(cacheKey, { status: "missing" });
 					return {
@@ -64953,7 +64998,7 @@ var GiftAudioManager = class {
 					};
 				}
 			} catch {
-				if (timedOut) return {
+				if (timedOut || externallyAborted) return {
 					buffer: null,
 					reason: "timeout"
 				};
@@ -64964,16 +65009,17 @@ var GiftAudioManager = class {
 				};
 			} finally {
 				if (timerId) clearTimeout(timerId);
+				if (options.signal) options.signal.removeEventListener("abort", onExternalAbort);
 				this.inflightLoads.delete(cacheKey);
 			}
 		})();
 		this.inflightLoads.set(cacheKey, loadPromise);
 		return loadPromise;
 	}
-	async loadAndDecodeAsset(assetPath) {
-		return (await this.loadAndDecodeAssetDetailed(assetPath)).buffer;
+	async loadAndDecodeAsset(assetPath, signal) {
+		return (await this.loadAndDecodeAssetDetailed(assetPath, { signal })).buffer;
 	}
-	async preloadGiftSfx(triggers) {
+	async preloadGiftSfx(triggers, options = {}) {
 		const keys = triggers && triggers.length > 0 ? triggers : Object.keys(GIFT_SFX_ASSET_MAP);
 		const paths = new Set(keys.map((k) => GIFT_SFX_ASSET_MAP[k].assetPath));
 		if (!triggers || triggers.length === 0) {
@@ -64981,10 +65027,103 @@ var GiftAudioManager = class {
 			this.customTriggerOverrides.forEach((p) => paths.add(p));
 		}
 		paths.add(COMBO_SFX_ASSET_PATH);
-		await Promise.allSettled(Array.from(paths).map((p) => this.loadAndDecodeAsset(p)));
+		if (options.includeVipEntry !== false) VIP_ENTRY_SFX_PATHS.forEach((p) => paths.add(p));
+		if (options.extraPaths) options.extraPaths.forEach((p) => {
+			if (typeof p === "string" && p.trim()) paths.add(p.trim());
+		});
+		const pathList = Array.from(paths);
+		const total = pathList.length;
+		if (total === 0) return {
+			decoded: 0,
+			total: 0
+		};
+		const concurrency = Math.max(1, Math.min(6, options.concurrency ?? 4));
+		let cursor = 0;
+		let done = 0;
+		let decoded = 0;
+		const worker = async () => {
+			while (cursor < pathList.length) {
+				if (options.signal?.aborted) return;
+				const nextPath = pathList[cursor++];
+				if (await this.loadAndDecodeAsset(nextPath, options.signal)) decoded += 1;
+				done += 1;
+				options.onItemComplete?.(done, total);
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+		return {
+			decoded,
+			total
+		};
 	}
-	preloadAll() {
-		return this.preloadGiftSfx();
+	async preloadMediaAudioTrack(mediaUrl, options = {}) {
+		if (!mediaUrl || options.signal?.aborted) return false;
+		const cacheKey = options.cacheKey || mediaUrl;
+		const existing = this.bufferCache.get(cacheKey);
+		if (existing) return existing.status === "decoded";
+		const res = await this.loadAndDecodeAssetDetailed(mediaUrl, {
+			cacheKey,
+			fetchTimeoutMs: options.fetchTimeoutMs ?? (mediaUrl.startsWith("blob:") ? 8e3 : 4500),
+			cacheMissingOnNetworkError: false,
+			signal: options.signal
+		});
+		return Boolean(res.buffer);
+	}
+	async preloadMediaAudioTracks(entries, options = {}) {
+		const deduped = [];
+		const seen = /* @__PURE__ */ new Set();
+		for (const item of entries) {
+			if (!item?.url) continue;
+			const key = item.cacheKey || item.url;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			deduped.push({
+				url: item.url,
+				cacheKey: key
+			});
+		}
+		const total = deduped.length;
+		if (total === 0) return {
+			decoded: 0,
+			skipped: 0,
+			failed: 0
+		};
+		const concurrency = Math.max(1, Math.min(4, options.concurrency ?? 2));
+		let cursor = 0;
+		let done = 0;
+		let decoded = 0;
+		let skipped = 0;
+		let failed = 0;
+		const worker = async () => {
+			while (cursor < deduped.length) {
+				if (options.signal?.aborted) return;
+				const entry = deduped[cursor++];
+				const existing = this.bufferCache.get(entry.cacheKey);
+				if (existing) {
+					if (existing.status === "decoded") decoded += 1;
+					else skipped += 1;
+					done += 1;
+					options.onItemComplete?.(done, total);
+					continue;
+				}
+				if (await this.preloadMediaAudioTrack(entry.url, {
+					cacheKey: entry.cacheKey,
+					signal: options.signal
+				})) decoded += 1;
+				else failed += 1;
+				done += 1;
+				options.onItemComplete?.(done, total);
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(concurrency, total) }, () => worker()));
+		return {
+			decoded,
+			skipped,
+			failed
+		};
+	}
+	async preloadAll() {
+		await this.preloadGiftSfx();
 	}
 	startDecodedBuffer(graph, buffer, volume, playbackRate = 1, offsetSec = 0) {
 		try {
@@ -66595,7 +66734,7 @@ function subscribeToReelComments(reelId, onUpdate) {
 	});
 }
 // src/services/realtimeSocket.ts
-var PRODUCTION_API_URL$1 = "https://api.alphamate.app";
+var PRODUCTION_API_URL$2 = "https://api.alphamate.app";
 var RECONNECT_BASE_MS = 800;
 var RECONNECT_MAX_MS = 12e3;
 var HEARTBEAT_MS = 15e3;
@@ -66604,7 +66743,7 @@ var CONNECT_HANDSHAKE_TIMEOUT_MS = 12e3;
 var OUTBOX_TTL_MS = 6e4;
 function resolveBackendHttpBase() {
 	"".trim();
-	return PRODUCTION_API_URL$1;
+	return PRODUCTION_API_URL$2;
 }
 function buildWebSocketUrl(idToken) {
 	return `${resolveBackendHttpBase().replace(/^https:\/\//i, "wss://").replace(/^http:\/\//i, "ws://")}/ws?token=${encodeURIComponent(idToken)}&batch=1&seq=1`;
@@ -68499,9 +68638,25 @@ var RealtimeSfuStreamingEngine = class RealtimeSfuStreamingEngine {
 			if (timer) clearTimeout(timer);
 		}
 	}
+	isMediaPermissionError(err) {
+		const name = String(err?.name || "");
+		const msg = String(err?.message || err || "").toLowerCase();
+		return name === "NotAllowedError" || name === "PermissionDeniedError" || name === "SecurityError" || msg.includes("permission denied") || msg.includes("permission dismissed") || msg.includes("not allowed");
+	}
+	isMediaNotFoundError(err) {
+		const name = String(err?.name || "");
+		const msg = String(err?.message || err || "").toLowerCase();
+		return name === "NotFoundError" || name === "DevicesNotFoundError" || msg.includes("requested device not found");
+	}
+	createTypedMediaError(code, message) {
+		const error = new Error(message);
+		error.code = code;
+		return error;
+	}
 	async getLocalMediaStream(facing = "user", withAudio = true) {
 		this.facingMode = facing;
 		this.stopLocalMediaStream();
+		if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) throw this.createTypedMediaError("MEDIA_UNAVAILABLE", "Camera and microphone are unavailable in this browser context. Open the app over HTTPS with media permissions enabled.");
 		const constraints = {
 			video: {
 				facingMode: { ideal: facing },
@@ -68532,7 +68687,20 @@ var RealtimeSfuStreamingEngine = class RealtimeSfuStreamingEngine {
 			if (withAudio) this.initAudioAnalyser(stream);
 			return stream;
 		} catch (err) {
-			console.warn("[Media capture] Preferred camera/microphone constraints failed; retrying with device defaults.", err);
+			const primaryWasPermissionDenied = this.isMediaPermissionError(err);
+			if (!primaryWasPermissionDenied) try {
+				const basicStream = await this.requestMediaWithTimeout({
+					video: true,
+					audio: withAudio
+				}, 8e3, "Camera and microphone");
+				this.localStream = basicStream;
+				if (this.isVideoPaused) basicStream.getVideoTracks().forEach((t) => t.enabled = false);
+				if (this.isMuted) basicStream.getAudioTracks().forEach((t) => t.enabled = false);
+				if (withAudio) this.initAudioAnalyser(basicStream);
+				return basicStream;
+			} catch {}
+			let audioDenied = false;
+			let videoDenied = false;
 			if (withAudio) try {
 				const audioOnlyStream = await this.requestMediaWithTimeout({
 					audio: {
@@ -68547,15 +68715,23 @@ var RealtimeSfuStreamingEngine = class RealtimeSfuStreamingEngine {
 				this.initAudioAnalyser(audioOnlyStream);
 				return audioOnlyStream;
 			} catch (audioErr) {
-				console.error("[Media capture] Microphone-only fallback failed.", audioErr);
+				audioDenied = this.isMediaPermissionError(audioErr);
+				if (!audioDenied) console.warn("[Media capture] Microphone-only fallback unavailable:", audioErr?.message || audioErr);
 			}
-			const videoOnlyStream = await this.requestMediaWithTimeout({
-				video: true,
-				audio: false
-			}, 8e3, "Camera");
-			this.localStream = videoOnlyStream;
-			if (this.isVideoPaused) videoOnlyStream.getVideoTracks().forEach((t) => t.enabled = false);
-			return videoOnlyStream;
+			try {
+				const videoOnlyStream = await this.requestMediaWithTimeout({
+					video: true,
+					audio: false
+				}, 8e3, "Camera");
+				this.localStream = videoOnlyStream;
+				if (this.isVideoPaused) videoOnlyStream.getVideoTracks().forEach((t) => t.enabled = false);
+				return videoOnlyStream;
+			} catch (videoErr) {
+				videoDenied = this.isMediaPermissionError(videoErr);
+				if (primaryWasPermissionDenied || audioDenied || videoDenied) throw this.createTypedMediaError("MEDIA_PERMISSION_DENIED", "Camera and microphone access was denied. Please allow Camera & Microphone permissions in your browser or device settings, then tap Retry.");
+				if (this.isMediaNotFoundError(err) || this.isMediaNotFoundError(videoErr)) throw this.createTypedMediaError("MEDIA_DEVICE_NOT_FOUND", "No camera or microphone was detected on this device. Connect a camera or microphone and tap Retry.");
+				throw videoErr;
+			}
 		}
 	}
 	/**
@@ -70356,6 +70532,19 @@ var WEB_SPEAKING_VOLUME_THRESHOLD = 8;
 * - Solo Live & Solo PK remain exclusively on WebRTC (`webrtcService.ts`).
 */
 var AgoraPartyEngine = class {
+	notifyAudioTrackListeners() {
+		this.audioTrackListeners.forEach((listener) => {
+			try {
+				listener();
+			} catch {}
+		});
+	}
+	subscribeAudioTracks(listener) {
+		this.audioTrackListeners.add(listener);
+		return () => {
+			this.audioTrackListeners.delete(listener);
+		};
+	}
 	constructor() {
 		this.roomId = null;
 		this.userId = null;
@@ -70372,6 +70561,8 @@ var AgoraPartyEngine = class {
 		this.remoteUsers = /* @__PURE__ */ new Map();
 		this.remoteMutedByUid = /* @__PURE__ */ new Map();
 		this.remoteSpeakingUntilMs = /* @__PURE__ */ new Map();
+		this.remoteVolumeByUid = /* @__PURE__ */ new Map();
+		this.audioTrackListeners = /* @__PURE__ */ new Set();
 		this.lastEmittedLocalSpeaking = false;
 		this.speakingSweepTimer = null;
 		this.manualStop = false;
@@ -70863,6 +71054,7 @@ var AgoraPartyEngine = class {
 						changed = true;
 					}
 					const presence = this.remoteUsers.get(uid);
+					this.remoteVolumeByUid.set(uid, presence.isMuted ? 0 : Math.min(255, Math.max(0, vol)));
 					if (!presence.isMuted && vol >= NATIVE_SPEAKING_VOLUME_THRESHOLD) {
 						this.remoteSpeakingUntilMs.set(uid, now + SPEAKING_HOLD_MS);
 						if (!presence.isSpeaking) {
@@ -70902,7 +71094,7 @@ var AgoraPartyEngine = class {
 		}
 	}
 	async startWebAgoraFallback(roomId, payload) {
-		const mod = await __vitePreload(() => import("./AgoraRTC_N-production-PQzfx1Na.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+		const mod = await __vitePreload(() => import("./AgoraRTC_N-production-BNAO_7Wt.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 		const AgoraRTC = mod.default || mod;
 		if (this.manualStop || this.roomId !== roomId) return;
 		try {
@@ -70994,7 +71186,9 @@ var AgoraPartyEngine = class {
 			this.remoteUsers.delete(numericUid);
 			this.remoteMutedByUid.delete(numericUid);
 			this.remoteSpeakingUntilMs.delete(numericUid);
+			this.remoteVolumeByUid.delete(numericUid);
 			this.webRemoteAudioTracks.delete(numericUid);
+			this.notifyAudioTrackListeners();
 			this.emitParticipants();
 			this.callbacks.onParticipantLeft?.({ uid: existing?.userId || String(user.uid) });
 		});
@@ -71011,6 +71205,7 @@ var AgoraPartyEngine = class {
 					track.setVolume(this.speakerEnabled ? 100 : 0);
 					track.play();
 				} catch {}
+				this.notifyAudioTrackListeners();
 			}
 			const presence = this.remoteUsers.get(numericUid) || this.buildRemotePresence(numericUid, roomId);
 			presence.isMuted = false;
@@ -71023,7 +71218,9 @@ var AgoraPartyEngine = class {
 			const numericUid = Number(user.uid);
 			this.remoteMutedByUid.set(numericUid, true);
 			this.remoteSpeakingUntilMs.delete(numericUid);
+			this.remoteVolumeByUid.delete(numericUid);
 			this.webRemoteAudioTracks.delete(numericUid);
+			this.notifyAudioTrackListeners();
 			const presence = this.remoteUsers.get(numericUid);
 			if (presence) {
 				presence.isMuted = true;
@@ -71045,6 +71242,7 @@ var AgoraPartyEngine = class {
 					continue;
 				}
 				const presence = this.remoteUsers.get(uid);
+				if (presence) this.remoteVolumeByUid.set(uid, presence.isMuted ? 0 : Math.min(255, Math.round(level * 2.55)));
 				if (presence && !presence.isMuted && level >= WEB_SPEAKING_VOLUME_THRESHOLD) {
 					this.remoteSpeakingUntilMs.set(uid, now + SPEAKING_HOLD_MS);
 					if (!presence.isSpeaking) {
@@ -71091,6 +71289,7 @@ var AgoraPartyEngine = class {
 			this.webLocalAudioTrack = micTrack;
 			await micTrack.setMuted(this.muted);
 			await client.publish([micTrack]);
+			this.notifyAudioTrackListeners();
 		} catch (micErr) {
 			this.canPublish = false;
 			this.muted = true;
@@ -71157,7 +71356,7 @@ var AgoraPartyEngine = class {
 			await agoraPartyNative.renewToken(payload.token);
 			await agoraPartyNative.setMuted(this.muted);
 		} else if (this.webClient && this.webJoined) {
-			const mod = await __vitePreload(() => import("./AgoraRTC_N-production-PQzfx1Na.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+			const mod = await __vitePreload(() => import("./AgoraRTC_N-production-BNAO_7Wt.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 			const AgoraRTC = mod.default || mod;
 			if (effectiveCanSpeak) {
 				await this.webClient.renewToken(payload.token).catch(() => {});
@@ -71178,7 +71377,11 @@ var AgoraPartyEngine = class {
 				}
 				await this.webLocalAudioTrack.setMuted(this.muted);
 				if (!(Array.isArray(this.webClient.localTracks) && this.webClient.localTracks.includes(this.webLocalAudioTrack))) await this.webClient.publish([this.webLocalAudioTrack]);
-			} else await this.switchWebClientToAudience(roomId, payload);
+				this.notifyAudioTrackListeners();
+			} else {
+				await this.switchWebClientToAudience(roomId, payload);
+				this.notifyAudioTrackListeners();
+			}
 		}
 		this.emitSpeakingSnapshot();
 	}
@@ -71292,6 +71495,7 @@ var AgoraPartyEngine = class {
 		this.listeners = [];
 		this.remoteUsers.clear();
 		this.remoteMutedByUid.clear();
+		this.remoteVolumeByUid.clear();
 		try {
 			if (agoraPartyNative.isAvailable()) await agoraPartyNative.leave().catch(() => {});
 			else {
@@ -71309,6 +71513,7 @@ var AgoraPartyEngine = class {
 					} catch {}
 				});
 				this.webRemoteAudioTracks.clear();
+				this.notifyAudioTrackListeners();
 				if (this.webClient) {
 					this.webSessionToken += 1;
 					this.clearWebReconnectingWatchdog();
@@ -71369,7 +71574,11 @@ var AgoraPartyEngine = class {
 			this.emitSpeakingSnapshot();
 		}
 		if (agoraPartyNative.isAvailable()) return agoraPartyNative.setMuted(this.muted).catch(() => ({ muted: this.muted }));
-		if (this.webLocalAudioTrack) return this.webLocalAudioTrack.setMuted(this.muted).then(() => ({ muted: this.muted })).catch(() => ({ muted: this.muted }));
+		if (this.webLocalAudioTrack) return this.webLocalAudioTrack.setMuted(this.muted).then(() => {
+			this.notifyAudioTrackListeners();
+			return { muted: this.muted };
+		}).catch(() => ({ muted: this.muted }));
+		this.notifyAudioTrackListeners();
 		return Promise.resolve({ muted: this.muted });
 	}
 	updatePartySpeakingIndicator(_roomId, _speaking) {}
@@ -71379,6 +71588,72 @@ var AgoraPartyEngine = class {
 	}
 	getSpeakingVolume() {
 		return this.muted || !this.canPublish ? 0 : this.localVolume;
+	}
+	/**
+	* Read-only extraction of active local & remote MediaStreamTracks for Web Audio API
+	* AnalyserNode frequency visualization (never stops, mutes, or alters Agora playback).
+	*/
+	getVisualizerAudioTracks(roomId) {
+		if (!roomId || this.roomId !== roomId) return [];
+		const results = [];
+		if (!this.muted && this.canPublish && this.webLocalAudioTrack) try {
+			const localTrack = this.webLocalAudioTrack.getMediaStreamTrack?.();
+			if (localTrack && localTrack.kind === "audio" && localTrack.readyState === "live") results.push({
+				id: `local:${localTrack.id}`,
+				track: localTrack,
+				kind: "local"
+			});
+		} catch {}
+		if (this.speakerEnabled) this.webRemoteAudioTracks.forEach((agoraTrack, uid) => {
+			if (this.remoteUsers.get(uid)?.isMuted) return;
+			try {
+				const remoteTrack = agoraTrack?.getMediaStreamTrack?.();
+				if (remoteTrack && remoteTrack.kind === "audio" && remoteTrack.readyState === "live") results.push({
+					id: `remote:${uid}:${remoteTrack.id}`,
+					track: remoteTrack,
+					kind: "remote"
+				});
+			} catch {}
+		});
+		return results;
+	}
+	/**
+	* Real-time normalized speaker audio energy snapshot (0..1) from Agora volume callbacks
+	* — works identically on Web and Native Android Capacitor SDKs.
+	*/
+	getAudioEnergySnapshot(roomId) {
+		if (!roomId || this.roomId !== roomId) return {
+			peakVolume: 0,
+			activeSpeakers: 0,
+			speakerLevels: []
+		};
+		const now = Date.now();
+		const levels = [];
+		let peak = 0;
+		if (!this.muted && this.canPublish) {
+			const localNorm = Math.min(1, Math.max(0, (this.localVolume || 0) / 255));
+			if (localNorm > .02 || this.localSpeakingUntilMs > now) {
+				const effective = Math.max(localNorm, this.localSpeakingUntilMs > now ? .22 : 0);
+				levels.push(effective);
+				if (effective > peak) peak = effective;
+			}
+		}
+		if (this.speakerEnabled) this.remoteUsers.forEach((presence, uid) => {
+			if (presence.isMuted) return;
+			const rawVol = this.remoteVolumeByUid.get(uid) || 0;
+			const norm = Math.min(1, Math.max(0, rawVol / 255));
+			const speakingHold = (this.remoteSpeakingUntilMs.get(uid) || 0) > now;
+			if (norm > .02 || presence.isSpeaking || speakingHold) {
+				const effective = Math.max(norm, speakingHold || presence.isSpeaking ? .24 : 0);
+				levels.push(effective);
+				if (effective > peak) peak = effective;
+			}
+		});
+		return {
+			peakVolume: peak,
+			activeSpeakers: levels.length,
+			speakerLevels: levels
+		};
 	}
 	getActivePartyRemoteStreams(_roomId) {
 		return [];
@@ -71421,7 +71696,7 @@ var AgoraPartyEngine = class {
 		await this.enqueueOp(async () => {
 			if (this.manualStop || this.roomId !== roomId || !this.webClient || !this.webJoined || !this.canPublish || this.listenOnly) return;
 			try {
-				const mod = await __vitePreload(() => import("./AgoraRTC_N-production-PQzfx1Na.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
+				const mod = await __vitePreload(() => import("./AgoraRTC_N-production-BNAO_7Wt.js").then((m) => /* @__PURE__ */ __toESM(m.default, 1)), []);
 				const AgoraRTC = mod.default || mod;
 				const keepRawMic = applied !== "normal";
 				await this.unpublishAndCloseWebLocalAudioTrack(keepRawMic);
@@ -81857,11 +82132,11 @@ var createLucideIcon = (iconName, iconNode) => {
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$155 = [["path", {
+var __iconNode$157 = [["path", {
 	d: "M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2",
 	key: "169zse"
 }]];
-var Activity = createLucideIcon("activity", __iconNode$155);
+var Activity = createLucideIcon("activity", __iconNode$157);
 // node_modules/lucide-react/dist/esm/icons/arrow-down-left.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81869,14 +82144,14 @@ var Activity = createLucideIcon("activity", __iconNode$155);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$154 = [["path", {
+var __iconNode$156 = [["path", {
 	d: "M17 7 7 17",
 	key: "15tmo1"
 }], ["path", {
 	d: "M17 17H7V7",
 	key: "1org7z"
 }]];
-var ArrowDownLeft = createLucideIcon("arrow-down-left", __iconNode$154);
+var ArrowDownLeft = createLucideIcon("arrow-down-left", __iconNode$156);
 // node_modules/lucide-react/dist/esm/icons/arrow-down.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81884,14 +82159,14 @@ var ArrowDownLeft = createLucideIcon("arrow-down-left", __iconNode$154);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$153 = [["path", {
+var __iconNode$155 = [["path", {
 	d: "M12 5v14",
 	key: "s699le"
 }], ["path", {
 	d: "m19 12-7 7-7-7",
 	key: "1idqje"
 }]];
-var ArrowDown = createLucideIcon("arrow-down", __iconNode$153);
+var ArrowDown = createLucideIcon("arrow-down", __iconNode$155);
 // node_modules/lucide-react/dist/esm/icons/arrow-left.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81899,14 +82174,14 @@ var ArrowDown = createLucideIcon("arrow-down", __iconNode$153);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$152 = [["path", {
+var __iconNode$154 = [["path", {
 	d: "m12 19-7-7 7-7",
 	key: "1l729n"
 }], ["path", {
 	d: "M19 12H5",
 	key: "x3x0zl"
 }]];
-var ArrowLeft = createLucideIcon("arrow-left", __iconNode$152);
+var ArrowLeft = createLucideIcon("arrow-left", __iconNode$154);
 // node_modules/lucide-react/dist/esm/icons/arrow-right.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81914,14 +82189,14 @@ var ArrowLeft = createLucideIcon("arrow-left", __iconNode$152);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$151 = [["path", {
+var __iconNode$153 = [["path", {
 	d: "M5 12h14",
 	key: "1ays0h"
 }], ["path", {
 	d: "m12 5 7 7-7 7",
 	key: "xquz4c"
 }]];
-var ArrowRight = createLucideIcon("arrow-right", __iconNode$151);
+var ArrowRight = createLucideIcon("arrow-right", __iconNode$153);
 // node_modules/lucide-react/dist/esm/icons/arrow-up-right.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81929,14 +82204,14 @@ var ArrowRight = createLucideIcon("arrow-right", __iconNode$151);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$150 = [["path", {
+var __iconNode$152 = [["path", {
 	d: "M7 7h10v10",
 	key: "1tivn9"
 }], ["path", {
 	d: "M7 17 17 7",
 	key: "1vkiza"
 }]];
-var ArrowUpRight = createLucideIcon("arrow-up-right", __iconNode$150);
+var ArrowUpRight = createLucideIcon("arrow-up-right", __iconNode$152);
 // node_modules/lucide-react/dist/esm/icons/at-sign.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81944,7 +82219,7 @@ var ArrowUpRight = createLucideIcon("arrow-up-right", __iconNode$150);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$149 = [["circle", {
+var __iconNode$151 = [["circle", {
 	cx: "12",
 	cy: "12",
 	r: "4",
@@ -81953,7 +82228,7 @@ var __iconNode$149 = [["circle", {
 	d: "M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8",
 	key: "7n84p3"
 }]];
-var AtSign = createLucideIcon("at-sign", __iconNode$149);
+var AtSign = createLucideIcon("at-sign", __iconNode$151);
 // node_modules/lucide-react/dist/esm/icons/audio-lines.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81961,7 +82236,7 @@ var AtSign = createLucideIcon("at-sign", __iconNode$149);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$148 = [
+var __iconNode$150 = [
 	["path", {
 		d: "M2 10v3",
 		key: "1fnikh"
@@ -81987,7 +82262,7 @@ var __iconNode$148 = [
 		key: "154ddg"
 	}]
 ];
-var AudioLines = createLucideIcon("audio-lines", __iconNode$148);
+var AudioLines = createLucideIcon("audio-lines", __iconNode$150);
 // node_modules/lucide-react/dist/esm/icons/award.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -81995,7 +82270,7 @@ var AudioLines = createLucideIcon("audio-lines", __iconNode$148);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$147 = [["path", {
+var __iconNode$149 = [["path", {
 	d: "m15.477 12.89 1.515 8.526a.5.5 0 0 1-.81.47l-3.58-2.687a1 1 0 0 0-1.197 0l-3.586 2.686a.5.5 0 0 1-.81-.469l1.514-8.526",
 	key: "1yiouv"
 }], ["circle", {
@@ -82004,7 +82279,7 @@ var __iconNode$147 = [["path", {
 	r: "6",
 	key: "1vp47v"
 }]];
-var Award = createLucideIcon("award", __iconNode$147);
+var Award = createLucideIcon("award", __iconNode$149);
 // node_modules/lucide-react/dist/esm/icons/badge-check.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82012,14 +82287,14 @@ var Award = createLucideIcon("award", __iconNode$147);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$146 = [["path", {
+var __iconNode$148 = [["path", {
 	d: "M3.85 8.62a4 4 0 0 1 4.78-4.77 4 4 0 0 1 6.74 0 4 4 0 0 1 4.78 4.78 4 4 0 0 1 0 6.74 4 4 0 0 1-4.77 4.78 4 4 0 0 1-6.75 0 4 4 0 0 1-4.78-4.77 4 4 0 0 1 0-6.76Z",
 	key: "3c2336"
 }], ["path", {
 	d: "m9 12 2 2 4-4",
 	key: "dzmm74"
 }]];
-var BadgeCheck = createLucideIcon("badge-check", __iconNode$146);
+var BadgeCheck = createLucideIcon("badge-check", __iconNode$148);
 // node_modules/lucide-react/dist/esm/icons/ban.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82027,7 +82302,7 @@ var BadgeCheck = createLucideIcon("badge-check", __iconNode$146);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$145 = [["path", {
+var __iconNode$147 = [["path", {
 	d: "M4.929 4.929 19.07 19.071",
 	key: "196cmz"
 }], ["circle", {
@@ -82036,7 +82311,7 @@ var __iconNode$145 = [["path", {
 	r: "10",
 	key: "1mglay"
 }]];
-var Ban = createLucideIcon("ban", __iconNode$145);
+var Ban = createLucideIcon("ban", __iconNode$147);
 // node_modules/lucide-react/dist/esm/icons/battery-warning.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82044,7 +82319,7 @@ var Ban = createLucideIcon("ban", __iconNode$145);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$144 = [
+var __iconNode$146 = [
 	["path", {
 		d: "M10 17h.01",
 		key: "nbq80n"
@@ -82066,7 +82341,7 @@ var __iconNode$144 = [
 		key: "h8lgfh"
 	}]
 ];
-var BatteryWarning = createLucideIcon("battery-warning", __iconNode$144);
+var BatteryWarning = createLucideIcon("battery-warning", __iconNode$146);
 // node_modules/lucide-react/dist/esm/icons/battery.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82074,7 +82349,7 @@ var BatteryWarning = createLucideIcon("battery-warning", __iconNode$144);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$143 = [["path", {
+var __iconNode$145 = [["path", {
 	d: "M 22 14 L 22 10",
 	key: "nqc4tb"
 }], ["rect", {
@@ -82085,7 +82360,7 @@ var __iconNode$143 = [["path", {
 	rx: "2",
 	key: "13zb55"
 }]];
-var Battery = createLucideIcon("battery", __iconNode$143);
+var Battery = createLucideIcon("battery", __iconNode$145);
 // node_modules/lucide-react/dist/esm/icons/bell.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82093,14 +82368,14 @@ var Battery = createLucideIcon("battery", __iconNode$143);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$142 = [["path", {
+var __iconNode$144 = [["path", {
 	d: "M10.268 21a2 2 0 0 0 3.464 0",
 	key: "vwvbt9"
 }], ["path", {
 	d: "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326",
 	key: "11g9vi"
 }]];
-var Bell = createLucideIcon("bell", __iconNode$142);
+var Bell = createLucideIcon("bell", __iconNode$144);
 // node_modules/lucide-react/dist/esm/icons/bookmark.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82108,11 +82383,11 @@ var Bell = createLucideIcon("bell", __iconNode$142);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$141 = [["path", {
+var __iconNode$143 = [["path", {
 	d: "m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z",
 	key: "1fy3hk"
 }]];
-var Bookmark = createLucideIcon("bookmark", __iconNode$141);
+var Bookmark = createLucideIcon("bookmark", __iconNode$143);
 // node_modules/lucide-react/dist/esm/icons/bot.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82120,7 +82395,7 @@ var Bookmark = createLucideIcon("bookmark", __iconNode$141);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$140 = [
+var __iconNode$142 = [
 	["path", {
 		d: "M12 8V4H8",
 		key: "hb8ula"
@@ -82150,7 +82425,7 @@ var __iconNode$140 = [
 		key: "rq6x2g"
 	}]
 ];
-var Bot = createLucideIcon("bot", __iconNode$140);
+var Bot = createLucideIcon("bot", __iconNode$142);
 // node_modules/lucide-react/dist/esm/icons/building-2.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82158,7 +82433,7 @@ var Bot = createLucideIcon("bot", __iconNode$140);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$139 = [
+var __iconNode$141 = [
 	["path", {
 		d: "M10 12h4",
 		key: "a56b0p"
@@ -82180,7 +82455,7 @@ var __iconNode$139 = [
 		key: "16ra0t"
 	}]
 ];
-var Building2 = createLucideIcon("building-2", __iconNode$139);
+var Building2 = createLucideIcon("building-2", __iconNode$141);
 // node_modules/lucide-react/dist/esm/icons/calendar.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82188,7 +82463,7 @@ var Building2 = createLucideIcon("building-2", __iconNode$139);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$138 = [
+var __iconNode$140 = [
 	["path", {
 		d: "M8 2v4",
 		key: "1cmpym"
@@ -82210,7 +82485,7 @@ var __iconNode$138 = [
 		key: "8toen8"
 	}]
 ];
-var Calendar = createLucideIcon("calendar", __iconNode$138);
+var Calendar = createLucideIcon("calendar", __iconNode$140);
 // node_modules/lucide-react/dist/esm/icons/camera.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82218,7 +82493,7 @@ var Calendar = createLucideIcon("calendar", __iconNode$138);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$137 = [["path", {
+var __iconNode$139 = [["path", {
 	d: "M13.997 4a2 2 0 0 1 1.76 1.05l.486.9A2 2 0 0 0 18.003 7H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h1.997a2 2 0 0 0 1.759-1.048l.489-.904A2 2 0 0 1 10.004 4z",
 	key: "18u6gg"
 }], ["circle", {
@@ -82227,7 +82502,7 @@ var __iconNode$137 = [["path", {
 	r: "3",
 	key: "1vg3eu"
 }]];
-var Camera = createLucideIcon("camera", __iconNode$137);
+var Camera = createLucideIcon("camera", __iconNode$139);
 // node_modules/lucide-react/dist/esm/icons/car.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82235,7 +82510,7 @@ var Camera = createLucideIcon("camera", __iconNode$137);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$136 = [
+var __iconNode$138 = [
 	["path", {
 		d: "M19 17h2c.6 0 1-.4 1-1v-3c0-.9-.7-1.7-1.5-1.9C18.7 10.6 16 10 16 10s-1.3-1.4-2.2-2.3c-.5-.4-1.1-.7-1.8-.7H5c-.6 0-1.1.4-1.4.9l-1.4 2.9A3.7 3.7 0 0 0 2 12v4c0 .6.4 1 1 1h2",
 		key: "5owen"
@@ -82257,7 +82532,7 @@ var __iconNode$136 = [
 		key: "axvx0g"
 	}]
 ];
-var Car = createLucideIcon("car", __iconNode$136);
+var Car = createLucideIcon("car", __iconNode$138);
 // node_modules/lucide-react/dist/esm/icons/chart-column.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82265,7 +82540,7 @@ var Car = createLucideIcon("car", __iconNode$136);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$135 = [
+var __iconNode$137 = [
 	["path", {
 		d: "M3 3v16a2 2 0 0 0 2 2h16",
 		key: "c24i48"
@@ -82283,7 +82558,7 @@ var __iconNode$135 = [
 		key: "17ska0"
 	}]
 ];
-var ChartColumn = createLucideIcon("chart-column", __iconNode$135);
+var ChartColumn = createLucideIcon("chart-column", __iconNode$137);
 // node_modules/lucide-react/dist/esm/icons/check-check.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82291,14 +82566,14 @@ var ChartColumn = createLucideIcon("chart-column", __iconNode$135);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$134 = [["path", {
+var __iconNode$136 = [["path", {
 	d: "M18 6 7 17l-5-5",
 	key: "116fxf"
 }], ["path", {
 	d: "m22 10-7.5 7.5L13 16",
 	key: "ke71qq"
 }]];
-var CheckCheck = createLucideIcon("check-check", __iconNode$134);
+var CheckCheck = createLucideIcon("check-check", __iconNode$136);
 // node_modules/lucide-react/dist/esm/icons/check.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82306,11 +82581,11 @@ var CheckCheck = createLucideIcon("check-check", __iconNode$134);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$133 = [["path", {
+var __iconNode$135 = [["path", {
 	d: "M20 6 9 17l-5-5",
 	key: "1gmf2c"
 }]];
-var Check = createLucideIcon("check", __iconNode$133);
+var Check = createLucideIcon("check", __iconNode$135);
 // node_modules/lucide-react/dist/esm/icons/chevron-down.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82318,11 +82593,11 @@ var Check = createLucideIcon("check", __iconNode$133);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$132 = [["path", {
+var __iconNode$134 = [["path", {
 	d: "m6 9 6 6 6-6",
 	key: "qrunsl"
 }]];
-var ChevronDown = createLucideIcon("chevron-down", __iconNode$132);
+var ChevronDown = createLucideIcon("chevron-down", __iconNode$134);
 // node_modules/lucide-react/dist/esm/icons/chevron-left.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82330,11 +82605,11 @@ var ChevronDown = createLucideIcon("chevron-down", __iconNode$132);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$131 = [["path", {
+var __iconNode$133 = [["path", {
 	d: "m15 18-6-6 6-6",
 	key: "1wnfg3"
 }]];
-var ChevronLeft = createLucideIcon("chevron-left", __iconNode$131);
+var ChevronLeft = createLucideIcon("chevron-left", __iconNode$133);
 // node_modules/lucide-react/dist/esm/icons/chevron-right.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82342,11 +82617,11 @@ var ChevronLeft = createLucideIcon("chevron-left", __iconNode$131);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$130 = [["path", {
+var __iconNode$132 = [["path", {
 	d: "m9 18 6-6-6-6",
 	key: "mthhwq"
 }]];
-var ChevronRight = createLucideIcon("chevron-right", __iconNode$130);
+var ChevronRight = createLucideIcon("chevron-right", __iconNode$132);
 // node_modules/lucide-react/dist/esm/icons/chevron-up.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82354,11 +82629,11 @@ var ChevronRight = createLucideIcon("chevron-right", __iconNode$130);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$129 = [["path", {
+var __iconNode$131 = [["path", {
 	d: "m18 15-6-6-6 6",
 	key: "153udz"
 }]];
-var ChevronUp = createLucideIcon("chevron-up", __iconNode$129);
+var ChevronUp = createLucideIcon("chevron-up", __iconNode$131);
 // node_modules/lucide-react/dist/esm/icons/circle-alert.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82366,7 +82641,7 @@ var ChevronUp = createLucideIcon("chevron-up", __iconNode$129);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$128 = [
+var __iconNode$130 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -82388,7 +82663,7 @@ var __iconNode$128 = [
 		key: "4dfq90"
 	}]
 ];
-var CircleAlert = createLucideIcon("circle-alert", __iconNode$128);
+var CircleAlert = createLucideIcon("circle-alert", __iconNode$130);
 // node_modules/lucide-react/dist/esm/icons/circle-check-big.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82396,14 +82671,14 @@ var CircleAlert = createLucideIcon("circle-alert", __iconNode$128);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$127 = [["path", {
+var __iconNode$129 = [["path", {
 	d: "M21.801 10A10 10 0 1 1 17 3.335",
 	key: "yps3ct"
 }], ["path", {
 	d: "m9 11 3 3L22 4",
 	key: "1pflzl"
 }]];
-var CircleCheckBig = createLucideIcon("circle-check-big", __iconNode$127);
+var CircleCheckBig = createLucideIcon("circle-check-big", __iconNode$129);
 // node_modules/lucide-react/dist/esm/icons/circle-check.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82411,7 +82686,7 @@ var CircleCheckBig = createLucideIcon("circle-check-big", __iconNode$127);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$126 = [["circle", {
+var __iconNode$128 = [["circle", {
 	cx: "12",
 	cy: "12",
 	r: "10",
@@ -82420,7 +82695,7 @@ var __iconNode$126 = [["circle", {
 	d: "m9 12 2 2 4-4",
 	key: "dzmm74"
 }]];
-var CircleCheck = createLucideIcon("circle-check", __iconNode$126);
+var CircleCheck = createLucideIcon("circle-check", __iconNode$128);
 // node_modules/lucide-react/dist/esm/icons/circle-pause.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82428,7 +82703,7 @@ var CircleCheck = createLucideIcon("circle-check", __iconNode$126);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$125 = [
+var __iconNode$127 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -82450,7 +82725,7 @@ var __iconNode$125 = [
 		key: "h65svq"
 	}]
 ];
-var CirclePause = createLucideIcon("circle-pause", __iconNode$125);
+var CirclePause = createLucideIcon("circle-pause", __iconNode$127);
 // node_modules/lucide-react/dist/esm/icons/circle-question-mark.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82458,7 +82733,7 @@ var CirclePause = createLucideIcon("circle-pause", __iconNode$125);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$124 = [
+var __iconNode$126 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -82474,7 +82749,7 @@ var __iconNode$124 = [
 		key: "p32p05"
 	}]
 ];
-var CircleQuestionMark = createLucideIcon("circle-question-mark", __iconNode$124);
+var CircleQuestionMark = createLucideIcon("circle-question-mark", __iconNode$126);
 // node_modules/lucide-react/dist/esm/icons/circle-x.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82482,7 +82757,7 @@ var CircleQuestionMark = createLucideIcon("circle-question-mark", __iconNode$124
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$123 = [
+var __iconNode$125 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -82498,7 +82773,7 @@ var __iconNode$123 = [
 		key: "z0biqf"
 	}]
 ];
-var CircleX = createLucideIcon("circle-x", __iconNode$123);
+var CircleX = createLucideIcon("circle-x", __iconNode$125);
 // node_modules/lucide-react/dist/esm/icons/circle.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82506,13 +82781,13 @@ var CircleX = createLucideIcon("circle-x", __iconNode$123);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$122 = [["circle", {
+var __iconNode$124 = [["circle", {
 	cx: "12",
 	cy: "12",
 	r: "10",
 	key: "1mglay"
 }]];
-var Circle = createLucideIcon("circle", __iconNode$122);
+var Circle = createLucideIcon("circle", __iconNode$124);
 // node_modules/lucide-react/dist/esm/icons/clapperboard.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82520,7 +82795,7 @@ var Circle = createLucideIcon("circle", __iconNode$122);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$121 = [
+var __iconNode$123 = [
 	["path", {
 		d: "M20.2 6 3 11l-.9-2.4c-.3-1.1.3-2.2 1.3-2.5l13.5-4c1.1-.3 2.2.3 2.5 1.3Z",
 		key: "1tn4o7"
@@ -82538,7 +82813,7 @@ var __iconNode$121 = [
 		key: "ltgou9"
 	}]
 ];
-var Clapperboard = createLucideIcon("clapperboard", __iconNode$121);
+var Clapperboard = createLucideIcon("clapperboard", __iconNode$123);
 // node_modules/lucide-react/dist/esm/icons/clock.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82546,7 +82821,7 @@ var Clapperboard = createLucideIcon("clapperboard", __iconNode$121);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$120 = [["path", {
+var __iconNode$122 = [["path", {
 	d: "M12 6v6l4 2",
 	key: "mmk7yg"
 }], ["circle", {
@@ -82555,7 +82830,7 @@ var __iconNode$120 = [["path", {
 	r: "10",
 	key: "1mglay"
 }]];
-var Clock = createLucideIcon("clock", __iconNode$120);
+var Clock = createLucideIcon("clock", __iconNode$122);
 // node_modules/lucide-react/dist/esm/icons/cloud-upload.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82563,7 +82838,7 @@ var Clock = createLucideIcon("clock", __iconNode$120);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$119 = [
+var __iconNode$121 = [
 	["path", {
 		d: "M12 13v8",
 		key: "1l5pq0"
@@ -82577,7 +82852,7 @@ var __iconNode$119 = [
 		key: "1quai1"
 	}]
 ];
-var CloudUpload = createLucideIcon("cloud-upload", __iconNode$119);
+var CloudUpload = createLucideIcon("cloud-upload", __iconNode$121);
 // node_modules/lucide-react/dist/esm/icons/cloud.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82585,11 +82860,11 @@ var CloudUpload = createLucideIcon("cloud-upload", __iconNode$119);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$118 = [["path", {
+var __iconNode$120 = [["path", {
 	d: "M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z",
 	key: "p7xjir"
 }]];
-var Cloud = createLucideIcon("cloud", __iconNode$118);
+var Cloud = createLucideIcon("cloud", __iconNode$120);
 // node_modules/lucide-react/dist/esm/icons/coins.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82597,7 +82872,7 @@ var Cloud = createLucideIcon("cloud", __iconNode$118);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$117 = [
+var __iconNode$119 = [
 	["circle", {
 		cx: "8",
 		cy: "8",
@@ -82617,7 +82892,7 @@ var __iconNode$117 = [
 		key: "1rbuyh"
 	}]
 ];
-var Coins = createLucideIcon("coins", __iconNode$117);
+var Coins = createLucideIcon("coins", __iconNode$119);
 // node_modules/lucide-react/dist/esm/icons/copy.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82625,7 +82900,7 @@ var Coins = createLucideIcon("coins", __iconNode$117);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$116 = [["rect", {
+var __iconNode$118 = [["rect", {
 	width: "14",
 	height: "14",
 	x: "8",
@@ -82637,7 +82912,7 @@ var __iconNode$116 = [["rect", {
 	d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2",
 	key: "zix9uf"
 }]];
-var Copy = createLucideIcon("copy", __iconNode$116);
+var Copy = createLucideIcon("copy", __iconNode$118);
 // node_modules/lucide-react/dist/esm/icons/cpu.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82645,7 +82920,7 @@ var Copy = createLucideIcon("copy", __iconNode$116);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$115 = [
+var __iconNode$117 = [
 	["path", {
 		d: "M12 20v2",
 		key: "1lh1kg"
@@ -82711,7 +82986,7 @@ var __iconNode$115 = [
 		key: "z9xiuo"
 	}]
 ];
-var Cpu = createLucideIcon("cpu", __iconNode$115);
+var Cpu = createLucideIcon("cpu", __iconNode$117);
 // node_modules/lucide-react/dist/esm/icons/credit-card.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82719,7 +82994,7 @@ var Cpu = createLucideIcon("cpu", __iconNode$115);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$114 = [["rect", {
+var __iconNode$116 = [["rect", {
 	width: "20",
 	height: "14",
 	x: "2",
@@ -82733,7 +83008,7 @@ var __iconNode$114 = [["rect", {
 	y2: "10",
 	key: "1b3vmo"
 }]];
-var CreditCard = createLucideIcon("credit-card", __iconNode$114);
+var CreditCard = createLucideIcon("credit-card", __iconNode$116);
 // node_modules/lucide-react/dist/esm/icons/crown.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82741,14 +83016,14 @@ var CreditCard = createLucideIcon("credit-card", __iconNode$114);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$113 = [["path", {
+var __iconNode$115 = [["path", {
 	d: "M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z",
 	key: "1vdc57"
 }], ["path", {
 	d: "M5 21h14",
 	key: "11awu3"
 }]];
-var Crown = createLucideIcon("crown", __iconNode$113);
+var Crown = createLucideIcon("crown", __iconNode$115);
 // node_modules/lucide-react/dist/esm/icons/database.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82756,7 +83031,7 @@ var Crown = createLucideIcon("crown", __iconNode$113);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$112 = [
+var __iconNode$114 = [
 	["ellipse", {
 		cx: "12",
 		cy: "5",
@@ -82773,7 +83048,7 @@ var __iconNode$112 = [
 		key: "mv7ke4"
 	}]
 ];
-var Database = createLucideIcon("database", __iconNode$112);
+var Database = createLucideIcon("database", __iconNode$114);
 // node_modules/lucide-react/dist/esm/icons/diamond.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82781,11 +83056,11 @@ var Database = createLucideIcon("database", __iconNode$112);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$111 = [["path", {
+var __iconNode$113 = [["path", {
 	d: "M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z",
 	key: "1f1r0c"
 }]];
-var Diamond = createLucideIcon("diamond", __iconNode$111);
+var Diamond = createLucideIcon("diamond", __iconNode$113);
 // node_modules/lucide-react/dist/esm/icons/disc-3.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82793,7 +83068,7 @@ var Diamond = createLucideIcon("diamond", __iconNode$111);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$110 = [
+var __iconNode$112 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -82815,7 +83090,7 @@ var __iconNode$110 = [
 		key: "1eah9h"
 	}]
 ];
-var Disc3 = createLucideIcon("disc-3", __iconNode$110);
+var Disc3 = createLucideIcon("disc-3", __iconNode$112);
 // node_modules/lucide-react/dist/esm/icons/dollar-sign.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82823,7 +83098,7 @@ var Disc3 = createLucideIcon("disc-3", __iconNode$110);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$109 = [["line", {
+var __iconNode$111 = [["line", {
 	x1: "12",
 	x2: "12",
 	y1: "2",
@@ -82833,7 +83108,7 @@ var __iconNode$109 = [["line", {
 	d: "M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6",
 	key: "1b0p4s"
 }]];
-var DollarSign = createLucideIcon("dollar-sign", __iconNode$109);
+var DollarSign = createLucideIcon("dollar-sign", __iconNode$111);
 // node_modules/lucide-react/dist/esm/icons/download.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82841,7 +83116,7 @@ var DollarSign = createLucideIcon("dollar-sign", __iconNode$109);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$108 = [
+var __iconNode$110 = [
 	["path", {
 		d: "M12 15V3",
 		key: "m9g1x1"
@@ -82855,7 +83130,7 @@ var __iconNode$108 = [
 		key: "brsn70"
 	}]
 ];
-var Download = createLucideIcon("download", __iconNode$108);
+var Download = createLucideIcon("download", __iconNode$110);
 // node_modules/lucide-react/dist/esm/icons/ellipsis-vertical.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82863,7 +83138,7 @@ var Download = createLucideIcon("download", __iconNode$108);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$107 = [
+var __iconNode$109 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -82883,7 +83158,7 @@ var __iconNode$107 = [
 		key: "lyex9k"
 	}]
 ];
-var EllipsisVertical = createLucideIcon("ellipsis-vertical", __iconNode$107);
+var EllipsisVertical = createLucideIcon("ellipsis-vertical", __iconNode$109);
 // node_modules/lucide-react/dist/esm/icons/ellipsis.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82891,7 +83166,7 @@ var EllipsisVertical = createLucideIcon("ellipsis-vertical", __iconNode$107);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$106 = [
+var __iconNode$108 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -82911,7 +83186,7 @@ var __iconNode$106 = [
 		key: "1pcz8c"
 	}]
 ];
-var Ellipsis = createLucideIcon("ellipsis", __iconNode$106);
+var Ellipsis = createLucideIcon("ellipsis", __iconNode$108);
 // node_modules/lucide-react/dist/esm/icons/external-link.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82919,7 +83194,7 @@ var Ellipsis = createLucideIcon("ellipsis", __iconNode$106);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$105 = [
+var __iconNode$107 = [
 	["path", {
 		d: "M15 3h6v6",
 		key: "1q9fwt"
@@ -82933,7 +83208,7 @@ var __iconNode$105 = [
 		key: "a6xqqp"
 	}]
 ];
-var ExternalLink = createLucideIcon("external-link", __iconNode$105);
+var ExternalLink = createLucideIcon("external-link", __iconNode$107);
 // node_modules/lucide-react/dist/esm/icons/eye-off.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82941,7 +83216,7 @@ var ExternalLink = createLucideIcon("external-link", __iconNode$105);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$104 = [
+var __iconNode$106 = [
 	["path", {
 		d: "M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49",
 		key: "ct8e1f"
@@ -82959,7 +83234,7 @@ var __iconNode$104 = [
 		key: "1ooewy"
 	}]
 ];
-var EyeOff = createLucideIcon("eye-off", __iconNode$104);
+var EyeOff = createLucideIcon("eye-off", __iconNode$106);
 // node_modules/lucide-react/dist/esm/icons/eye.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82967,7 +83242,7 @@ var EyeOff = createLucideIcon("eye-off", __iconNode$104);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$103 = [["path", {
+var __iconNode$105 = [["path", {
 	d: "M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0",
 	key: "1nclc0"
 }], ["circle", {
@@ -82976,7 +83251,7 @@ var __iconNode$103 = [["path", {
 	r: "3",
 	key: "1v7zrd"
 }]];
-var Eye = createLucideIcon("eye", __iconNode$103);
+var Eye = createLucideIcon("eye", __iconNode$105);
 // node_modules/lucide-react/dist/esm/icons/file-check.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -82984,7 +83259,7 @@ var Eye = createLucideIcon("eye", __iconNode$103);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$102 = [
+var __iconNode$104 = [
 	["path", {
 		d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
 		key: "1rqfz7"
@@ -82998,7 +83273,7 @@ var __iconNode$102 = [
 		key: "1grp1n"
 	}]
 ];
-var FileCheck = createLucideIcon("file-check", __iconNode$102);
+var FileCheck = createLucideIcon("file-check", __iconNode$104);
 // node_modules/lucide-react/dist/esm/icons/file-play.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83006,7 +83281,7 @@ var FileCheck = createLucideIcon("file-check", __iconNode$102);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$101 = [
+var __iconNode$103 = [
 	["path", {
 		d: "M14 2v4a2 2 0 0 0 2 2h4",
 		key: "tnqrlb"
@@ -83020,7 +83295,7 @@ var __iconNode$101 = [
 		key: "1tzo1f"
 	}]
 ];
-var FilePlay = createLucideIcon("file-play", __iconNode$101);
+var FilePlay = createLucideIcon("file-play", __iconNode$103);
 // node_modules/lucide-react/dist/esm/icons/file-text.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83028,7 +83303,7 @@ var FilePlay = createLucideIcon("file-play", __iconNode$101);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$100 = [
+var __iconNode$102 = [
 	["path", {
 		d: "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
 		key: "1rqfz7"
@@ -83050,7 +83325,7 @@ var __iconNode$100 = [
 		key: "z1uh3a"
 	}]
 ];
-var FileText = createLucideIcon("file-text", __iconNode$100);
+var FileText = createLucideIcon("file-text", __iconNode$102);
 // node_modules/lucide-react/dist/esm/icons/film.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83058,7 +83333,7 @@ var FileText = createLucideIcon("file-text", __iconNode$100);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$99 = [
+var __iconNode$101 = [
 	["rect", {
 		width: "18",
 		height: "18",
@@ -83096,7 +83371,7 @@ var __iconNode$99 = [
 		key: "go4c1d"
 	}]
 ];
-var Film = createLucideIcon("film", __iconNode$99);
+var Film = createLucideIcon("film", __iconNode$101);
 // node_modules/lucide-react/dist/esm/icons/flag.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83104,11 +83379,11 @@ var Film = createLucideIcon("film", __iconNode$99);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$98 = [["path", {
+var __iconNode$100 = [["path", {
 	d: "M4 22V4a1 1 0 0 1 .4-.8A6 6 0 0 1 8 2c3 0 5 2 7.333 2q2 0 3.067-.8A1 1 0 0 1 20 4v10a1 1 0 0 1-.4.8A6 6 0 0 1 16 16c-3 0-5-2-8-2a6 6 0 0 0-4 1.528",
 	key: "1jaruq"
 }]];
-var Flag = createLucideIcon("flag", __iconNode$98);
+var Flag = createLucideIcon("flag", __iconNode$100);
 // node_modules/lucide-react/dist/esm/icons/flame.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83116,11 +83391,11 @@ var Flag = createLucideIcon("flag", __iconNode$98);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$97 = [["path", {
+var __iconNode$99 = [["path", {
 	d: "M12 3q1 4 4 6.5t3 5.5a1 1 0 0 1-14 0 5 5 0 0 1 1-3 1 1 0 0 0 5 0c0-2-1.5-3-1.5-5q0-2 2.5-4",
 	key: "1slcih"
 }]];
-var Flame = createLucideIcon("flame", __iconNode$97);
+var Flame = createLucideIcon("flame", __iconNode$99);
 // node_modules/lucide-react/dist/esm/icons/flask-conical.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83128,7 +83403,7 @@ var Flame = createLucideIcon("flame", __iconNode$97);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$96 = [
+var __iconNode$98 = [
 	["path", {
 		d: "M14 2v6a2 2 0 0 0 .245.96l5.51 10.08A2 2 0 0 1 18 22H6a2 2 0 0 1-1.755-2.96l5.51-10.08A2 2 0 0 0 10 8V2",
 		key: "18mbvz"
@@ -83142,7 +83417,7 @@ var __iconNode$96 = [
 		key: "csnxdl"
 	}]
 ];
-var FlaskConical = createLucideIcon("flask-conical", __iconNode$96);
+var FlaskConical = createLucideIcon("flask-conical", __iconNode$98);
 // node_modules/lucide-react/dist/esm/icons/flip-horizontal.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83150,7 +83425,7 @@ var FlaskConical = createLucideIcon("flask-conical", __iconNode$96);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$95 = [
+var __iconNode$97 = [
 	["path", {
 		d: "M8 3H5a2 2 0 0 0-2 2v14c0 1.1.9 2 2 2h3",
 		key: "1i73f7"
@@ -83176,7 +83451,7 @@ var __iconNode$95 = [
 		key: "tus03m"
 	}]
 ];
-var FlipHorizontal = createLucideIcon("flip-horizontal", __iconNode$95);
+var FlipHorizontal = createLucideIcon("flip-horizontal", __iconNode$97);
 // node_modules/lucide-react/dist/esm/icons/gift.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83184,7 +83459,7 @@ var FlipHorizontal = createLucideIcon("flip-horizontal", __iconNode$95);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$94 = [
+var __iconNode$96 = [
 	["rect", {
 		x: "3",
 		y: "8",
@@ -83206,7 +83481,7 @@ var __iconNode$94 = [
 		key: "1ihvrl"
 	}]
 ];
-var Gift = createLucideIcon("gift", __iconNode$94);
+var Gift = createLucideIcon("gift", __iconNode$96);
 // node_modules/lucide-react/dist/esm/icons/globe.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83214,7 +83489,7 @@ var Gift = createLucideIcon("gift", __iconNode$94);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$93 = [
+var __iconNode$95 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -83230,7 +83505,7 @@ var __iconNode$93 = [
 		key: "9i4pu4"
 	}]
 ];
-var Globe = createLucideIcon("globe", __iconNode$93);
+var Globe = createLucideIcon("globe", __iconNode$95);
 // node_modules/lucide-react/dist/esm/icons/hard-drive.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83238,7 +83513,7 @@ var Globe = createLucideIcon("globe", __iconNode$93);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$92 = [
+var __iconNode$94 = [
 	["line", {
 		x1: "22",
 		x2: "2",
@@ -83265,7 +83540,7 @@ var __iconNode$92 = [
 		key: "1l4acy"
 	}]
 ];
-var HardDrive = createLucideIcon("hard-drive", __iconNode$92);
+var HardDrive = createLucideIcon("hard-drive", __iconNode$94);
 // node_modules/lucide-react/dist/esm/icons/hash.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83273,7 +83548,7 @@ var HardDrive = createLucideIcon("hard-drive", __iconNode$92);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$91 = [
+var __iconNode$93 = [
 	["line", {
 		x1: "4",
 		x2: "20",
@@ -83303,7 +83578,7 @@ var __iconNode$91 = [
 		key: "weycgp"
 	}]
 ];
-var Hash = createLucideIcon("hash", __iconNode$91);
+var Hash = createLucideIcon("hash", __iconNode$93);
 // node_modules/lucide-react/dist/esm/icons/headphones.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83311,11 +83586,11 @@ var Hash = createLucideIcon("hash", __iconNode$91);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$90 = [["path", {
+var __iconNode$92 = [["path", {
 	d: "M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3",
 	key: "1xhozi"
 }]];
-var Headphones = createLucideIcon("headphones", __iconNode$90);
+var Headphones = createLucideIcon("headphones", __iconNode$92);
 // node_modules/lucide-react/dist/esm/icons/heart.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83323,11 +83598,11 @@ var Headphones = createLucideIcon("headphones", __iconNode$90);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$89 = [["path", {
+var __iconNode$91 = [["path", {
 	d: "M2 9.5a5.5 5.5 0 0 1 9.591-3.676.56.56 0 0 0 .818 0A5.49 5.49 0 0 1 22 9.5c0 2.29-1.5 4-3 5.5l-5.492 5.313a2 2 0 0 1-3 .019L5 15c-1.5-1.5-3-3.2-3-5.5",
 	key: "mvr1a0"
 }]];
-var Heart = createLucideIcon("heart", __iconNode$89);
+var Heart = createLucideIcon("heart", __iconNode$91);
 // node_modules/lucide-react/dist/esm/icons/history.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83335,7 +83610,7 @@ var Heart = createLucideIcon("heart", __iconNode$89);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$88 = [
+var __iconNode$90 = [
 	["path", {
 		d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8",
 		key: "1357e3"
@@ -83349,7 +83624,7 @@ var __iconNode$88 = [
 		key: "1fdv2h"
 	}]
 ];
-var History = createLucideIcon("history", __iconNode$88);
+var History = createLucideIcon("history", __iconNode$90);
 // node_modules/lucide-react/dist/esm/icons/house.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83357,14 +83632,14 @@ var History = createLucideIcon("history", __iconNode$88);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$87 = [["path", {
+var __iconNode$89 = [["path", {
 	d: "M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8",
 	key: "5wwlr5"
 }], ["path", {
 	d: "M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
 	key: "r6nss1"
 }]];
-var House = createLucideIcon("house", __iconNode$87);
+var House = createLucideIcon("house", __iconNode$89);
 // node_modules/lucide-react/dist/esm/icons/image.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83372,7 +83647,7 @@ var House = createLucideIcon("house", __iconNode$87);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$86 = [
+var __iconNode$88 = [
 	["rect", {
 		width: "18",
 		height: "18",
@@ -83393,7 +83668,7 @@ var __iconNode$86 = [
 		key: "1xmnt7"
 	}]
 ];
-var Image$1 = createLucideIcon("image", __iconNode$86);
+var Image$1 = createLucideIcon("image", __iconNode$88);
 // node_modules/lucide-react/dist/esm/icons/info.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83401,7 +83676,7 @@ var Image$1 = createLucideIcon("image", __iconNode$86);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$85 = [
+var __iconNode$87 = [
 	["circle", {
 		cx: "12",
 		cy: "12",
@@ -83417,7 +83692,7 @@ var __iconNode$85 = [
 		key: "e9boi3"
 	}]
 ];
-var Info = createLucideIcon("info", __iconNode$85);
+var Info = createLucideIcon("info", __iconNode$87);
 // node_modules/lucide-react/dist/esm/icons/key-round.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83425,7 +83700,7 @@ var Info = createLucideIcon("info", __iconNode$85);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$84 = [["path", {
+var __iconNode$86 = [["path", {
 	d: "M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z",
 	key: "1s6t7t"
 }], ["circle", {
@@ -83435,7 +83710,7 @@ var __iconNode$84 = [["path", {
 	fill: "currentColor",
 	key: "w0ekpg"
 }]];
-var KeyRound = createLucideIcon("key-round", __iconNode$84);
+var KeyRound = createLucideIcon("key-round", __iconNode$86);
 // node_modules/lucide-react/dist/esm/icons/layers.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83443,7 +83718,7 @@ var KeyRound = createLucideIcon("key-round", __iconNode$84);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$83 = [
+var __iconNode$85 = [
 	["path", {
 		d: "M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z",
 		key: "zw3jo"
@@ -83457,7 +83732,7 @@ var __iconNode$83 = [
 		key: "kqbvx6"
 	}]
 ];
-var Layers = createLucideIcon("layers", __iconNode$83);
+var Layers = createLucideIcon("layers", __iconNode$85);
 // node_modules/lucide-react/dist/esm/icons/link-2.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83465,7 +83740,7 @@ var Layers = createLucideIcon("layers", __iconNode$83);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$82 = [
+var __iconNode$84 = [
 	["path", {
 		d: "M9 17H7A5 5 0 0 1 7 7h2",
 		key: "8i5ue5"
@@ -83482,7 +83757,7 @@ var __iconNode$82 = [
 		key: "1jonct"
 	}]
 ];
-var Link2 = createLucideIcon("link-2", __iconNode$82);
+var Link2 = createLucideIcon("link-2", __iconNode$84);
 // node_modules/lucide-react/dist/esm/icons/link.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83490,14 +83765,46 @@ var Link2 = createLucideIcon("link-2", __iconNode$82);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$81 = [["path", {
+var __iconNode$83 = [["path", {
 	d: "M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71",
 	key: "1cjeqo"
 }], ["path", {
 	d: "M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71",
 	key: "19qd67"
 }]];
-var Link = createLucideIcon("link", __iconNode$81);
+var Link = createLucideIcon("link", __iconNode$83);
+// node_modules/lucide-react/dist/esm/icons/list-music.js
+/**
+* @license lucide-react v0.546.0 - ISC
+*
+* This source code is licensed under the ISC license.
+* See the LICENSE file in the root directory of this source tree.
+*/
+var __iconNode$82 = [
+	["path", {
+		d: "M16 5H3",
+		key: "m91uny"
+	}],
+	["path", {
+		d: "M11 12H3",
+		key: "51ecnj"
+	}],
+	["path", {
+		d: "M11 19H3",
+		key: "zflm78"
+	}],
+	["path", {
+		d: "M21 16V5",
+		key: "yxg4q8"
+	}],
+	["circle", {
+		cx: "18",
+		cy: "16",
+		r: "3",
+		key: "1hluhg"
+	}]
+];
+var ListMusic = createLucideIcon("list-music", __iconNode$82);
 // node_modules/lucide-react/dist/esm/icons/loader-circle.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83505,12 +83812,32 @@ var Link = createLucideIcon("link", __iconNode$81);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$80 = [["path", {
+var __iconNode$81 = [["path", {
 	d: "M21 12a9 9 0 1 1-6.219-8.56",
 	key: "13zald"
 }]];
-var LoaderCircle = createLucideIcon("loader-circle", __iconNode$80);
+var LoaderCircle = createLucideIcon("loader-circle", __iconNode$81);
 // node_modules/lucide-react/dist/esm/icons/lock-open.js
+/**
+* @license lucide-react v0.546.0 - ISC
+*
+* This source code is licensed under the ISC license.
+* See the LICENSE file in the root directory of this source tree.
+*/
+var __iconNode$80 = [["rect", {
+	width: "18",
+	height: "11",
+	x: "3",
+	y: "11",
+	rx: "2",
+	ry: "2",
+	key: "1w4ew1"
+}], ["path", {
+	d: "M7 11V7a5 5 0 0 1 9.9-1",
+	key: "1mm8w8"
+}]];
+var LockOpen = createLucideIcon("lock-open", __iconNode$80);
+// node_modules/lucide-react/dist/esm/icons/lock.js
 /**
 * @license lucide-react v0.546.0 - ISC
 *
@@ -83526,30 +83853,10 @@ var __iconNode$79 = [["rect", {
 	ry: "2",
 	key: "1w4ew1"
 }], ["path", {
-	d: "M7 11V7a5 5 0 0 1 9.9-1",
-	key: "1mm8w8"
-}]];
-var LockOpen = createLucideIcon("lock-open", __iconNode$79);
-// node_modules/lucide-react/dist/esm/icons/lock.js
-/**
-* @license lucide-react v0.546.0 - ISC
-*
-* This source code is licensed under the ISC license.
-* See the LICENSE file in the root directory of this source tree.
-*/
-var __iconNode$78 = [["rect", {
-	width: "18",
-	height: "11",
-	x: "3",
-	y: "11",
-	rx: "2",
-	ry: "2",
-	key: "1w4ew1"
-}], ["path", {
 	d: "M7 11V7a5 5 0 0 1 10 0v4",
 	key: "fwvmzm"
 }]];
-var Lock = createLucideIcon("lock", __iconNode$78);
+var Lock = createLucideIcon("lock", __iconNode$79);
 // node_modules/lucide-react/dist/esm/icons/log-in.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83557,7 +83864,7 @@ var Lock = createLucideIcon("lock", __iconNode$78);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$77 = [
+var __iconNode$78 = [
 	["path", {
 		d: "m10 17 5-5-5-5",
 		key: "1bsop3"
@@ -83571,7 +83878,7 @@ var __iconNode$77 = [
 		key: "u53s6r"
 	}]
 ];
-var LogIn = createLucideIcon("log-in", __iconNode$77);
+var LogIn = createLucideIcon("log-in", __iconNode$78);
 // node_modules/lucide-react/dist/esm/icons/log-out.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83579,7 +83886,7 @@ var LogIn = createLucideIcon("log-in", __iconNode$77);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$76 = [
+var __iconNode$77 = [
 	["path", {
 		d: "m16 17 5-5-5-5",
 		key: "1bji2h"
@@ -83593,7 +83900,7 @@ var __iconNode$76 = [
 		key: "1uf3rs"
 	}]
 ];
-var LogOut = createLucideIcon("log-out", __iconNode$76);
+var LogOut = createLucideIcon("log-out", __iconNode$77);
 // node_modules/lucide-react/dist/esm/icons/mail-check.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83601,7 +83908,7 @@ var LogOut = createLucideIcon("log-out", __iconNode$76);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$75 = [
+var __iconNode$76 = [
 	["path", {
 		d: "M22 13V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v12c0 1.1.9 2 2 2h8",
 		key: "12jkf8"
@@ -83615,7 +83922,7 @@ var __iconNode$75 = [
 		key: "1b14m6"
 	}]
 ];
-var MailCheck = createLucideIcon("mail-check", __iconNode$75);
+var MailCheck = createLucideIcon("mail-check", __iconNode$76);
 // node_modules/lucide-react/dist/esm/icons/mail.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83623,7 +83930,7 @@ var MailCheck = createLucideIcon("mail-check", __iconNode$75);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$74 = [["path", {
+var __iconNode$75 = [["path", {
 	d: "m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7",
 	key: "132q7q"
 }], ["rect", {
@@ -83634,7 +83941,7 @@ var __iconNode$74 = [["path", {
 	rx: "2",
 	key: "izxlao"
 }]];
-var Mail = createLucideIcon("mail", __iconNode$74);
+var Mail = createLucideIcon("mail", __iconNode$75);
 // node_modules/lucide-react/dist/esm/icons/maximize-2.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83642,7 +83949,7 @@ var Mail = createLucideIcon("mail", __iconNode$74);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$73 = [
+var __iconNode$74 = [
 	["path", {
 		d: "M15 3h6v6",
 		key: "1q9fwt"
@@ -83660,7 +83967,7 @@ var __iconNode$73 = [
 		key: "wtvkvv"
 	}]
 ];
-var Maximize2 = createLucideIcon("maximize-2", __iconNode$73);
+var Maximize2 = createLucideIcon("maximize-2", __iconNode$74);
 // node_modules/lucide-react/dist/esm/icons/message-circle.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83668,11 +83975,11 @@ var Maximize2 = createLucideIcon("maximize-2", __iconNode$73);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$72 = [["path", {
+var __iconNode$73 = [["path", {
 	d: "M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719",
 	key: "1sd12s"
 }]];
-var MessageCircle = createLucideIcon("message-circle", __iconNode$72);
+var MessageCircle = createLucideIcon("message-circle", __iconNode$73);
 // node_modules/lucide-react/dist/esm/icons/message-square-text.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83680,7 +83987,7 @@ var MessageCircle = createLucideIcon("message-circle", __iconNode$72);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$71 = [
+var __iconNode$72 = [
 	["path", {
 		d: "M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z",
 		key: "18887p"
@@ -83698,7 +84005,7 @@ var __iconNode$71 = [
 		key: "af5zfr"
 	}]
 ];
-var MessageSquareText = createLucideIcon("message-square-text", __iconNode$71);
+var MessageSquareText = createLucideIcon("message-square-text", __iconNode$72);
 // node_modules/lucide-react/dist/esm/icons/message-square.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83706,11 +84013,11 @@ var MessageSquareText = createLucideIcon("message-square-text", __iconNode$71);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$70 = [["path", {
+var __iconNode$71 = [["path", {
 	d: "M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z",
 	key: "18887p"
 }]];
-var MessageSquare = createLucideIcon("message-square", __iconNode$70);
+var MessageSquare = createLucideIcon("message-square", __iconNode$71);
 // node_modules/lucide-react/dist/esm/icons/mic-off.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83718,7 +84025,7 @@ var MessageSquare = createLucideIcon("message-square", __iconNode$70);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$69 = [
+var __iconNode$70 = [
 	["path", {
 		d: "M12 19v3",
 		key: "npa21l"
@@ -83744,7 +84051,7 @@ var __iconNode$69 = [
 		key: "r2i35w"
 	}]
 ];
-var MicOff = createLucideIcon("mic-off", __iconNode$69);
+var MicOff = createLucideIcon("mic-off", __iconNode$70);
 // node_modules/lucide-react/dist/esm/icons/mic.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83752,7 +84059,7 @@ var MicOff = createLucideIcon("mic-off", __iconNode$69);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$68 = [
+var __iconNode$69 = [
 	["path", {
 		d: "M12 19v3",
 		key: "npa21l"
@@ -83770,7 +84077,7 @@ var __iconNode$68 = [
 		key: "s6n7sd"
 	}]
 ];
-var Mic = createLucideIcon("mic", __iconNode$68);
+var Mic = createLucideIcon("mic", __iconNode$69);
 // node_modules/lucide-react/dist/esm/icons/monitor.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83778,7 +84085,7 @@ var Mic = createLucideIcon("mic", __iconNode$68);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$67 = [
+var __iconNode$68 = [
 	["rect", {
 		width: "20",
 		height: "14",
@@ -83802,7 +84109,7 @@ var __iconNode$67 = [
 		key: "vw1qmm"
 	}]
 ];
-var Monitor = createLucideIcon("monitor", __iconNode$67);
+var Monitor = createLucideIcon("monitor", __iconNode$68);
 // node_modules/lucide-react/dist/esm/icons/moon.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83810,11 +84117,11 @@ var Monitor = createLucideIcon("monitor", __iconNode$67);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$66 = [["path", {
+var __iconNode$67 = [["path", {
 	d: "M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401",
 	key: "kfwtm"
 }]];
-var Moon = createLucideIcon("moon", __iconNode$66);
+var Moon = createLucideIcon("moon", __iconNode$67);
 // node_modules/lucide-react/dist/esm/icons/music.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83822,7 +84129,7 @@ var Moon = createLucideIcon("moon", __iconNode$66);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$65 = [
+var __iconNode$66 = [
 	["path", {
 		d: "M9 18V5l12-2v13",
 		key: "1jmyc2"
@@ -83840,7 +84147,7 @@ var __iconNode$65 = [
 		key: "1hluhg"
 	}]
 ];
-var Music = createLucideIcon("music", __iconNode$65);
+var Music = createLucideIcon("music", __iconNode$66);
 // node_modules/lucide-react/dist/esm/icons/package.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83848,7 +84155,7 @@ var Music = createLucideIcon("music", __iconNode$65);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$64 = [
+var __iconNode$65 = [
 	["path", {
 		d: "M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z",
 		key: "1a0edw"
@@ -83866,7 +84173,7 @@ var __iconNode$64 = [
 		key: "1c824w"
 	}]
 ];
-var Package = createLucideIcon("package", __iconNode$64);
+var Package = createLucideIcon("package", __iconNode$65);
 // node_modules/lucide-react/dist/esm/icons/palette.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83874,7 +84181,7 @@ var Package = createLucideIcon("package", __iconNode$64);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$63 = [
+var __iconNode$64 = [
 	["path", {
 		d: "M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z",
 		key: "e79jfc"
@@ -83908,7 +84215,7 @@ var __iconNode$63 = [
 		key: "fotxhn"
 	}]
 ];
-var Palette = createLucideIcon("palette", __iconNode$63);
+var Palette = createLucideIcon("palette", __iconNode$64);
 // node_modules/lucide-react/dist/esm/icons/pause.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83916,7 +84223,7 @@ var Palette = createLucideIcon("palette", __iconNode$63);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$62 = [["rect", {
+var __iconNode$63 = [["rect", {
 	x: "14",
 	y: "3",
 	width: "5",
@@ -83931,7 +84238,7 @@ var __iconNode$62 = [["rect", {
 	rx: "1",
 	key: "1wsw3u"
 }]];
-var Pause = createLucideIcon("pause", __iconNode$62);
+var Pause = createLucideIcon("pause", __iconNode$63);
 // node_modules/lucide-react/dist/esm/icons/pen-line.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83939,14 +84246,14 @@ var Pause = createLucideIcon("pause", __iconNode$62);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$61 = [["path", {
+var __iconNode$62 = [["path", {
 	d: "M13 21h8",
 	key: "1jsn5i"
 }], ["path", {
 	d: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
 	key: "1a8usu"
 }]];
-var PenLine = createLucideIcon("pen-line", __iconNode$61);
+var PenLine = createLucideIcon("pen-line", __iconNode$62);
 // node_modules/lucide-react/dist/esm/icons/pencil.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83954,14 +84261,14 @@ var PenLine = createLucideIcon("pen-line", __iconNode$61);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$60 = [["path", {
+var __iconNode$61 = [["path", {
 	d: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z",
 	key: "1a8usu"
 }], ["path", {
 	d: "m15 5 4 4",
 	key: "1mk7zo"
 }]];
-var Pencil = createLucideIcon("pencil", __iconNode$60);
+var Pencil = createLucideIcon("pencil", __iconNode$61);
 // node_modules/lucide-react/dist/esm/icons/percent.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83969,7 +84276,7 @@ var Pencil = createLucideIcon("pencil", __iconNode$60);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$59 = [
+var __iconNode$60 = [
 	["line", {
 		x1: "19",
 		x2: "5",
@@ -83990,7 +84297,7 @@ var __iconNode$59 = [
 		key: "1mdrzq"
 	}]
 ];
-var Percent = createLucideIcon("percent", __iconNode$59);
+var Percent = createLucideIcon("percent", __iconNode$60);
 // node_modules/lucide-react/dist/esm/icons/phone-call.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -83998,7 +84305,7 @@ var Percent = createLucideIcon("percent", __iconNode$59);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$58 = [
+var __iconNode$59 = [
 	["path", {
 		d: "M13 2a9 9 0 0 1 9 9",
 		key: "1itnx2"
@@ -84012,7 +84319,7 @@ var __iconNode$58 = [
 		key: "9njp5v"
 	}]
 ];
-var PhoneCall = createLucideIcon("phone-call", __iconNode$58);
+var PhoneCall = createLucideIcon("phone-call", __iconNode$59);
 // node_modules/lucide-react/dist/esm/icons/phone.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84020,11 +84327,11 @@ var PhoneCall = createLucideIcon("phone-call", __iconNode$58);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$57 = [["path", {
+var __iconNode$58 = [["path", {
 	d: "M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384",
 	key: "9njp5v"
 }]];
-var Phone = createLucideIcon("phone", __iconNode$57);
+var Phone = createLucideIcon("phone", __iconNode$58);
 // node_modules/lucide-react/dist/esm/icons/play.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84032,11 +84339,11 @@ var Phone = createLucideIcon("phone", __iconNode$57);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$56 = [["path", {
+var __iconNode$57 = [["path", {
 	d: "M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z",
 	key: "10ikf1"
 }]];
-var Play = createLucideIcon("play", __iconNode$56);
+var Play = createLucideIcon("play", __iconNode$57);
 // node_modules/lucide-react/dist/esm/icons/plus.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84044,14 +84351,14 @@ var Play = createLucideIcon("play", __iconNode$56);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$55 = [["path", {
+var __iconNode$56 = [["path", {
 	d: "M5 12h14",
 	key: "1ays0h"
 }], ["path", {
 	d: "M12 5v14",
 	key: "s699le"
 }]];
-var Plus = createLucideIcon("plus", __iconNode$55);
+var Plus = createLucideIcon("plus", __iconNode$56);
 // node_modules/lucide-react/dist/esm/icons/qr-code.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84059,7 +84366,7 @@ var Plus = createLucideIcon("plus", __iconNode$55);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$54 = [
+var __iconNode$55 = [
 	["rect", {
 		width: "5",
 		height: "5",
@@ -84121,7 +84428,7 @@ var __iconNode$54 = [
 		key: "1880an"
 	}]
 ];
-var QrCode = createLucideIcon("qr-code", __iconNode$54);
+var QrCode = createLucideIcon("qr-code", __iconNode$55);
 // node_modules/lucide-react/dist/esm/icons/radio.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84129,7 +84436,7 @@ var QrCode = createLucideIcon("qr-code", __iconNode$54);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$53 = [
+var __iconNode$54 = [
 	["path", {
 		d: "M16.247 7.761a6 6 0 0 1 0 8.478",
 		key: "1fwjs5"
@@ -84153,7 +84460,7 @@ var __iconNode$53 = [
 		key: "1c9p78"
 	}]
 ];
-var Radio = createLucideIcon("radio", __iconNode$53);
+var Radio = createLucideIcon("radio", __iconNode$54);
 // node_modules/lucide-react/dist/esm/icons/refresh-cw.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84161,7 +84468,7 @@ var Radio = createLucideIcon("radio", __iconNode$53);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$52 = [
+var __iconNode$53 = [
 	["path", {
 		d: "M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8",
 		key: "v9h5vc"
@@ -84179,7 +84486,7 @@ var __iconNode$52 = [
 		key: "1cv678"
 	}]
 ];
-var RefreshCw = createLucideIcon("refresh-cw", __iconNode$52);
+var RefreshCw = createLucideIcon("refresh-cw", __iconNode$53);
 // node_modules/lucide-react/dist/esm/icons/repeat.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84187,7 +84494,7 @@ var RefreshCw = createLucideIcon("refresh-cw", __iconNode$52);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$51 = [
+var __iconNode$52 = [
 	["path", {
 		d: "m17 2 4 4-4 4",
 		key: "nntrym"
@@ -84205,7 +84512,7 @@ var __iconNode$51 = [
 		key: "1rx37r"
 	}]
 ];
-var Repeat = createLucideIcon("repeat", __iconNode$51);
+var Repeat = createLucideIcon("repeat", __iconNode$52);
 // node_modules/lucide-react/dist/esm/icons/reply.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84213,14 +84520,14 @@ var Repeat = createLucideIcon("repeat", __iconNode$51);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$50 = [["path", {
+var __iconNode$51 = [["path", {
 	d: "M20 18v-2a4 4 0 0 0-4-4H4",
 	key: "5vmcpk"
 }], ["path", {
 	d: "m9 17-5-5 5-5",
 	key: "nvlc11"
 }]];
-var Reply = createLucideIcon("reply", __iconNode$50);
+var Reply = createLucideIcon("reply", __iconNode$51);
 // node_modules/lucide-react/dist/esm/icons/rotate-ccw.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84228,14 +84535,14 @@ var Reply = createLucideIcon("reply", __iconNode$50);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$49 = [["path", {
+var __iconNode$50 = [["path", {
 	d: "M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8",
 	key: "1357e3"
 }], ["path", {
 	d: "M3 3v5h5",
 	key: "1xhq8a"
 }]];
-var RotateCcw = createLucideIcon("rotate-ccw", __iconNode$49);
+var RotateCcw = createLucideIcon("rotate-ccw", __iconNode$50);
 // node_modules/lucide-react/dist/esm/icons/save.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84243,7 +84550,7 @@ var RotateCcw = createLucideIcon("rotate-ccw", __iconNode$49);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$48 = [
+var __iconNode$49 = [
 	["path", {
 		d: "M15.2 3a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z",
 		key: "1c8476"
@@ -84257,7 +84564,7 @@ var __iconNode$48 = [
 		key: "t51u73"
 	}]
 ];
-var Save = createLucideIcon("save", __iconNode$48);
+var Save = createLucideIcon("save", __iconNode$49);
 // node_modules/lucide-react/dist/esm/icons/scale.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84265,7 +84572,7 @@ var Save = createLucideIcon("save", __iconNode$48);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$47 = [
+var __iconNode$48 = [
 	["path", {
 		d: "m16 16 3-8 3 8c-.87.65-1.92 1-3 1s-2.13-.35-3-1Z",
 		key: "7g6ntu"
@@ -84287,7 +84594,7 @@ var __iconNode$47 = [
 		key: "3gwbw2"
 	}]
 ];
-var Scale = createLucideIcon("scale", __iconNode$47);
+var Scale = createLucideIcon("scale", __iconNode$48);
 // node_modules/lucide-react/dist/esm/icons/search.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84295,7 +84602,7 @@ var Scale = createLucideIcon("scale", __iconNode$47);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$46 = [["path", {
+var __iconNode$47 = [["path", {
 	d: "m21 21-4.34-4.34",
 	key: "14j7rj"
 }], ["circle", {
@@ -84304,7 +84611,7 @@ var __iconNode$46 = [["path", {
 	r: "8",
 	key: "4ej97u"
 }]];
-var Search = createLucideIcon("search", __iconNode$46);
+var Search = createLucideIcon("search", __iconNode$47);
 // node_modules/lucide-react/dist/esm/icons/send.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84312,14 +84619,14 @@ var Search = createLucideIcon("search", __iconNode$46);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$45 = [["path", {
+var __iconNode$46 = [["path", {
 	d: "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z",
 	key: "1ffxy3"
 }], ["path", {
 	d: "m21.854 2.147-10.94 10.939",
 	key: "12cjpa"
 }]];
-var Send = createLucideIcon("send", __iconNode$45);
+var Send = createLucideIcon("send", __iconNode$46);
 // node_modules/lucide-react/dist/esm/icons/settings.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84327,7 +84634,7 @@ var Send = createLucideIcon("send", __iconNode$45);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$44 = [["path", {
+var __iconNode$45 = [["path", {
 	d: "M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915",
 	key: "1i5ecw"
 }], ["circle", {
@@ -84336,7 +84643,7 @@ var __iconNode$44 = [["path", {
 	r: "3",
 	key: "1v7zrd"
 }]];
-var Settings = createLucideIcon("settings", __iconNode$44);
+var Settings = createLucideIcon("settings", __iconNode$45);
 // node_modules/lucide-react/dist/esm/icons/share-2.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84344,7 +84651,7 @@ var Settings = createLucideIcon("settings", __iconNode$44);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$43 = [
+var __iconNode$44 = [
 	["circle", {
 		cx: "18",
 		cy: "5",
@@ -84378,7 +84685,7 @@ var __iconNode$43 = [
 		key: "1n3mei"
 	}]
 ];
-var Share2 = createLucideIcon("share-2", __iconNode$43);
+var Share2 = createLucideIcon("share-2", __iconNode$44);
 // node_modules/lucide-react/dist/esm/icons/share.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84386,7 +84693,7 @@ var Share2 = createLucideIcon("share-2", __iconNode$43);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$42 = [
+var __iconNode$43 = [
 	["path", {
 		d: "M12 2v13",
 		key: "1km8f5"
@@ -84400,7 +84707,7 @@ var __iconNode$42 = [
 		key: "1b2hhj"
 	}]
 ];
-var Share = createLucideIcon("share", __iconNode$42);
+var Share = createLucideIcon("share", __iconNode$43);
 // node_modules/lucide-react/dist/esm/icons/shield-alert.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84408,7 +84715,7 @@ var Share = createLucideIcon("share", __iconNode$42);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$41 = [
+var __iconNode$42 = [
 	["path", {
 		d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
 		key: "oel41y"
@@ -84422,8 +84729,23 @@ var __iconNode$41 = [
 		key: "1drbdi"
 	}]
 ];
-var ShieldAlert = createLucideIcon("shield-alert", __iconNode$41);
+var ShieldAlert = createLucideIcon("shield-alert", __iconNode$42);
 // node_modules/lucide-react/dist/esm/icons/shield-ban.js
+/**
+* @license lucide-react v0.546.0 - ISC
+*
+* This source code is licensed under the ISC license.
+* See the LICENSE file in the root directory of this source tree.
+*/
+var __iconNode$41 = [["path", {
+	d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
+	key: "oel41y"
+}], ["path", {
+	d: "m4.243 5.21 14.39 12.472",
+	key: "1c9a7c"
+}]];
+var ShieldBan = createLucideIcon("shield-ban", __iconNode$41);
+// node_modules/lucide-react/dist/esm/icons/shield-check.js
 /**
 * @license lucide-react v0.546.0 - ISC
 *
@@ -84434,11 +84756,11 @@ var __iconNode$40 = [["path", {
 	d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
 	key: "oel41y"
 }], ["path", {
-	d: "m4.243 5.21 14.39 12.472",
-	key: "1c9a7c"
+	d: "m9 12 2 2 4-4",
+	key: "dzmm74"
 }]];
-var ShieldBan = createLucideIcon("shield-ban", __iconNode$40);
-// node_modules/lucide-react/dist/esm/icons/shield-check.js
+var ShieldCheck = createLucideIcon("shield-check", __iconNode$40);
+// node_modules/lucide-react/dist/esm/icons/shield.js
 /**
 * @license lucide-react v0.546.0 - ISC
 *
@@ -84448,23 +84770,8 @@ var ShieldBan = createLucideIcon("shield-ban", __iconNode$40);
 var __iconNode$39 = [["path", {
 	d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
 	key: "oel41y"
-}], ["path", {
-	d: "m9 12 2 2 4-4",
-	key: "dzmm74"
 }]];
-var ShieldCheck = createLucideIcon("shield-check", __iconNode$39);
-// node_modules/lucide-react/dist/esm/icons/shield.js
-/**
-* @license lucide-react v0.546.0 - ISC
-*
-* This source code is licensed under the ISC license.
-* See the LICENSE file in the root directory of this source tree.
-*/
-var __iconNode$38 = [["path", {
-	d: "M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z",
-	key: "oel41y"
-}]];
-var Shield = createLucideIcon("shield", __iconNode$38);
+var Shield = createLucideIcon("shield", __iconNode$39);
 // node_modules/lucide-react/dist/esm/icons/shopping-bag.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84472,7 +84779,7 @@ var Shield = createLucideIcon("shield", __iconNode$38);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$37 = [
+var __iconNode$38 = [
 	["path", {
 		d: "M16 10a4 4 0 0 1-8 0",
 		key: "1ltviw"
@@ -84486,7 +84793,7 @@ var __iconNode$37 = [
 		key: "o988cm"
 	}]
 ];
-var ShoppingBag = createLucideIcon("shopping-bag", __iconNode$37);
+var ShoppingBag = createLucideIcon("shopping-bag", __iconNode$38);
 // node_modules/lucide-react/dist/esm/icons/signal.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -84494,7 +84801,7 @@ var ShoppingBag = createLucideIcon("shopping-bag", __iconNode$37);
 * This source code is licensed under the ISC license.
 * See the LICENSE file in the root directory of this source tree.
 */
-var __iconNode$36 = [
+var __iconNode$37 = [
 	["path", {
 		d: "M2 20h.01",
 		key: "4haj6o"
@@ -84516,7 +84823,22 @@ var __iconNode$36 = [
 		key: "sih9yq"
 	}]
 ];
-var Signal = createLucideIcon("signal", __iconNode$36);
+var Signal = createLucideIcon("signal", __iconNode$37);
+// node_modules/lucide-react/dist/esm/icons/skip-forward.js
+/**
+* @license lucide-react v0.546.0 - ISC
+*
+* This source code is licensed under the ISC license.
+* See the LICENSE file in the root directory of this source tree.
+*/
+var __iconNode$36 = [["path", {
+	d: "M21 4v16",
+	key: "7j8fe9"
+}], ["path", {
+	d: "M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z",
+	key: "zs4d6"
+}]];
+var SkipForward = createLucideIcon("skip-forward", __iconNode$36);
 // node_modules/lucide-react/dist/esm/icons/slash.js
 /**
 * @license lucide-react v0.546.0 - ISC
@@ -85721,7 +86043,7 @@ var RefreshScopeButton = ({ scope, onAfterRefresh, onBeforeRefresh, compact = fa
 	});
 };
 // node_modules/@capacitor/app/dist/esm/index.js
-var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-BwTSkxt-.js").then((m) => new m.AppWeb()), []) });
+var App$1 = registerPlugin("App", { web: () => __vitePreload(() => import("./web-BTbzpC90.js").then((m) => new m.AppWeb()), []) });
 // node_modules/@capacitor/status-bar/dist/esm/definitions.js
 var Style;
 (function(Style) {
@@ -112958,7 +113280,7 @@ function subscribeToLiveHeartEvents(type, id, onEvent, onError, sessionId) {
 	};
 }
 // src/services/geminiChatService.ts
-var PRODUCTION_API_URL = "https://api.alphamate.app";
+var PRODUCTION_API_URL$1 = "https://api.alphamate.app";
 var GEMINI_ASSISTANT_CONVERSATION_ID = "gemini_assistant_inbox";
 var GEMINI_ASSISTANT_USER_ID = "alpha_mate_gemini_ai";
 var GEMINI_ASSISTANT_NAME = "Alpha AI";
@@ -112984,7 +113306,7 @@ function resolveGeminiApiBase() {
 	const port = window.location.port;
 	if (!(proto === "capacitor:" || host === "localhost" && !port || Boolean(window.Capacitor?.isNativePlatform?.()))) return "";
 	"".trim();
-	return PRODUCTION_API_URL;
+	return PRODUCTION_API_URL$1;
 }
 function getInboxStorageKey(userId) {
 	return `alphamate_gemini_inbox_v1_${String(userId || "guest").trim() || "guest"}`;
@@ -113845,10 +114167,13 @@ var LiveStreamScreen = () => {
 					setStreamStatus("live");
 				} catch (err) {
 					if (!isMounted) return;
-					if (err?.code === "SFU_NOT_CONFIGURED" || err?.status === 503) console.warn("[Solo Live Host] SFU unavailable:", err?.message || err);
+					const errMsg = String(err?.message || "");
+					const isPermissionDenied = err?.code === "MEDIA_PERMISSION_DENIED" || err?.code === "MEDIA_DEVICE_NOT_FOUND" || err?.code === "MEDIA_UNAVAILABLE" || err?.name === "NotAllowedError" || err?.name === "PermissionDeniedError" || err?.name === "SecurityError" || /permission denied|permission dismissed|not allowed/i.test(errMsg);
+					if (err?.code === "SFU_NOT_CONFIGURED" || err?.status === 503) console.warn("[Solo Live Host] SFU unavailable:", errMsg || err);
+					else if (isPermissionDenied) console.warn("[Solo Live Host] Camera/microphone permission or device unavailable:", errMsg || err);
 					else console.error("[Solo Live Host] SFU publish failed:", err);
 					setStreamStatus("error");
-					setStreamError(err instanceof Error ? err.message : "Alpha Mate Live could not connect. Please try again.");
+					setStreamError(isPermissionDenied ? errMsg || "Camera and microphone permission was denied. Please allow access in your browser or device settings, then tap Retry." : err instanceof Error ? err.message : "Alpha Mate Live could not connect. Please try again.");
 				}
 			};
 			initHostCameraAndSfu();
@@ -114440,7 +114765,7 @@ var LiveStreamScreen = () => {
 						}),
 						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", {
 							className: "text-base font-black text-white mb-1.5",
-							children: activeRole === "host" ? "Could Not Start Live Stream" : "Stream Connection Unavailable"
+							children: activeRole === "host" ? /permission|camera|microphone/i.test(streamError || "") ? "Camera & Mic Permission Required" : "Could Not Start Live Stream" : "Stream Connection Unavailable"
 						}),
 						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
 							className: "text-xs text-zinc-300 leading-relaxed mb-5",
@@ -114456,6 +114781,7 @@ var LiveStreamScreen = () => {
 								onClick: () => {
 									setStreamStatus("connecting");
 									setStreamError(null);
+									setRetryToken((n) => n + 1);
 									refreshScope("live_stream");
 								},
 								className: "flex-1 h-11 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold cursor-pointer",
@@ -115703,8 +116029,8 @@ var PartyRoomAtmosphere = ({ isMusicPlaying = true, theme = "royal_castle", host
 var PARTY_SEAT_THEMES = [
 	{
 		id: "royal_gold_diya",
-		name: "Royal Gold Diya",
-		shortLabel: "Gold Diya",
+		name: "Crystal Gold",
+		shortLabel: "Gold Orb",
 		starFillFrom: "#FEF08A",
 		starFillTo: "#D97706",
 		starStroke: "#FDE68A",
@@ -115713,8 +116039,8 @@ var PARTY_SEAT_THEMES = [
 	},
 	{
 		id: "royal_purple_lotus",
-		name: "Royal Purple Lotus",
-		shortLabel: "Purple Lotus",
+		name: "Crystal Violet",
+		shortLabel: "Violet Orb",
 		starFillFrom: "#F5D0FE",
 		starFillTo: "#9333EA",
 		starStroke: "#F0ABFC",
@@ -115723,8 +116049,8 @@ var PARTY_SEAT_THEMES = [
 	},
 	{
 		id: "diamond_ice_blue",
-		name: "Diamond Ice Blue",
-		shortLabel: "Diamond Blue",
+		name: "Crystal Ice",
+		shortLabel: "Ice Orb",
 		starFillFrom: "#E0F2FE",
 		starFillTo: "#0284C7",
 		starStroke: "#7DD3FC",
@@ -115733,1570 +116059,333 @@ var PARTY_SEAT_THEMES = [
 	}
 ];
 var isValidPartySeatTheme = (val) => val === "royal_gold_diya" || val === "royal_purple_lotus" || val === "diamond_ice_blue";
+var ORB_PALETTES = {
+	diamond_ice_blue: {
+		glassCore: "rgba(12, 26, 32, 0.42)",
+		glassMid: "rgba(30, 58, 66, 0.26)",
+		glassEdge: "rgba(186, 238, 255, 0.24)",
+		rimLight: "rgba(232, 250, 255, 0.92)",
+		rimMid: "rgba(125, 226, 238, 0.56)",
+		rimDark: "rgba(148, 205, 224, 0.22)",
+		crescentStart: "#A7F3D0",
+		crescentMid: "#67E8F9",
+		crescentEnd: "#E0F2FE",
+		glintStroke: "#E0F9FF",
+		outerShadow: "0 4px 16px rgba(0, 0, 0, 0.34), 0 0 14px rgba(103, 232, 249, 0.22)",
+		heroOuterShadow: "0 6px 20px rgba(0, 0, 0, 0.4), 0 0 22px rgba(103, 232, 249, 0.38)",
+		reactiveAura: "rgba(103, 232, 249, 0.55)",
+		iconGlow: "drop-shadow(0 1px 4px rgba(103, 232, 249, 0.42))"
+	},
+	royal_gold_diya: {
+		glassCore: "rgba(28, 20, 10, 0.44)",
+		glassMid: "rgba(66, 46, 18, 0.28)",
+		glassEdge: "rgba(254, 240, 178, 0.24)",
+		rimLight: "rgba(255, 249, 219, 0.94)",
+		rimMid: "rgba(251, 191, 36, 0.62)",
+		rimDark: "rgba(217, 119, 6, 0.24)",
+		crescentStart: "#FEF08A",
+		crescentMid: "#FBBF24",
+		crescentEnd: "#FDBA74",
+		glintStroke: "#FFFBEB",
+		outerShadow: "0 4px 16px rgba(0, 0, 0, 0.34), 0 0 14px rgba(251, 191, 36, 0.24)",
+		heroOuterShadow: "0 6px 20px rgba(0, 0, 0, 0.4), 0 0 22px rgba(251, 191, 36, 0.4)",
+		reactiveAura: "rgba(251, 191, 36, 0.55)",
+		iconGlow: "drop-shadow(0 1px 4px rgba(251, 191, 36, 0.42))"
+	},
+	royal_purple_lotus: {
+		glassCore: "rgba(24, 12, 34, 0.44)",
+		glassMid: "rgba(58, 26, 78, 0.28)",
+		glassEdge: "rgba(245, 208, 254, 0.24)",
+		rimLight: "rgba(253, 244, 255, 0.94)",
+		rimMid: "rgba(217, 70, 239, 0.6)",
+		rimDark: "rgba(147, 51, 234, 0.24)",
+		crescentStart: "#F5D0FE",
+		crescentMid: "#E879F9",
+		crescentEnd: "#C084FC",
+		glintStroke: "#FDF4FF",
+		outerShadow: "0 4px 16px rgba(0, 0, 0, 0.34), 0 0 14px rgba(217, 70, 239, 0.26)",
+		heroOuterShadow: "0 6px 20px rgba(0, 0, 0, 0.4), 0 0 22px rgba(217, 70, 239, 0.42)",
+		reactiveAura: "rgba(217, 70, 239, 0.55)",
+		iconGlow: "drop-shadow(0 1px 4px rgba(232, 121, 249, 0.45))"
+	}
+};
 /**
-* Reusable, lightweight SVG + GPU-composited animated seat frame skin.
-* Geometry: overlay sits at -inset-[25%] (150% of inner circle diameter), so inside
-* viewBox="0 0 160 160", the user's circular avatar occupies exact center (80, 80)
-* with radius 53.33. Every theme hugs r=54.5 around the outside — keeping 100% of
-* the user's profile picture face completely unobstructed.
+* Translucent Glass-Bubble / Crystal-Orb Party Seat Container.
+* Zero bulky ornate frames or overhanging borders — clean circular frosted glass
+* orb with a luminous theme-tinted iridescent crescent rim, subtle orbiting glint,
+* and Web Audio API energy reactivity (--party-audio-energy / --party-audio-bass).
 */
 var AnimatedSeatThemeFrame = ({ theme, sizeClass, role = "guest", compact = false, children }) => {
 	const uid = (0, import_react.useId)().replace(/[^a-zA-Z0-9_-]/g, "");
-	const ringGlowShadow = theme === "royal_gold_diya" ? "shadow-[0_0_16px_rgba(251,191,36,0.44)]" : theme === "royal_purple_lotus" ? "shadow-[0_0_16px_rgba(217,70,239,0.44)]" : "shadow-[0_0_16px_rgba(56,189,248,0.48)]";
+	const palette = ORB_PALETTES[theme];
+	const isHero = role !== "guest";
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: `relative ${sizeClass} rounded-full flex items-center justify-center shrink-0`,
+		className: `relative ${sizeClass} rounded-full flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-[1.04]`,
 		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-			className: `relative z-10 w-full h-full rounded-full overflow-hidden ${ringGlowShadow}`,
-			children
-		}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 			"aria-hidden": "true",
-			className: "pointer-events-none select-none absolute -inset-[25%] z-[15]",
-			children: [
-				theme === "royal_gold_diya" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(RoyalGoldDiyaSvg, {
-					uid,
-					isHero: role !== "guest",
-					compact
-				}),
-				theme === "royal_purple_lotus" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(RoyalPurpleLotusSvg, {
-					uid,
-					isHero: role !== "guest",
-					compact
-				}),
-				theme === "diamond_ice_blue" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)(DiamondIceBlueSvg, {
-					uid,
-					isHero: role !== "guest",
-					compact
-				})
-			]
+			className: "pointer-events-none select-none absolute -inset-[14%] rounded-full z-[2]",
+			style: {
+				background: `radial-gradient(circle, ${palette.reactiveAura} 0%, transparent 70%)`,
+				opacity: "calc(var(--party-audio-energy, 0) * 0.78)",
+				transform: "scale(calc(0.95 + var(--party-audio-energy, 0) * 0.25)) translateZ(0)",
+				willChange: "transform, opacity"
+			}
+		}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+			className: "relative z-10 w-full h-full rounded-full overflow-hidden backdrop-blur-[2.5px]",
+			style: {
+				boxShadow: isHero ? palette.heroOuterShadow : palette.outerShadow,
+				transform: "scale(calc(1 + var(--party-audio-bass, 0) * 0.04)) translateZ(0)",
+				willChange: "transform"
+			},
+			children: [children, /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
+				"aria-hidden": "true",
+				viewBox: "0 0 100 100",
+				fill: "none",
+				xmlns: "http://www.w3.org/2000/svg",
+				className: "pointer-events-none select-none absolute inset-0 w-full h-full z-20",
+				children: [
+					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("defs", { children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
+							id: `orb-rim-${uid}`,
+							x1: "12",
+							y1: "8",
+							x2: "88",
+							y2: "92",
+							gradientUnits: "userSpaceOnUse",
+							children: [
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "0%",
+									stopColor: palette.rimLight
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "48%",
+									stopColor: palette.rimDark
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "78%",
+									stopColor: palette.rimMid
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "100%",
+									stopColor: palette.rimLight
+								})
+							]
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
+							id: `orb-crescent-${uid}`,
+							x1: "88",
+							y1: "36",
+							x2: "30",
+							y2: "94",
+							gradientUnits: "userSpaceOnUse",
+							children: [
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "0%",
+									stopColor: palette.crescentStart,
+									stopOpacity: "0.1"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "42%",
+									stopColor: palette.crescentMid,
+									stopOpacity: "0.88"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "78%",
+									stopColor: palette.crescentEnd,
+									stopOpacity: "0.95"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "100%",
+									stopColor: palette.crescentStart,
+									stopOpacity: "0.06"
+								})
+							]
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("radialGradient", {
+							id: `orb-wash-${uid}`,
+							cx: "74%",
+							cy: "76%",
+							r: "48%",
+							children: [
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "0%",
+									stopColor: palette.crescentMid,
+									stopOpacity: "0.34"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "55%",
+									stopColor: palette.crescentEnd,
+									stopOpacity: "0.12"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "100%",
+									stopColor: palette.crescentMid,
+									stopOpacity: "0"
+								})
+							]
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
+							id: `orb-spec-${uid}`,
+							x1: "14",
+							y1: "14",
+							x2: "54",
+							y2: "42",
+							gradientUnits: "userSpaceOnUse",
+							children: [
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "0%",
+									stopColor: "#FFFFFF",
+									stopOpacity: "0.58"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "55%",
+									stopColor: "#FFFFFF",
+									stopOpacity: "0.16"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "100%",
+									stopColor: "#FFFFFF",
+									stopOpacity: "0"
+								})
+							]
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
+							id: `orb-glint-${uid}`,
+							x1: "50",
+							y1: "2",
+							x2: "96",
+							y2: "50",
+							gradientUnits: "userSpaceOnUse",
+							children: [
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "0%",
+									stopColor: palette.glintStroke,
+									stopOpacity: "0"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "55%",
+									stopColor: palette.glintStroke,
+									stopOpacity: "0.95"
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
+									offset: "100%",
+									stopColor: palette.glintStroke,
+									stopOpacity: "0"
+								})
+							]
+						})
+					] }),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
+						cx: "50",
+						cy: "50",
+						r: "48.5",
+						fill: `url(#orb-wash-${uid})`,
+						className: "animate-orb-crescent"
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
+						d: "M 16 36 A 39 39 0 0 1 64 13",
+						stroke: `url(#orb-spec-${uid})`,
+						strokeWidth: isHero ? "3.4" : "2.8",
+						strokeLinecap: "round"
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
+						d: "M 88.5 46 A 39.5 39.5 0 0 1 32 86.2",
+						stroke: `url(#orb-crescent-${uid})`,
+						strokeWidth: isHero ? "4.8" : "4.2",
+						strokeLinecap: "round",
+						className: "animate-orb-crescent"
+					}),
+					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
+						cx: "50",
+						cy: "50",
+						r: "48.4",
+						stroke: `url(#orb-rim-${uid})`,
+						strokeWidth: isHero ? "2.1" : "1.7"
+					}),
+					!compact && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
+						className: "animate-orb-glint",
+						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
+							d: "M 54 1.8 A 48.2 48.2 0 0 1 94.6 32",
+							stroke: `url(#orb-glint-${uid})`,
+							strokeWidth: "2.1",
+							strokeLinecap: "round"
+						})
+					})
+				]
+			})]
 		})]
 	});
 };
-var RoyalGoldDiyaSvg = ({ uid, isHero, compact }) => {
-	const cx = 80;
-	const cy = 80;
-	const beads = Array.from({ length: 12 }, (_, idx) => {
-		const angle = (idx * 30 - 90) * Math.PI / 180;
-		return {
-			cx: cx + Math.cos(angle) * 57.3,
-			cy: cy + Math.sin(angle) * 57.3,
-			delay: `${idx % 4 * .35}s`
-		};
-	});
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
-		viewBox: "0 0 160 160",
-		className: "w-full h-full overflow-visible",
-		fill: "none",
-		xmlns: "http://www.w3.org/2000/svg",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("defs", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `gd-gold-${uid}`,
-					x1: "16",
-					y1: "12",
-					x2: "144",
-					y2: "148",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FFF7C2"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "28%",
-							stopColor: "#FBBF24"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "56%",
-							stopColor: "#B45309"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "80%",
-							stopColor: "#FDE047"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#D97706"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `gd-rim-${uid}`,
-					x1: "80",
-					y1: "18",
-					x2: "80",
-					y2: "142",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FEF08A"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "50%",
-							stopColor: "#F59E0B"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#92400E"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `gd-ruby-${uid}`,
-					x1: "80",
-					y1: "6",
-					x2: "80",
-					y2: "26",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FDA4AF"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "45%",
-							stopColor: "#E11D48"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#881337"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `gd-diya-${uid}`,
-					x1: "62",
-					y1: "130",
-					x2: "98",
-					y2: "148",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#F43F5E"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "50%",
-							stopColor: "#B91C1C"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#7F1D1D"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("radialGradient", {
-					id: `gd-flame-halo-${uid}`,
-					cx: "50%",
-					cy: "50%",
-					r: "50%",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FEF08A",
-							stopOpacity: "0.95"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "48%",
-							stopColor: "#F59E0B",
-							stopOpacity: "0.45"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#EA580C",
-							stopOpacity: "0"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `gd-flame-${uid}`,
-					x1: "80",
-					y1: "112",
-					x2: "80",
-					y2: "136",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FFFBEB"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "42%",
-							stopColor: "#FDE047"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "80%",
-							stopColor: "#F97316"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#DC2626"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `gd-arc-${uid}`,
-					x1: "20",
-					y1: "20",
-					x2: "140",
-					y2: "80",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FFFBEB",
-							stopOpacity: "0"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "45%",
-							stopColor: "#FEF08A",
-							stopOpacity: "0.95"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "65%",
-							stopColor: "#FFFFFF",
-							stopOpacity: "1"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#F59E0B",
-							stopOpacity: "0"
-						})
-					]
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 61.7,
-				stroke: "#F59E0B",
-				strokeOpacity: "0.24",
-				strokeWidth: "4.8"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 57.3,
-				stroke: `url(#gd-gold-${uid})`,
-				strokeWidth: "6"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 57.3,
-				stroke: "#581C3E",
-				strokeOpacity: "0.58",
-				strokeWidth: "2.8"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 54,
-				stroke: `url(#gd-rim-${uid})`,
-				strokeWidth: "1.9"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-seat-orbit",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy,
-					r: 57.3,
-					stroke: `url(#gd-arc-${uid})`,
-					strokeWidth: "3.2",
-					strokeLinecap: "round",
-					strokeDasharray: "64 295"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy: 22.700000000000003,
-					r: "2.7",
-					fill: "#FFFBEB"
-				})]
-			}),
-			beads.map((b, i) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx: b.cx,
-				cy: b.cy,
-				r: i % 2 === 0 ? 1.8 : 1.2,
-				fill: i % 2 === 0 ? "#FEF08A" : "#FBBF24",
-				className: "animate-seat-sparkle",
-				style: { animationDelay: b.delay }
-			}, i)),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-				d: "M25 103 C14 99 12 87 20 81 C17 90 21 95 28 97 Z",
-				fill: `url(#gd-gold-${uid})`,
-				stroke: "#92400E",
-				strokeWidth: "0.6"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-				d: "M135 103 C146 99 148 87 140 81 C143 90 139 95 132 97 Z",
-				fill: `url(#gd-gold-${uid})`,
-				stroke: "#92400E",
-				strokeWidth: "0.6"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M62 24 C65 15 72 12 80 5 C88 12 95 15 98 24 C91 21 86 23 80 26 C74 23 69 21 62 24 Z",
-					fill: `url(#gd-gold-${uid})`,
-					stroke: "#92400E",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M80 10 L85 17 L80 23.5 L75 17 Z",
-					fill: `url(#gd-ruby-${uid})`,
-					stroke: "#FEF08A",
-					strokeWidth: "0.8"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "79",
-					cy: "14.5",
-					r: "1.1",
-					fill: "#FFF1F2",
-					opacity: "0.9"
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M36 131 C46 144 62 150 80 150 C98 150 114 144 124 131 C113 137 97 140 80 140 C63 140 47 137 36 131 Z",
-					fill: `url(#gd-gold-${uid})`,
-					stroke: "#92400E",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-					cx: "80",
-					cy: "135.5",
-					rx: "34",
-					ry: "3.8",
-					fill: "#FEF08A",
-					fillOpacity: "0.28",
-					stroke: `url(#gd-rim-${uid})`,
-					strokeWidth: "1.1"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M70 146 L80 155 L90 146 L80 142 Z",
-					fill: `url(#gd-gold-${uid})`,
-					stroke: "#92400E",
-					strokeWidth: "0.7"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "80",
-					cy: "147.5",
-					r: "2.1",
-					fill: `url(#gd-ruby-${uid})`,
-					stroke: "#FEF08A",
-					strokeWidth: "0.6"
-				})
-			] }),
-			!compact && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "50",
-					cy: "134",
-					r: "4.8",
-					fill: "#F97316",
-					stroke: "#FDE047",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "50",
-					cy: "134",
-					r: "2.4",
-					fill: "#FBBF24"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "56.5",
-					cy: "137",
-					r: "2.6",
-					fill: "#E11D48",
-					stroke: "#FDA4AF",
-					strokeWidth: "0.5"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "110",
-					cy: "134",
-					r: "4.8",
-					fill: "#F97316",
-					stroke: "#FDE047",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "110",
-					cy: "134",
-					r: "2.4",
-					fill: "#FBBF24"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "103.5",
-					cy: "137",
-					r: "2.6",
-					fill: "#E11D48",
-					stroke: "#FDA4AF",
-					strokeWidth: "0.5"
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "80",
-					cy: "126",
-					r: isHero ? 14 : 11.5,
-					fill: `url(#gd-flame-halo-${uid})`,
-					className: "animate-diya-halo"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-					className: "animate-diya-flame",
-					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M80 115.5 C84 121.5 85.1 127 83 130.8 C82.1 132.5 80.9 133.1 80 133.1 C79.1 133.1 77.9 132.5 77 130.8 C74.9 127 76 121.5 80 115.5 Z",
-						fill: `url(#gd-flame-${uid})`
-					}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M80 121.2 C82 125 82.2 128.6 81.1 130.7 C80.6 131.5 80.3 131.8 80 131.8 C79.7 131.8 79.4 131.5 78.9 130.7 C77.8 128.6 78 125 80 121.2 Z",
-						fill: "#FFFBEB"
-					})]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M66 133.5 C68 140.5 73.2 143.8 80 143.8 C86.8 143.8 92 140.5 94 133.5 C89.5 135.5 84.8 136.3 80 136.3 C75.2 136.3 70.5 135.5 66 133.5 Z",
-					fill: `url(#gd-diya-${uid})`,
-					stroke: "#FDE047",
-					strokeWidth: "1.2"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-					cx: "80",
-					cy: "133.8",
-					rx: "14",
-					ry: "2.4",
-					fill: "#991B1B",
-					stroke: "#FBBF24",
-					strokeWidth: "1"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M76.5 139.8 L80 137.2 L83.5 139.8 L80 142 Z",
-					fill: "#FDE047"
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-seat-sparkle",
-				style: { animationDelay: "0s" },
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M21 35 L22.5 39 L26.5 40.5 L22.5 42 L21 46 L19.5 42 L15.5 40.5 L19.5 39 Z",
-					fill: "#FEF08A"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-seat-sparkle",
-				style: { animationDelay: "0.8s" },
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M139 36 L140.4 39.5 L144 41 L140.4 42.4 L139 46 L137.6 42.4 L134 41 L137.6 39.5 Z",
-					fill: "#FDE047"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-seat-sparkle",
-				style: { animationDelay: "1.3s" },
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "145",
-					cy: "72",
-					r: "1.8",
-					fill: "#FEF08A"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "15",
-					cy: "70",
-					r: "1.6",
-					fill: "#FBBF24"
-				})]
-			})
-		]
-	});
-};
-var RoyalPurpleLotusSvg = ({ uid, compact }) => {
-	const cx = 80;
-	const cy = 80;
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
-		viewBox: "0 0 160 160",
-		className: "w-full h-full overflow-visible",
-		fill: "none",
-		xmlns: "http://www.w3.org/2000/svg",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("defs", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `lp-gold-${uid}`,
-					x1: "16",
-					y1: "14",
-					x2: "144",
-					y2: "146",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FEF08A"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "35%",
-							stopColor: "#F59E0B"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "70%",
-							stopColor: "#FDE68A"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#B45309"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `lp-neon-${uid}`,
-					x1: "26",
-					y1: "24",
-					x2: "134",
-					y2: "136",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#F0ABFC"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "50%",
-							stopColor: "#EC4899"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#9333EA"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `lp-petal-pink-${uid}`,
-					x1: "0%",
-					y1: "0%",
-					x2: "100%",
-					y2: "100%",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#F9A8D4"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "52%",
-							stopColor: "#EC4899"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#7E22CE"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `lp-petal-purple-${uid}`,
-					x1: "0%",
-					y1: "0%",
-					x2: "100%",
-					y2: "100%",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#E9D5FF"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "48%",
-							stopColor: "#A855F7"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#581C87"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `lp-gem-${uid}`,
-					x1: "80",
-					y1: "4",
-					x2: "80",
-					y2: "26",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FAE8FF"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "42%",
-							stopColor: "#D946EF"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#6B21A8"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `lp-arc-${uid}`,
-					x1: "20",
-					y1: "20",
-					x2: "140",
-					y2: "120",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#F5D0FE",
-							stopOpacity: "0"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "50%",
-							stopColor: "#F472B6",
-							stopOpacity: "0.95"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "75%",
-							stopColor: "#FFFFFF",
-							stopOpacity: "1"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#A855F7",
-							stopOpacity: "0"
-						})
-					]
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-lotus-pulse",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy,
-					r: 61.7,
-					stroke: `url(#lp-neon-${uid})`,
-					strokeOpacity: "0.34",
-					strokeWidth: "5.6"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-					cx,
-					cy,
-					rx: "67",
-					ry: "45",
-					stroke: "#FDE68A",
-					strokeOpacity: "0.28",
-					strokeWidth: "1",
-					transform: "rotate(-14 80 80)"
-				})]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 57.7,
-				stroke: `url(#lp-gold-${uid})`,
-				strokeWidth: "4.2"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 54.3,
-				stroke: `url(#lp-neon-${uid})`,
-				strokeWidth: "2.6"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-seat-orbit",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy,
-					r: 55.7,
-					stroke: `url(#lp-arc-${uid})`,
-					strokeWidth: "3.1",
-					strokeLinecap: "round",
-					strokeDasharray: "60 300"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy: 24.299999999999997,
-					r: "2.6",
-					fill: "#FAE8FF"
-				})]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M78 21 C71 13 64 11 58 14 C62 21 68 24 76 24 Z",
-					fill: `url(#lp-petal-pink-${uid})`,
-					stroke: `url(#lp-gold-${uid})`,
-					strokeWidth: "1.2"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M82 21 C89 13 96 11 102 14 C98 21 92 24 84 24 Z",
-					fill: `url(#lp-petal-pink-${uid})`,
-					stroke: `url(#lp-gold-${uid})`,
-					strokeWidth: "1.2"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M80 4 L88 15 L80 25 L72 15 Z",
-					fill: `url(#lp-gem-${uid})`,
-					stroke: `url(#lp-gold-${uid})`,
-					strokeWidth: "1.5"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M80 7 L84.5 15 L80 22 L75.5 15 Z",
-					fill: "#FAE8FF",
-					opacity: "0.35"
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-lotus-sway",
-				children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M29 116 C19 104 16 89 22 77 C30 86 34 100 37 113 Z",
-						fill: `url(#lp-petal-purple-${uid})`,
-						stroke: `url(#lp-gold-${uid})`,
-						strokeWidth: "1.3"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M131 116 C141 104 144 89 138 77 C130 86 126 100 123 113 Z",
-						fill: `url(#lp-petal-purple-${uid})`,
-						stroke: `url(#lp-gold-${uid})`,
-						strokeWidth: "1.3"
-					}),
-					!compact && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M44 134 C24 130 11 116 7 101 C22 104 36 113 49 128 Z",
-						fill: `url(#lp-petal-pink-${uid})`,
-						stroke: `url(#lp-gold-${uid})`,
-						strokeWidth: "1.4"
-					}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M116 134 C136 130 149 116 153 101 C138 104 124 113 111 128 Z",
-						fill: `url(#lp-petal-pink-${uid})`,
-						stroke: `url(#lp-gold-${uid})`,
-						strokeWidth: "1.4"
-					})] }),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M66 143 C46 143 30 133 24 119 C40 121 55 127 70 138 Z",
-						fill: `url(#lp-petal-pink-${uid})`,
-						stroke: `url(#lp-gold-${uid})`,
-						strokeWidth: "1.35"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M94 143 C114 143 130 133 136 119 C120 121 105 127 90 138 Z",
-						fill: `url(#lp-petal-pink-${uid})`,
-						stroke: `url(#lp-gold-${uid})`,
-						strokeWidth: "1.35"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-						cx: "80",
-						cy: "146.5",
-						rx: "35",
-						ry: "5.2",
-						fill: "#581C87",
-						fillOpacity: "0.88",
-						stroke: `url(#lp-gold-${uid})`,
-						strokeWidth: "1.3"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-						cx: "80",
-						cy: "146",
-						rx: "25",
-						ry: "2.4",
-						fill: "#E879F9",
-						fillOpacity: "0.45"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M64 139 C69 133 74 133 80 127 C86 133 91 133 96 139 C90 143 85 146 80 149 C75 146 70 143 64 139 Z",
-						fill: `url(#lp-gold-${uid})`,
-						stroke: "#78350F",
-						strokeWidth: "0.7"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M80 129 L86 138 L80 147 L74 138 Z",
-						fill: `url(#lp-gem-${uid})`,
-						stroke: "#FEF08A",
-						strokeWidth: "1"
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-						cx: "79",
-						cy: "135.5",
-						r: "1.2",
-						fill: "#FFFFFF",
-						opacity: "0.88"
-					})
-				]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-seat-sparkle",
-				style: { animationDelay: "0.1s" },
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M22 36 L23.5 40 L27.5 41.5 L23.5 43 L22 47 L20.5 43 L16.5 41.5 L20.5 40 Z",
-					fill: "#F5D0FE"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-seat-sparkle",
-				style: { animationDelay: "0.9s" },
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M138 35 L139.5 39 L143.5 40.5 L139.5 42 L138 46 L136.5 42 L132.5 40.5 L136.5 39 Z",
-					fill: "#FEF08A"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-seat-sparkle",
-				style: { animationDelay: "1.4s" },
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "145",
-					cy: "68",
-					r: "1.9",
-					fill: "#F472B6"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "15",
-					cy: "66",
-					r: "1.7",
-					fill: "#E879F9"
-				})]
-			})
-		]
-	});
-};
-var DiamondIceBlueSvg = ({ uid, compact }) => {
-	const cx = 80;
-	const cy = 80;
-	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
-		viewBox: "0 0 160 160",
-		className: "w-full h-full overflow-visible",
-		fill: "none",
-		xmlns: "http://www.w3.org/2000/svg",
-		children: [
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("defs", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `db-silver-${uid}`,
-					x1: "18",
-					y1: "12",
-					x2: "142",
-					y2: "148",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FFFFFF"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "28%",
-							stopColor: "#BAE6FD"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "56%",
-							stopColor: "#0284C7"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "82%",
-							stopColor: "#E0F2FE"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#0369A1"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `db-cyan-${uid}`,
-					x1: "26",
-					y1: "20",
-					x2: "134",
-					y2: "136",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#E0F2FE"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "50%",
-							stopColor: "#38BDF8"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#06B6D4"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `db-crystal-${uid}`,
-					x1: "80",
-					y1: "4",
-					x2: "80",
-					y2: "30",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#FFFFFF"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "35%",
-							stopColor: "#7DD3FC"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "75%",
-							stopColor: "#0284C7"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#1E3A8A"
-						})
-					]
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-					id: `db-arc-${uid}`,
-					x1: "20",
-					y1: "20",
-					x2: "140",
-					y2: "120",
-					gradientUnits: "userSpaceOnUse",
-					children: [
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "0%",
-							stopColor: "#38BDF8",
-							stopOpacity: "0"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "48%",
-							stopColor: "#67E8F9",
-							stopOpacity: "0.95"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "72%",
-							stopColor: "#FFFFFF",
-							stopOpacity: "1"
-						}),
-						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-							offset: "100%",
-							stopColor: "#0EA5E9",
-							stopOpacity: "0"
-						})
-					]
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 61.7,
-				stroke: "#38BDF8",
-				strokeOpacity: "0.28",
-				strokeWidth: "5.2"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 57.6,
-				stroke: `url(#db-silver-${uid})`,
-				strokeWidth: "5.1"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-				cx,
-				cy,
-				r: 54.2,
-				stroke: `url(#db-cyan-${uid})`,
-				strokeWidth: "2"
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-seat-orbit",
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy,
-					r: 57.6,
-					stroke: `url(#db-arc-${uid})`,
-					strokeWidth: "3.5",
-					strokeLinecap: "round",
-					strokeDasharray: "68 290"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy: 22.4,
-					r: "2.8",
-					fill: "#FFFFFF"
-				})]
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-seat-orbit-reverse",
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx,
-					cy,
-					r: 60.7,
-					stroke: "#BAE6FD",
-					strokeOpacity: "0.45",
-					strokeWidth: "1.2",
-					strokeDasharray: "16 26"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "66,24 60,11 72,18 74,24",
-					fill: `url(#db-crystal-${uid})`,
-					stroke: "#E0F2FE",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "94,24 100,11 88,18 86,24",
-					fill: `url(#db-crystal-${uid})`,
-					stroke: "#E0F2FE",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "80,3.5 89,14 80,25 71,14",
-					fill: `url(#db-crystal-${uid})`,
-					stroke: "#FFFFFF",
-					strokeWidth: "1.2"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "80,3.5 84.5,14 80,14",
-					fill: "#FFFFFF",
-					opacity: "0.72"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "75.5,14 80,14 80,25",
-					fill: "#BAE6FD",
-					opacity: "0.52"
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "27,108 11,93 20,86 30,97",
-					fill: `url(#db-crystal-${uid})`,
-					stroke: "#E0F2FE",
-					strokeWidth: "1"
-				}),
-				!compact && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "37,124 14,117 21,107 39,114",
-					fill: `url(#db-cyan-${uid})`,
-					stroke: "#FFFFFF",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "133,108 149,93 140,86 130,97",
-					fill: `url(#db-crystal-${uid})`,
-					stroke: "#E0F2FE",
-					strokeWidth: "1"
-				}),
-				!compact && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "123,124 146,117 139,107 121,114",
-					fill: `url(#db-cyan-${uid})`,
-					stroke: "#FFFFFF",
-					strokeWidth: "0.9"
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M42 134 L56 144 L104 144 L118 134 L102 139 L58 139 Z",
-					fill: `url(#db-silver-${uid})`,
-					stroke: "#E0F2FE",
-					strokeWidth: "0.9"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "80,129.5 89.5,139 80,150.5 70.5,139",
-					fill: `url(#db-crystal-${uid})`,
-					stroke: "#FFFFFF",
-					strokeWidth: "1.2"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "80,129.5 85,139 80,139",
-					fill: "#FFFFFF",
-					opacity: "0.8"
-				})
-			] }),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-diamond-glint",
-				style: { animationDelay: "0s" },
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M22 33 L23.8 38 L28.8 39.8 L23.8 41.6 L22 46.6 L20.2 41.6 L15.2 39.8 L20.2 38 Z",
-					fill: "#FFFFFF"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-diamond-glint",
-				style: { animationDelay: "0.75s" },
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M138 34 L139.6 38.5 L144.1 40.1 L139.6 41.7 L138 46.2 L136.4 41.7 L131.9 40.1 L136.4 38.5 Z",
-					fill: "#BAE6FD"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-				className: "animate-diamond-glint",
-				style: { animationDelay: "1.35s" },
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-					d: "M136 127 L137.3 130.2 L140.5 131.5 L137.3 132.8 L136 136 L134.7 132.8 L131.5 131.5 L134.7 130.2 Z",
-					fill: "#67E8F9"
-				})
-			}),
-			/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-				className: "animate-seat-sparkle",
-				style: { animationDelay: "0.45s" },
-				children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "17,69 19.5,72 17,75 14.5,72",
-					fill: "#7DD3FC"
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-					points: "143,70 145.5,73 143,76 140.5,73",
-					fill: "#E0F2FE"
-				})]
-			})
-		]
-	});
-};
 var AnimatedEmptySeatSofa = ({ theme, isLocked = false, isVip = false, compact = false }) => {
-	const uid = (0, import_react.useId)().replace(/[^a-zA-Z0-9_-]/g, "");
-	const palette = theme === "royal_gold_diya" ? {
-		bgTop: "#3B0A1E",
-		bgMid: "#240714",
-		bgBot: "#12040B",
-		aura: "#F59E0B",
-		trimLight: "#FEF08A",
-		trimMid: "#F59E0B",
-		trimDark: "#92400E",
-		velvetLight: "#F43F5E",
-		velvetMid: "#BE123C",
-		velvetDark: "#6B0F26",
-		cushionTop: "#E11D48",
-		cushionEdge: "#881337",
-		gem: "#FDE047",
-		sparkle: "#FEF08A",
-		floorGlow: "#FBBF24"
-	} : theme === "royal_purple_lotus" ? {
-		bgTop: "#330B4D",
-		bgMid: "#1F0733",
-		bgBot: "#0F041B",
-		aura: "#E879F9",
-		trimLight: "#FEF08A",
-		trimMid: "#F59E0B",
-		trimDark: "#B45309",
-		velvetLight: "#F472B6",
-		velvetMid: "#A855F7",
-		velvetDark: "#581C87",
-		cushionTop: "#D946EF",
-		cushionEdge: "#6B21A8",
-		gem: "#F5D0FE",
-		sparkle: "#F9A8D4",
-		floorGlow: "#E879F9"
-	} : {
-		bgTop: "#0B2B4B",
-		bgMid: "#071B33",
-		bgBot: "#040E1D",
-		aura: "#38BDF8",
-		trimLight: "#FFFFFF",
-		trimMid: "#BAE6FD",
-		trimDark: "#0284C7",
-		velvetLight: "#7DD3FC",
-		velvetMid: "#0284C7",
-		velvetDark: "#1E3A8A",
-		cushionTop: "#38BDF8",
-		cushionEdge: "#0369A1",
-		gem: "#FFFFFF",
-		sparkle: "#BAE6FD",
-		floorGlow: "#38BDF8"
-	};
+	const palette = ORB_PALETTES[theme];
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-		className: "relative w-full h-full rounded-full overflow-hidden flex items-center justify-center",
-		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
-			viewBox: "0 0 100 100",
-			className: `w-full h-full transition-transform duration-300 group-hover:scale-105 ${isLocked ? "opacity-65 saturate-75" : "opacity-100"}`,
+		className: "relative w-full h-full rounded-full flex items-center justify-center overflow-hidden select-none",
+		style: { background: `radial-gradient(circle at 32% 28%, ${palette.glassEdge} 0%, ${palette.glassMid} 44%, ${palette.glassCore} 100%)` },
+		children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+			"aria-hidden": "true",
+			className: "pointer-events-none absolute -top-[18%] left-[12%] w-[76%] h-[48%] rounded-full",
+			style: { background: "radial-gradient(ellipse at center, rgba(255,255,255,0.22) 0%, transparent 72%)" }
+		}), isLocked ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
+			viewBox: "0 0 36 36",
 			fill: "none",
 			xmlns: "http://www.w3.org/2000/svg",
+			className: `relative z-10 animate-orb-icon-pulse ${isVip ? "w-[46%] h-[46%]" : compact ? "w-[48%] h-[48%]" : "w-[46%] h-[46%]"}`,
+			style: { filter: palette.iconGlow },
+			"aria-hidden": "true",
 			children: [
-				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("defs", { children: [
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("radialGradient", {
-						id: `sf-bg-${uid}`,
-						cx: "50%",
-						cy: "38%",
-						r: "65%",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "0%",
-								stopColor: palette.bgTop
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "58%",
-								stopColor: palette.bgMid
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "100%",
-								stopColor: palette.bgBot
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("radialGradient", {
-						id: `sf-aura-${uid}`,
-						cx: "50%",
-						cy: "54%",
-						r: "44%",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "0%",
-								stopColor: palette.aura,
-								stopOpacity: "0.46"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "65%",
-								stopColor: palette.aura,
-								stopOpacity: "0.12"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "100%",
-								stopColor: palette.aura,
-								stopOpacity: "0"
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-						id: `sf-trim-${uid}`,
-						x1: "16",
-						y1: "22",
-						x2: "84",
-						y2: "82",
-						gradientUnits: "userSpaceOnUse",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "0%",
-								stopColor: palette.trimLight
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "50%",
-								stopColor: palette.trimMid
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "100%",
-								stopColor: palette.trimDark
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-						id: `sf-velvet-${uid}`,
-						x1: "50",
-						y1: "26",
-						x2: "50",
-						y2: "74",
-						gradientUnits: "userSpaceOnUse",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "0%",
-								stopColor: palette.velvetLight
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "52%",
-								stopColor: palette.velvetMid
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "100%",
-								stopColor: palette.velvetDark
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-						id: `sf-cushion-${uid}`,
-						x1: "24",
-						y1: "54",
-						x2: "76",
-						y2: "74",
-						gradientUnits: "userSpaceOnUse",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "0%",
-								stopColor: palette.cushionTop
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "55%",
-								stopColor: palette.velvetMid
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "100%",
-								stopColor: palette.cushionEdge
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("linearGradient", {
-						id: `sf-sheen-${uid}`,
-						x1: "0%",
-						y1: "0%",
-						x2: "100%",
-						y2: "0%",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "0%",
-								stopColor: "#FFFFFF",
-								stopOpacity: "0"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "50%",
-								stopColor: "#FFFFFF",
-								stopOpacity: "0.72"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("stop", {
-								offset: "100%",
-								stopColor: "#FFFFFF",
-								stopOpacity: "0"
-							})
-						]
-					}),
-					/* @__PURE__ */ (0, import_jsx_runtime.jsx)("clipPath", {
-						id: `sf-clip-${uid}`,
-						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-							cx: "50",
-							cy: "50",
-							r: "48"
-						})
-					})
-				] }),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "50",
-					cy: "50",
-					r: "50",
-					fill: `url(#sf-bg-${uid})`
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
+					d: "M12.5 15.5V12.2C12.5 9.15 14.96 6.7 18 6.7C21.04 6.7 23.5 9.15 23.5 12.2V15.5",
+					stroke: "#FFFFFF",
+					strokeWidth: "3.1",
+					strokeLinecap: "round"
+				}),
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("rect", {
+					x: "8.8",
+					y: "15.2",
+					width: "18.4",
+					height: "14.1",
+					rx: "3.4",
+					fill: "#FFFFFF"
 				}),
 				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "50",
-					cy: "54",
-					r: "42",
-					fill: `url(#sf-aura-${uid})`,
-					className: "animate-lotus-pulse"
+					cx: "18",
+					cy: "21.2",
+					r: "1.85",
+					fill: palette.glassCore,
+					fillOpacity: "0.82"
 				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-					cx: "50",
-					cy: "78",
-					rx: "31",
-					ry: "6.5",
-					fill: palette.floorGlow,
-					fillOpacity: "0.22"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-					cx: "50",
-					cy: "78",
-					rx: "22",
-					ry: "3.2",
-					fill: palette.trimLight,
-					fillOpacity: "0.28"
-				}),
-				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-					clipPath: `url(#sf-clip-${uid})`,
-					children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-						className: "animate-sofa-breathe",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M27 72 L24 78.5 L28.5 78.5 L31 73 Z",
-								fill: `url(#sf-trim-${uid})`
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M73 72 L76 78.5 L71.5 78.5 L69 73 Z",
-								fill: `url(#sf-trim-${uid})`
-							}),
-							theme === "royal_gold_diya" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M24 56 C23 41 29 31 39 30 C43 24 46.5 22 50 20 C53.5 22 57 24 61 30 C71 31 77 41 76 56 Z",
-								fill: `url(#sf-velvet-${uid})`,
-								stroke: `url(#sf-trim-${uid})`,
-								strokeWidth: "2.8",
-								strokeLinejoin: "round"
-							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M50 18.5 L53.5 23 L50 27 L46.5 23 Z",
-								fill: palette.gem,
-								stroke: "#92400E",
-								strokeWidth: "0.7"
-							})] }),
-							theme === "royal_purple_lotus" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-									d: "M36 55 C24 52 21 38 28 31 C35 31 41 38 43 52 Z",
-									fill: `url(#sf-velvet-${uid})`,
-									stroke: `url(#sf-trim-${uid})`,
-									strokeWidth: "2.2"
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-									d: "M64 55 C76 52 79 38 72 31 C65 31 59 38 57 52 Z",
-									fill: `url(#sf-velvet-${uid})`,
-									stroke: `url(#sf-trim-${uid})`,
-									strokeWidth: "2.2"
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-									d: "M35 55 C34 37 41 25 50 20.5 C59 25 66 37 65 55 Z",
-									fill: `url(#sf-velvet-${uid})`,
-									stroke: `url(#sf-trim-${uid})`,
-									strokeWidth: "2.5"
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-									d: "M50 23 L53 28 L50 32.5 L47 28 Z",
-									fill: palette.gem,
-									stroke: "#FDE047",
-									strokeWidth: "0.8"
-								})
-							] }),
-							theme === "diamond_ice_blue" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", { children: [
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-									points: "25,56 23,39 34,29 50,21 66,29 77,39 75,56",
-									fill: `url(#sf-velvet-${uid})`,
-									stroke: `url(#sf-trim-${uid})`,
-									strokeWidth: "2.6",
-									strokeLinejoin: "round"
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polyline", {
-									points: "34,29 50,41 66,29",
-									stroke: "#E0F2FE",
-									strokeOpacity: "0.48",
-									strokeWidth: "1.2"
-								}),
-								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("polygon", {
-									points: "50,18.5 54,24 50,29 46,24",
-									fill: "#FFFFFF",
-									stroke: "#38BDF8",
-									strokeWidth: "0.9"
-								})
-							] }),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("g", {
-								opacity: "0.85",
-								children: [
-									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-										cx: "41",
-										cy: "40",
-										r: "1.4",
-										fill: palette.trimLight
-									}),
-									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-										cx: "50",
-										cy: "36.5",
-										r: "1.5",
-										fill: palette.trimLight
-									}),
-									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-										cx: "59",
-										cy: "40",
-										r: "1.4",
-										fill: palette.trimLight
-									}),
-									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-										cx: "45.5",
-										cy: "46.5",
-										r: "1.3",
-										fill: palette.trimLight
-									}),
-									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-										cx: "54.5",
-										cy: "46.5",
-										r: "1.3",
-										fill: palette.trimLight
-									})
-								]
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-								cx: "31.5",
-								cy: "54",
-								rx: "5.5",
-								ry: "4.2",
-								transform: "rotate(-14 31.5 54)",
-								fill: palette.velvetLight,
-								stroke: `url(#sf-trim-${uid})`,
-								strokeWidth: "1.1"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("ellipse", {
-								cx: "68.5",
-								cy: "54",
-								rx: "5.5",
-								ry: "4.2",
-								transform: "rotate(14 68.5 54)",
-								fill: palette.velvetLight,
-								stroke: `url(#sf-trim-${uid})`,
-								strokeWidth: "1.1"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M25 57 C25 53.5 34 51.5 50 51.5 C66 51.5 75 53.5 75 57 L74 65.5 C74 68.5 64 70.5 50 70.5 C36 70.5 26 68.5 26 65.5 Z",
-								fill: `url(#sf-cushion-${uid})`,
-								stroke: `url(#sf-trim-${uid})`,
-								strokeWidth: "1.6"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M32 58.5 Q50 61.5 68 58.5",
-								stroke: "#FFFFFF",
-								strokeOpacity: "0.34",
-								strokeWidth: "1.2",
-								strokeLinecap: "round"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("line", {
-								x1: "50",
-								y1: "52.5",
-								x2: "50",
-								y2: "68.5",
-								stroke: palette.velvetDark,
-								strokeOpacity: "0.55",
-								strokeWidth: "1.1"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M17.5 52 C17.5 47 23.5 46.5 26 51.5 L28 66 C26.5 69.5 21 70 19 66.5 Z",
-								fill: `url(#sf-velvet-${uid})`,
-								stroke: `url(#sf-trim-${uid})`,
-								strokeWidth: "2.1",
-								strokeLinejoin: "round"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-								cx: "21.2",
-								cy: "51.5",
-								r: "2.2",
-								fill: `url(#sf-trim-${uid})`
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M82.5 52 C82.5 47 76.5 46.5 74 51.5 L72 66 C73.5 69.5 79 70 81 66.5 Z",
-								fill: `url(#sf-velvet-${uid})`,
-								stroke: `url(#sf-trim-${uid})`,
-								strokeWidth: "2.1",
-								strokeLinejoin: "round"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-								cx: "78.8",
-								cy: "51.5",
-								r: "2.2",
-								fill: `url(#sf-trim-${uid})`
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M23 68.5 C32 72.5 68 72.5 77 68.5 L75.5 73.5 C66 76.5 34 76.5 24.5 73.5 Z",
-								fill: `url(#sf-trim-${uid})`
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-								d: "M50 69.2 L53.4 72.8 L50 76.4 L46.6 72.8 Z",
-								fill: palette.gem,
-								stroke: palette.trimDark,
-								strokeWidth: "0.7"
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("rect", {
-								x: "0",
-								y: "16",
-								width: "24",
-								height: "68",
-								fill: `url(#sf-sheen-${uid})`,
-								className: "animate-sofa-shimmer"
-							})
-						]
-					})
-				}),
-				!compact && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-					className: "animate-seat-sparkle",
-					style: { animationDelay: "0.2s" },
-					children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M24 27 L25 29.8 L27.8 30.8 L25 31.8 L24 34.6 L23 31.8 L20.2 30.8 L23 29.8 Z",
-						fill: palette.sparkle
-					})
-				}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("g", {
-					className: "animate-seat-sparkle",
-					style: { animationDelay: "1.05s" },
-					children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", {
-						d: "M76 26 L77 28.5 L79.5 29.5 L77 30.5 L76 33 L75 30.5 L72.5 29.5 L75 28.5 Z",
-						fill: palette.sparkle
-					})
-				})] }),
-				isVip && !isLocked && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("circle", {
-					cx: "50",
-					cy: "14",
-					r: "2",
-					fill: palette.gem,
-					className: "animate-seat-sparkle"
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("rect", {
+					x: "17.15",
+					y: "21.9",
+					width: "1.7",
+					height: "3.3",
+					rx: "0.85",
+					fill: palette.glassCore,
+					fillOpacity: "0.82"
 				})
 			]
-		}), isLocked && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-			className: "absolute inset-0 flex items-center justify-center bg-black/30",
-			children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-				className: "w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-[#130826]/85 border border-amber-300/65 flex items-center justify-center shadow-md",
-				children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
-					viewBox: "0 0 24 24",
-					className: "w-3 h-3 text-amber-300",
-					fill: "none",
-					stroke: "currentColor",
-					strokeWidth: "2.4",
-					strokeLinecap: "round",
-					strokeLinejoin: "round",
-					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("rect", {
-						x: "4",
-						y: "11",
-						width: "16",
-						height: "10",
-						rx: "2"
-					}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("path", { d: "M8 11V7a4 4 0 0 1 8 0v4" })]
-				})
-			})
+		}) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("svg", {
+			viewBox: "0 0 36 36",
+			fill: "none",
+			xmlns: "http://www.w3.org/2000/svg",
+			className: `relative z-10 animate-orb-icon-pulse transition-transform duration-200 group-hover:scale-110 ${isVip ? "w-[44%] h-[44%]" : compact ? "w-[46%] h-[46%]" : "w-[44%] h-[44%]"}`,
+			style: { filter: palette.iconGlow },
+			"aria-hidden": "true",
+			children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("rect", {
+				x: "15.6",
+				y: "7",
+				width: "4.8",
+				height: "22",
+				rx: "2.2",
+				fill: "#FFFFFF"
+			}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("rect", {
+				x: "7",
+				y: "15.6",
+				width: "22",
+				height: "4.8",
+				rx: "2.2",
+				fill: "#FFFFFF"
+			})]
 		})]
 	});
 };
@@ -117304,14 +116393,14 @@ var PartySeatThemeStarSelector = ({ selectedTheme, onSelectTheme, orientation = 
 	const uid = (0, import_react.useId)().replace(/[^a-zA-Z0-9_-]/g, "");
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 		role: "group",
-		"aria-label": "Party Seat Theme Selector",
-		className: `flex ${orientation === "vertical" ? "flex-col gap-1.5 py-1.5 px-1" : "flex-row gap-1.5 px-1.5 py-1"} items-center rounded-full bg-[#130826]/80 backdrop-blur-md border border-white/15 shadow-[0_8px_24px_rgba(0,0,0,0.45)]`,
+		"aria-label": "Party Seat Color Theme Selector",
+		className: `flex ${orientation === "vertical" ? "flex-col gap-1.5 py-1.5 px-1" : "flex-row gap-1.5 px-1.5 py-1"} items-center rounded-full bg-[#130826]/75 backdrop-blur-md border border-white/15 shadow-[0_8px_24px_rgba(0,0,0,0.45)]`,
 		children: PARTY_SEAT_THEMES.map((item) => {
 			const isSelected = selectedTheme === item.id;
 			return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
 				type: "button",
 				onClick: () => onSelectTheme(item.id),
-				"aria-label": `Select ${item.name} seat theme`,
+				"aria-label": `Select ${item.name} seat color`,
 				"aria-pressed": isSelected,
 				title: item.name,
 				className: `relative w-8 h-8 rounded-full flex items-center justify-center transition-all duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 active:scale-90 ${isSelected ? `${item.activeBorder} border scale-105` : "border border-white/10 bg-white/[0.04] hover:bg-white/12 opacity-80 hover:opacity-100"}`,
@@ -117700,16 +116789,16 @@ var PartyMusicVinylWidget = ({ isPlaying, trackTitle, canModerate, onOpenMusicMo
 			}),
 			/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
 				className: `mt-1 max-w-[74px] truncate text-[9px] font-bold tracking-tight drop-shadow-[0_1px_4px_rgba(0,0,0,0.95)] ${isPlaying ? "text-amber-200/95" : "text-zinc-400/80"}`,
-				children: isPlaying ? shortTitle : "Paused"
+				children: isPlaying ? shortTitle : "Music"
 			})
 		]
 	});
-	if (canModerate && onOpenMusicModal) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+	if (onOpenMusicModal) return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
 		type: "button",
 		onClick: onOpenMusicModal,
 		className: "group flex flex-col items-center cursor-pointer active:scale-95 transition-transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#EC4899] rounded-full",
-		title: `Now Playing: ${trackTitle} — Tap to change music`,
-		"aria-label": `Music turntable: ${isPlaying ? `playing ${trackTitle}` : "paused"}. Tap to open music playlist.`,
+		title: isPlaying ? `Now Playing: ${trackTitle} — Tap for Music DJ & Volume` : canModerate ? "Tap to search & play background music" : "Tap to open Party Music & Volume",
+		"aria-label": `Music turntable: ${isPlaying ? `playing ${trackTitle}` : "idle"}. Tap to open Party Music.`,
 		children: content
 	});
 	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
@@ -117719,6 +116808,1870 @@ var PartyMusicVinylWidget = ({ isPlaying, trackTitle, canModerate, onOpenMusicMo
 		children: content
 	});
 };
+// src/services/partyMusicService.ts
+var PRODUCTION_API_URL = "https://api.alphamate.app";
+var AUDIUS_PUBLIC_API = "https://api.audius.co/v1";
+var AUDIUS_APP_NAME = "AlphaMateLive";
+var ITUNES_PUBLIC_API = "https://itunes.apple.com";
+var clientSearchCache = /* @__PURE__ */ new Map();
+var CLIENT_CACHE_TTL_MS = 18e4;
+function getMusicApiBase() {
+	const envUrl = "".trim().replace(/\/$/, "");
+	if (typeof window !== "undefined") {
+		if (Capacitor.isNativePlatform()) return envUrl || PRODUCTION_API_URL;
+		const host = window.location.hostname.toLowerCase();
+		if (host === "localhost" || host === "127.0.0.1" || host.endsWith(".run.app") || host.endsWith("alphamate.app")) return "";
+	}
+	return envUrl || "";
+}
+function resolvePlayableStreamUrls(track) {
+	const apiBase = getMusicApiBase();
+	const rawStream = String(track.streamUrl || "").trim();
+	const rawDirect = String(track.directStreamUrl || "").trim();
+	let primaryUrl = rawStream;
+	if (primaryUrl.startsWith("/api/")) primaryUrl = `${apiBase}${primaryUrl}`;
+	else if (!primaryUrl && rawDirect) primaryUrl = rawDirect;
+	let fallbackUrl = rawDirect || null;
+	if (!fallbackUrl && track.source === "audius" && track.sourceTrackId) fallbackUrl = `${AUDIUS_PUBLIC_API}/tracks/${encodeURIComponent(track.sourceTrackId)}/stream?app_name=${AUDIUS_APP_NAME}`;
+	if (fallbackUrl === primaryUrl) fallbackUrl = null;
+	return {
+		primaryUrl,
+		fallbackUrl
+	};
+}
+function formatMusicDuration(seconds) {
+	const safe = Math.max(0, Math.floor(Number(seconds) || 0));
+	const mins = Math.floor(safe / 60);
+	const secs = safe % 60;
+	return `${mins}:${secs < 10 ? "0" : ""}${secs}`;
+}
+function sanitizePartyMusicTrackForFirestore(track, requestedBy) {
+	if (!track || !track.id || !track.title) return null;
+	return {
+		id: String(track.id).slice(0, 96),
+		sourceTrackId: track.sourceTrackId ? String(track.sourceTrackId).slice(0, 64) : void 0,
+		title: String(track.title).slice(0, 110),
+		artist: String(track.artist || "Unknown Artist").slice(0, 80),
+		album: track.album ? String(track.album).slice(0, 80) : void 0,
+		artworkUrl: typeof track.artworkUrl === "string" && track.artworkUrl.startsWith("https://") ? track.artworkUrl.slice(0, 1024) : void 0,
+		durationSec: Math.max(10, Math.min(7200, Math.round(Number(track.durationSec) || 30))),
+		fullDurationSec: track.fullDurationSec ? Math.max(10, Math.min(7200, Math.round(Number(track.fullDurationSec)))) : void 0,
+		streamUrl: String(track.streamUrl || "").slice(0, 1400),
+		directStreamUrl: typeof track.directStreamUrl === "string" && track.directStreamUrl.startsWith("https://") ? track.directStreamUrl.slice(0, 1400) : void 0,
+		source: track.source === "audius" || track.source === "deezer" || track.source === "itunes" || track.source === "jamendo" ? track.source : "audius",
+		isFullTrack: Boolean(track.isFullTrack),
+		requestedBy: (requestedBy || track.requestedBy || "").slice(0, 64) || void 0
+	};
+}
+async function fetchJsonWithTimeout(url, timeoutMs = 7e3) {
+	const controller = new AbortController();
+	const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+	try {
+		const res = await fetch(url, {
+			signal: controller.signal,
+			headers: { Accept: "application/json" }
+		});
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
+		return await res.json();
+	} finally {
+		window.clearTimeout(timer);
+	}
+}
+async function fallbackClientAudiusSearch(query, limit) {
+	try {
+		const json = await fetchJsonWithTimeout(query ? `${AUDIUS_PUBLIC_API}/tracks/search?query=${encodeURIComponent(query)}&app_name=${AUDIUS_APP_NAME}` : `${AUDIUS_PUBLIC_API}/tracks/trending?app_name=${AUDIUS_APP_NAME}&time=week`, 6500);
+		return (Array.isArray(json?.data) ? json.data : []).filter((t) => t && t.id && t.is_streamable !== false).slice(0, limit).map((t) => {
+			const trackId = String(t.id);
+			const directUrl = `${AUDIUS_PUBLIC_API}/tracks/${encodeURIComponent(trackId)}/stream?app_name=${AUDIUS_APP_NAME}`;
+			const dur = Math.max(15, Math.min(7200, Math.round(Number(t.duration) || 180)));
+			return {
+				id: `audius:${trackId}`,
+				sourceTrackId: trackId,
+				title: String(t.title || "Untitled Track").slice(0, 110),
+				artist: String(t.user?.name || t.user?.handle || "Artist").slice(0, 80),
+				album: t.genre ? String(t.genre).slice(0, 60) : void 0,
+				artworkUrl: t.artwork?.["480x480"] || t.artwork?.["150x150"] || "",
+				durationSec: dur,
+				fullDurationSec: dur,
+				streamUrl: directUrl,
+				directStreamUrl: directUrl,
+				source: "audius",
+				isFullTrack: true
+			};
+		});
+	} catch {
+		return [];
+	}
+}
+async function fallbackClientItunesSearch(query, limit) {
+	try {
+		const json = await fetchJsonWithTimeout(`${ITUNES_PUBLIC_API}/search?term=${encodeURIComponent(query)}&media=music&entity=song&limit=${limit}`, 6e3);
+		return (Array.isArray(json?.results) ? json.results : []).filter((t) => t && t.trackId && typeof t.previewUrl === "string" && t.previewUrl.startsWith("https://")).slice(0, limit).map((t) => ({
+			id: `itunes:${t.trackId}`,
+			sourceTrackId: String(t.trackId),
+			title: String(t.trackName || "Untitled Track").slice(0, 110),
+			artist: String(t.artistName || "Unknown Artist").slice(0, 80),
+			album: t.collectionName ? String(t.collectionName).slice(0, 80) : void 0,
+			artworkUrl: String(t.artworkUrl100 || "").replace(/100x100bb/i, "300x300bb"),
+			durationSec: 30,
+			fullDurationSec: Math.max(30, Math.round((Number(t.trackTimeMillis) || 21e4) / 1e3)),
+			streamUrl: String(t.previewUrl),
+			directStreamUrl: String(t.previewUrl),
+			source: "itunes",
+			isFullTrack: false
+		}));
+	} catch {
+		return [];
+	}
+}
+async function searchPartyMusic(query, mode = "all", limit = 20) {
+	const cleanQuery = query.trim();
+	if (!cleanQuery) return [];
+	const cacheKey = `search:${mode}:${limit}:${cleanQuery.toLowerCase()}`;
+	const cached = clientSearchCache.get(cacheKey);
+	if (cached && Date.now() < cached.expiresAt) return cached.tracks;
+	const apiBase = getMusicApiBase();
+	try {
+		const json = await fetchJsonWithTimeout(`${apiBase}/api/music/search?q=${encodeURIComponent(cleanQuery)}&mode=${encodeURIComponent(mode)}&limit=${limit}`, 7500);
+		if (json?.success && Array.isArray(json.tracks)) {
+			const tracks = json.tracks;
+			clientSearchCache.set(cacheKey, {
+				tracks,
+				expiresAt: Date.now() + CLIENT_CACHE_TTL_MS
+			});
+			return tracks;
+		}
+	} catch {}
+	const [audius, itunes] = await Promise.all([mode === "popular" ? Promise.resolve([]) : fallbackClientAudiusSearch(cleanQuery, Math.ceil(limit * .6)), mode === "full" ? Promise.resolve([]) : fallbackClientItunesSearch(cleanQuery, Math.ceil(limit * .6))]);
+	const merged = [];
+	const maxLen = Math.max(audius.length, itunes.length);
+	for (let i = 0; i < maxLen && merged.length < limit; i++) {
+		if (audius[i]) merged.push(audius[i]);
+		if (itunes[i] && merged.length < limit) merged.push(itunes[i]);
+	}
+	if (merged.length > 0) clientSearchCache.set(cacheKey, {
+		tracks: merged,
+		expiresAt: Date.now() + CLIENT_CACHE_TTL_MS
+	});
+	return merged;
+}
+var FALLBACK_CATEGORY_QUERIES = {
+	all: "Atif Aslam Arijit Singh",
+	urdu: "Atif Aslam Coke Studio Pakistan",
+	bollywood: "Arijit Singh Bollywood",
+	punjabi: "AP Dhillon Diljit Dosanjh",
+	lofi: "lofi chill beats",
+	pop: "The Weeknd Dua Lipa",
+	full: "bollywood remix lofi"
+};
+async function fetchTrendingPartyMusic(category = "all", limit = 18) {
+	const cacheKey = `trending:${category}:${limit}`;
+	const cached = clientSearchCache.get(cacheKey);
+	if (cached && Date.now() < cached.expiresAt) return cached.tracks;
+	const apiBase = getMusicApiBase();
+	try {
+		const json = await fetchJsonWithTimeout(`${apiBase}/api/music/trending?category=${encodeURIComponent(category)}&limit=${limit}`, 7500);
+		if (json?.success && Array.isArray(json.tracks) && json.tracks.length > 0) {
+			const tracks = json.tracks;
+			clientSearchCache.set(cacheKey, {
+				tracks,
+				expiresAt: Date.now() + CLIENT_CACHE_TTL_MS
+			});
+			return tracks;
+		}
+	} catch {}
+	const q = FALLBACK_CATEGORY_QUERIES[category] || "Atif Aslam";
+	const [audius, itunes] = await Promise.all([fallbackClientAudiusSearch(category === "all" || category === "full" ? "" : q, Math.ceil(limit * .55)), category === "full" ? Promise.resolve([]) : fallbackClientItunesSearch(q, Math.ceil(limit * .55))]);
+	const merged = [];
+	const maxLen = Math.max(audius.length, itunes.length);
+	for (let i = 0; i < maxLen && merged.length < limit; i++) {
+		if (audius[i]) merged.push(audius[i]);
+		if (itunes[i] && merged.length < limit) merged.push(itunes[i]);
+	}
+	if (merged.length > 0) clientSearchCache.set(cacheKey, {
+		tracks: merged,
+		expiresAt: Date.now() + CLIENT_CACHE_TTL_MS
+	});
+	return merged;
+}
+// src/services/partyMusicPlayer.ts
+var STORAGE_VOLUME_KEY = "alphamate_party_music_volume";
+var STORAGE_MUTED_KEY = "alphamate_party_music_muted";
+var STORAGE_DUCKING_KEY = "alphamate_party_music_ducking";
+var DEFAULT_BACKGROUND_VOLUME = .28;
+var VOICE_DUCK_MULTIPLIER = .46;
+var VOICE_DUCK_RELEASE_MS = 580;
+var MAX_SYNC_DRIFT_SEC = 2.2;
+function clamp01(value) {
+	if (!Number.isFinite(value)) return DEFAULT_BACKGROUND_VOLUME;
+	return Math.max(0, Math.min(1, value));
+}
+function readStoredNumber(key, fallback) {
+	try {
+		const raw = window.localStorage.getItem(key);
+		if (raw === null) return fallback;
+		const parsed = Number(raw);
+		return Number.isFinite(parsed) ? clamp01(parsed) : fallback;
+	} catch {
+		return fallback;
+	}
+}
+function readStoredBool(key, fallback) {
+	try {
+		const raw = window.localStorage.getItem(key);
+		if (raw === null) return fallback;
+		return raw === "true";
+	} catch {
+		return fallback;
+	}
+}
+/**
+* Voice-Safe Synchronized Party Room Background Music Engine.
+*
+* Architecture highlights:
+* - Plays streamed songs via HTML5 <audio> alongside Agora Party Voice without muting mics or speakers.
+* - Uses timestamp-based playback sync (`startedAtMs` + `positionSec`) so Host, Seated Guests, and
+*   Viewers (including late joiners) stay synchronized on the same beat.
+* - Automatic Smart Voice Ducking gently lowers background music whenever anyone speaks, then
+*   smoothly restores the user's chosen music volume when voices pause.
+* - Optional CORS-clean Web Audio AnalyserNode tap exposes real-time music beat energy for the
+*   Party Room frequency visualizer, with automatic fallback to direct HTTPS playback if CORS fails.
+*/
+var PartyMusicPlayer = class {
+	constructor() {
+		this.audioEl = null;
+		this.audioCtx = null;
+		this.sourceNode = null;
+		this.gainNode = null;
+		this.analyserNode = null;
+		this.freqBuf = null;
+		this.webAudioConnected = false;
+		this.activeRoomSync = null;
+		this.activeTrackId = null;
+		this.activeUrlCandidate = "primary";
+		this.activeTrack = null;
+		this.previewTrack = null;
+		this.isLoading = false;
+		this.isAutoplayBlocked = false;
+		this.errorMessage = null;
+		this.speakerOn = true;
+		this.localVolume = typeof window !== "undefined" ? readStoredNumber(STORAGE_VOLUME_KEY, DEFAULT_BACKGROUND_VOLUME) : DEFAULT_BACKGROUND_VOLUME;
+		this.localMuted = typeof window !== "undefined" ? readStoredBool(STORAGE_MUTED_KEY, false) : false;
+		this.voiceDuckingEnabled = typeof window !== "undefined" ? readStoredBool(STORAGE_DUCKING_KEY, true) : true;
+		this.isCurrentlyDucked = false;
+		this.duckReleaseTimer = null;
+		this.listeners = /* @__PURE__ */ new Set();
+		this.trackEndedListeners = /* @__PURE__ */ new Set();
+		this.unlockListenersBound = false;
+		this.pendingSyncSeekSec = null;
+		this.lastEmitMs = 0;
+	}
+	ensureAudioElement(useCors) {
+		if (this.audioEl && this.webAudioConnected && !useCors) this.teardownAudioElement();
+		if (!this.audioEl) {
+			const el = document.createElement("audio");
+			el.preload = "auto";
+			el.playsInline = true;
+			el.setAttribute("playsinline", "true");
+			el.setAttribute("webkit-playsinline", "true");
+			if (useCors) el.crossOrigin = "anonymous";
+			el.volume = this.computeTargetGain();
+			this.bindElementEvents(el);
+			this.audioEl = el;
+		}
+		return this.audioEl;
+	}
+	teardownAudioElement() {
+		if (this.sourceNode) {
+			try {
+				this.sourceNode.disconnect();
+			} catch {}
+			this.sourceNode = null;
+		}
+		if (this.gainNode) {
+			try {
+				this.gainNode.disconnect();
+			} catch {}
+			this.gainNode = null;
+		}
+		if (this.analyserNode) {
+			try {
+				this.analyserNode.disconnect();
+			} catch {}
+			this.analyserNode = null;
+		}
+		this.freqBuf = null;
+		this.webAudioConnected = false;
+		if (this.audioEl) {
+			try {
+				this.audioEl.pause();
+				this.audioEl.removeAttribute("src");
+				this.audioEl.load();
+			} catch {}
+			this.audioEl = null;
+		}
+	}
+	tryAttachWebAudioGraph(el) {
+		if (this.webAudioConnected || !el.crossOrigin) return;
+		if (typeof window === "undefined") return;
+		const AudioCtxCtor = window.AudioContext || window.webkitAudioContext;
+		if (!AudioCtxCtor) return;
+		try {
+			if (!this.audioCtx || this.audioCtx.state === "closed") this.audioCtx = new AudioCtxCtor();
+			const ctx = this.audioCtx;
+			const source = ctx.createMediaElementSource(el);
+			const gain = ctx.createGain();
+			const analyser = ctx.createAnalyser();
+			analyser.fftSize = 128;
+			analyser.smoothingTimeConstant = .78;
+			gain.gain.value = this.computeTargetGain();
+			el.volume = 1;
+			source.connect(gain);
+			gain.connect(analyser);
+			analyser.connect(ctx.destination);
+			this.sourceNode = source;
+			this.gainNode = gain;
+			this.analyserNode = analyser;
+			this.freqBuf = new Uint8Array(analyser.frequencyBinCount);
+			this.webAudioConnected = true;
+		} catch {
+			this.webAudioConnected = false;
+			el.volume = this.computeTargetGain();
+		}
+	}
+	bindElementEvents(el) {
+		el.addEventListener("playing", () => {
+			if (this.audioEl !== el) return;
+			this.isLoading = false;
+			this.isAutoplayBlocked = false;
+			this.errorMessage = null;
+			this.applyTargetGain(false);
+			this.emit(true);
+		});
+		el.addEventListener("waiting", () => {
+			if (this.audioEl !== el) return;
+			this.isLoading = true;
+			this.emit(true);
+		});
+		el.addEventListener("canplay", () => {
+			if (this.audioEl !== el) return;
+			this.isLoading = false;
+			if (this.pendingSyncSeekSec !== null && Number.isFinite(el.duration) && el.duration > 1) {
+				const clamped = Math.max(0, Math.min(el.duration - .5, this.pendingSyncSeekSec));
+				if (Math.abs(el.currentTime - clamped) > MAX_SYNC_DRIFT_SEC) try {
+					el.currentTime = clamped;
+				} catch {}
+				this.pendingSyncSeekSec = null;
+			}
+			this.emit(true);
+		});
+		el.addEventListener("timeupdate", () => {
+			if (this.audioEl !== el) return;
+			this.emit(false);
+		});
+		el.addEventListener("pause", () => {
+			if (this.audioEl !== el) return;
+			this.emit(true);
+		});
+		el.addEventListener("ended", () => {
+			if (this.audioEl !== el) return;
+			if (this.previewTrack) {
+				this.stopPreview();
+				return;
+			}
+			if (this.activeRoomSync?.loop && this.activeRoomSync.isPlaying) try {
+				el.currentTime = 0;
+				el.play().catch(() => {});
+				return;
+			} catch {}
+			const endedTrack = this.activeTrack;
+			this.emit(true);
+			if (endedTrack) this.trackEndedListeners.forEach((cb) => {
+				try {
+					cb(endedTrack);
+				} catch {}
+			});
+		});
+		el.addEventListener("error", () => {
+			if (this.audioEl !== el) return;
+			const track = this.previewTrack || this.activeTrack;
+			if (!track) return;
+			if (this.activeUrlCandidate === "primary") {
+				const { fallbackUrl } = resolvePlayableStreamUrls(track);
+				if (fallbackUrl) {
+					this.activeUrlCandidate = "fallback";
+					this.loadAndPlayUrl(track, fallbackUrl, false, this.computeExpectedSyncSec());
+					return;
+				}
+			}
+			this.isLoading = false;
+			this.errorMessage = "Could not stream this track. Try another song.";
+			this.emit(true);
+		});
+	}
+	bindAutoplayUnlockListeners() {
+		if (this.unlockListenersBound || typeof window === "undefined") return;
+		this.unlockListenersBound = true;
+		const handleGesture = () => {
+			this.unlock();
+		};
+		window.addEventListener("pointerdown", handleGesture, { passive: true });
+		window.addEventListener("touchstart", handleGesture, { passive: true });
+		window.addEventListener("keydown", handleGesture, { passive: true });
+	}
+	unlock() {
+		if (this.audioCtx && this.audioCtx.state === "suspended") this.audioCtx.resume().catch(() => {});
+		if (this.isAutoplayBlocked && this.audioEl) {
+			if (Boolean(this.previewTrack || this.activeRoomSync?.isPlaying && this.activeRoomSync?.track) && this.audioEl.paused) {
+				this.applyTargetGain(false);
+				this.audioEl.play().then(() => {
+					this.isAutoplayBlocked = false;
+					this.errorMessage = null;
+					this.emit(true);
+				}).catch(() => {});
+			}
+		}
+	}
+	computeTargetGain() {
+		if (!this.speakerOn || this.localMuted) return 0;
+		return clamp01((this.previewTrack ? Math.max(.32, this.localVolume) : this.localVolume) * (!this.previewTrack && this.voiceDuckingEnabled && this.isCurrentlyDucked ? VOICE_DUCK_MULTIPLIER : 1));
+	}
+	applyTargetGain(smooth) {
+		const target = this.computeTargetGain();
+		if (this.webAudioConnected && this.gainNode && this.audioCtx && this.audioCtx.state !== "closed") {
+			const now = this.audioCtx.currentTime;
+			try {
+				this.gainNode.gain.cancelScheduledValues(now);
+				if (smooth) this.gainNode.gain.setTargetAtTime(target, now, .14);
+				else this.gainNode.gain.setValueAtTime(target, now);
+			} catch {
+				this.gainNode.gain.value = target;
+			}
+			if (this.audioEl) this.audioEl.volume = 1;
+			return;
+		}
+		if (this.audioEl) this.audioEl.volume = target;
+	}
+	computeExpectedSyncSec() {
+		if (this.previewTrack) return 0;
+		const sync = this.activeRoomSync;
+		if (!sync || !sync.track) return 0;
+		const basePos = Math.max(0, Number(sync.positionSec) || 0);
+		if (!sync.isPlaying || !sync.startedAtMs) return basePos;
+		const total = basePos + Math.max(0, (Date.now() - sync.startedAtMs) / 1e3);
+		const dur = Math.max(10, Number(sync.track.durationSec) || 30);
+		if (sync.loop && dur > 0) return total % dur;
+		return Math.min(Math.max(0, dur - .5), total);
+	}
+	loadAndPlayUrl(track, url, useCors, targetStartSec) {
+		this.bindAutoplayUnlockListeners();
+		const el = this.ensureAudioElement(useCors);
+		if (useCors) this.tryAttachWebAudioGraph(el);
+		this.isLoading = true;
+		this.errorMessage = null;
+		this.pendingSyncSeekSec = targetStartSec > 1.5 ? targetStartSec : null;
+		try {
+			el.pause();
+			el.src = url;
+			el.load();
+		} catch {}
+		if (this.audioCtx && this.audioCtx.state === "suspended") this.audioCtx.resume().catch(() => {});
+		this.applyTargetGain(false);
+		const playPromise = el.play();
+		if (playPromise && typeof playPromise.then === "function") playPromise.then(() => {
+			this.isAutoplayBlocked = false;
+			this.isLoading = false;
+			this.emit(true);
+		}).catch((err) => {
+			const errName = String(err?.name || "");
+			if (errName === "NotAllowedError" || errName === "AbortError") {
+				this.isAutoplayBlocked = errName === "NotAllowedError";
+				this.isLoading = false;
+				this.emit(true);
+			} else {
+				this.isLoading = false;
+				this.emit(true);
+			}
+		});
+		this.emit(true);
+	}
+	syncToRoomState(input) {
+		this.speakerOn = input.speakerOn;
+		this.activeRoomSync = input;
+		if (this.previewTrack) {
+			this.applyTargetGain(true);
+			return;
+		}
+		if (!input.track || !input.isPlaying) {
+			this.activeTrack = input.track;
+			this.activeTrackId = input.track?.id || null;
+			this.isLoading = false;
+			this.isAutoplayBlocked = false;
+			if (this.audioEl && !this.audioEl.paused) try {
+				this.audioEl.pause();
+			} catch {}
+			this.emit(true);
+			return;
+		}
+		const incomingTrack = input.track;
+		const isSameTrack = this.activeTrackId === incomingTrack.id && Boolean(this.audioEl?.src);
+		const expectedSec = this.computeExpectedSyncSec();
+		if (!isSameTrack) {
+			this.activeTrack = incomingTrack;
+			this.activeTrackId = incomingTrack.id;
+			const { primaryUrl, fallbackUrl } = resolvePlayableStreamUrls(incomingTrack);
+			const isSameOriginOrProxy = primaryUrl.startsWith("/api/") || typeof window !== "undefined" && primaryUrl.startsWith(window.location.origin);
+			this.activeUrlCandidate = "primary";
+			const chosenUrl = primaryUrl || fallbackUrl || "";
+			if (!chosenUrl) {
+				this.errorMessage = "No playable audio stream for this track.";
+				this.emit(true);
+				return;
+			}
+			this.loadAndPlayUrl(incomingTrack, chosenUrl, isSameOriginOrProxy, expectedSec);
+			return;
+		}
+		this.activeTrack = incomingTrack;
+		const el = this.audioEl;
+		if (!el) return;
+		this.applyTargetGain(true);
+		if (Number.isFinite(el.duration) && el.duration > 1) {
+			const clampedExpected = Math.max(0, Math.min(el.duration - .5, expectedSec));
+			if (Math.abs(el.currentTime - clampedExpected) > MAX_SYNC_DRIFT_SEC) try {
+				el.currentTime = clampedExpected;
+			} catch {}
+		}
+		if (el.paused) {
+			if (this.audioCtx && this.audioCtx.state === "suspended") this.audioCtx.resume().catch(() => {});
+			el.play().then(() => {
+				this.isAutoplayBlocked = false;
+				this.emit(true);
+			}).catch((err) => {
+				if (err?.name === "NotAllowedError") {
+					this.isAutoplayBlocked = true;
+					this.emit(true);
+				}
+			});
+		}
+	}
+	startPreview(track) {
+		this.previewTrack = track;
+		this.activeUrlCandidate = "primary";
+		const { primaryUrl, fallbackUrl } = resolvePlayableStreamUrls(track);
+		const isSameOriginOrProxy = primaryUrl.startsWith("/api/") || typeof window !== "undefined" && primaryUrl.startsWith(window.location.origin);
+		const chosenUrl = primaryUrl || fallbackUrl || "";
+		if (!chosenUrl) return;
+		this.loadAndPlayUrl(track, chosenUrl, isSameOriginOrProxy, 0);
+	}
+	stopPreview() {
+		if (!this.previewTrack) return;
+		this.previewTrack = null;
+		this.activeTrackId = null;
+		if (this.audioEl) try {
+			this.audioEl.pause();
+		} catch {}
+		if (this.activeRoomSync) this.syncToRoomState(this.activeRoomSync);
+		else this.emit(true);
+	}
+	stopAll() {
+		this.previewTrack = null;
+		this.activeRoomSync = null;
+		this.activeTrack = null;
+		this.activeTrackId = null;
+		this.isLoading = false;
+		this.isAutoplayBlocked = false;
+		this.errorMessage = null;
+		if (this.duckReleaseTimer) {
+			clearTimeout(this.duckReleaseTimer);
+			this.duckReleaseTimer = null;
+		}
+		this.isCurrentlyDucked = false;
+		if (this.audioEl) try {
+			this.audioEl.pause();
+			this.audioEl.removeAttribute("src");
+			this.audioEl.load();
+		} catch {}
+		this.emit(true);
+	}
+	setSpeakerOn(on) {
+		this.speakerOn = on;
+		this.applyTargetGain(true);
+		this.emit(true);
+	}
+	setLocalVolume(volume) {
+		this.localVolume = clamp01(volume);
+		if (this.localVolume > .01 && this.localMuted) {
+			this.localMuted = false;
+			try {
+				window.localStorage.setItem(STORAGE_MUTED_KEY, "false");
+			} catch {}
+		}
+		try {
+			window.localStorage.setItem(STORAGE_VOLUME_KEY, String(this.localVolume));
+		} catch {}
+		this.applyTargetGain(false);
+		this.emit(true);
+	}
+	setLocalMuted(muted) {
+		this.localMuted = muted;
+		try {
+			window.localStorage.setItem(STORAGE_MUTED_KEY, String(muted));
+		} catch {}
+		this.applyTargetGain(false);
+		this.emit(true);
+	}
+	setVoiceDuckingEnabled(enabled) {
+		this.voiceDuckingEnabled = enabled;
+		try {
+			window.localStorage.setItem(STORAGE_DUCKING_KEY, String(enabled));
+		} catch {}
+		this.applyTargetGain(true);
+		this.emit(true);
+	}
+	/**
+	* Called reactively from PartyRoomsScreen when Host or any Seated Speaker talks.
+	* Gently ducks background music while someone speaks and smoothly restores volume afterwards.
+	*/
+	setVoiceDuckingActive(isAnyoneSpeaking) {
+		if (isAnyoneSpeaking) {
+			if (this.duckReleaseTimer) {
+				clearTimeout(this.duckReleaseTimer);
+				this.duckReleaseTimer = null;
+			}
+			if (!this.isCurrentlyDucked) {
+				this.isCurrentlyDucked = true;
+				this.applyTargetGain(true);
+				this.emit(false);
+			}
+			return;
+		}
+		if (this.isCurrentlyDucked && !this.duckReleaseTimer) this.duckReleaseTimer = setTimeout(() => {
+			this.duckReleaseTimer = null;
+			this.isCurrentlyDucked = false;
+			this.applyTargetGain(true);
+			this.emit(false);
+		}, VOICE_DUCK_RELEASE_MS);
+	}
+	getCurrentPositionSec() {
+		if (this.audioEl && Number.isFinite(this.audioEl.currentTime)) return this.audioEl.currentTime;
+		return this.computeExpectedSyncSec();
+	}
+	/**
+	* Real-time live energy tap (0..1) for PartyAudioVisualizer.
+	* Zero allocations on the 60fps animation loop.
+	*/
+	getMusicEnergy() {
+		if (!this.audioEl || this.audioEl.paused || !this.speakerOn || this.localMuted) return 0;
+		if (this.webAudioConnected && this.analyserNode && this.freqBuf && this.audioCtx?.state === "running") {
+			this.analyserNode.getByteFrequencyData(this.freqBuf);
+			const bins = Math.min(24, this.freqBuf.length);
+			let sum = 0;
+			for (let i = 0; i < bins; i++) sum += this.freqBuf[i];
+			const avg = sum / Math.max(1, bins) / 255;
+			return Math.min(1, avg * 1.45);
+		}
+		return Math.min(.45, this.localVolume * .65);
+	}
+	getSnapshot() {
+		const el = this.audioEl;
+		const isPlaying = Boolean(el && !el.paused && !el.ended);
+		const active = this.previewTrack || this.activeTrack;
+		const rawDuration = el && Number.isFinite(el.duration) && el.duration > 0 ? el.duration : active?.durationSec || 0;
+		return {
+			isPlaying,
+			isLoading: this.isLoading,
+			isAutoplayBlocked: this.isAutoplayBlocked,
+			isPreviewMode: Boolean(this.previewTrack),
+			previewTrackId: this.previewTrack?.id || null,
+			currentTimeSec: el && Number.isFinite(el.currentTime) ? el.currentTime : 0,
+			durationSec: rawDuration,
+			localVolume: this.localVolume,
+			localMuted: this.localMuted,
+			voiceDuckingEnabled: this.voiceDuckingEnabled,
+			isCurrentlyDucked: this.isCurrentlyDucked && this.voiceDuckingEnabled,
+			errorMessage: this.errorMessage
+		};
+	}
+	subscribe(listener) {
+		this.listeners.add(listener);
+		listener(this.getSnapshot());
+		return () => {
+			this.listeners.delete(listener);
+		};
+	}
+	onTrackEnded(listener) {
+		this.trackEndedListeners.add(listener);
+		return () => {
+			this.trackEndedListeners.delete(listener);
+		};
+	}
+	emit(force) {
+		const now = Date.now();
+		if (!force && now - this.lastEmitMs < 240) return;
+		this.lastEmitMs = now;
+		const snap = this.getSnapshot();
+		this.listeners.forEach((cb) => {
+			try {
+				cb(snap);
+			} catch {}
+		});
+	}
+};
+var partyMusicPlayer = new PartyMusicPlayer();
+// src/components/party/PartyMusicPlayerModal.tsx
+var CATEGORY_CHIPS = [
+	{
+		id: "all",
+		label: "Trending"
+	},
+	{
+		id: "full",
+		label: "Full Songs"
+	},
+	{
+		id: "urdu",
+		label: "Urdu / Sufi"
+	},
+	{
+		id: "bollywood",
+		label: "Bollywood"
+	},
+	{
+		id: "punjabi",
+		label: "Punjabi"
+	},
+	{
+		id: "lofi",
+		label: "Lo-Fi Chill"
+	},
+	{
+		id: "pop",
+		label: "English Pop"
+	}
+];
+var PartyMusicPlayerModal = ({ isOpen, onClose, canControlRoomMusic, isRoomMusicPlaying, currentTrack, musicQueue, musicLoop, musicUpdatedBy, songRequests, isSpeakerOn, onPlayTrackForRoom, onToggleRoomPlayPause, onStopRoomMusic, onSkipNext, onToggleLoop, onAddToQueue, onRemoveFromQueue, onRequestTrack, onDismissRequest }) => {
+	const [activeTab, setActiveTab] = (0, import_react.useState)("search");
+	const [searchQuery, setSearchQuery] = (0, import_react.useState)("");
+	const [searchMode, setSearchMode] = (0, import_react.useState)("all");
+	const [selectedCategory, setSelectedCategory] = (0, import_react.useState)("all");
+	const [results, setResults] = (0, import_react.useState)([]);
+	const [isSearching, setIsSearching] = (0, import_react.useState)(false);
+	const [searchError, setSearchError] = (0, import_react.useState)(null);
+	const [recentlyQueuedIds, setRecentlyQueuedIds] = (0, import_react.useState)(/* @__PURE__ */ new Set());
+	const [recentlyRequestedIds, setRecentlyRequestedIds] = (0, import_react.useState)(/* @__PURE__ */ new Set());
+	const [playback, setPlayback] = (0, import_react.useState)(() => partyMusicPlayer.getSnapshot());
+	const searchRequestSeqRef = (0, import_react.useRef)(0);
+	(0, import_react.useEffect)(() => {
+		if (!isOpen) return;
+		const unsub = partyMusicPlayer.subscribe(setPlayback);
+		return () => {
+			unsub();
+			partyMusicPlayer.stopPreview();
+		};
+	}, [isOpen]);
+	(0, import_react.useEffect)(() => {
+		if (!isOpen) return;
+		const trimmed = searchQuery.trim();
+		const seq = ++searchRequestSeqRef.current;
+		if (!trimmed) {
+			setIsSearching(true);
+			setSearchError(null);
+			fetchTrendingPartyMusic(selectedCategory, 18).then((tracks) => {
+				if (searchRequestSeqRef.current !== seq) return;
+				setResults(tracks);
+				if (tracks.length === 0) setSearchError("No songs loaded right now. Try searching by song or artist name.");
+			}).catch(() => {
+				if (searchRequestSeqRef.current !== seq) return;
+				setSearchError("Could not load songs. Check your internet connection.");
+			}).finally(() => {
+				if (searchRequestSeqRef.current === seq) setIsSearching(false);
+			});
+			return;
+		}
+		setIsSearching(true);
+		setSearchError(null);
+		const timer = window.setTimeout(() => {
+			searchPartyMusic(trimmed, searchMode, 22).then((tracks) => {
+				if (searchRequestSeqRef.current !== seq) return;
+				setResults(tracks);
+				if (tracks.length === 0) setSearchError(`No tracks found for "${trimmed}". Try another spelling or artist.`);
+			}).catch(() => {
+				if (searchRequestSeqRef.current !== seq) return;
+				setSearchError("Search failed. Please try again.");
+			}).finally(() => {
+				if (searchRequestSeqRef.current === seq) setIsSearching(false);
+			});
+		}, 360);
+		return () => window.clearTimeout(timer);
+	}, [
+		isOpen,
+		searchQuery,
+		searchMode,
+		selectedCategory
+	]);
+	if (!isOpen) return null;
+	const progressPct = playback.durationSec > 0 ? Math.min(100, Math.max(0, playback.currentTimeSec / playback.durationSec * 100)) : 0;
+	const handleQueueClick = (track) => {
+		onAddToQueue(track);
+		setRecentlyQueuedIds((prev) => new Set(prev).add(track.id));
+		window.setTimeout(() => {
+			setRecentlyQueuedIds((prev) => {
+				const next = new Set(prev);
+				next.delete(track.id);
+				return next;
+			});
+		}, 1500);
+	};
+	const handleRequestClick = (track) => {
+		onRequestTrack(track);
+		setRecentlyRequestedIds((prev) => new Set(prev).add(track.id));
+		window.setTimeout(() => {
+			setRecentlyRequestedIds((prev) => {
+				const next = new Set(prev);
+				next.delete(track.id);
+				return next;
+			});
+		}, 2500);
+	};
+	const handleTogglePreview = (track) => {
+		partyMusicPlayer.unlock();
+		if (playback.isPreviewMode && playback.previewTrackId === track.id) partyMusicPlayer.stopPreview();
+		else partyMusicPlayer.startPreview(track);
+	};
+	const volumePercent = Math.round(playback.localVolume * 100);
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+		className: "fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-end sm:items-center justify-center sm:p-4",
+		onClick: onClose,
+		children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+			onClick: (e) => e.stopPropagation(),
+			className: "w-full sm:max-w-md max-h-[88vh] rounded-t-3xl sm:rounded-3xl bg-[#130A24] border-t sm:border border-[#A855F7]/30 shadow-[0_20px_70px_rgba(0,0,0,0.85)] flex flex-col overflow-hidden",
+			children: [
+				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "px-4 pt-4 pb-3 border-b border-white/10 flex items-center justify-between shrink-0",
+					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "flex items-center gap-2.5 min-w-0",
+						children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "w-9 h-9 rounded-2xl bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center shadow-lg shrink-0",
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Disc3, { className: `w-5 h-5 text-white ${isRoomMusicPlaying && currentTrack ? "animate-spin-slow" : ""}` })
+						}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "min-w-0",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center gap-1.5",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("h3", {
+									className: "text-sm font-black text-white tracking-tight truncate",
+									children: "Party Music DJ"
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+									className: "px-1.5 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-400/30 text-[9px] font-bold text-emerald-300 shrink-0",
+									children: "Voice Clear"
+								})]
+							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("p", {
+								className: "text-[10px] text-zinc-400 truncate",
+								children: canControlRoomMusic ? "Plays live for Host, Seated Guests & Viewers" : "Live synced room audio • Adjust your own music volume"
+							})]
+						})]
+					}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+						type: "button",
+						onClick: onClose,
+						className: "w-8 h-8 rounded-full bg-white/5 hover:bg-white/15 flex items-center justify-center text-zinc-300 hover:text-white transition-colors cursor-pointer shrink-0",
+						"aria-label": "Close music player",
+						children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(X, { className: "w-4 h-4" })
+					})]
+				}),
+				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "px-4 pt-3 pb-3 bg-gradient-to-b from-[#20103D]/90 to-[#130A24] border-b border-white/10 shrink-0 space-y-2.5",
+					children: [
+						currentTrack ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "p-2.5 rounded-2xl bg-black/35 border border-[#A855F7]/25",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center gap-2.5",
+								children: [
+									currentTrack.artworkUrl ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", {
+										src: currentTrack.artworkUrl,
+										alt: currentTrack.title,
+										className: "w-11 h-11 rounded-xl object-cover border border-white/15 shrink-0"
+									}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+										className: "w-11 h-11 rounded-xl bg-gradient-to-br from-[#7928CA] to-[#EC4899] flex items-center justify-center shrink-0",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Disc3, { className: "w-5 h-5 text-white" })
+									}),
+									/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										className: "min-w-0 flex-1",
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+											className: "flex items-center gap-1.5",
+											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+												className: "text-xs font-bold text-white truncate",
+												children: currentTrack.title
+											}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+												className: `px-1.5 py-0.2 rounded text-[8.5px] font-black uppercase shrink-0 ${currentTrack.isFullTrack ? "bg-emerald-500/20 text-emerald-300 border border-emerald-400/30" : "bg-amber-500/20 text-amber-200 border border-amber-400/30"}`,
+												children: currentTrack.isFullTrack ? "Full" : "30s"
+											})]
+										}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+											className: "text-[10.5px] text-zinc-300 truncate",
+											children: [currentTrack.artist, musicUpdatedBy ? ` • DJ ${musicUpdatedBy}` : ""]
+										})]
+									}),
+									canControlRoomMusic ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										className: "flex items-center gap-1 shrink-0",
+										children: [
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: () => {
+													partyMusicPlayer.unlock();
+													onToggleRoomPlayPause();
+												},
+												className: "w-9 h-9 rounded-full bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center text-white shadow-md hover:brightness-110 active:scale-95 transition-all cursor-pointer",
+												title: isRoomMusicPlaying ? "Pause for everyone" : "Resume for everyone",
+												children: playback.isLoading && isRoomMusicPlaying ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(LoaderCircle, { className: "w-4 h-4 animate-spin" }) : isRoomMusicPlaying ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Pause, { className: "w-4 h-4 fill-white" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Play, { className: "w-4 h-4 fill-white ml-0.5" })
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: onSkipNext,
+												disabled: musicQueue.length === 0,
+												className: "w-8 h-8 rounded-full bg-white/10 hover:bg-white/20 disabled:opacity-35 flex items-center justify-center text-white transition-colors cursor-pointer disabled:cursor-not-allowed",
+												title: "Skip to next queued song",
+												children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(SkipForward, { className: "w-3.5 h-3.5" })
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: onToggleLoop,
+												className: `w-8 h-8 rounded-full flex items-center justify-center transition-colors cursor-pointer ${musicLoop ? "bg-[#EC4899]/30 text-[#F472B6] border border-[#EC4899]/50" : "bg-white/5 text-zinc-400 hover:text-white"}`,
+												title: musicLoop ? "Repeat track ON" : "Repeat track OFF",
+												children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Repeat, { className: "w-3.5 h-3.5" })
+											}),
+											/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: onStopRoomMusic,
+												className: "w-8 h-8 rounded-full bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 flex items-center justify-center transition-colors cursor-pointer",
+												title: "Stop room music",
+												children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Square, { className: "w-3 h-3 fill-current" })
+											})
+										]
+									}) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										className: "flex items-center gap-1 px-2 py-1 rounded-lg bg-emerald-500/15 border border-emerald-400/30 text-[10px] font-bold text-emerald-300 shrink-0",
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Radio, { className: "w-3 h-3 animate-pulse" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: isRoomMusicPlaying ? "Live" : "Paused" })]
+									})
+								]
+							}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "mt-2 flex items-center gap-2",
+								children: [
+									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+										className: "text-[9.5px] font-mono text-zinc-400 w-7 text-right",
+										children: formatMusicDuration(playback.currentTimeSec)
+									}),
+									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+										className: "flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+											className: "h-full rounded-full bg-gradient-to-r from-[#A855F7] to-[#EC4899] transition-all duration-200",
+											style: { width: `${progressPct}%` }
+										})
+									}),
+									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+										className: "text-[9.5px] font-mono text-zinc-400 w-7",
+										children: formatMusicDuration(playback.durationSec || currentTrack.durationSec)
+									})
+								]
+							})]
+						}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "p-2.5 rounded-2xl bg-black/30 border border-white/10 flex items-center justify-between gap-2",
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center gap-2 text-zinc-300 text-xs",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Radio, { className: "w-4 h-4 text-[#C084FC]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: canControlRoomMusic ? "Search any song below to play live in this party!" : "No background song playing yet. Request a song below!" })]
+							})
+						}),
+						playback.isAutoplayBlocked && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+							type: "button",
+							onClick: () => partyMusicPlayer.unlock(),
+							className: "w-full py-2 px-3 rounded-xl bg-amber-500/20 border border-amber-400/50 text-amber-200 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer hover:bg-amber-500/30",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Volume2, { className: "w-4 h-4" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Tap here to unlock room background music" })]
+						}),
+						playback.isPreviewMode && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "px-3 py-1.5 rounded-xl bg-cyan-500/15 border border-cyan-400/35 flex items-center justify-between text-[11px] text-cyan-200",
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center gap-1.5 font-semibold",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Headphones, { className: "w-3.5 h-3.5" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Private Preview (only you hear this)" })]
+							}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+								type: "button",
+								onClick: () => partyMusicPlayer.stopPreview(),
+								className: "text-[10px] font-black uppercase px-2 py-0.5 rounded bg-cyan-500/25 hover:bg-cyan-500/40 text-white cursor-pointer",
+								children: "Stop"
+							})]
+						}),
+						playback.errorMessage && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "px-3 py-1.5 rounded-xl bg-rose-500/15 border border-rose-400/30 text-[11px] text-rose-200",
+							children: playback.errorMessage
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "flex items-center gap-2 px-2.5 py-2 rounded-xl bg-white/[0.04] border border-white/10",
+							children: [
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+									type: "button",
+									onClick: () => partyMusicPlayer.setLocalMuted(!playback.localMuted),
+									className: `w-7 h-7 rounded-lg flex items-center justify-center shrink-0 transition-colors cursor-pointer ${playback.localMuted || !isSpeakerOn ? "bg-rose-500/20 text-rose-300" : "bg-[#7928CA]/30 text-[#E9D5FF]"}`,
+									title: playback.localMuted ? "Unmute background music" : "Mute background music (keep voice on)",
+									children: playback.localMuted || !isSpeakerOn ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(VolumeX, { className: "w-3.5 h-3.5" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Volume2, { className: "w-3.5 h-3.5" })
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: "flex-1 min-w-0",
+									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+										className: "flex items-center justify-between text-[10px] mb-0.5",
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
+											className: "text-zinc-300 font-semibold",
+											children: ["My Music Volume ", !isSpeakerOn ? "(Room Speaker Off)" : ""]
+										}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+											className: "font-mono text-[#E9D5FF] font-bold",
+											children: playback.localMuted ? "Muted" : `${volumePercent}%`
+										})]
+									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
+										type: "range",
+										min: 0,
+										max: 100,
+										value: playback.localMuted ? 0 : volumePercent,
+										onChange: (e) => partyMusicPlayer.setLocalVolume(Number(e.target.value) / 100),
+										className: "w-full h-1.5 accent-[#EC4899] cursor-pointer",
+										"aria-label": "Personal background music volume"
+									})]
+								}),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+									type: "button",
+									onClick: () => partyMusicPlayer.setVoiceDuckingEnabled(!playback.voiceDuckingEnabled),
+									className: `px-2 py-1 rounded-lg text-[9.5px] font-bold border shrink-0 transition-colors cursor-pointer ${playback.voiceDuckingEnabled ? "bg-emerald-500/15 border-emerald-400/40 text-emerald-300" : "bg-white/5 border-white/10 text-zinc-400"}`,
+									title: "Automatically lowers music softly when anyone speaks so voices stay crystal clear",
+									children: playback.voiceDuckingEnabled ? "Auto-Duck ON" : "Auto-Duck OFF"
+								})
+							]
+						})
+					]
+				}),
+				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "px-4 pt-2.5 flex items-center gap-1.5 shrink-0",
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+							type: "button",
+							onClick: () => setActiveTab("search"),
+							className: `flex-1 h-8 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${activeTab === "search" ? "bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow" : "bg-white/5 text-zinc-400 hover:text-white"}`,
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Search, { className: "w-3.5 h-3.5" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Search Songs" })]
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+							type: "button",
+							onClick: () => setActiveTab("queue"),
+							className: `flex-1 h-8 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 transition-all cursor-pointer ${activeTab === "queue" ? "bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow" : "bg-white/5 text-zinc-400 hover:text-white"}`,
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(ListMusic, { className: "w-3.5 h-3.5" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+								"Up Next (",
+								musicQueue.length,
+								")"
+							] })]
+						}),
+						(songRequests.length > 0 || !canControlRoomMusic) && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+							type: "button",
+							onClick: () => setActiveTab("requests"),
+							className: `px-3 h-8 rounded-xl text-xs font-bold flex items-center justify-center gap-1 transition-all cursor-pointer ${activeTab === "requests" ? "bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white shadow" : "bg-white/5 text-zinc-400 hover:text-white"}`,
+							children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Sparkles, { className: "w-3.5 h-3.5" }), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", { children: [
+								"Req (",
+								songRequests.length,
+								")"
+							] })]
+						})
+					]
+				}),
+				activeTab === "search" && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "flex-1 min-h-0 flex flex-col px-4 pt-2.5 pb-4 overflow-hidden",
+					children: [
+						/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+							className: "relative shrink-0",
+							children: [
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Search, { className: "w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" }),
+								/* @__PURE__ */ (0, import_jsx_runtime.jsx)("input", {
+									type: "text",
+									value: searchQuery,
+									onChange: (e) => setSearchQuery(e.target.value),
+									placeholder: "Search any song (Atif Aslam, Arijit, Punjabi, Lo-Fi...)",
+									className: "w-full h-10 pl-9 pr-9 rounded-xl bg-black/45 border border-white/15 text-xs text-white placeholder-zinc-400 focus:outline-none focus:border-[#EC4899]"
+								}),
+								searchQuery && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+									type: "button",
+									onClick: () => setSearchQuery(""),
+									className: "absolute right-2.5 top-1/2 -translate-y-1/2 text-zinc-400 hover:text-white cursor-pointer",
+									"aria-label": "Clear search",
+									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(X, { className: "w-4 h-4" })
+								})
+							]
+						}),
+						searchQuery.trim() ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "mt-2 flex items-center gap-1.5 shrink-0",
+							children: [
+								{
+									id: "all",
+									label: "All Results"
+								},
+								{
+									id: "full",
+									label: "Full Songs Only"
+								},
+								{
+									id: "popular",
+									label: "Bollywood / Desi / Pop"
+								}
+							].map((m) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+								type: "button",
+								onClick: () => setSearchMode(m.id),
+								className: `px-2.5 py-1 rounded-lg text-[10.5px] font-bold border transition-colors cursor-pointer ${searchMode === m.id ? "bg-[#7928CA]/40 border-[#EC4899] text-white" : "bg-white/5 border-white/10 text-zinc-400 hover:text-white"}`,
+								children: m.label
+							}, m.id))
+						}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "mt-2 flex items-center gap-1.5 overflow-x-auto scrollbar-none pb-1 shrink-0",
+							children: CATEGORY_CHIPS.map((cat) => /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+								type: "button",
+								onClick: () => setSelectedCategory(cat.id),
+								className: `px-2.5 py-1 rounded-lg text-[10.5px] font-bold border whitespace-nowrap transition-colors cursor-pointer ${selectedCategory === cat.id ? "bg-[#7928CA]/45 border-[#EC4899] text-white" : "bg-white/5 border-white/10 text-zinc-300 hover:text-white"}`,
+								children: cat.label
+							}, cat.id))
+						}),
+						/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+							className: "mt-2 flex-1 min-h-0 overflow-y-auto space-y-1.5 pr-0.5",
+							children: isSearching ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "py-10 flex flex-col items-center justify-center text-zinc-400 gap-2",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(LoaderCircle, { className: "w-6 h-6 animate-spin text-[#EC4899]" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+									className: "text-xs",
+									children: "Searching free music library..."
+								})]
+							}) : searchError && results.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "py-10 text-center text-xs text-zinc-400 px-4",
+								children: searchError
+							}) : results.map((track) => {
+								const isCurrent = currentTrack?.id === track.id;
+								const isPreviewing = playback.isPreviewMode && playback.previewTrackId === track.id;
+								const wasQueued = recentlyQueuedIds.has(track.id);
+								const wasRequested = recentlyRequestedIds.has(track.id);
+								return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: `p-2 rounded-xl border flex items-center gap-2.5 transition-all ${isCurrent ? "bg-[#7928CA]/30 border-[#EC4899]/80" : "bg-white/[0.03] border-white/8 hover:border-white/20"}`,
+									children: [
+										track.artworkUrl ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", {
+											src: track.artworkUrl,
+											alt: track.title,
+											loading: "lazy",
+											className: "w-10 h-10 rounded-lg object-cover border border-white/10 shrink-0"
+										}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+											className: "w-10 h-10 rounded-lg bg-gradient-to-br from-[#7928CA]/70 to-[#EC4899]/70 flex items-center justify-center shrink-0",
+											children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Disc3, { className: "w-4 h-4 text-white" })
+										}),
+										/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+											className: "min-w-0 flex-1",
+											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+												className: "text-xs font-bold text-white truncate",
+												children: track.title
+											}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+												className: "flex items-center gap-1.5 mt-0.5",
+												children: [
+													/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+														className: "text-[10.5px] text-zinc-400 truncate",
+														children: track.artist
+													}),
+													/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+														className: "text-[9.5px] font-mono text-zinc-500 shrink-0",
+														children: formatMusicDuration(track.durationSec)
+													}),
+													/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+														className: `px-1 py-0.2 rounded text-[8.5px] font-extrabold uppercase shrink-0 ${track.isFullTrack ? "bg-emerald-500/15 text-emerald-300" : "bg-amber-500/15 text-amber-200"}`,
+														children: track.isFullTrack ? "Full" : "30s"
+													})
+												]
+											})]
+										}),
+										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+											className: "flex items-center gap-1 shrink-0",
+											children: canControlRoomMusic ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+												type: "button",
+												onClick: () => {
+													partyMusicPlayer.unlock();
+													partyMusicPlayer.stopPreview();
+													onPlayTrackForRoom(track);
+												},
+												className: "h-8 px-2.5 rounded-lg bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-[10.5px] font-bold flex items-center gap-1 hover:brightness-110 active:scale-95 transition-all cursor-pointer",
+												title: "Play live for everyone in room",
+												children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Play, { className: "w-3 h-3 fill-white" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: isCurrent && isRoomMusicPlaying ? "Playing" : "Play" })]
+											}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: () => handleQueueClick(track),
+												className: `w-8 h-8 rounded-lg border flex items-center justify-center transition-colors cursor-pointer ${wasQueued ? "bg-emerald-500/25 border-emerald-400/50 text-emerald-300" : "bg-white/5 border-white/10 text-zinc-300 hover:text-white hover:bg-white/15"}`,
+												title: "Add to room Up Next queue",
+												children: wasQueued ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Check, { className: "w-3.5 h-3.5" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Plus, { className: "w-3.5 h-3.5" })
+											})] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: () => handleTogglePreview(track),
+												className: `w-8 h-8 rounded-lg border flex items-center justify-center transition-colors cursor-pointer ${isPreviewing ? "bg-cyan-500/30 border-cyan-400 text-white" : "bg-white/5 border-white/10 text-zinc-300 hover:text-white"}`,
+												title: isPreviewing ? "Stop private preview" : "Listen privately (only you)",
+												children: isPreviewing ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Square, { className: "w-3 h-3 fill-white" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Headphones, { className: "w-3.5 h-3.5" })
+											}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+												type: "button",
+												onClick: () => handleRequestClick(track),
+												className: `h-8 px-2.5 rounded-lg text-[10.5px] font-bold flex items-center gap-1 transition-all cursor-pointer ${wasRequested ? "bg-emerald-500/25 text-emerald-300 border border-emerald-400/40" : "bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white hover:brightness-110"}`,
+												title: "Request Host to play this song for everyone",
+												children: wasRequested ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Check, { className: "w-3 h-3" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Sent" })] }) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)(import_jsx_runtime.Fragment, { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Send, { className: "w-3 h-3" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Request" })] })
+											})] })
+										})
+									]
+								}, track.id);
+							})
+						})
+					]
+				}),
+				activeTab === "queue" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+					className: "flex-1 min-h-0 overflow-y-auto px-4 pt-3 pb-4 space-y-2",
+					children: musicQueue.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "py-10 text-center text-xs text-zinc-400",
+						children: ["Queue is empty. ", canControlRoomMusic ? "Tap + on any searched song to queue it up!" : "Host has not queued extra songs yet."]
+					}) : musicQueue.map((track, idx) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "p-2.5 rounded-xl bg-white/[0.04] border border-white/10 flex items-center gap-2.5",
+						children: [
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+								className: "text-[11px] font-mono text-[#C084FC] w-5 text-center shrink-0",
+								children: idx + 1
+							}),
+							track.artworkUrl ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", {
+								src: track.artworkUrl,
+								alt: track.title,
+								className: "w-9 h-9 rounded-lg object-cover shrink-0"
+							}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "w-9 h-9 rounded-lg bg-[#7928CA]/40 flex items-center justify-center shrink-0",
+								children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Disc3, { className: "w-4 h-4 text-white" })
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "min-w-0 flex-1",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+									className: "text-xs font-bold text-white truncate",
+									children: track.title
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: "text-[10px] text-zinc-400 truncate",
+									children: [
+										track.artist,
+										" • ",
+										formatMusicDuration(track.durationSec)
+									]
+								})]
+							}),
+							canControlRoomMusic && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center gap-1 shrink-0",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+									type: "button",
+									onClick: () => {
+										onPlayTrackForRoom(track);
+										onRemoveFromQueue(track.id, idx);
+									},
+									className: "w-7 h-7 rounded-lg bg-[#7928CA]/40 hover:bg-[#7928CA]/70 text-white flex items-center justify-center cursor-pointer",
+									title: "Play now",
+									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Play, { className: "w-3 h-3 fill-white" })
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+									type: "button",
+									onClick: () => onRemoveFromQueue(track.id, idx),
+									className: "w-7 h-7 rounded-lg bg-rose-500/15 hover:bg-rose-500/30 text-rose-300 flex items-center justify-center cursor-pointer",
+									title: "Remove from queue",
+									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Trash2, { className: "w-3 h-3" })
+								})]
+							})
+						]
+					}, `${track.id}_${idx}`))
+				}),
+				activeTab === "requests" && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+					className: "flex-1 min-h-0 overflow-y-auto px-4 pt-3 pb-4 space-y-2",
+					children: songRequests.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+						className: "py-10 text-center text-xs text-zinc-400",
+						children: "No song requests yet. Guests and viewers can request songs from Search!"
+					}) : songRequests.map((req) => /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+						className: "p-2.5 rounded-xl bg-white/[0.04] border border-white/10 flex items-center gap-2.5",
+						children: [
+							req.track.artworkUrl ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", {
+								src: req.track.artworkUrl,
+								alt: req.track.title,
+								className: "w-10 h-10 rounded-lg object-cover shrink-0"
+							}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+								className: "w-10 h-10 rounded-lg bg-[#7928CA]/40 flex items-center justify-center shrink-0",
+								children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Disc3, { className: "w-4 h-4 text-white" })
+							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "min-w-0 flex-1",
+								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+									className: "text-xs font-bold text-white truncate",
+									children: req.track.title
+								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									className: "text-[10px] text-zinc-400 truncate",
+									children: [
+										req.track.artist,
+										" • Req by ",
+										/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+											className: "text-[#E9D5FF] font-semibold",
+											children: req.requesterName
+										})
+									]
+								})]
+							}),
+							canControlRoomMusic && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+								className: "flex items-center gap-1 shrink-0",
+								children: [
+									/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+										type: "button",
+										onClick: () => {
+											onPlayTrackForRoom({
+												...req.track,
+												requestedBy: req.requesterName
+											});
+											onDismissRequest(req.id);
+										},
+										className: "h-7 px-2 rounded-lg bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-[10px] font-bold flex items-center gap-1 cursor-pointer",
+										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Play, { className: "w-3 h-3 fill-white" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "Play" })]
+									}),
+									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+										type: "button",
+										onClick: () => {
+											onAddToQueue({
+												...req.track,
+												requestedBy: req.requesterName
+											});
+											onDismissRequest(req.id);
+										},
+										className: "w-7 h-7 rounded-lg bg-white/10 hover:bg-white/20 text-white flex items-center justify-center cursor-pointer",
+										title: "Add to queue",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Plus, { className: "w-3.5 h-3.5" })
+									}),
+									/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
+										type: "button",
+										onClick: () => onDismissRequest(req.id),
+										className: "w-7 h-7 rounded-lg bg-white/5 hover:bg-rose-500/25 text-zinc-400 hover:text-rose-300 flex items-center justify-center cursor-pointer",
+										title: "Dismiss",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(X, { className: "w-3 h-3" })
+									})
+								]
+							})
+						]
+					}, req.id))
+				})
+			]
+		})
+	});
+};
+// src/hooks/usePartyAudioAnalyser.ts
+/**
+* Real-time Web Audio API `AnalyserNode` hook for Party Rooms.
+*
+* - Taps every active local & remote Agora WebRTC `MediaStreamTrack` read-only into
+*   a summing `GainNode` -> `AnalyserNode` (NEVER connected to `ctx.destination`, so
+*   there is zero echo, zero feedback, and zero disruption to Agora Party Voice).
+* - Exposes a zero-allocation `sampleSpectrum(outBars)` reader intended for 60fps
+*   `requestAnimationFrame` canvas rendering with zero React state re-renders.
+* - On Native Android Capacitor (where Agora audio runs natively outside WebRTC
+*   browser tracks), gracefully blends real native Agora speaker volume telemetry
+*   when `AnalyserNode` bins are zero.
+*/
+function usePartyAudioAnalyser({ roomId, isSpeakerOn, remoteStreams = [], fftSize = 128 }) {
+	const ctxRef = (0, import_react.useRef)(null);
+	const mixerGainRef = (0, import_react.useRef)(null);
+	const analyserRef = (0, import_react.useRef)(null);
+	const freqBufferRef = (0, import_react.useRef)(null);
+	const connectedSourcesRef = (0, import_react.useRef)(/* @__PURE__ */ new Map());
+	const smoothedBarsRef = (0, import_react.useRef)(null);
+	const roomIdRef = (0, import_react.useRef)(roomId);
+	roomIdRef.current = roomId;
+	const isSpeakerOnRef = (0, import_react.useRef)(isSpeakerOn);
+	isSpeakerOnRef.current = isSpeakerOn;
+	const remoteStreamsRef = (0, import_react.useRef)(remoteStreams);
+	remoteStreamsRef.current = remoteStreams;
+	const ensureAnalyserGraph = (0, import_react.useCallback)(() => {
+		if (typeof window === "undefined") return null;
+		try {
+			if (!ctxRef.current) {
+				const AudioCtx = window.AudioContext || window.webkitAudioContext;
+				if (!AudioCtx) return null;
+				ctxRef.current = new AudioCtx();
+			}
+			const ctx = ctxRef.current;
+			if (!mixerGainRef.current || !analyserRef.current) {
+				const mixer = ctx.createGain();
+				mixer.gain.setValueAtTime(1, ctx.currentTime);
+				const analyser = ctx.createAnalyser();
+				analyser.fftSize = fftSize;
+				analyser.minDecibels = -86;
+				analyser.maxDecibels = -16;
+				analyser.smoothingTimeConstant = .76;
+				mixer.connect(analyser);
+				mixerGainRef.current = mixer;
+				analyserRef.current = analyser;
+				freqBufferRef.current = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+			}
+			return analyserRef.current;
+		} catch {
+			return null;
+		}
+	}, [fftSize]);
+	const disconnectAllSources = (0, import_react.useCallback)(() => {
+		connectedSourcesRef.current.forEach((entry) => {
+			try {
+				entry.track.removeEventListener("ended", entry.onEnded);
+				entry.source.disconnect();
+			} catch {}
+		});
+		connectedSourcesRef.current.clear();
+	}, []);
+	const syncActiveStreamTracks = (0, import_react.useCallback)(() => {
+		const activeRoomId = roomIdRef.current;
+		if (!activeRoomId) {
+			disconnectAllSources();
+			return;
+		}
+		const desiredTracks = /* @__PURE__ */ new Map();
+		const agoraTracks = agoraPartyEngine.getVisualizerAudioTracks(activeRoomId);
+		for (const item of agoraTracks) if (item.track && item.track.readyState === "live") desiredTracks.set(item.id, item.track);
+		if (isSpeakerOnRef.current && remoteStreamsRef.current.length > 0) for (const rs of remoteStreamsRef.current) {
+			if (!rs?.stream) continue;
+			for (const t of rs.stream.getAudioTracks()) if (t && t.readyState === "live") desiredTracks.set(`stream:${rs.peerId}:${t.id}`, t);
+		}
+		connectedSourcesRef.current.forEach((entry, key) => {
+			const nextTrack = desiredTracks.get(key);
+			if (!nextTrack || nextTrack !== entry.track || entry.track.readyState !== "live") {
+				try {
+					entry.track.removeEventListener("ended", entry.onEnded);
+					entry.source.disconnect();
+				} catch {}
+				connectedSourcesRef.current.delete(key);
+			}
+		});
+		if (desiredTracks.size === 0) return;
+		const analyser = ensureAnalyserGraph();
+		const ctx = ctxRef.current;
+		const mixer = mixerGainRef.current;
+		if (!analyser || !ctx || !mixer) return;
+		if (ctx.state === "suspended") ctx.resume().catch(() => {});
+		desiredTracks.forEach((track, key) => {
+			if (connectedSourcesRef.current.has(key)) return;
+			try {
+				const singleTrackStream = new MediaStream([track]);
+				const source = ctx.createMediaStreamSource(singleTrackStream);
+				source.connect(mixer);
+				const onEnded = () => {
+					const current = connectedSourcesRef.current.get(key);
+					if (current) {
+						try {
+							current.source.disconnect();
+						} catch {}
+						connectedSourcesRef.current.delete(key);
+					}
+				};
+				track.addEventListener("ended", onEnded, { once: true });
+				connectedSourcesRef.current.set(key, {
+					track,
+					source,
+					onEnded
+				});
+			} catch {}
+		});
+	}, [disconnectAllSources, ensureAnalyserGraph]);
+	(0, import_react.useEffect)(() => {
+		if (!roomId) {
+			disconnectAllSources();
+			return;
+		}
+		ensureAnalyserGraph();
+		syncActiveStreamTracks();
+		const unsubscribeTracks = agoraPartyEngine.subscribeAudioTracks(() => {
+			syncActiveStreamTracks();
+		});
+		const handleResumeGesture = () => {
+			const ctx = ctxRef.current;
+			if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
+			syncActiveStreamTracks();
+		};
+		const handleVisibility = () => {
+			if (document.visibilityState === "visible") handleResumeGesture();
+		};
+		window.addEventListener("pointerdown", handleResumeGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("touchstart", handleResumeGesture, {
+			capture: true,
+			passive: true
+		});
+		window.addEventListener("click", handleResumeGesture, {
+			capture: true,
+			passive: true
+		});
+		document.addEventListener("visibilitychange", handleVisibility);
+		const syncTimer = window.setInterval(syncActiveStreamTracks, 2500);
+		return () => {
+			unsubscribeTracks();
+			window.clearInterval(syncTimer);
+			window.removeEventListener("pointerdown", handleResumeGesture, { capture: true });
+			window.removeEventListener("touchstart", handleResumeGesture, { capture: true });
+			window.removeEventListener("click", handleResumeGesture, { capture: true });
+			document.removeEventListener("visibilitychange", handleVisibility);
+			disconnectAllSources();
+		};
+	}, [
+		roomId,
+		ensureAnalyserGraph,
+		syncActiveStreamTracks,
+		disconnectAllSources
+	]);
+	(0, import_react.useEffect)(() => {
+		if (!roomId) return;
+		syncActiveStreamTracks();
+	}, [
+		roomId,
+		isSpeakerOn,
+		remoteStreams,
+		syncActiveStreamTracks
+	]);
+	(0, import_react.useEffect)(() => {
+		return () => {
+			disconnectAllSources();
+			try {
+				mixerGainRef.current?.disconnect();
+				analyserRef.current?.disconnect();
+			} catch {}
+			if (ctxRef.current && ctxRef.current.state !== "closed") ctxRef.current.close().catch(() => {});
+			ctxRef.current = null;
+			mixerGainRef.current = null;
+			analyserRef.current = null;
+			freqBufferRef.current = null;
+		};
+	}, [disconnectAllSources]);
+	return { sampleSpectrum: (0, import_react.useCallback)((outBars, nowMs, opts) => {
+		const barCount = outBars.length;
+		if (!smoothedBarsRef.current || smoothedBarsRef.current.length !== barCount) smoothedBarsRef.current = new Float32Array(barCount);
+		const smoothed = smoothedBarsRef.current;
+		const analyser = analyserRef.current;
+		const freqBuf = freqBufferRef.current;
+		const ctx = ctxRef.current;
+		const activeRoomId = roomIdRef.current;
+		let fftHasEnergy = false;
+		let rawSum = 0;
+		if (analyser && freqBuf && ctx && ctx.state === "running" && connectedSourcesRef.current.size > 0) {
+			analyser.getByteFrequencyData(freqBuf);
+			const usableBins = Math.max(8, Math.floor(freqBuf.length * .78));
+			for (let i = 0; i < barCount; i++) {
+				const t0 = i / barCount;
+				const t1 = (i + 1) / barCount;
+				const startBin = Math.min(usableBins - 1, Math.floor(Math.pow(t0, 1.38) * usableBins));
+				const endBin = Math.max(startBin + 1, Math.min(usableBins, Math.ceil(Math.pow(t1, 1.38) * usableBins)));
+				let peakBin = 0;
+				let avgBin = 0;
+				for (let b = startBin; b < endBin; b++) {
+					const val = freqBuf[b];
+					avgBin += val;
+					if (val > peakBin) peakBin = val;
+				}
+				avgBin /= Math.max(1, endBin - startBin);
+				const normalized = Math.min(1, (peakBin * .62 + avgBin * .38) / 255 * 1.18);
+				if (normalized > .025) fftHasEnergy = true;
+				rawSum += normalized;
+				const prev = smoothed[i];
+				const alpha = normalized > prev ? .58 : .2;
+				smoothed[i] = prev + (normalized - prev) * alpha;
+				outBars[i] = smoothed[i];
+			}
+		}
+		const snapshot = activeRoomId ? agoraPartyEngine.getAudioEnergySnapshot(activeRoomId) : {
+			peakVolume: 0,
+			activeSpeakers: 0,
+			speakerLevels: []
+		};
+		if (!fftHasEnergy) {
+			const tSec = nowMs * .001;
+			const nativeEnergy = snapshot.peakVolume;
+			const musicEnergy = isSpeakerOnRef.current ? partyMusicPlayer.getMusicEnergy() : 0;
+			const hasNativeVoice = nativeEnergy > .02;
+			const hasLiveMusic = musicEnergy > .04;
+			const ambientMusicFloor = hasLiveMusic ? Math.min(.42, .08 + musicEnergy * .45) : opts?.isMusicPlaying && isSpeakerOnRef.current ? .09 : .035;
+			for (let i = 0; i < barCount; i++) {
+				const normIdx = i / Math.max(1, barCount - 1);
+				let target = ambientMusicFloor;
+				if (hasNativeVoice) {
+					const formantBell = Math.exp(-Math.pow((normIdx - .22) / .28, 2)) * .92 + Math.exp(-Math.pow((normIdx - .58) / .22, 2)) * .56;
+					const harmonicWave = .68 + .22 * Math.sin(tSec * (7.2 + i % 5 * 1.4) + i * .85) + .1 * Math.cos(tSec * 11.5 - i * 1.3);
+					const speakerBoost = snapshot.speakerLevels[i % Math.max(1, snapshot.speakerLevels.length)] ?? nativeEnergy;
+					target = Math.min(1, Math.max(ambientMusicFloor, speakerBoost * formantBell * harmonicWave * 1.25));
+				} else if (hasLiveMusic) {
+					const bassBias = 1.15 - normIdx * .48;
+					const rhythmicWave = .62 + .26 * Math.sin(tSec * (5.2 + i % 4 * 1.1) + i * .7) + .12 * Math.cos(tSec * 9.4 - i * 1.05);
+					target = Math.min(.85, Math.max(.05, musicEnergy * bassBias * rhythmicWave * 1.35));
+				} else target = ambientMusicFloor * (.45 + .55 * (.55 + .45 * Math.sin(tSec * 1.85 + normIdx * Math.PI * 2.2))) * (1 - normIdx * .35);
+				const prev = smoothed[i];
+				const alpha = target > prev ? .42 : .16;
+				smoothed[i] = prev + (target - prev) * alpha;
+				outBars[i] = smoothed[i];
+				rawSum += outBars[i];
+			}
+		}
+		const bassEnd = Math.max(1, Math.floor(barCount * .28));
+		const midEnd = Math.max(bassEnd + 1, Math.floor(barCount * .68));
+		let bassAcc = 0;
+		let midAcc = 0;
+		let trebleAcc = 0;
+		for (let i = 0; i < barCount; i++) {
+			const v = outBars[i];
+			if (i < bassEnd) bassAcc += v;
+			else if (i < midEnd) midAcc += v;
+			else trebleAcc += v;
+		}
+		const bass = bassAcc / bassEnd;
+		const mid = midAcc / Math.max(1, midEnd - bassEnd);
+		const treble = trebleAcc / Math.max(1, barCount - midEnd);
+		return {
+			energy: Math.min(1, (bass * .42 + mid * .43 + treble * .15) * 1.15),
+			bass,
+			mid,
+			treble,
+			hasLiveSignal: fftHasEnergy || snapshot.peakVolume > .02,
+			activeSpeakers: Math.max(snapshot.activeSpeakers, fftHasEnergy ? 1 : 0)
+		};
+	}, []) };
+}
+// src/components/party/PartyAudioVisualizer.tsx
+var VISUALIZER_THEME_PALETTES = {
+	royal_gold_diya: {
+		barBottom: "rgba(180, 83, 9, 0.72)",
+		barMid: "rgba(245, 158, 11, 0.92)",
+		barTop: "rgba(254, 240, 138, 0.98)",
+		peakCap: "#FB7185",
+		crestStroke: "rgba(254, 240, 138, 0.48)",
+		haloInner: "rgba(251, 191, 36, 0.28)",
+		haloOuter: "rgba(245, 158, 11, 0)",
+		baseline: "rgba(253, 224, 71, 0.26)"
+	},
+	royal_purple_lotus: {
+		barBottom: "rgba(126, 34, 206, 0.72)",
+		barMid: "rgba(192, 132, 252, 0.92)",
+		barTop: "rgba(245, 208, 254, 0.98)",
+		peakCap: "#F472B6",
+		crestStroke: "rgba(240, 171, 252, 0.48)",
+		haloInner: "rgba(217, 70, 239, 0.28)",
+		haloOuter: "rgba(147, 51, 234, 0)",
+		baseline: "rgba(232, 121, 249, 0.26)"
+	},
+	diamond_ice_blue: {
+		barBottom: "rgba(2, 132, 199, 0.72)",
+		barMid: "rgba(56, 189, 248, 0.92)",
+		barTop: "rgba(224, 242, 254, 0.98)",
+		peakCap: "#FFFFFF",
+		crestStroke: "rgba(186, 230, 253, 0.52)",
+		haloInner: "rgba(56, 189, 248, 0.30)",
+		haloOuter: "rgba(14, 165, 233, 0)",
+		baseline: "rgba(125, 211, 252, 0.28)"
+	}
+};
+var HALF_BAR_COUNT = 16;
+/**
+* Real-Time Party Room Frequency Visualizer.
+*
+* Renders a zero-clutter, edge-feathered 60fps Canvas spectrum driven by the Web Audio API
+* `AnalyserNode` (`usePartyAudioAnalyser`). Automatically harmonizes its palette, peak glints,
+* and stage aura with the active Party Seat Theme (`Royal Gold Diya`, `Royal Purple Lotus`,
+* `Diamond Ice Blue`) and publishes smoothed `--party-audio-energy` CSS variables to the stage
+* so all seat frames animate in exact rhythmic sync with active stream audio.
+*/
+var PartyAudioVisualizer = import_react.memo(({ roomId, theme, isSpeakerOn, isMusicPlaying = false, remoteStreams = [], stageContainerRef, compact = false }) => {
+	const canvasRef = (0, import_react.useRef)(null);
+	const themeRef = (0, import_react.useRef)(theme);
+	themeRef.current = theme;
+	const isMusicPlayingRef = (0, import_react.useRef)(isMusicPlaying);
+	isMusicPlayingRef.current = isMusicPlaying;
+	const { sampleSpectrum } = usePartyAudioAnalyser({
+		roomId,
+		isSpeakerOn,
+		remoteStreams,
+		fftSize: 128
+	});
+	(0, import_react.useEffect)(() => {
+		if (!roomId) return;
+		const canvas = canvasRef.current;
+		if (!canvas) return;
+		const ctx2d = canvas.getContext("2d");
+		if (!ctx2d) return;
+		const reducedMotionQuery = typeof window !== "undefined" && window.matchMedia ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+		const bandValues = new Float32Array(HALF_BAR_COUNT);
+		const peakHold = new Float32Array(HALF_BAR_COUNT);
+		const peakVel = new Float32Array(HALF_BAR_COUNT);
+		let rafId = 0;
+		let widthCss = 0;
+		let heightCss = 0;
+		let dpr = 1;
+		let smoothedEnergy = 0;
+		let smoothedBass = 0;
+		let lastCssUpdateAt = 0;
+		let lastReducedDrawAt = 0;
+		const syncCanvasSize = () => {
+			const rect = canvas.getBoundingClientRect();
+			widthCss = Math.max(120, Math.round(rect.width));
+			heightCss = Math.max(20, Math.round(rect.height));
+			dpr = Math.min(window.devicePixelRatio || 1, 2);
+			const targetW = Math.round(widthCss * dpr);
+			const targetH = Math.round(heightCss * dpr);
+			if (canvas.width !== targetW || canvas.height !== targetH) {
+				canvas.width = targetW;
+				canvas.height = targetH;
+			}
+		};
+		syncCanvasSize();
+		const resizeObserver = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncCanvasSize) : null;
+		resizeObserver?.observe(canvas);
+		const drawFrame = (nowMs) => {
+			rafId = window.requestAnimationFrame(drawFrame);
+			if (document.hidden || widthCss <= 0 || heightCss <= 0) return;
+			const isReducedMotion = Boolean(reducedMotionQuery?.matches);
+			if (isReducedMotion && nowMs - lastReducedDrawAt < 180) return;
+			lastReducedDrawAt = nowMs;
+			const frame = sampleSpectrum(bandValues, nowMs, { isMusicPlaying: isMusicPlayingRef.current });
+			const energyLerp = frame.energy > smoothedEnergy ? .32 : .14;
+			smoothedEnergy += (frame.energy - smoothedEnergy) * energyLerp;
+			smoothedBass += (frame.bass - smoothedBass) * .25;
+			if (stageContainerRef?.current && nowMs - lastCssUpdateAt >= 32) {
+				lastCssUpdateAt = nowMs;
+				const clampedEnergy = isReducedMotion ? Math.min(.35, smoothedEnergy * .5) : smoothedEnergy;
+				stageContainerRef.current.style.setProperty("--party-audio-energy", clampedEnergy.toFixed(3));
+				stageContainerRef.current.style.setProperty("--party-audio-bass", smoothedBass.toFixed(3));
+			}
+			const palette = VISUALIZER_THEME_PALETTES[themeRef.current];
+			ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
+			ctx2d.clearRect(0, 0, widthCss, heightCss);
+			const midX = widthCss * .5;
+			const baselineY = heightCss - 3;
+			const maxBarHeight = Math.max(8, heightCss - 7);
+			const glowRadius = Math.max(48, widthCss * (.28 + smoothedBass * .16));
+			const halo = ctx2d.createRadialGradient(midX, baselineY, 2, midX, baselineY, glowRadius);
+			halo.addColorStop(0, palette.haloInner);
+			halo.addColorStop(1, palette.haloOuter);
+			ctx2d.save();
+			ctx2d.globalAlpha = Math.min(1, .35 + smoothedEnergy * .85);
+			ctx2d.fillStyle = halo;
+			ctx2d.fillRect(0, 0, widthCss, heightCss);
+			ctx2d.restore();
+			const baseGrad = ctx2d.createLinearGradient(0, baselineY, widthCss, baselineY);
+			baseGrad.addColorStop(0, "rgba(255,255,255,0)");
+			baseGrad.addColorStop(.2, palette.baseline);
+			baseGrad.addColorStop(.5, palette.barTop);
+			baseGrad.addColorStop(.8, palette.baseline);
+			baseGrad.addColorStop(1, "rgba(255,255,255,0)");
+			ctx2d.fillStyle = baseGrad;
+			ctx2d.globalAlpha = .45 + smoothedEnergy * .45;
+			ctx2d.fillRect(0, baselineY, widthCss, 1);
+			ctx2d.globalAlpha = 1;
+			const step = widthCss * .92 / 32;
+			const barW = Math.max(2.2, Math.min(4.6, step * .56));
+			const barRadius = barW * .5;
+			const barGrad = ctx2d.createLinearGradient(0, baselineY, 0, baselineY - maxBarHeight);
+			barGrad.addColorStop(0, palette.barBottom);
+			barGrad.addColorStop(.58, palette.barMid);
+			barGrad.addColorStop(1, palette.barTop);
+			const crestPointsLeft = [];
+			const crestPointsRight = [];
+			for (let i = 0; i < HALF_BAR_COUNT; i++) {
+				const edgeTaper = 1 - Math.pow(i / HALF_BAR_COUNT, 1.8) * .32;
+				const amp = Math.min(1, bandValues[i] * edgeTaper);
+				const barH = Math.max(2.2, amp * maxBarHeight);
+				if (barH >= peakHold[i]) {
+					peakHold[i] = barH;
+					peakVel[i] = 0;
+				} else {
+					peakVel[i] += .085;
+					peakHold[i] = Math.max(barH, peakHold[i] - peakVel[i]);
+				}
+				const offsetFromCenter = (i + .5) * step;
+				const xRight = midX + offsetFromCenter - barW * .5;
+				const xLeft = midX - offsetFromCenter - barW * .5;
+				const topY = baselineY - barH;
+				crestPointsRight.push({
+					x: midX + offsetFromCenter,
+					y: topY - 1.2
+				});
+				crestPointsLeft.push({
+					x: midX - offsetFromCenter,
+					y: topY - 1.2
+				});
+				ctx2d.fillStyle = barGrad;
+				ctx2d.beginPath();
+				if (typeof ctx2d.roundRect === "function") {
+					ctx2d.roundRect(xRight, topY, barW, barH, [
+						barRadius,
+						barRadius,
+						1,
+						1
+					]);
+					ctx2d.roundRect(xLeft, topY, barW, barH, [
+						barRadius,
+						barRadius,
+						1,
+						1
+					]);
+				} else {
+					const r = Math.min(barRadius, barH * .5);
+					for (const x of [xRight, xLeft]) {
+						ctx2d.moveTo(x, topY + barH);
+						ctx2d.lineTo(x, topY + r);
+						ctx2d.quadraticCurveTo(x, topY, x + r, topY);
+						ctx2d.lineTo(x + barW - r, topY);
+						ctx2d.quadraticCurveTo(x + barW, topY, x + barW, topY + r);
+						ctx2d.lineTo(x + barW, topY + barH);
+						ctx2d.closePath();
+					}
+				}
+				ctx2d.fill();
+				if (peakHold[i] > 4.5 && !isReducedMotion) {
+					const peakY = Math.max(1.5, baselineY - peakHold[i] - 2.2);
+					ctx2d.fillStyle = palette.peakCap;
+					ctx2d.globalAlpha = Math.min(.95, .3 + amp * .7);
+					ctx2d.beginPath();
+					ctx2d.arc(midX + offsetFromCenter, peakY, Math.min(1.6, barW * .38), 0, Math.PI * 2);
+					ctx2d.arc(midX - offsetFromCenter, peakY, Math.min(1.6, barW * .38), 0, Math.PI * 2);
+					ctx2d.fill();
+					ctx2d.globalAlpha = 1;
+				}
+			}
+			if (!isReducedMotion && crestPointsLeft.length > 1) {
+				const orderedPoints = [...crestPointsLeft.reverse(), ...crestPointsRight];
+				ctx2d.save();
+				ctx2d.strokeStyle = palette.crestStroke;
+				ctx2d.lineWidth = 1.1;
+				ctx2d.lineJoin = "round";
+				ctx2d.lineCap = "round";
+				ctx2d.beginPath();
+				ctx2d.moveTo(orderedPoints[0].x, orderedPoints[0].y);
+				for (let p = 1; p < orderedPoints.length - 1; p++) {
+					const xc = (orderedPoints[p].x + orderedPoints[p + 1].x) * .5;
+					const yc = (orderedPoints[p].y + orderedPoints[p + 1].y) * .5;
+					ctx2d.quadraticCurveTo(orderedPoints[p].x, orderedPoints[p].y, xc, yc);
+				}
+				const lastPt = orderedPoints[orderedPoints.length - 1];
+				ctx2d.lineTo(lastPt.x, lastPt.y);
+				ctx2d.stroke();
+				ctx2d.restore();
+			}
+		};
+		rafId = window.requestAnimationFrame(drawFrame);
+		return () => {
+			window.cancelAnimationFrame(rafId);
+			resizeObserver?.disconnect();
+			if (stageContainerRef?.current) {
+				stageContainerRef.current.style.setProperty("--party-audio-energy", "0");
+				stageContainerRef.current.style.setProperty("--party-audio-bass", "0");
+			}
+		};
+	}, [
+		roomId,
+		sampleSpectrum,
+		stageContainerRef
+	]);
+	if (!roomId) return null;
+	return /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+		"aria-hidden": "true",
+		className: `relative w-full max-w-sm mx-auto pointer-events-none select-none shrink-0 overflow-hidden ${compact ? "h-5 my-0.5" : "h-7 mt-1 mb-0.5"}`,
+		style: {
+			WebkitMaskImage: "linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%)",
+			maskImage: "linear-gradient(to right, transparent 0%, #000 10%, #000 90%, transparent 100%)"
+		},
+		children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("canvas", {
+			ref: canvasRef,
+			className: "w-full h-full block"
+		})
+	});
+});
+PartyAudioVisualizer.displayName = "PartyAudioVisualizer";
 // src/components/party/SharePartyModal.tsx
 var SharePartyModal = ({ isOpen, room, activeViewers, onClose, onToast }) => {
 	const { currentUser, conversations, sendMessage } = useApp();
@@ -120320,32 +121273,6 @@ var RoomPKVictoryModal = ({ isOpen, myRoomTitle, opponentRoomTitle, myScore, opp
 	});
 };
 // src/screens/PartyRoomsScreen.tsx
-var PLAYLIST_TRACKS = [
-	{
-		id: "1",
-		title: "Alpha Mate Club Anthem (VIP Mix)",
-		artist: "DJ Kairo",
-		duration: "3:45"
-	},
-	{
-		id: "2",
-		title: "Midnight Neon Beats & Chill",
-		artist: "Luna Star",
-		duration: "4:12"
-	},
-	{
-		id: "3",
-		title: "Cyberwave Royal Bass Drop",
-		artist: "Electro_9",
-		duration: "3:20"
-	},
-	{
-		id: "4",
-		title: "Late Night Acoustic Lounge",
-		artist: "Zainab Live",
-		duration: "3:50"
-	}
-];
 var VIP_GUEST_SEAT_INDEX = 100;
 function getNormalSeatCountForLevel(level) {
 	if (level === 1) return 4;
@@ -120446,11 +121373,19 @@ var PartyRoomsScreen = () => {
 	const lastSyncedViewerCountRef = (0, import_react.useRef)(-1);
 	const lastSelfSpeakingSyncedRef = (0, import_react.useRef)(false);
 	const partyRoomRootRef = (0, import_react.useRef)(null);
+	const partyStageRef = (0, import_react.useRef)(null);
 	const lastHandledPartyRefreshTickRef = (0, import_react.useRef)(partyRefreshTick);
 	const lastVoiceRoomIdRef = (0, import_react.useRef)(null);
-	const [isMusicPlaying, setIsMusicPlaying] = (0, import_react.useState)(true);
-	const [currentTrackIndex, setCurrentTrackIndex] = (0, import_react.useState)(0);
+	const [isMusicPlaying, setIsMusicPlaying] = (0, import_react.useState)(false);
+	const [activeMusicTrack, setActiveMusicTrack] = (0, import_react.useState)(null);
+	const [musicStartedAtMs, setMusicStartedAtMs] = (0, import_react.useState)(0);
+	const [musicPositionSec, setMusicPositionSec] = (0, import_react.useState)(0);
+	const [musicQueue, setMusicQueue] = (0, import_react.useState)([]);
+	const [musicLoop, setMusicLoop] = (0, import_react.useState)(false);
+	const [musicUpdatedBy, setMusicUpdatedBy] = (0, import_react.useState)("");
+	const [songRequests, setSongRequests] = (0, import_react.useState)([]);
 	const [showMusicModal, setShowMusicModal] = (0, import_react.useState)(false);
+	const lastMusicSignalAtRef = (0, import_react.useRef)(0);
 	const [showGiftDrawer, setShowGiftDrawer] = (0, import_react.useState)(false);
 	const [selectedGift, setSelectedGift] = (0, import_react.useState)(() => publishedCatalogGifts[0] || VIRTUAL_GIFTS[0]);
 	const publishedCatalogGiftsRef = (0, import_react.useRef)(publishedCatalogGifts);
@@ -120477,7 +121412,7 @@ var PartyRoomsScreen = () => {
 			const saved = window.localStorage.getItem("alphamate_party_seat_theme");
 			if (isValidPartySeatTheme(saved)) return saved;
 		} catch {}
-		return "royal_gold_diya";
+		return "diamond_ice_blue";
 	});
 	const [showBackgroundModal, setShowBackgroundModal] = (0, import_react.useState)(false);
 	const [showLeaderboardModal, setShowLeaderboardModal] = (0, import_react.useState)(false);
@@ -120785,6 +121720,8 @@ var PartyRoomsScreen = () => {
 	const isHost = activePartyRoom ? activePartyRoom.host.id === effectiveUserId : false;
 	const isModerator = moderatorIds.includes(effectiveUserId);
 	const canModerate = isHost || isModerator;
+	const canModerateRef = (0, import_react.useRef)(canModerate);
+	canModerateRef.current = canModerate;
 	const canUseSpeakerMic = isHost || userSeatIndex !== null;
 	const hostLevel = activePartyRoom?.host.level ?? currentUser.level;
 	(0, import_react.useEffect)(() => {
@@ -120793,18 +121730,73 @@ var PartyRoomsScreen = () => {
 		else setSeatTheme("royal_gold_diya");
 		if (isValidPartyBackgroundTheme(activePartyRoom.backgroundTheme)) setRoomBackground(activePartyRoom.backgroundTheme);
 		else setRoomBackground("royal_castle");
-		if (typeof activePartyRoom.isMusicPlaying === "boolean") setIsMusicPlaying(activePartyRoom.isMusicPlaying);
-		if (typeof activePartyRoom.musicTrackIndex === "number" && Number.isFinite(activePartyRoom.musicTrackIndex) && activePartyRoom.musicTrackIndex >= 0 && activePartyRoom.musicTrackIndex < PLAYLIST_TRACKS.length) setCurrentTrackIndex(Math.floor(activePartyRoom.musicTrackIndex));
+		const incomingTrack = activePartyRoom.musicTrack && activePartyRoom.musicTrack.id ? activePartyRoom.musicTrack : null;
+		const incomingStartedAt = Number(activePartyRoom.musicStartedAtMs || 0);
+		if (incomingStartedAt >= lastMusicSignalAtRef.current - 1500 || !incomingStartedAt) {
+			setActiveMusicTrack(incomingTrack);
+			setIsMusicPlaying(Boolean(activePartyRoom.isMusicPlaying && incomingTrack));
+			setMusicStartedAtMs(incomingStartedAt);
+			setMusicPositionSec(Math.max(0, Number(activePartyRoom.musicPositionSec) || 0));
+			setMusicQueue(Array.isArray(activePartyRoom.musicQueue) ? activePartyRoom.musicQueue.slice(0, 15) : []);
+			setMusicLoop(Boolean(activePartyRoom.musicLoop));
+			setMusicUpdatedBy(String(activePartyRoom.musicUpdatedBy || ""));
+		}
 	}, [
 		activePartyRoom?.id,
 		activePartyRoom?.seatTheme,
 		activePartyRoom?.backgroundTheme,
 		activePartyRoom?.isMusicPlaying,
-		activePartyRoom?.musicTrackIndex
+		activePartyRoom?.musicTrack,
+		activePartyRoom?.musicStartedAtMs,
+		activePartyRoom?.musicPositionSec,
+		activePartyRoom?.musicQueue,
+		activePartyRoom?.musicLoop,
+		activePartyRoom?.musicUpdatedBy
+	]);
+	(0, import_react.useEffect)(() => {
+		if (!activePartyRoom?.id) {
+			partyMusicPlayer.stopAll();
+			setSongRequests([]);
+			lastMusicSignalAtRef.current = 0;
+			return;
+		}
+		partyMusicPlayer.syncToRoomState({
+			roomId: activePartyRoom.id,
+			isPlaying: Boolean(isMusicPlaying && activeMusicTrack),
+			track: activeMusicTrack,
+			startedAtMs: musicStartedAtMs,
+			positionSec: musicPositionSec,
+			loop: musicLoop,
+			speakerOn: isSpeakerOn
+		});
+	}, [
+		activePartyRoom?.id,
+		isMusicPlaying,
+		activeMusicTrack,
+		musicStartedAtMs,
+		musicPositionSec,
+		musicLoop,
+		isSpeakerOn
+	]);
+	(0, import_react.useEffect)(() => {
+		return () => {
+			partyMusicPlayer.stopAll();
+		};
+	}, []);
+	(0, import_react.useEffect)(() => {
+		if (!activePartyRoom?.id) return;
+		const anyRemotePresenceSpeaking = activeVoiceParticipants.some((p) => p.isSpeaking && !p.isMuted);
+		const isAnyParticipantSpeaking = Boolean(isHostSpeaking || isSelfSpeaking || remoteSpeakingPeerIds.size > 0 || anyRemotePresenceSpeaking);
+		partyMusicPlayer.setVoiceDuckingActive(isAnyParticipantSpeaking);
+	}, [
+		activePartyRoom?.id,
+		isHostSpeaking,
+		isSelfSpeaking,
+		remoteSpeakingPeerIds,
+		activeVoiceParticipants
 	]);
 	(0, import_react.useEffect)(() => {
 		if (!canModerate) {
-			setShowMusicModal(false);
 			setShowBackgroundModal(false);
 			setShowMoreModal(false);
 			setShowHostAnalyticsCard(false);
@@ -120839,41 +121831,303 @@ var PartyRoomsScreen = () => {
 		showToast(`Theme applied: ${bgName}`);
 		setShowBackgroundModal(false);
 	}, [canModerate, activePartyRoom?.id]);
-	const handleToggleRoomMusic = (0, import_react.useCallback)(() => {
+	const broadcastRoomMusicState = (0, import_react.useCallback)((next) => {
+		if (!activePartyRoom?.id) return;
+		const cleanTrack = sanitizePartyMusicTrackForFirestore(next.track);
+		const cleanQueue = next.queue.slice(0, 15).map((t) => sanitizePartyMusicTrackForFirestore(t)).filter((t) => Boolean(t));
+		const djName = (next.updatedBy || currentUser.displayName || "Host").slice(0, 64);
+		lastMusicSignalAtRef.current = Date.now();
+		setActiveMusicTrack(cleanTrack);
+		setIsMusicPlaying(Boolean(next.isPlaying && cleanTrack));
+		setMusicStartedAtMs(next.startedAtMs);
+		setMusicPositionSec(next.positionSec);
+		setMusicQueue(cleanQueue);
+		setMusicLoop(next.loop);
+		setMusicUpdatedBy(djName);
+		realtimeSocket.sendRoomSignal("party", activePartyRoom.id, {
+			type: "party_music_sync",
+			isPlaying: Boolean(next.isPlaying && cleanTrack),
+			track: cleanTrack,
+			startedAtMs: next.startedAtMs,
+			positionSec: next.positionSec,
+			queue: cleanQueue,
+			loop: next.loop,
+			updatedBy: djName,
+			sentAtMs: Date.now()
+		});
+		updatePartyRoomFields(activePartyRoom.id, {
+			isMusicPlaying: Boolean(next.isPlaying && cleanTrack),
+			musicTrack: cleanTrack,
+			musicStartedAtMs: next.startedAtMs,
+			musicPositionSec: next.positionSec,
+			musicQueue: cleanQueue,
+			musicLoop: next.loop,
+			musicUpdatedBy: djName,
+			nowPlaying: next.isPlaying && cleanTrack ? `${cleanTrack.title} — ${cleanTrack.artist}` : ""
+		}).catch(() => {});
+	}, [activePartyRoom?.id, currentUser.displayName]);
+	const handlePlayTrackForRoom = (0, import_react.useCallback)((track) => {
 		if (!canModerate || !activePartyRoom?.id) {
-			showToast("Only Host & Moderators can control room music 🔒");
+			showToast("Only Host & Moderators can play room music directly — tap Request! 🎵");
 			return;
 		}
-		const nextPlaying = !isMusicPlaying;
-		const track = PLAYLIST_TRACKS[currentTrackIndex] || PLAYLIST_TRACKS[0];
-		setIsMusicPlaying(nextPlaying);
-		updatePartyRoomFields(activePartyRoom.id, {
-			isMusicPlaying: nextPlaying,
-			musicTrackIndex: currentTrackIndex,
-			nowPlaying: nextPlaying && track ? `${track.title} — ${track.artist}` : ""
-		}).catch(() => {});
+		partyMusicPlayer.unlock();
+		broadcastRoomMusicState({
+			isPlaying: true,
+			track,
+			startedAtMs: Date.now(),
+			positionSec: 0,
+			queue: musicQueue,
+			loop: musicLoop,
+			updatedBy: track.requestedBy ? `${currentUser.displayName} (for ${track.requestedBy})` : currentUser.displayName
+		});
+		showToast(`🎶 Playing for everyone: ${track.title}`);
 	}, [
 		canModerate,
 		activePartyRoom?.id,
-		isMusicPlaying,
-		currentTrackIndex
+		broadcastRoomMusicState,
+		musicQueue,
+		musicLoop,
+		currentUser.displayName
 	]);
-	const handleSelectMusicTrack = (0, import_react.useCallback)((idx) => {
+	const handleToggleRoomMusic = (0, import_react.useCallback)(() => {
 		if (!canModerate || !activePartyRoom?.id) {
-			showToast("Only Host & Moderators can change room music 🔒");
+			setShowMusicModal(true);
 			return;
 		}
-		const track = PLAYLIST_TRACKS[idx];
-		if (!track) return;
-		setCurrentTrackIndex(idx);
-		setIsMusicPlaying(true);
-		updatePartyRoomFields(activePartyRoom.id, {
-			isMusicPlaying: true,
-			musicTrackIndex: idx,
-			nowPlaying: `${track.title} — ${track.artist}`
-		}).catch(() => {});
-		showToast(`Playing: ${track.title} 🎶`);
-	}, [canModerate, activePartyRoom?.id]);
+		if (!activeMusicTrack) {
+			setShowMusicModal(true);
+			return;
+		}
+		partyMusicPlayer.unlock();
+		const nextPlaying = !isMusicPlaying;
+		const currentPos = nextPlaying ? musicPositionSec : Math.max(0, partyMusicPlayer.getCurrentPositionSec());
+		broadcastRoomMusicState({
+			isPlaying: nextPlaying,
+			track: activeMusicTrack,
+			startedAtMs: Date.now(),
+			positionSec: currentPos,
+			queue: musicQueue,
+			loop: musicLoop,
+			updatedBy: currentUser.displayName
+		});
+	}, [
+		canModerate,
+		activePartyRoom?.id,
+		activeMusicTrack,
+		isMusicPlaying,
+		musicPositionSec,
+		musicQueue,
+		musicLoop,
+		currentUser.displayName,
+		broadcastRoomMusicState
+	]);
+	const handleStopRoomMusic = (0, import_react.useCallback)(() => {
+		if (!canModerate || !activePartyRoom?.id) return;
+		broadcastRoomMusicState({
+			isPlaying: false,
+			track: null,
+			startedAtMs: Date.now(),
+			positionSec: 0,
+			queue: musicQueue,
+			loop: musicLoop,
+			updatedBy: currentUser.displayName
+		});
+		showToast("Room music stopped ⏹️");
+	}, [
+		canModerate,
+		activePartyRoom?.id,
+		broadcastRoomMusicState,
+		musicQueue,
+		musicLoop,
+		currentUser.displayName
+	]);
+	const handleSkipNextMusic = (0, import_react.useCallback)(() => {
+		if (!canModerate || !activePartyRoom?.id) return;
+		if (musicQueue.length === 0) {
+			showToast("No songs in Up Next queue.");
+			return;
+		}
+		const [nextTrack, ...restQueue] = musicQueue;
+		partyMusicPlayer.unlock();
+		broadcastRoomMusicState({
+			isPlaying: true,
+			track: nextTrack,
+			startedAtMs: Date.now(),
+			positionSec: 0,
+			queue: restQueue,
+			loop: musicLoop,
+			updatedBy: nextTrack.requestedBy ? `${currentUser.displayName} (for ${nextTrack.requestedBy})` : currentUser.displayName
+		});
+		showToast(`⏭️ Up Next: ${nextTrack.title}`);
+	}, [
+		canModerate,
+		activePartyRoom?.id,
+		musicQueue,
+		musicLoop,
+		currentUser.displayName,
+		broadcastRoomMusicState
+	]);
+	const handleToggleMusicLoop = (0, import_react.useCallback)(() => {
+		if (!canModerate || !activePartyRoom?.id) return;
+		const nextLoop = !musicLoop;
+		broadcastRoomMusicState({
+			isPlaying: isMusicPlaying,
+			track: activeMusicTrack,
+			startedAtMs: musicStartedAtMs || Date.now(),
+			positionSec: isMusicPlaying ? partyMusicPlayer.getCurrentPositionSec() : musicPositionSec,
+			queue: musicQueue,
+			loop: nextLoop,
+			updatedBy: currentUser.displayName
+		});
+		showToast(nextLoop ? "🔁 Track Repeat ON" : "🔁 Track Repeat OFF");
+	}, [
+		canModerate,
+		activePartyRoom?.id,
+		musicLoop,
+		isMusicPlaying,
+		activeMusicTrack,
+		musicStartedAtMs,
+		musicPositionSec,
+		musicQueue,
+		currentUser.displayName,
+		broadcastRoomMusicState
+	]);
+	const handleAddToMusicQueue = (0, import_react.useCallback)((track) => {
+		if (!canModerate || !activePartyRoom?.id) return;
+		if (musicQueue.length >= 15) {
+			showToast("Queue is full (max 15 songs).");
+			return;
+		}
+		const nextQueue = [...musicQueue, track];
+		broadcastRoomMusicState({
+			isPlaying: isMusicPlaying,
+			track: activeMusicTrack,
+			startedAtMs: musicStartedAtMs || Date.now(),
+			positionSec: isMusicPlaying ? partyMusicPlayer.getCurrentPositionSec() : musicPositionSec,
+			queue: nextQueue,
+			loop: musicLoop,
+			updatedBy: currentUser.displayName
+		});
+		showToast(`➕ Queued: ${track.title}`);
+	}, [
+		canModerate,
+		activePartyRoom?.id,
+		musicQueue,
+		isMusicPlaying,
+		activeMusicTrack,
+		musicStartedAtMs,
+		musicPositionSec,
+		musicLoop,
+		currentUser.displayName,
+		broadcastRoomMusicState
+	]);
+	const handleRemoveFromMusicQueue = (0, import_react.useCallback)((_trackId, index) => {
+		if (!canModerate || !activePartyRoom?.id) return;
+		const nextQueue = musicQueue.filter((_, i) => i !== index);
+		broadcastRoomMusicState({
+			isPlaying: isMusicPlaying,
+			track: activeMusicTrack,
+			startedAtMs: musicStartedAtMs || Date.now(),
+			positionSec: isMusicPlaying ? partyMusicPlayer.getCurrentPositionSec() : musicPositionSec,
+			queue: nextQueue,
+			loop: musicLoop,
+			updatedBy: currentUser.displayName
+		});
+	}, [
+		canModerate,
+		activePartyRoom?.id,
+		musicQueue,
+		isMusicPlaying,
+		activeMusicTrack,
+		musicStartedAtMs,
+		musicPositionSec,
+		musicLoop,
+		currentUser.displayName,
+		broadcastRoomMusicState
+	]);
+	const handleRequestMusicTrack = (0, import_react.useCallback)((track) => {
+		if (!activePartyRoom?.id) return;
+		const cleanTrack = sanitizePartyMusicTrackForFirestore(track, currentUser.displayName);
+		if (!cleanTrack) return;
+		const reqId = `mreq_${effectiveUserId}_${Date.now()}`;
+		realtimeSocket.sendRoomSignal("party", activePartyRoom.id, {
+			type: "party_music_request",
+			requestId: reqId,
+			track: cleanTrack,
+			requesterId: effectiveUserId,
+			requesterName: currentUser.displayName,
+			requestedAtMs: Date.now()
+		});
+		setSongRequests((prev) => {
+			if (prev.some((r) => r.track.id === cleanTrack.id && r.requesterId === effectiveUserId)) return prev;
+			return [{
+				id: reqId,
+				track: cleanTrack,
+				requesterId: effectiveUserId,
+				requesterName: currentUser.displayName,
+				requestedAtMs: Date.now()
+			}, ...prev].slice(0, 12);
+		});
+		sendPartyRoomMessage(activePartyRoom.id, {
+			sender: {
+				id: effectiveUserId,
+				displayName: currentUser.displayName,
+				avatar: currentUser.avatar,
+				vipTier: currentUser.vipTier,
+				level: currentUser.level,
+				isHost: false
+			},
+			text: `🎵 Requested song: "${cleanTrack.title}" — ${cleanTrack.artist}`,
+			type: "room"
+		}, activePartyRoom.sessionId).catch(() => {});
+		showToast(`🎵 Requested "${cleanTrack.title}" for the party!`);
+	}, [
+		activePartyRoom?.id,
+		activePartyRoom?.sessionId,
+		currentUser.avatar,
+		currentUser.displayName,
+		currentUser.level,
+		currentUser.vipTier,
+		effectiveUserId
+	]);
+	const handleDismissMusicRequest = (0, import_react.useCallback)((requestId) => {
+		setSongRequests((prev) => prev.filter((r) => r.id !== requestId));
+	}, []);
+	(0, import_react.useEffect)(() => {
+		if (!activePartyRoom?.id || !isHost) return;
+		return partyMusicPlayer.onTrackEnded(() => {
+			if (musicLoop) return;
+			if (musicQueue.length > 0) {
+				const [nextTrack, ...restQueue] = musicQueue;
+				broadcastRoomMusicState({
+					isPlaying: true,
+					track: nextTrack,
+					startedAtMs: Date.now(),
+					positionSec: 0,
+					queue: restQueue,
+					loop: false,
+					updatedBy: nextTrack.requestedBy ? `${currentUser.displayName} (for ${nextTrack.requestedBy})` : currentUser.displayName
+				});
+			} else broadcastRoomMusicState({
+				isPlaying: false,
+				track: activeMusicTrack,
+				startedAtMs: Date.now(),
+				positionSec: 0,
+				queue: [],
+				loop: false,
+				updatedBy: currentUser.displayName
+			});
+		});
+	}, [
+		activePartyRoom?.id,
+		isHost,
+		musicLoop,
+		musicQueue,
+		activeMusicTrack,
+		currentUser.displayName,
+		broadcastRoomMusicState
+	]);
 	(0, import_react.useEffect)(() => {
 		isSpeakerOnRef.current = isSpeakerOn;
 	}, [isSpeakerOn]);
@@ -121939,6 +123193,35 @@ var PartyRoomsScreen = () => {
 							roomId
 						});
 					}
+				} else if (ev.type === "room:signal" && ev.roomId === roomId && ev.signal?.type === "party_music_sync" && ev.senderId !== effectiveUserId) {
+					const sig = ev.signal;
+					const sigTrack = sig.track && typeof sig.track === "object" && sig.track.id ? sig.track : null;
+					lastMusicSignalAtRef.current = Number(sig.sentAtMs || Date.now());
+					setActiveMusicTrack(sigTrack);
+					setIsMusicPlaying(Boolean(sig.isPlaying && sigTrack));
+					setMusicStartedAtMs(Number(sig.startedAtMs || Date.now()));
+					setMusicPositionSec(Math.max(0, Number(sig.positionSec) || 0));
+					if (Array.isArray(sig.queue)) setMusicQueue(sig.queue.slice(0, 15));
+					if (typeof sig.loop === "boolean") setMusicLoop(sig.loop);
+					if (typeof sig.updatedBy === "string") setMusicUpdatedBy(sig.updatedBy);
+				} else if (ev.type === "room:signal" && ev.roomId === roomId && ev.signal?.type === "party_music_request" && ev.senderId !== effectiveUserId) {
+					const sig = ev.signal;
+					const reqTrack = sig.track && typeof sig.track === "object" && sig.track.id ? sig.track : null;
+					if (reqTrack) {
+						const reqId = String(sig.requestId || `mreq_${ev.senderId}_${Date.now()}`);
+						const reqName = String(sig.requesterName || "Guest");
+						setSongRequests((prev) => {
+							if (prev.some((r) => r.id === reqId)) return prev;
+							return [{
+								id: reqId,
+								track: reqTrack,
+								requesterId: String(sig.requesterId || ev.senderId || ""),
+								requesterName: reqName,
+								requestedAtMs: Number(sig.requestedAtMs || Date.now())
+							}, ...prev].slice(0, 12);
+						});
+						if (canModerateRef.current) showToast(`🎵 ${reqName} requested: ${reqTrack.title}`);
+					}
 				}
 			}
 			if (latestViewers !== null) {
@@ -122503,6 +123786,7 @@ var PartyRoomsScreen = () => {
 	};
 	const handleScreenTouchOrClick = (e) => {
 		unlockAllRemoteAudioPlayback().catch(() => {});
+		partyMusicPlayer.unlock();
 		const now = Date.now();
 		if (now - lastTapRef.current < 320) {
 			const clientX = "touches" in e && e.touches[0] ? e.touches[0].clientX : e.clientX;
@@ -122729,7 +124013,8 @@ var PartyRoomsScreen = () => {
 		});
 	}, [partyRooms, activeCategory]);
 	if (activePartyRoom) {
-		const currentTrack = PLAYLIST_TRACKS[currentTrackIndex];
+		const effectiveRoomMusicPlaying = Boolean(isMusicPlaying && activeMusicTrack);
+		const currentMusicTitle = activeMusicTrack?.title || activePartyRoom.nowPlaying || "Party Music";
 		const remoteHostPresence = voiceParticipantsById.get(activePartyRoom.host.id);
 		const isHostSeatedOnThrone = isHost || wsPartyViewers.some((v) => v.id === activePartyRoom.host.id) || activePartyRoom.isHostPresent !== false;
 		const effectiveHostMicMuted = isHost ? isHostMicMuted : Boolean(remoteHostPresence ? remoteHostPresence.isMuted : false);
@@ -122763,7 +124048,7 @@ var PartyRoomsScreen = () => {
 					}, peerId))
 				}),
 				/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PartyRoomAtmosphere, {
-					isMusicPlaying,
+					isMusicPlaying: effectiveRoomMusicPlaying,
 					theme: roomBackground,
 					hostAvatar: getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar)
 				}),
@@ -123068,10 +124353,11 @@ var PartyRoomsScreen = () => {
 							onSeatClick: handleSeatClick
 						})
 					}) : /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-						className: `relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-0 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${partyLevel === 4 ? "h-[60%] max-h-[60%]" : "h-[48%] max-h-[48%]"}`,
+						ref: partyStageRef,
+						className: `relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-3.5 sm:pt-4 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${partyLevel === 4 ? "h-[63%] max-h-[63%]" : "h-[53%] max-h-[53%]"}`,
 						children: [
 							canModerate && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-								className: "absolute right-2 top-0 z-30",
+								className: "absolute right-2 top-3 sm:top-4 z-30",
 								children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PartySeatThemeStarSelector, {
 									selectedTheme: seatTheme,
 									onSelectTheme: handleSelectSeatTheme,
@@ -123079,7 +124365,7 @@ var PartyRoomsScreen = () => {
 								})
 							}),
 							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-0",
+								className: "flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-0.5",
 								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 									className: "flex flex-col items-center shrink-0",
 									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
@@ -123102,7 +124388,7 @@ var PartyRoomsScreen = () => {
 												theme: seatTheme,
 												role: "host",
 												compact: partyLevel === 4,
-												sizeClass: partyLevel === 4 ? "w-[58px] h-[58px] sm:w-[66px] sm:h-[66px]" : "w-[68px] h-[68px] sm:w-[76px] sm:h-[76px]",
+												sizeClass: partyLevel === 4 ? "w-[64px] h-[64px] sm:w-[72px] sm:h-[72px]" : "w-[74px] h-[74px] sm:w-[82px] sm:h-[82px]",
 												children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 													className: "w-full h-full rounded-full overflow-hidden bg-[#120826] transition-transform group-hover:scale-[1.03]",
 													children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", {
@@ -123116,7 +124402,7 @@ var PartyRoomsScreen = () => {
 											theme: seatTheme,
 											role: "host",
 											compact: partyLevel === 4,
-											sizeClass: partyLevel === 4 ? "w-[58px] h-[58px] sm:w-[66px] sm:h-[66px]" : "w-[68px] h-[68px] sm:w-[76px] sm:h-[76px]",
+											sizeClass: partyLevel === 4 ? "w-[64px] h-[64px] sm:w-[72px] sm:h-[72px]" : "w-[74px] h-[74px] sm:w-[82px] sm:h-[82px]",
 											children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 												className: "relative w-full h-full rounded-full overflow-hidden",
 												title: "Host Seat Empty — Host is currently away",
@@ -123170,7 +124456,7 @@ var PartyRoomsScreen = () => {
 												theme: seatTheme,
 												role: "vip",
 												compact: partyLevel === 4,
-												sizeClass: partyLevel === 4 ? "w-[48px] h-[48px] sm:w-[56px] sm:h-[56px]" : "w-[58px] h-[58px] sm:w-[66px] sm:h-[66px]",
+												sizeClass: partyLevel === 4 ? "w-[56px] h-[56px] sm:w-[64px] sm:h-[64px]" : "w-[66px] h-[66px] sm:w-[74px] sm:h-[74px]",
 												children: vipGuestSeat.user ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 													className: "w-full h-full rounded-full overflow-hidden bg-[#120826] transition-transform group-hover:scale-[1.03]",
 													children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("img", {
@@ -123185,43 +124471,46 @@ var PartyRoomsScreen = () => {
 													compact: partyLevel === 4
 												})
 											}),
-											vipGuestSeat.user ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
+											vipGuestSeat.user && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 												className: `absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md z-30 ${vipGuestSeat.isMuted ? vipGuestSeat.isHostMuted ? "bg-rose-700 text-white ring-1 ring-amber-400" : "bg-rose-600 text-white" : "bg-emerald-500 text-black"}`,
 												children: vipGuestSeat.isHostMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Lock, { className: "w-2.5 h-2.5 text-amber-300" }) : vipGuestSeat.isMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MicOff, { className: "w-2.5 h-2.5" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-2.5 h-2.5" })
-											}) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-												className: `absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-amber-300/60 shadow-md z-30 ${vipGuestSeat.isLocked ? "bg-[#1D0F38] text-amber-300" : "bg-gradient-to-tr from-amber-400 to-purple-600 text-white"}`,
-												children: vipGuestSeat.isLocked ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Lock, { className: "w-2.5 h-2.5" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(LockOpen, { className: "w-2.5 h-2.5" })
 											})
 										]
-									}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+									}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 										className: "mt-1.5 flex flex-col items-center leading-tight",
-										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-											className: "text-[9.5px] font-black text-amber-300 tracking-wide truncate max-w-[78px]",
+										children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+											className: "text-[10.5px] font-bold text-white/95 tracking-wide truncate max-w-[82px] drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]",
 											children: vipGuestSeat.user ? `${vipGuestSeat.user.displayName.split(" ")[0]}` : "VIP 1"
-										}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-											className: "text-[7.5px] font-extrabold uppercase tracking-wider text-purple-200/90",
-											children: vipGuestSeat.user ? "VIP 1 • VIP GUEST" : "VIP GUEST"
-										})]
+										})
 									})]
 								})]
 							}),
+							/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PartyAudioVisualizer, {
+								roomId: activePartyRoom.id,
+								theme: seatTheme,
+								isSpeakerOn,
+								isMusicPlaying: effectiveRoomMusicPlaying,
+								remoteStreams: remotePartyStreams,
+								stageContainerRef: partyStageRef,
+								compact: partyLevel === 4
+							}),
 							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "w-full mt-2 flex-1 flex flex-col justify-start",
+								className: "w-full mt-1.5 flex-1 flex flex-col justify-start",
 								children: [
 									partyLevel === 1 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-										className: "grid grid-cols-4 gap-x-3 gap-y-2.5 max-w-sm mx-auto w-full px-1",
+										className: "grid grid-cols-4 gap-x-2.5 gap-y-2.5 max-w-sm mx-auto w-full px-1",
 										children: activeGuestSeats.map((seat) => renderGuestSeat(seat, "lg"))
 									}),
 									partyLevel === 2 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-										className: "grid grid-cols-4 gap-x-3 gap-y-2 max-w-sm mx-auto w-full px-1",
+										className: "grid grid-cols-4 gap-x-2.5 gap-y-2.5 max-w-sm mx-auto w-full px-1",
 										children: activeGuestSeats.map((seat) => renderGuestSeat(seat, "md"))
 									}),
 									partyLevel === 3 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-										className: "grid grid-cols-4 gap-x-2.5 gap-y-1.5 max-w-sm mx-auto w-full px-1",
+										className: "grid grid-cols-4 gap-x-2 gap-y-2 max-w-sm mx-auto w-full px-1",
 										children: activeGuestSeats.map((seat) => renderGuestSeat(seat, "sm"))
 									}),
 									partyLevel === 4 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-										className: "grid grid-cols-4 gap-x-2.5 gap-y-1 max-w-sm mx-auto w-full px-1",
+										className: "grid grid-cols-4 gap-x-2 gap-y-1.5 max-w-sm mx-auto w-full px-1",
 										children: activeGuestSeats.map((seat) => renderGuestSeat(seat, "xs"))
 									})
 								]
@@ -123269,10 +124558,13 @@ var PartyRoomsScreen = () => {
 							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
 								className: "absolute right-2.5 bottom-[92px] sm:bottom-[100px] z-30",
 								children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(PartyMusicVinylWidget, {
-									isPlaying: isMusicPlaying,
-									trackTitle: currentTrack.title,
+									isPlaying: effectiveRoomMusicPlaying,
+									trackTitle: currentMusicTitle,
 									canModerate,
-									onOpenMusicModal: () => setShowMusicModal(true)
+									onOpenMusicModal: () => {
+										partyMusicPlayer.unlock();
+										setShowMusicModal(true);
+									}
 								})
 							}),
 							joinNotification && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
@@ -123371,17 +124663,27 @@ var PartyRoomsScreen = () => {
 									]
 								}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 									className: "grid gap-1.5 w-full",
-									style: { gridTemplateColumns: `repeat(${(canModerate ? 1 : 0) + (canUseSpeakerMic ? 1 : 0) + (canModerate ? 1 : 0) + (canUseSpeakerMic ? 1 : 0) + 1 + 1 + (canModerate ? 1 : 0)}, minmax(0, 1fr))` },
+									style: { gridTemplateColumns: `repeat(${1 + (canUseSpeakerMic ? 1 : 0) + (canModerate ? 1 : 0) + (canUseSpeakerMic ? 1 : 0) + 1 + 1 + (canModerate ? 1 : 0)}, minmax(0, 1fr))` },
 									children: [
-										canModerate && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
+										/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 											type: "button",
-											onClick: () => setShowMusicModal(true),
-											className: `h-9 sm:h-10 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer backdrop-blur-md ${isMusicPlaying ? "bg-gradient-to-tr from-[#7928CA]/80 to-[#EC4899]/80 border-[#EC4899] text-white shadow-md" : "bg-black/50 border-white/10 text-zinc-400 hover:text-white"}`,
-											title: "Music Player & Playlist",
-											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Music, { className: `w-3.5 h-3.5 ${isMusicPlaying ? "animate-bounce text-white" : "text-[#EC4899]"}` }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-												className: "text-[8px] font-black truncate max-w-full mt-0.5",
-												children: isMusicPlaying ? "Music On" : "Music"
-											})]
+											onClick: () => {
+												partyMusicPlayer.unlock();
+												setShowMusicModal(true);
+											},
+											className: `relative h-9 sm:h-10 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer backdrop-blur-md ${effectiveRoomMusicPlaying ? "bg-gradient-to-tr from-[#7928CA]/80 to-[#EC4899]/80 border-[#EC4899] text-white shadow-md" : "bg-black/50 border-white/10 text-zinc-300 hover:text-white"}`,
+											title: "Search & Play Party Music",
+											children: [
+												canModerate && songRequests.length > 0 && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+													className: "absolute -top-1 -right-1 min-w-[15px] h-[15px] px-1 rounded-full bg-amber-400 text-[#120824] text-[8.5px] font-black flex items-center justify-center shadow",
+													children: songRequests.length
+												}),
+												/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Music, { className: `w-3.5 h-3.5 ${effectiveRoomMusicPlaying ? "animate-bounce text-white" : "text-[#EC4899]"}` }),
+												/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
+													className: "text-[8px] font-black truncate max-w-full mt-0.5",
+													children: effectiveRoomMusicPlaying ? "Music On" : "Music"
+												})
+											]
 										}),
 										canUseSpeakerMic && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("button", {
 											type: "button",
@@ -123482,78 +124784,26 @@ var PartyRoomsScreen = () => {
 						]
 					})]
 				}),
-				showMusicModal && canModerate && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-					className: "fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4",
-					children: /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-						className: "w-full max-w-sm rounded-3xl bg-[#170E2C] border border-[#A855F7]/30 p-5 shadow-2xl",
-						children: [
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "flex items-center justify-between pb-3 border-b border-[#A855F7]/20",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-									className: "flex items-center gap-2",
-									children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)(Disc3, { className: `w-5 h-5 text-[#EC4899] ${isMusicPlaying ? "animate-spin-slow" : ""}` }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-										className: "text-sm font-bold text-white",
-										children: "Party Room Music Hub"
-									})]
-								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-									onClick: () => setShowMusicModal(false),
-									className: "text-zinc-400 hover:text-white cursor-pointer",
-									children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(X, { className: "w-5 h-5" })
-								})]
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "mt-4 p-3.5 rounded-2xl bg-gradient-to-r from-[#7928CA]/30 via-[#EC4899]/20 to-[#7928CA]/30 border border-[#A855F7]/30 flex items-center justify-between",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", { children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-									className: "text-xs font-bold text-white",
-									children: currentTrack.title
-								}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-									className: "text-[10px] text-zinc-400",
-									children: currentTrack.artist
-								})] }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-									type: "button",
-									onClick: handleToggleRoomMusic,
-									className: "w-10 h-10 rounded-full bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center text-white shadow-md cursor-pointer hover:scale-105 transition-transform",
-									children: isMusicPlaying ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Pause, { className: "w-4 h-4 fill-white" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Play, { className: "w-4 h-4 fill-white ml-0.5" })
-								})]
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-								className: "mt-4 space-y-2 max-h-48 overflow-y-auto",
-								children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-									className: "text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1",
-									children: "Playlist"
-								}), PLAYLIST_TRACKS.map((t, idx) => {
-									return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-										onClick: () => handleSelectMusicTrack(idx),
-										className: `p-2.5 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${idx === currentTrackIndex ? "bg-[#7928CA]/30 border-[#EC4899] text-white" : "bg-[#120824] border-white/5 text-zinc-300 hover:border-white/20"}`,
-										children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-											className: "flex items-center gap-2.5 min-w-0",
-											children: [/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("span", {
-												className: "text-xs font-mono text-[#C084FC]",
-												children: ["0", idx + 1]
-											}), /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-												className: "min-w-0",
-												children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-													className: "text-xs font-bold truncate",
-													children: t.title
-												}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-													className: "text-[10px] text-zinc-400",
-													children: t.artist
-												})]
-											})]
-										}), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-											className: "text-[10px] font-mono text-zinc-400",
-											children: t.duration
-										})]
-									}, t.id);
-								})]
-							}),
-							/* @__PURE__ */ (0, import_jsx_runtime.jsx)("button", {
-								onClick: () => setShowMusicModal(false),
-								className: "mt-4 w-full h-10 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-bold hover:text-white cursor-pointer",
-								children: "Close"
-							})
-						]
-					})
+				/* @__PURE__ */ (0, import_jsx_runtime.jsx)(PartyMusicPlayerModal, {
+					isOpen: showMusicModal,
+					onClose: () => setShowMusicModal(false),
+					canControlRoomMusic: canModerate,
+					isRoomMusicPlaying: effectiveRoomMusicPlaying,
+					currentTrack: activeMusicTrack,
+					musicQueue,
+					musicLoop,
+					musicUpdatedBy,
+					songRequests,
+					isSpeakerOn,
+					onPlayTrackForRoom: handlePlayTrackForRoom,
+					onToggleRoomPlayPause: handleToggleRoomMusic,
+					onStopRoomMusic: handleStopRoomMusic,
+					onSkipNext: handleSkipNextMusic,
+					onToggleLoop: handleToggleMusicLoop,
+					onAddToQueue: handleAddToMusicQueue,
+					onRemoveFromQueue: handleRemoveFromMusicQueue,
+					onRequestTrack: handleRequestMusicTrack,
+					onDismissRequest: handleDismissMusicRequest
 				}),
 				/* @__PURE__ */ (0, import_jsx_runtime.jsx)(FastGiftDrawer, {
 					isOpen: showGiftDrawer,
@@ -124468,21 +125718,21 @@ var PartyRoomsScreen = () => {
 		const isMe = userSeatIndex === seat.seatIndex;
 		const isSpeaking = Boolean(seat.isSpeaking);
 		const circleSize = {
-			lg: "w-[48px] h-[48px] sm:w-[56px] sm:h-[56px]",
-			md: "w-[42px] h-[42px] sm:w-[48px] sm:h-[48px]",
-			sm: "w-[36px] h-[36px] sm:w-[42px] sm:h-[42px]",
-			xs: "w-[32px] h-[32px] sm:w-[38px] sm:h-[38px]"
+			lg: "w-[62px] h-[62px] sm:w-[68px] sm:h-[68px]",
+			md: "w-[56px] h-[56px] sm:w-[62px] sm:h-[62px]",
+			sm: "w-[50px] h-[50px] sm:w-[56px] sm:h-[56px]",
+			xs: "w-[46px] h-[46px] sm:w-[52px] sm:h-[52px]"
 		}[sizeVariant];
 		const labelMaxWidth = {
-			lg: "max-w-[66px]",
-			md: "max-w-[60px]",
-			sm: "max-w-[54px]",
-			xs: "max-w-[50px]"
+			lg: "max-w-[74px]",
+			md: "max-w-[68px]",
+			sm: "max-w-[62px]",
+			xs: "max-w-[58px]"
 		}[sizeVariant];
-		const isCompact = sizeVariant === "xs" || sizeVariant === "sm";
+		const isCompact = sizeVariant === "xs";
 		return /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 			onClick: () => handleSeatClick(seat),
-			className: "flex flex-col items-center gap-0.5 cursor-pointer group transition-transform active:scale-95 pt-1",
+			className: "flex flex-col items-center gap-1 cursor-pointer group transition-transform active:scale-92",
 			children: [
 				/* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
 					className: "relative",
@@ -124507,23 +125757,23 @@ var PartyRoomsScreen = () => {
 							})
 						}),
 						isOccupied && seat.user && moderatorIds.includes(seat.user.id) && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-							className: "absolute -top-1 -left-1 w-3.5 h-3.5 rounded-full bg-cyan-600 border border-white flex items-center justify-center shadow-sm z-30",
+							className: "absolute -top-0.5 -left-0.5 w-4 h-4 rounded-full bg-cyan-600 border border-white flex items-center justify-center shadow-sm z-30",
 							title: "Room Moderator",
-							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ShieldCheck, { className: "w-2 h-2 text-white" })
+							children: /* @__PURE__ */ (0, import_jsx_runtime.jsx)(ShieldCheck, { className: "w-2.5 h-2.5 text-white" })
 						}),
 						isOccupied && /* @__PURE__ */ (0, import_jsx_runtime.jsx)("div", {
-							className: `absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md z-30 ${seat.isMuted ? seat.isHostMuted ? "bg-rose-700 text-white ring-1 ring-amber-400" : "bg-rose-600 text-white" : "bg-emerald-500 text-black"}`,
+							className: `absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md z-30 ${seat.isMuted ? seat.isHostMuted ? "bg-rose-700 text-white ring-1 ring-amber-400" : "bg-rose-600 text-white" : "bg-emerald-500 text-black"}`,
 							title: seat.isHostMuted ? "Muted & Locked by Host/Mod" : seat.isMuted ? "Mic Muted" : "Mic Live",
-							children: seat.isHostMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Lock, { className: "w-2 h-2 text-amber-300" }) : seat.isMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MicOff, { className: "w-2 h-2 sm:w-2.5 sm:h-2.5" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-2 h-2 sm:w-2.5 sm:h-2.5" })
+							children: seat.isHostMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Lock, { className: "w-2 h-2 text-amber-300" }) : seat.isMuted ? /* @__PURE__ */ (0, import_jsx_runtime.jsx)(MicOff, { className: "w-2.5 h-2.5" }) : /* @__PURE__ */ (0, import_jsx_runtime.jsx)(Mic, { className: "w-2.5 h-2.5" })
 						})
 					]
 				}),
 				/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", {
-					className: `${isCompact ? "text-[7.5px]" : "text-[8.5px] sm:text-[9.5px]"} font-bold text-zinc-200 truncate text-center leading-tight mt-2 ${labelMaxWidth}`,
-					children: isOccupied ? isMe ? "You" : seat.user.displayName.split(" ")[0] : seat.isLocked ? "Locked" : `Seat ${seat.seatIndex + 1}`
+					className: `${isCompact ? "text-[10.5px]" : "text-[11.5px] sm:text-[12px]"} font-semibold text-white/90 truncate text-center leading-tight tabular-nums drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] ${labelMaxWidth}`,
+					children: isOccupied ? isMe ? "You" : seat.user.displayName.split(" ")[0] : `${seat.seatIndex + 1}`
 				}),
-				(!isCompact || (seat.receivedCoins || 0) > 0 || isOccupied) && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
-					className: "flex items-center gap-0.5 px-1 py-0 rounded-full bg-black/45 border border-white/10 text-amber-300 text-[7px] font-bold leading-tight",
+				(isOccupied || (seat.receivedCoins || 0) > 0) && /* @__PURE__ */ (0, import_jsx_runtime.jsxs)("div", {
+					className: "flex items-center gap-0.5 px-1.5 py-0 rounded-full bg-black/45 border border-white/10 text-amber-300 text-[7.5px] font-bold leading-tight",
 					children: [/* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: "🎁" }), /* @__PURE__ */ (0, import_jsx_runtime.jsx)("span", { children: seat.receivedCoins ? seat.receivedCoins > 999 ? `${(seat.receivedCoins / 1e3).toFixed(1)}k` : seat.receivedCoins : "0" })]
 				})
 			]
@@ -125160,8 +126410,8 @@ var PartyRoomsScreen = () => {
 											activeViewers: 1,
 											isHostPresent: true,
 											backgroundTheme: isValidPartyBackgroundTheme(roomBackground) ? roomBackground : "royal_castle",
-											seatTheme: isValidPartySeatTheme(seatTheme) ? seatTheme : "royal_gold_diya",
-											isMusicPlaying: true,
+											seatTheme: isValidPartySeatTheme(seatTheme) ? seatTheme : "diamond_ice_blue",
+											isMusicPlaying: false,
 											musicTrackIndex: 0,
 											level: finalLevel,
 											isActive: true,
@@ -146817,6 +148067,203 @@ function initDeviceDimensions() {
 		window.visualViewport?.removeEventListener("resize", syncViewportDimensions);
 	};
 }
+// src/hooks/usePartyGiftAudioPreloader.ts
+var VIDEO_GIFT_FORMATS = /* @__PURE__ */ new Set([
+	"webm",
+	"mp4",
+	"mov"
+]);
+var lastCompletedSignature = null;
+var inflightPreloadSignature = null;
+var inflightPreloadPromise = null;
+function buildCatalogSignature(gifts) {
+	if (!gifts.length) return "default";
+	return gifts.map((g) => {
+		const adv = g.advancedConfig;
+		const mediaKey = adv ? adv.optimizedFileUrl || adv.animationUrl || adv.originalFileUrl || "" : "";
+		return `${g.id}:${g.audioAssetPath || ""}:${mediaKey}`;
+	}).sort().join("|");
+}
+/**
+* Global Party Room Gift Audio Preloading Hook.
+*
+* Eagerly unlocks the Web Audio API graph and decodes all gift animation SFX,
+* combo/VIP sound cues, and cached/catalog video gift audio tracks into Web Audio
+* `AudioBuffer`s as soon as the user enters a Party Room, ensuring zero-latency
+* synchronized playback across all room participants without disturbing Agora Voice.
+*/
+function usePartyGiftAudioPreloader({ roomId, gifts = [], enabled = true, maxUncachedVideoTracks = 8 }) {
+	const [status, setStatus] = (0, import_react.useState)("idle");
+	const [loadedCount, setLoadedCount] = (0, import_react.useState)(0);
+	const [totalCount, setTotalCount] = (0, import_react.useState)(0);
+	const [decodedBufferCount, setDecodedBufferCount] = (0, import_react.useState)(() => audioManager.getBufferStats().decodedCount);
+	const [isAudioUnlocked, setIsAudioUnlocked] = (0, import_react.useState)(false);
+	const giftsRef = (0, import_react.useRef)(gifts);
+	giftsRef.current = gifts;
+	const catalogSignature = (0, import_react.useMemo)(() => buildCatalogSignature(gifts), [gifts]);
+	const abortControllerRef = (0, import_react.useRef)(null);
+	const runEagerPreload = (0, import_react.useCallback)(async (force = false) => {
+		if (!enabled || !roomId) return;
+		const unlocked = await audioManager.unlock();
+		setIsAudioUnlocked(unlocked);
+		const signature = `${catalogSignature}`;
+		if (!force && lastCompletedSignature === signature) {
+			setDecodedBufferCount(audioManager.getBufferStats().decodedCount);
+			setStatus("ready");
+			return;
+		}
+		if (!force && inflightPreloadPromise && inflightPreloadSignature === signature) {
+			setStatus("preloading");
+			await inflightPreloadPromise;
+			setDecodedBufferCount(audioManager.getBufferStats().decodedCount);
+			setStatus("ready");
+			return;
+		}
+		if (abortControllerRef.current) abortControllerRef.current.abort();
+		const controller = new AbortController();
+		abortControllerRef.current = controller;
+		const { signal } = controller;
+		setStatus("preloading");
+		const task = (async () => {
+			try {
+				virtualGiftDatabase.syncAudioManagerMappings();
+				await hydrateGiftMediaCacheIndex().catch(() => {});
+				if (signal.aborted) return;
+				const extraSfxPaths = [];
+				const catalog = giftsRef.current;
+				for (const g of catalog) if (typeof g.audioAssetPath === "string" && g.audioAssetPath.trim()) {
+					const trimmed = g.audioAssetPath.trim();
+					extraSfxPaths.push(trimmed);
+					if (g.id) audioManager.registerAssetMapping(g.id, trimmed);
+				}
+				const cachedVideoEntries = [];
+				const remoteVideoEntries = [];
+				for (const g of catalog) {
+					const cfg = g.advancedConfig;
+					if (!cfg || cfg.enableSound === false) continue;
+					const resolved = resolvePlayableGiftUrl(cfg);
+					if (!resolved?.url || !VIDEO_GIFT_FORMATS.has(resolved.effectiveFormat)) continue;
+					const remoteUrl = resolved.url;
+					if (audioManager.hasDecodedBuffer(remoteUrl)) continue;
+					const syncBlob = getCachedGiftMediaUrlSync(remoteUrl);
+					if (syncBlob) {
+						cachedVideoEntries.push({
+							url: syncBlob,
+							cacheKey: remoteUrl
+						});
+						continue;
+					}
+					try {
+						const idb = await resolveCachedGiftMediaUrl(remoteUrl, {
+							giftId: g.id || cfg.id || "gift",
+							autoCache: false
+						});
+						if (signal.aborted) return;
+						if (idb.fromCache && idb.playableUrl) {
+							cachedVideoEntries.push({
+								url: idb.playableUrl,
+								cacheKey: remoteUrl
+							});
+							continue;
+						}
+					} catch {}
+					remoteVideoEntries.push({
+						url: remoteUrl,
+						cacheKey: remoteUrl
+					});
+				}
+				if (signal.aborted) return;
+				const weakNet = isWeakNetworkConnection();
+				const remoteCap = weakNet ? Math.min(2, maxUncachedVideoTracks) : maxUncachedVideoTracks;
+				const videoAudioQueue = [...cachedVideoEntries, ...remoteVideoEntries.slice(0, Math.max(0, remoteCap))];
+				const grandTotal = 15 + extraSfxPaths.length + videoAudioQueue.length;
+				setTotalCount(grandTotal);
+				setLoadedCount(0);
+				let sfxDone = 0;
+				let mediaDone = 0;
+				await audioManager.preloadGiftSfx(void 0, {
+					extraPaths: extraSfxPaths,
+					includeVipEntry: true,
+					concurrency: weakNet ? 2 : 4,
+					signal,
+					onItemComplete: (done, total) => {
+						sfxDone = done;
+						setTotalCount(total + videoAudioQueue.length);
+						setLoadedCount(sfxDone + mediaDone);
+						setDecodedBufferCount(audioManager.getBufferStats().decodedCount);
+					}
+				});
+				if (signal.aborted) return;
+				if (videoAudioQueue.length > 0) await audioManager.preloadMediaAudioTracks(videoAudioQueue, {
+					concurrency: weakNet ? 1 : 2,
+					signal,
+					onItemComplete: (done) => {
+						mediaDone = done;
+						setLoadedCount(sfxDone + mediaDone);
+						setDecodedBufferCount(audioManager.getBufferStats().decodedCount);
+					}
+				});
+				if (!signal.aborted) {
+					lastCompletedSignature = signature;
+					setDecodedBufferCount(audioManager.getBufferStats().decodedCount);
+					setStatus("ready");
+				}
+			} catch {
+				if (!signal.aborted) {
+					setDecodedBufferCount(audioManager.getBufferStats().decodedCount);
+					setStatus("ready");
+				}
+			} finally {
+				if (inflightPreloadSignature === signature) {
+					inflightPreloadSignature = null;
+					inflightPreloadPromise = null;
+				}
+			}
+		})();
+		inflightPreloadSignature = signature;
+		inflightPreloadPromise = task;
+		await task;
+	}, [
+		enabled,
+		roomId,
+		catalogSignature,
+		maxUncachedVideoTracks
+	]);
+	(0, import_react.useEffect)(() => {
+		if (!enabled || !roomId) {
+			if (abortControllerRef.current) {
+				abortControllerRef.current.abort();
+				abortControllerRef.current = null;
+			}
+			setStatus("idle");
+			return;
+		}
+		runEagerPreload(false);
+		const handleOnline = () => {
+			runEagerPreload(true);
+		};
+		window.addEventListener("online", handleOnline);
+		return () => {
+			window.removeEventListener("online", handleOnline);
+			if (abortControllerRef.current) {
+				abortControllerRef.current.abort();
+				abortControllerRef.current = null;
+			}
+		};
+	}, [
+		enabled,
+		roomId,
+		runEagerPreload
+	]);
+	return {
+		status,
+		loadedCount,
+		totalCount,
+		decodedBufferCount,
+		isAudioUnlocked,
+		preloadNow: (0, import_react.useCallback)(() => runEagerPreload(true), [runEagerPreload])
+	};
+}
 // src/components/common/BatteryStatus.tsx
 var NativeBatteryStatus = registerPlugin("BatteryStatus");
 var SESSION_CHECKPOINT_KEY = "alphamate_session_checkpoint";
@@ -150083,7 +151530,7 @@ var ModerationGuard = ({ children, scope = "app", onRestrictedClose }) => {
 */
 var NativePlatformBridge = () => {
 	const { theme } = useTheme();
-	const { currentScreen, setCurrentScreen, setActiveTab, deviceMode, partyRooms, activePartyRoom, openPartyRoom, activeStream, closePartyRoom, closeLiveStream, navigateBack, currentUser } = useApp();
+	const { currentScreen, setCurrentScreen, setActiveTab, deviceMode, partyRooms, activePartyRoom, openPartyRoom, activeStream, closePartyRoom, closeLiveStream, navigateBack, currentUser, publishedCatalogGifts } = useApp();
 	const [pendingDeepLinkPartyId, setPendingDeepLinkPartyId] = (0, import_react.useState)(() => {
 		if (typeof window === "undefined") return null;
 		return extractPartyRoomIdFromUrl(window.location.href);
@@ -150117,6 +151564,11 @@ var NativePlatformBridge = () => {
 		}, 600);
 		return () => window.clearTimeout(timer);
 	}, [isSessionReadyAndAuthed, deviceMode]);
+	usePartyGiftAudioPreloader({
+		roomId: activePartyRoom?.id ?? null,
+		gifts: publishedCatalogGifts,
+		enabled: Boolean(isSessionReadyAndAuthed && deviceMode !== "admin" && !isAccountAdminRestricted && !isPartyRestricted)
+	});
 	(0, import_react.useEffect)(() => {
 		if (!isSessionReadyAndAuthed || isAccountAdminRestricted || !currentUser?.id) return;
 		pushService.initialize({

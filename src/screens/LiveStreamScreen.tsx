@@ -1096,14 +1096,28 @@ export const LiveStreamScreen: React.FC = () => {
           setStreamStatus('live');
         } catch (err: any) {
           if (!isMounted) return;
+          const errMsg = String(err?.message || '');
+          const isPermissionDenied =
+            err?.code === 'MEDIA_PERMISSION_DENIED' ||
+            err?.code === 'MEDIA_DEVICE_NOT_FOUND' ||
+            err?.code === 'MEDIA_UNAVAILABLE' ||
+            err?.name === 'NotAllowedError' ||
+            err?.name === 'PermissionDeniedError' ||
+            err?.name === 'SecurityError' ||
+            /permission denied|permission dismissed|not allowed/i.test(errMsg);
+
           if (err?.code === 'SFU_NOT_CONFIGURED' || err?.status === 503) {
-            console.warn('[Solo Live Host] SFU unavailable:', err?.message || err);
+            console.warn('[Solo Live Host] SFU unavailable:', errMsg || err);
+          } else if (isPermissionDenied) {
+            console.warn('[Solo Live Host] Camera/microphone permission or device unavailable:', errMsg || err);
           } else {
             console.error('[Solo Live Host] SFU publish failed:', err);
           }
           setStreamStatus('error');
           setStreamError(
-            err instanceof Error
+            isPermissionDenied
+              ? errMsg || 'Camera and microphone permission was denied. Please allow access in your browser or device settings, then tap Retry.'
+              : err instanceof Error
               ? err.message
               : 'Alpha Mate Live could not connect. Please try again.'
           );
@@ -1925,7 +1939,11 @@ export const LiveStreamScreen: React.FC = () => {
               <Radio className="w-6 h-6 text-rose-400" />
             </div>
             <h3 className="text-base font-black text-white mb-1.5">
-              {activeRole === 'host' ? 'Could Not Start Live Stream' : 'Stream Connection Unavailable'}
+              {activeRole === 'host'
+                ? /permission|camera|microphone/i.test(streamError || '')
+                  ? 'Camera & Mic Permission Required'
+                  : 'Could Not Start Live Stream'
+                : 'Stream Connection Unavailable'}
             </h3>
             <p className="text-xs text-zinc-300 leading-relaxed mb-5">
               {streamError || 'Network Error — please check your connection and try again.'}
@@ -1941,6 +1959,7 @@ export const LiveStreamScreen: React.FC = () => {
                 onClick={() => {
                   setStreamStatus('connecting');
                   setStreamError(null);
+                  setRetryToken((n) => n + 1);
                   void refreshScope('live_stream');
                 }}
                 className="flex-1 h-11 rounded-xl bg-gradient-to-r from-[#7928CA] to-[#EC4899] text-white text-xs font-bold cursor-pointer"

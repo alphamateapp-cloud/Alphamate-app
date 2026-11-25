@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { agoraPartyEngine } from '../services/agoraPartyEngine';
+import { partyMusicPlayer } from '../services/partyMusicPlayer';
 
 export interface PartyAudioSpectrumFrame {
   /** Overall normalized RMS/mean energy (0..1) */
@@ -330,9 +331,14 @@ export function usePartyAudioAnalyser({
       if (!fftHasEnergy) {
         const tSec = nowMs * 0.001;
         const nativeEnergy = snapshot.peakVolume;
+        const musicEnergy = isSpeakerOnRef.current ? partyMusicPlayer.getMusicEnergy() : 0;
         const hasNativeVoice = nativeEnergy > 0.02;
-        const ambientMusicFloor =
-          opts?.isMusicPlaying && isSpeakerOnRef.current ? 0.09 : 0.035;
+        const hasLiveMusic = musicEnergy > 0.04;
+        const ambientMusicFloor = hasLiveMusic
+          ? Math.min(0.42, 0.08 + musicEnergy * 0.45)
+          : opts?.isMusicPlaying && isSpeakerOnRef.current
+          ? 0.09
+          : 0.035;
 
         for (let i = 0; i < barCount; i++) {
           const normIdx = i / Math.max(1, barCount - 1);
@@ -351,6 +357,14 @@ export function usePartyAudioAnalyser({
               snapshot.speakerLevels[i % Math.max(1, snapshot.speakerLevels.length)] ??
               nativeEnergy;
             target = Math.min(1, Math.max(ambientMusicFloor, speakerBoost * formantBell * harmonicWave * 1.25));
+          } else if (hasLiveMusic) {
+            // Shape real background music beat energy across bass-to-treble bands
+            const bassBias = 1.15 - normIdx * 0.48;
+            const rhythmicWave =
+              0.62 +
+              0.26 * Math.sin(tSec * (5.2 + (i % 4) * 1.1) + i * 0.7) +
+              0.12 * Math.cos(tSec * 9.4 - i * 1.05);
+            target = Math.min(0.85, Math.max(0.05, musicEnergy * bassBias * rhythmicWave * 1.35));
           } else {
             // Whisper-quiet idle breathing curve so the stage feels alive without fake spikes
             const wave =

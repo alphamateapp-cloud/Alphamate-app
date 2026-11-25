@@ -307,6 +307,35 @@ export interface PartySeat {
   receivedCoins?: number;
 }
 
+export type PartyMusicSource = 'audius' | 'deezer' | 'itunes' | 'jamendo';
+
+export interface PartyMusicTrack {
+  id: string;
+  sourceTrackId?: string;
+  title: string;
+  artist: string;
+  album?: string;
+  artworkUrl?: string;
+  /** Playable stream duration in seconds (full length for Audius/Jamendo, ~30s for Deezer/iTunes preview). */
+  durationSec: number;
+  fullDurationSec?: number;
+  /** Backend proxy stream URL (e.g. /api/music/audius/:id) for CORS-clean synced playback & visualizer. */
+  streamUrl: string;
+  /** Direct HTTPS fallback stream URL if backend proxy is unavailable. */
+  directStreamUrl?: string;
+  source: PartyMusicSource;
+  isFullTrack: boolean;
+  requestedBy?: string;
+}
+
+export interface PartyMusicRequest {
+  id: string;
+  track: PartyMusicTrack;
+  requesterId: string;
+  requesterName: string;
+  requestedAtMs: number;
+}
+
 export interface PartyRoom {
   id: string;
   sessionId?: string;
@@ -321,6 +350,12 @@ export interface PartyRoom {
   nowPlaying?: string;
   isMusicPlaying?: boolean;
   musicTrackIndex?: number;
+  musicTrack?: PartyMusicTrack | null;
+  musicStartedAtMs?: number;
+  musicPositionSec?: number;
+  musicQueue?: PartyMusicTrack[];
+  musicLoop?: boolean;
+  musicUpdatedBy?: string;
   level?: 1 | 2 | 3 | 4;
   isActive?: boolean;
   isHostPresent?: boolean;

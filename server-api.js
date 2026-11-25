@@ -11,6 +11,7 @@ import { fileURLToPath } from 'url';
 import agoraTokenPkg from 'agora-token';
 import { registerGiftMediaRoutes } from './server-gift-media.js';
 import { registerGeminiRoutes } from './server-gemini.js';
+import { registerMusicRoutes } from './server-music.js';
 
 const { RtcTokenBuilder, RtcRole } = agoraTokenPkg;
 
@@ -3642,6 +3643,9 @@ export function createApiApp() {
 
   // Server-side Gemini Chatbot & Live/Party Welcome Routes
   registerGeminiRoutes(app);
+
+  // Free-Tier Party Room Music Search & Voice-Safe Audio Streaming Proxy (Audius + Deezer + iTunes)
+  registerMusicRoutes(app);
 
   // Ensure unmatched /api/* endpoints return JSON 404 instead of falling through to SPA HTML
   app.use('/api', (_req, res) => {

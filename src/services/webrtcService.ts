@@ -1213,12 +1213,48 @@ class RealtimeSfuStreamingEngine {
     }
   }
 
+  private isMediaPermissionError(err: unknown): boolean {
+    const name = String((err as any)?.name || '');
+    const msg = String((err as any)?.message || err || '').toLowerCase();
+    return (
+      name === 'NotAllowedError' ||
+      name === 'PermissionDeniedError' ||
+      name === 'SecurityError' ||
+      msg.includes('permission denied') ||
+      msg.includes('permission dismissed') ||
+      msg.includes('not allowed')
+    );
+  }
+
+  private isMediaNotFoundError(err: unknown): boolean {
+    const name = String((err as any)?.name || '');
+    const msg = String((err as any)?.message || err || '').toLowerCase();
+    return (
+      name === 'NotFoundError' ||
+      name === 'DevicesNotFoundError' ||
+      msg.includes('requested device not found')
+    );
+  }
+
+  private createTypedMediaError(code: string, message: string): Error & { code: string } {
+    const error = new Error(message) as Error & { code: string };
+    error.code = code;
+    return error;
+  }
+
   public async getLocalMediaStream(
     facing: 'user' | 'environment' = 'user',
     withAudio: boolean = true
   ): Promise<MediaStream> {
     this.facingMode = facing;
     this.stopLocalMediaStream();
+
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+      throw this.createTypedMediaError(
+        'MEDIA_UNAVAILABLE',
+        'Camera and microphone are unavailable in this browser context. Open the app over HTTPS with media permissions enabled.'
+      );
+    }
 
     const constraints: MediaStreamConstraints = {
       video: {
@@ -1244,28 +1280,78 @@ class RealtimeSfuStreamingEngine {
       if (withAudio) this.initAudioAnalyser(stream);
       return stream;
     } catch (err) {
-      console.warn('[Media capture] Preferred camera/microphone constraints failed; retrying with device defaults.', err);
-      // Keep voice available even when camera capture/rendering fails. Audio is
-      // requested independently as a fallback so video-off never implies mic-off.
+      const primaryWasPermissionDenied = this.isMediaPermissionError(err);
+
+      // If preferred HD constraints failed for a non-permission reason (e.g. OverconstrainedError),
+      // try basic device-default video + audio before dropping camera.
+      if (!primaryWasPermissionDenied) {
+        try {
+          const basicStream = await this.requestMediaWithTimeout(
+            { video: true, audio: withAudio },
+            8000,
+            'Camera and microphone'
+          );
+          this.localStream = basicStream;
+          if (this.isVideoPaused) basicStream.getVideoTracks().forEach((t) => (t.enabled = false));
+          if (this.isMuted) basicStream.getAudioTracks().forEach((t) => (t.enabled = false));
+          if (withAudio) this.initAudioAnalyser(basicStream);
+          return basicStream;
+        } catch {
+          // Continue to single-track fallbacks below
+        }
+      }
+
+      let audioDenied = false;
+      let videoDenied = false;
+
+      // Keep voice available even when camera capture fails or camera permission is blocked.
       if (withAudio) {
         try {
-          const audioOnlyStream = await this.requestMediaWithTimeout({
-            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-            video: false,
-          }, 8000, 'Microphone');
+          const audioOnlyStream = await this.requestMediaWithTimeout(
+            {
+              audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+              video: false,
+            },
+            8000,
+            'Microphone'
+          );
           this.localStream = audioOnlyStream;
           if (this.isMuted) audioOnlyStream.getAudioTracks().forEach((t) => (t.enabled = false));
           this.initAudioAnalyser(audioOnlyStream);
           return audioOnlyStream;
         } catch (audioErr) {
-          console.error('[Media capture] Microphone-only fallback failed.', audioErr);
+          audioDenied = this.isMediaPermissionError(audioErr);
+          if (!audioDenied) {
+            console.warn('[Media capture] Microphone-only fallback unavailable:', (audioErr as any)?.message || audioErr);
+          }
         }
       }
-      // If microphone is not requested/available, retain a camera-only path.
-      const videoOnlyStream = await this.requestMediaWithTimeout({ video: true, audio: false }, 8000, 'Camera');
-      this.localStream = videoOnlyStream;
-      if (this.isVideoPaused) videoOnlyStream.getVideoTracks().forEach((t) => (t.enabled = false));
-      return videoOnlyStream;
+
+      // If microphone is unavailable/blocked, try camera-only so host can still broadcast video.
+      try {
+        const videoOnlyStream = await this.requestMediaWithTimeout({ video: true, audio: false }, 8000, 'Camera');
+        this.localStream = videoOnlyStream;
+        if (this.isVideoPaused) videoOnlyStream.getVideoTracks().forEach((t) => (t.enabled = false));
+        return videoOnlyStream;
+      } catch (videoErr) {
+        videoDenied = this.isMediaPermissionError(videoErr);
+
+        if (primaryWasPermissionDenied || audioDenied || videoDenied) {
+          throw this.createTypedMediaError(
+            'MEDIA_PERMISSION_DENIED',
+            'Camera and microphone access was denied. Please allow Camera & Microphone permissions in your browser or device settings, then tap Retry.'
+          );
+        }
+
+        if (this.isMediaNotFoundError(err) || this.isMediaNotFoundError(videoErr)) {
+          throw this.createTypedMediaError(
+            'MEDIA_DEVICE_NOT_FOUND',
+            'No camera or microphone was detected on this device. Connect a camera or microphone and tap Retry.'
+          );
+        }
+
+        throw videoErr;
+      }
     }
   }
 

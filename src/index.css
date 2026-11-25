@@ -902,42 +902,54 @@ html.light :where(
   will-change: transform, opacity;
 }
 
-/* Empty seat luxury sofa subtle breathing & velvet specular sheen */
-@keyframes sofaBreathe {
+/* Empty seat glass-orb subtle luminous crescent breathing, rim glint orbit, and crisp icon pulse */
+@keyframes orbCrescentBreathe {
   0%, 100% {
-    transform: translateY(0px) scale(1);
+    opacity: 0.78;
+    transform: scale(0.99);
   }
   50% {
-    transform: translateY(-1.4px) scale(1.03);
+    opacity: 1;
+    transform: scale(1.015);
   }
 }
 
-@keyframes sofaShimmerSweep {
+@keyframes orbGlintOrbit {
   0% {
-    transform: translateX(-95px) skewX(-22deg);
-    opacity: 0;
-  }
-  20% {
-    opacity: 0.45;
-  }
-  55% {
-    opacity: 0.25;
+    transform: rotate(0deg);
   }
   100% {
-    transform: translateX(135px) skewX(-22deg);
-    opacity: 0;
+    transform: rotate(360deg);
   }
 }
 
-.animate-sofa-breathe {
-  animation: sofaBreathe 3.2s ease-in-out infinite;
-  transform-box: fill-box;
-  transform-origin: center bottom;
+@keyframes orbIconPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.92;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+.animate-orb-crescent {
+  animation: orbCrescentBreathe 3.2s ease-in-out infinite;
+  transform-box: view-box;
+  transform-origin: 50px 50px;
+  will-change: transform, opacity;
+}
+
+.animate-orb-glint {
+  animation: orbGlintOrbit 7.5s linear infinite;
+  transform-box: view-box;
+  transform-origin: 50px 50px;
   will-change: transform;
 }
 
-.animate-sofa-shimmer {
-  animation: sofaShimmerSweep 3.8s ease-in-out infinite;
+.animate-orb-icon-pulse {
+  animation: orbIconPulse 2.8s ease-in-out infinite;
   will-change: transform, opacity;
 }
 
@@ -1060,8 +1072,9 @@ html.light :where(
   .animate-lotus-sway,
   .animate-diamond-glint,
   .animate-seat-sparkle,
-  .animate-sofa-breathe,
-  .animate-sofa-shimmer,
+  .animate-orb-crescent,
+  .animate-orb-glint,
+  .animate-orb-icon-pulse,
   .animate-vinyl-spin,
   .animate-vinyl-woofer-ring,
   .animate-vinyl-woofer-cone,

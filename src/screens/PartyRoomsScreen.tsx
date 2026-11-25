@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { useApp } from '../context/AppContext';
 import { PullToRefresh, RefreshScopeButton } from '../components/common/PullToRefresh';
 import { NetworkLatencyMonitor } from '../components/common/NetworkLatencyMonitor';
-import { PartyRoom, PartySeat, User, Gift } from '../types';
+import { PartyRoom, PartySeat, User, Gift, PartyMusicTrack, PartyMusicRequest } from '../types';
 import { agoraPartyEngine } from '../services/agoraPartyEngine';
 import type { PartyParticipantPresence } from '../services/webrtcService';
 import {
@@ -29,6 +29,7 @@ import {
 } from '../components/party/AnimatedSeatThemeFrame';
 import { PartyRemoteAudioPlayer } from '../components/party/PartyRemoteAudioPlayer';
 import { PartyMusicVinylWidget } from '../components/party/PartyMusicVinylWidget';
+import { PartyMusicPlayerModal } from '../components/party/PartyMusicPlayerModal';
 import { PartyAudioVisualizer } from '../components/party/PartyAudioVisualizer';
 import { SharePartyModal } from '../components/party/SharePartyModal';
 import { VoiceModulationModal } from '../components/party/VoiceModulationModal';
@@ -40,8 +41,10 @@ import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
 import { uploadPartyRoomCover } from '../services/chatService';
 import { sendPartyRoomMessage, subscribeToPartyRoomMessages } from '../services/partyChatService';
-import { RealtimeViewerProfile } from '../services/realtimeSocket';
+import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
 import { partyRoomDataService } from '../services/partyRoomDataService';
+import { partyMusicPlayer } from '../services/partyMusicPlayer';
+import { sanitizePartyMusicTrackForFirestore } from '../services/partyMusicService';
 import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
 import {
@@ -148,13 +151,6 @@ interface ChatItem {
   isAiBot?: boolean;
   createdAtMs?: number;
 }
-
-const PLAYLIST_TRACKS = [
-  { id: '1', title: 'Alpha Mate Club Anthem (VIP Mix)', artist: 'DJ Kairo', duration: '3:45' },
-  { id: '2', title: 'Midnight Neon Beats & Chill', artist: 'Luna Star', duration: '4:12' },
-  { id: '3', title: 'Cyberwave Royal Bass Drop', artist: 'Electro_9', duration: '3:20' },
-  { id: '4', title: 'Late Night Acoustic Lounge', artist: 'Zainab Live', duration: '3:50' },
-];
 
 export const VIP_GUEST_SEAT_INDEX = 100;
 
@@ -311,10 +307,17 @@ export const PartyRoomsScreen: React.FC = () => {
   const lastHandledPartyRefreshTickRef = useRef<number>(partyRefreshTick);
   const lastVoiceRoomIdRef = useRef<string | null>(null);
 
-  // Music Player State
-  const [isMusicPlaying, setIsMusicPlaying] = useState(true);
-  const [currentTrackIndex, setCurrentTrackIndex] = useState(0);
+  // Synchronized Room Background Music State (Host/Mod DJ + All Listeners)
+  const [isMusicPlaying, setIsMusicPlaying] = useState(false);
+  const [activeMusicTrack, setActiveMusicTrack] = useState<PartyMusicTrack | null>(null);
+  const [musicStartedAtMs, setMusicStartedAtMs] = useState<number>(0);
+  const [musicPositionSec, setMusicPositionSec] = useState<number>(0);
+  const [musicQueue, setMusicQueue] = useState<PartyMusicTrack[]>([]);
+  const [musicLoop, setMusicLoop] = useState<boolean>(false);
+  const [musicUpdatedBy, setMusicUpdatedBy] = useState<string>('');
+  const [songRequests, setSongRequests] = useState<PartyMusicRequest[]>([]);
   const [showMusicModal, setShowMusicModal] = useState(false);
+  const lastMusicSignalAtRef = useRef<number>(0);
 
   // Modals & Drawers
   const [showGiftDrawer, setShowGiftDrawer] = useState(false);
@@ -352,7 +355,7 @@ export const PartyRoomsScreen: React.FC = () => {
     } catch {
       // Ignore storage access failures in restricted environments
     }
-    return 'royal_gold_diya';
+    return 'diamond_ice_blue';
   });
   const [showBackgroundModal, setShowBackgroundModal] = useState(false);
   const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
@@ -742,6 +745,8 @@ export const PartyRoomsScreen: React.FC = () => {
   const isHost = activePartyRoom ? activePartyRoom.host.id === effectiveUserId : false;
   const isModerator = moderatorIds.includes(effectiveUserId);
   const canModerate = isHost || isModerator;
+  const canModerateRef = useRef<boolean>(canModerate);
+  canModerateRef.current = canModerate;
   const canUseSpeakerMic = isHost || userSeatIndex !== null;
   const hostLevel = activePartyRoom?.host.level ?? currentUser.level;
 
@@ -759,29 +764,91 @@ export const PartyRoomsScreen: React.FC = () => {
     } else {
       setRoomBackground('royal_castle');
     }
-    if (typeof activePartyRoom.isMusicPlaying === 'boolean') {
-      setIsMusicPlaying(activePartyRoom.isMusicPlaying);
-    }
-    if (
-      typeof activePartyRoom.musicTrackIndex === 'number' &&
-      Number.isFinite(activePartyRoom.musicTrackIndex) &&
-      activePartyRoom.musicTrackIndex >= 0 &&
-      activePartyRoom.musicTrackIndex < PLAYLIST_TRACKS.length
-    ) {
-      setCurrentTrackIndex(Math.floor(activePartyRoom.musicTrackIndex));
+    const incomingTrack =
+      activePartyRoom.musicTrack && activePartyRoom.musicTrack.id
+        ? activePartyRoom.musicTrack
+        : null;
+    const incomingStartedAt = Number(activePartyRoom.musicStartedAtMs || 0);
+    // Avoid older Firestore snapshot briefly reverting a fresher <150ms WebSocket music signal
+    if (incomingStartedAt >= lastMusicSignalAtRef.current - 1500 || !incomingStartedAt) {
+      setActiveMusicTrack(incomingTrack);
+      setIsMusicPlaying(Boolean(activePartyRoom.isMusicPlaying && incomingTrack));
+      setMusicStartedAtMs(incomingStartedAt);
+      setMusicPositionSec(Math.max(0, Number(activePartyRoom.musicPositionSec) || 0));
+      setMusicQueue(Array.isArray(activePartyRoom.musicQueue) ? activePartyRoom.musicQueue.slice(0, 15) : []);
+      setMusicLoop(Boolean(activePartyRoom.musicLoop));
+      setMusicUpdatedBy(String(activePartyRoom.musicUpdatedBy || ''));
     }
   }, [
     activePartyRoom?.id,
     activePartyRoom?.seatTheme,
     activePartyRoom?.backgroundTheme,
     activePartyRoom?.isMusicPlaying,
-    activePartyRoom?.musicTrackIndex,
+    activePartyRoom?.musicTrack,
+    activePartyRoom?.musicStartedAtMs,
+    activePartyRoom?.musicPositionSec,
+    activePartyRoom?.musicQueue,
+    activePartyRoom?.musicLoop,
+    activePartyRoom?.musicUpdatedBy,
+  ]);
+
+  // Keep synchronized voice-safe background music engine aligned for Host, Seated Guests, and Viewers
+  useEffect(() => {
+    if (!activePartyRoom?.id) {
+      partyMusicPlayer.stopAll();
+      setSongRequests([]);
+      lastMusicSignalAtRef.current = 0;
+      return;
+    }
+    partyMusicPlayer.syncToRoomState({
+      roomId: activePartyRoom.id,
+      isPlaying: Boolean(isMusicPlaying && activeMusicTrack),
+      track: activeMusicTrack,
+      startedAtMs: musicStartedAtMs,
+      positionSec: musicPositionSec,
+      loop: musicLoop,
+      speakerOn: isSpeakerOn,
+    });
+  }, [
+    activePartyRoom?.id,
+    isMusicPlaying,
+    activeMusicTrack,
+    musicStartedAtMs,
+    musicPositionSec,
+    musicLoop,
+    isSpeakerOn,
+  ]);
+
+  // Stop background music cleanly if PartyRoomsScreen unmounts
+  useEffect(() => {
+    return () => {
+      partyMusicPlayer.stopAll();
+    };
+  }, []);
+
+  // Smart Auto Voice-Ducking: gently softens background music whenever Host or any Guest is speaking
+  useEffect(() => {
+    if (!activePartyRoom?.id) return;
+    const anyRemotePresenceSpeaking = activeVoiceParticipants.some((p) => p.isSpeaking && !p.isMuted);
+    const isAnyParticipantSpeaking = Boolean(
+      isHostSpeaking ||
+        isSelfSpeaking ||
+        remoteSpeakingPeerIds.size > 0 ||
+        anyRemotePresenceSpeaking
+    );
+    partyMusicPlayer.setVoiceDuckingActive(isAnyParticipantSpeaking);
+  }, [
+    activePartyRoom?.id,
+    isHostSpeaking,
+    isSelfSpeaking,
+    remoteSpeakingPeerIds,
+    activeVoiceParticipants,
   ]);
 
   // Immediately close privileged modals if user is demoted or steps off a seat
+  // (Music Hub remains accessible to everyone for personal music volume, search preview, and song requests)
   useEffect(() => {
     if (!canModerate) {
-      setShowMusicModal(false);
       setShowBackgroundModal(false);
       setShowMoreModal(false);
       setShowHostAnalyticsCard(false);
@@ -834,40 +901,344 @@ export const PartyRoomsScreen: React.FC = () => {
     [canModerate, activePartyRoom?.id]
   );
 
-  const handleToggleRoomMusic = useCallback(() => {
-    if (!canModerate || !activePartyRoom?.id) {
-      showToast('Only Host & Moderators can control room music 🔒');
-      return;
-    }
-    const nextPlaying = !isMusicPlaying;
-    const track = PLAYLIST_TRACKS[currentTrackIndex] || PLAYLIST_TRACKS[0];
-    setIsMusicPlaying(nextPlaying);
-    updatePartyRoomFields(activePartyRoom.id, {
-      isMusicPlaying: nextPlaying,
-      musicTrackIndex: currentTrackIndex,
-      nowPlaying: nextPlaying && track ? `${track.title} — ${track.artist}` : '',
-    }).catch(() => {});
-  }, [canModerate, activePartyRoom?.id, isMusicPlaying, currentTrackIndex]);
+  const broadcastRoomMusicState = useCallback(
+    (next: {
+      isPlaying: boolean;
+      track: PartyMusicTrack | null;
+      startedAtMs: number;
+      positionSec: number;
+      queue: PartyMusicTrack[];
+      loop: boolean;
+      updatedBy?: string;
+    }) => {
+      if (!activePartyRoom?.id) return;
+      const cleanTrack = sanitizePartyMusicTrackForFirestore(next.track);
+      const cleanQueue = next.queue
+        .slice(0, 15)
+        .map((t) => sanitizePartyMusicTrackForFirestore(t))
+        .filter((t): t is PartyMusicTrack => Boolean(t));
+      const djName = (next.updatedBy || currentUser.displayName || 'Host').slice(0, 64);
 
-  const handleSelectMusicTrack = useCallback(
-    (idx: number) => {
+      lastMusicSignalAtRef.current = Date.now();
+      setActiveMusicTrack(cleanTrack);
+      setIsMusicPlaying(Boolean(next.isPlaying && cleanTrack));
+      setMusicStartedAtMs(next.startedAtMs);
+      setMusicPositionSec(next.positionSec);
+      setMusicQueue(cleanQueue);
+      setMusicLoop(next.loop);
+      setMusicUpdatedBy(djName);
+
+      // 1. Instant <150ms WebSocket room broadcast to all currently connected listeners
+      realtimeSocket.sendRoomSignal('party', activePartyRoom.id, {
+        type: 'party_music_sync',
+        isPlaying: Boolean(next.isPlaying && cleanTrack),
+        track: cleanTrack,
+        startedAtMs: next.startedAtMs,
+        positionSec: next.positionSec,
+        queue: cleanQueue,
+        loop: next.loop,
+        updatedBy: djName,
+        sentAtMs: Date.now(),
+      });
+
+      // 2. Durable Firestore sync so late joiners and reconnecting viewers hear the exact same beat
+      updatePartyRoomFields(activePartyRoom.id, {
+        isMusicPlaying: Boolean(next.isPlaying && cleanTrack),
+        musicTrack: cleanTrack,
+        musicStartedAtMs: next.startedAtMs,
+        musicPositionSec: next.positionSec,
+        musicQueue: cleanQueue,
+        musicLoop: next.loop,
+        musicUpdatedBy: djName,
+        nowPlaying: next.isPlaying && cleanTrack ? `${cleanTrack.title} — ${cleanTrack.artist}` : '',
+      }).catch(() => {});
+    },
+    [activePartyRoom?.id, currentUser.displayName]
+  );
+
+  const handlePlayTrackForRoom = useCallback(
+    (track: PartyMusicTrack) => {
       if (!canModerate || !activePartyRoom?.id) {
-        showToast('Only Host & Moderators can change room music 🔒');
+        showToast('Only Host & Moderators can play room music directly — tap Request! 🎵');
         return;
       }
-      const track = PLAYLIST_TRACKS[idx];
-      if (!track) return;
-      setCurrentTrackIndex(idx);
-      setIsMusicPlaying(true);
-      updatePartyRoomFields(activePartyRoom.id, {
-        isMusicPlaying: true,
-        musicTrackIndex: idx,
-        nowPlaying: `${track.title} — ${track.artist}`,
-      }).catch(() => {});
-      showToast(`Playing: ${track.title} 🎶`);
+      partyMusicPlayer.unlock();
+      const now = Date.now();
+      broadcastRoomMusicState({
+        isPlaying: true,
+        track,
+        startedAtMs: now,
+        positionSec: 0,
+        queue: musicQueue,
+        loop: musicLoop,
+        updatedBy: track.requestedBy ? `${currentUser.displayName} (for ${track.requestedBy})` : currentUser.displayName,
+      });
+      showToast(`🎶 Playing for everyone: ${track.title}`);
     },
-    [canModerate, activePartyRoom?.id]
+    [canModerate, activePartyRoom?.id, broadcastRoomMusicState, musicQueue, musicLoop, currentUser.displayName]
   );
+
+  const handleToggleRoomMusic = useCallback(() => {
+    if (!canModerate || !activePartyRoom?.id) {
+      setShowMusicModal(true);
+      return;
+    }
+    if (!activeMusicTrack) {
+      setShowMusicModal(true);
+      return;
+    }
+    partyMusicPlayer.unlock();
+    const nextPlaying = !isMusicPlaying;
+    const currentPos = nextPlaying
+      ? musicPositionSec
+      : Math.max(0, partyMusicPlayer.getCurrentPositionSec());
+    broadcastRoomMusicState({
+      isPlaying: nextPlaying,
+      track: activeMusicTrack,
+      startedAtMs: Date.now(),
+      positionSec: currentPos,
+      queue: musicQueue,
+      loop: musicLoop,
+      updatedBy: currentUser.displayName,
+    });
+  }, [
+    canModerate,
+    activePartyRoom?.id,
+    activeMusicTrack,
+    isMusicPlaying,
+    musicPositionSec,
+    musicQueue,
+    musicLoop,
+    currentUser.displayName,
+    broadcastRoomMusicState,
+  ]);
+
+  const handleStopRoomMusic = useCallback(() => {
+    if (!canModerate || !activePartyRoom?.id) return;
+    broadcastRoomMusicState({
+      isPlaying: false,
+      track: null,
+      startedAtMs: Date.now(),
+      positionSec: 0,
+      queue: musicQueue,
+      loop: musicLoop,
+      updatedBy: currentUser.displayName,
+    });
+    showToast('Room music stopped ⏹️');
+  }, [canModerate, activePartyRoom?.id, broadcastRoomMusicState, musicQueue, musicLoop, currentUser.displayName]);
+
+  const handleSkipNextMusic = useCallback(() => {
+    if (!canModerate || !activePartyRoom?.id) return;
+    if (musicQueue.length === 0) {
+      showToast('No songs in Up Next queue.');
+      return;
+    }
+    const [nextTrack, ...restQueue] = musicQueue;
+    partyMusicPlayer.unlock();
+    broadcastRoomMusicState({
+      isPlaying: true,
+      track: nextTrack,
+      startedAtMs: Date.now(),
+      positionSec: 0,
+      queue: restQueue,
+      loop: musicLoop,
+      updatedBy: nextTrack.requestedBy
+        ? `${currentUser.displayName} (for ${nextTrack.requestedBy})`
+        : currentUser.displayName,
+    });
+    showToast(`⏭️ Up Next: ${nextTrack.title}`);
+  }, [canModerate, activePartyRoom?.id, musicQueue, musicLoop, currentUser.displayName, broadcastRoomMusicState]);
+
+  const handleToggleMusicLoop = useCallback(() => {
+    if (!canModerate || !activePartyRoom?.id) return;
+    const nextLoop = !musicLoop;
+    broadcastRoomMusicState({
+      isPlaying: isMusicPlaying,
+      track: activeMusicTrack,
+      startedAtMs: musicStartedAtMs || Date.now(),
+      positionSec: isMusicPlaying ? partyMusicPlayer.getCurrentPositionSec() : musicPositionSec,
+      queue: musicQueue,
+      loop: nextLoop,
+      updatedBy: currentUser.displayName,
+    });
+    showToast(nextLoop ? '🔁 Track Repeat ON' : '🔁 Track Repeat OFF');
+  }, [
+    canModerate,
+    activePartyRoom?.id,
+    musicLoop,
+    isMusicPlaying,
+    activeMusicTrack,
+    musicStartedAtMs,
+    musicPositionSec,
+    musicQueue,
+    currentUser.displayName,
+    broadcastRoomMusicState,
+  ]);
+
+  const handleAddToMusicQueue = useCallback(
+    (track: PartyMusicTrack) => {
+      if (!canModerate || !activePartyRoom?.id) return;
+      if (musicQueue.length >= 15) {
+        showToast('Queue is full (max 15 songs).');
+        return;
+      }
+      const nextQueue = [...musicQueue, track];
+      broadcastRoomMusicState({
+        isPlaying: isMusicPlaying,
+        track: activeMusicTrack,
+        startedAtMs: musicStartedAtMs || Date.now(),
+        positionSec: isMusicPlaying ? partyMusicPlayer.getCurrentPositionSec() : musicPositionSec,
+        queue: nextQueue,
+        loop: musicLoop,
+        updatedBy: currentUser.displayName,
+      });
+      showToast(`➕ Queued: ${track.title}`);
+    },
+    [
+      canModerate,
+      activePartyRoom?.id,
+      musicQueue,
+      isMusicPlaying,
+      activeMusicTrack,
+      musicStartedAtMs,
+      musicPositionSec,
+      musicLoop,
+      currentUser.displayName,
+      broadcastRoomMusicState,
+    ]
+  );
+
+  const handleRemoveFromMusicQueue = useCallback(
+    (_trackId: string, index: number) => {
+      if (!canModerate || !activePartyRoom?.id) return;
+      const nextQueue = musicQueue.filter((_, i) => i !== index);
+      broadcastRoomMusicState({
+        isPlaying: isMusicPlaying,
+        track: activeMusicTrack,
+        startedAtMs: musicStartedAtMs || Date.now(),
+        positionSec: isMusicPlaying ? partyMusicPlayer.getCurrentPositionSec() : musicPositionSec,
+        queue: nextQueue,
+        loop: musicLoop,
+        updatedBy: currentUser.displayName,
+      });
+    },
+    [
+      canModerate,
+      activePartyRoom?.id,
+      musicQueue,
+      isMusicPlaying,
+      activeMusicTrack,
+      musicStartedAtMs,
+      musicPositionSec,
+      musicLoop,
+      currentUser.displayName,
+      broadcastRoomMusicState,
+    ]
+  );
+
+  const handleRequestMusicTrack = useCallback(
+    (track: PartyMusicTrack) => {
+      if (!activePartyRoom?.id) return;
+      const cleanTrack = sanitizePartyMusicTrackForFirestore(track, currentUser.displayName);
+      if (!cleanTrack) return;
+      const reqId = `mreq_${effectiveUserId}_${Date.now()}`;
+
+      realtimeSocket.sendRoomSignal('party', activePartyRoom.id, {
+        type: 'party_music_request',
+        requestId: reqId,
+        track: cleanTrack,
+        requesterId: effectiveUserId,
+        requesterName: currentUser.displayName,
+        requestedAtMs: Date.now(),
+      });
+
+      setSongRequests((prev) => {
+        if (prev.some((r) => r.track.id === cleanTrack.id && r.requesterId === effectiveUserId)) return prev;
+        return [
+          {
+            id: reqId,
+            track: cleanTrack,
+            requesterId: effectiveUserId,
+            requesterName: currentUser.displayName,
+            requestedAtMs: Date.now(),
+          },
+          ...prev,
+        ].slice(0, 12);
+      });
+
+      sendPartyRoomMessage(
+        activePartyRoom.id,
+        {
+          sender: {
+            id: effectiveUserId,
+            displayName: currentUser.displayName,
+            avatar: currentUser.avatar,
+            vipTier: currentUser.vipTier,
+            level: currentUser.level,
+            isHost: false,
+          },
+          text: `🎵 Requested song: "${cleanTrack.title}" — ${cleanTrack.artist}`,
+          type: 'room',
+        },
+        activePartyRoom.sessionId
+      ).catch(() => {});
+
+      showToast(`🎵 Requested "${cleanTrack.title}" for the party!`);
+    },
+    [
+      activePartyRoom?.id,
+      activePartyRoom?.sessionId,
+      currentUser.avatar,
+      currentUser.displayName,
+      currentUser.level,
+      currentUser.vipTier,
+      effectiveUserId,
+    ]
+  );
+
+  const handleDismissMusicRequest = useCallback((requestId: string) => {
+    setSongRequests((prev) => prev.filter((r) => r.id !== requestId));
+  }, []);
+
+  // Host automatically advances the room's Up Next queue when the current song finishes
+  useEffect(() => {
+    if (!activePartyRoom?.id || !isHost) return;
+    return partyMusicPlayer.onTrackEnded(() => {
+      if (musicLoop) return;
+      if (musicQueue.length > 0) {
+        const [nextTrack, ...restQueue] = musicQueue;
+        broadcastRoomMusicState({
+          isPlaying: true,
+          track: nextTrack,
+          startedAtMs: Date.now(),
+          positionSec: 0,
+          queue: restQueue,
+          loop: false,
+          updatedBy: nextTrack.requestedBy
+            ? `${currentUser.displayName} (for ${nextTrack.requestedBy})`
+            : currentUser.displayName,
+        });
+      } else {
+        broadcastRoomMusicState({
+          isPlaying: false,
+          track: activeMusicTrack,
+          startedAtMs: Date.now(),
+          positionSec: 0,
+          queue: [],
+          loop: false,
+          updatedBy: currentUser.displayName,
+        });
+      }
+    });
+  }, [
+    activePartyRoom?.id,
+    isHost,
+    musicLoop,
+    musicQueue,
+    activeMusicTrack,
+    currentUser.displayName,
+    broadcastRoomMusicState,
+  ]);
 
   useEffect(() => {
     isSpeakerOnRef.current = isSpeakerOn;
@@ -2207,6 +2578,62 @@ export const PartyRoomsScreen: React.FC = () => {
               roomId,
             });
           }
+        } else if (
+          ev.type === 'room:signal' &&
+          ev.roomId === roomId &&
+          ev.signal?.type === 'party_music_sync' &&
+          ev.senderId !== effectiveUserId
+        ) {
+          const sig = ev.signal;
+          const sigTrack =
+            sig.track && typeof sig.track === 'object' && sig.track.id
+              ? (sig.track as PartyMusicTrack)
+              : null;
+          lastMusicSignalAtRef.current = Number(sig.sentAtMs || Date.now());
+          setActiveMusicTrack(sigTrack);
+          setIsMusicPlaying(Boolean(sig.isPlaying && sigTrack));
+          setMusicStartedAtMs(Number(sig.startedAtMs || Date.now()));
+          setMusicPositionSec(Math.max(0, Number(sig.positionSec) || 0));
+          if (Array.isArray(sig.queue)) {
+            setMusicQueue((sig.queue as PartyMusicTrack[]).slice(0, 15));
+          }
+          if (typeof sig.loop === 'boolean') {
+            setMusicLoop(sig.loop);
+          }
+          if (typeof sig.updatedBy === 'string') {
+            setMusicUpdatedBy(sig.updatedBy);
+          }
+        } else if (
+          ev.type === 'room:signal' &&
+          ev.roomId === roomId &&
+          ev.signal?.type === 'party_music_request' &&
+          ev.senderId !== effectiveUserId
+        ) {
+          const sig = ev.signal;
+          const reqTrack =
+            sig.track && typeof sig.track === 'object' && sig.track.id
+              ? (sig.track as PartyMusicTrack)
+              : null;
+          if (reqTrack) {
+            const reqId = String(sig.requestId || `mreq_${ev.senderId}_${Date.now()}`);
+            const reqName = String(sig.requesterName || 'Guest');
+            setSongRequests((prev) => {
+              if (prev.some((r) => r.id === reqId)) return prev;
+              return [
+                {
+                  id: reqId,
+                  track: reqTrack,
+                  requesterId: String(sig.requesterId || ev.senderId || ''),
+                  requesterName: reqName,
+                  requestedAtMs: Number(sig.requestedAtMs || Date.now()),
+                },
+                ...prev,
+              ].slice(0, 12);
+            });
+            if (canModerateRef.current) {
+              showToast(`🎵 ${reqName} requested: ${reqTrack.title}`);
+            }
+          }
         }
       }
 
@@ -2812,8 +3239,9 @@ export const PartyRoomsScreen: React.FC = () => {
 
   // Screen Double Tap handler
   const handleScreenTouchOrClick = (e: React.MouseEvent | React.TouchEvent) => {
-    // A real user gesture is required by mobile browsers to unlock remote audio playback.
+    // A real user gesture is required by mobile browsers to unlock remote audio & background music playback.
     unlockAllRemoteAudioPlayback().catch(() => {});
+    partyMusicPlayer.unlock();
     const now = Date.now();
     const timeDiff = now - lastTapRef.current;
     if (timeDiff < 320) {
@@ -3189,7 +3617,8 @@ export const PartyRoomsScreen: React.FC = () => {
   // IF INSIDE AN ACTIVE PARTY ROOM -> RENDER MASTER PARTY ROOM UI
   // =========================================================================
   if (activePartyRoom) {
-    const currentTrack = PLAYLIST_TRACKS[currentTrackIndex];
+    const effectiveRoomMusicPlaying = Boolean(isMusicPlaying && activeMusicTrack);
+    const currentMusicTitle = activeMusicTrack?.title || activePartyRoom.nowPlaying || 'Party Music';
     const remoteHostPresence = voiceParticipantsById.get(activePartyRoom.host.id);
     const isHostSeatedOnThrone =
       isHost ||
@@ -3246,7 +3675,7 @@ export const PartyRoomsScreen: React.FC = () => {
             1. COMPLETE NIGHTCLUB PARTY ROOM BACKGROUND (5 Custom Themes)
            ===================================================================== */}
         <PartyRoomAtmosphere
-          isMusicPlaying={isMusicPlaying}
+          isMusicPlaying={effectiveRoomMusicPlaying}
           theme={roomBackground}
           hostAvatar={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar)}
         />
@@ -3674,13 +4103,13 @@ export const PartyRoomsScreen: React.FC = () => {
         ) : (
           <div
             ref={partyStageRef}
-            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-5 sm:pt-6 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
-              partyLevel === 4 ? 'h-[62%] max-h-[62%]' : 'h-[51%] max-h-[51%]'
+            className={`relative z-10 w-full shrink-0 flex flex-col items-center px-2.5 pt-3.5 sm:pt-4 pb-0.5 overflow-y-auto scrollbar-none transition-[height,max-height] duration-300 ${
+              partyLevel === 4 ? 'h-[63%] max-h-[63%]' : 'h-[53%] max-h-[53%]'
             }`}
           >
-            {/* Floating Three-Star Seat Theme Selector — Host & Moderator only */}
+            {/* Floating Three-Star Seat Color Selector — Host & Moderator only */}
             {canModerate && (
-              <div className="absolute right-2 top-4 sm:top-5 z-30">
+              <div className="absolute right-2 top-3 sm:top-4 z-30">
                 <PartySeatThemeStarSelector
                   selectedTheme={seatTheme}
                   onSelectTheme={handleSelectSeatTheme}
@@ -3690,7 +4119,7 @@ export const PartyRoomsScreen: React.FC = () => {
             )}
 
             {/* UPPER PROMINENCE ROW: Large Circular HOST Seat + VIP 1 (VIP GUEST) Seat Beside Host */}
-            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-1">
+            <div className="flex items-start justify-center gap-7 sm:gap-10 w-full max-w-sm mx-auto shrink-0 pt-0.5">
               {/* 1. HOST SEAT (Large Circular Frame with Synchronized Animated Seat Theme) */}
               <div className="flex flex-col items-center shrink-0">
                 <div className="relative">
@@ -3724,8 +4153,8 @@ export const PartyRoomsScreen: React.FC = () => {
                         compact={partyLevel === 4}
                         sizeClass={
                           partyLevel === 4
-                            ? 'w-[58px] h-[58px] sm:w-[66px] sm:h-[66px]'
-                            : 'w-[68px] h-[68px] sm:w-[76px] sm:h-[76px]'
+                            ? 'w-[64px] h-[64px] sm:w-[72px] sm:h-[72px]'
+                            : 'w-[74px] h-[74px] sm:w-[82px] sm:h-[82px]'
                         }
                       >
                         <div className="w-full h-full rounded-full overflow-hidden bg-[#120826] transition-transform group-hover:scale-[1.03]">
@@ -3744,8 +4173,8 @@ export const PartyRoomsScreen: React.FC = () => {
                       compact={partyLevel === 4}
                       sizeClass={
                         partyLevel === 4
-                          ? 'w-[58px] h-[58px] sm:w-[66px] sm:h-[66px]'
-                          : 'w-[68px] h-[68px] sm:w-[76px] sm:h-[76px]'
+                          ? 'w-[64px] h-[64px] sm:w-[72px] sm:h-[72px]'
+                          : 'w-[74px] h-[74px] sm:w-[82px] sm:h-[82px]'
                       }
                     >
                       <div
@@ -3839,15 +4268,15 @@ export const PartyRoomsScreen: React.FC = () => {
                     </>
                   )}
 
-                  {/* Animated Theme Frame around VIP 1 Seat */}
+                  {/* Translucent Glass-Orb VIP 1 Seat */}
                   <AnimatedSeatThemeFrame
                     theme={seatTheme}
                     role="vip"
                     compact={partyLevel === 4}
                     sizeClass={
                       partyLevel === 4
-                        ? 'w-[48px] h-[48px] sm:w-[56px] sm:h-[56px]'
-                        : 'w-[58px] h-[58px] sm:w-[66px] sm:h-[66px]'
+                        ? 'w-[56px] h-[56px] sm:w-[64px] sm:h-[64px]'
+                        : 'w-[66px] h-[66px] sm:w-[74px] sm:h-[74px]'
                     }
                   >
                     {vipGuestSeat.user ? (
@@ -3868,8 +4297,8 @@ export const PartyRoomsScreen: React.FC = () => {
                     )}
                   </AnimatedSeatThemeFrame>
 
-                  {/* Lock / Mic Status Badge on VIP 1 */}
-                  {vipGuestSeat.user ? (
+                  {/* Mic Status Badge ONLY when VIP 1 is Occupied (Empty VIP uses crisp centered + / Padlock inside orb) */}
+                  {vipGuestSeat.user && (
                     <div
                       className={`absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md z-30 ${
                         vipGuestSeat.isMuted
@@ -3887,32 +4316,15 @@ export const PartyRoomsScreen: React.FC = () => {
                         <Mic className="w-2.5 h-2.5" />
                       )}
                     </div>
-                  ) : (
-                    <div
-                      className={`absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-amber-300/60 shadow-md z-30 ${
-                        vipGuestSeat.isLocked
-                          ? 'bg-[#1D0F38] text-amber-300'
-                          : 'bg-gradient-to-tr from-amber-400 to-purple-600 text-white'
-                      }`}
-                    >
-                      {vipGuestSeat.isLocked ? (
-                        <Lock className="w-2.5 h-2.5" />
-                      ) : (
-                        <Unlock className="w-2.5 h-2.5" />
-                      )}
-                    </div>
                   )}
                 </div>
 
-                {/* VIP 1 Label + VIP GUEST Subtitle */}
+                {/* VIP 1 Clean Label */}
                 <div className="mt-1.5 flex flex-col items-center leading-tight">
-                  <span className="text-[9.5px] font-black text-amber-300 tracking-wide truncate max-w-[78px]">
+                  <span className="text-[10.5px] font-bold text-white/95 tracking-wide truncate max-w-[82px] drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)]">
                     {vipGuestSeat.user
                       ? `${vipGuestSeat.user.displayName.split(' ')[0]}`
                       : 'VIP 1'}
-                  </span>
-                  <span className="text-[7.5px] font-extrabold uppercase tracking-wider text-purple-200/90">
-                    {vipGuestSeat.user ? 'VIP 1 • VIP GUEST' : 'VIP GUEST'}
                   </span>
                 </div>
               </div>
@@ -3923,7 +4335,7 @@ export const PartyRoomsScreen: React.FC = () => {
               roomId={activePartyRoom.id}
               theme={seatTheme}
               isSpeakerOn={isSpeakerOn}
-              isMusicPlaying={isMusicPlaying}
+              isMusicPlaying={effectiveRoomMusicPlaying}
               remoteStreams={remotePartyStreams}
               stageContainerRef={partyStageRef}
               compact={partyLevel === 4}
@@ -3932,31 +4344,31 @@ export const PartyRoomsScreen: React.FC = () => {
             {/* ===================================================================
                 NORMAL CIRCULAR GUEST SEATS GRID (Progressive 4 / 8 / 12 / 16)
                =================================================================== */}
-            <div className="w-full mt-1 flex-1 flex flex-col justify-start">
+            <div className="w-full mt-1.5 flex-1 flex flex-col justify-start">
               {partyLevel === 1 && (
-                /* LEVEL 1: 4 normal circular seats (1 Row x 4) */
-                <div className="grid grid-cols-4 gap-x-3 gap-y-2.5 max-w-sm mx-auto w-full px-1">
+                /* LEVEL 1: 4 normal circular glass-orb seats (1 Row x 4) */
+                <div className="grid grid-cols-4 gap-x-2.5 gap-y-2.5 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'lg'))}
                 </div>
               )}
 
               {partyLevel === 2 && (
-                /* LEVEL 2: 8 normal circular seats (2 Rows x 4) */
-                <div className="grid grid-cols-4 gap-x-3 gap-y-2 max-w-sm mx-auto w-full px-1">
+                /* LEVEL 2: 8 normal circular glass-orb seats (2 Rows x 4) */
+                <div className="grid grid-cols-4 gap-x-2.5 gap-y-2.5 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'md'))}
                 </div>
               )}
 
               {partyLevel === 3 && (
-                /* LEVEL 3: 12 normal circular seats (3 Rows x 4) */
-                <div className="grid grid-cols-4 gap-x-2.5 gap-y-1.5 max-w-sm mx-auto w-full px-1">
+                /* LEVEL 3: 12 normal circular glass-orb seats (3 Rows x 4) */
+                <div className="grid grid-cols-4 gap-x-2 gap-y-2 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'sm'))}
                 </div>
               )}
 
               {partyLevel === 4 && (
-                /* LEVEL 4: 16 normal circular seats (4 Rows x 4) */
-                <div className="grid grid-cols-4 gap-x-2.5 gap-y-1 max-w-sm mx-auto w-full px-1">
+                /* LEVEL 4: 16 normal circular glass-orb seats (4 Rows x 4) */
+                <div className="grid grid-cols-4 gap-x-2 gap-y-1.5 max-w-sm mx-auto w-full px-1">
                   {activeGuestSeats.map((seat) => renderGuestSeat(seat, 'xs'))}
                 </div>
               )}
@@ -4009,10 +4421,13 @@ export const PartyRoomsScreen: React.FC = () => {
           {/* Vintage Spinning Vinyl Turntable + Woofer + Rising Music Notes (Lower-Right Corner Above Comments Bar) */}
           <div className="absolute right-2.5 bottom-[92px] sm:bottom-[100px] z-30">
             <PartyMusicVinylWidget
-              isPlaying={isMusicPlaying}
-              trackTitle={currentTrack.title}
+              isPlaying={effectiveRoomMusicPlaying}
+              trackTitle={currentMusicTitle}
               canModerate={canModerate}
-              onOpenMusicModal={() => setShowMusicModal(true)}
+              onOpenMusicModal={() => {
+                partyMusicPlayer.unlock();
+                setShowMusicModal(true);
+              }}
             />
           </div>
 
@@ -4152,7 +4567,7 @@ export const PartyRoomsScreen: React.FC = () => {
               className="grid gap-1.5 w-full"
               style={{
                 gridTemplateColumns: `repeat(${
-                  (canModerate ? 1 : 0) +
+                  1 +
                   (canUseSpeakerMic ? 1 : 0) +
                   (canModerate ? 1 : 0) +
                   (canUseSpeakerMic ? 1 : 0) +
@@ -4162,22 +4577,30 @@ export const PartyRoomsScreen: React.FC = () => {
                 }, minmax(0, 1fr))`,
               }}
             >
-              {/* 1. Room Music Management — Host & Moderator only */}
-              {canModerate && <button
+              {/* 1. Party Room Music Hub — All participants (Host/Mod DJ controls; Guests/Viewers search, volume & request) */}
+              <button
                 type="button"
-                onClick={() => setShowMusicModal(true)}
-                className={`h-9 sm:h-10 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer backdrop-blur-md ${
-                  isMusicPlaying
+                onClick={() => {
+                  partyMusicPlayer.unlock();
+                  setShowMusicModal(true);
+                }}
+                className={`relative h-9 sm:h-10 rounded-xl border flex flex-col items-center justify-center p-1 transition-all cursor-pointer backdrop-blur-md ${
+                  effectiveRoomMusicPlaying
                     ? 'bg-gradient-to-tr from-[#7928CA]/80 to-[#EC4899]/80 border-[#EC4899] text-white shadow-md'
-                    : 'bg-black/50 border-white/10 text-zinc-400 hover:text-white'
+                    : 'bg-black/50 border-white/10 text-zinc-300 hover:text-white'
                 }`}
-                title="Music Player & Playlist"
+                title="Search & Play Party Music"
               >
-                <Music className={`w-3.5 h-3.5 ${isMusicPlaying ? 'animate-bounce text-white' : 'text-[#EC4899]'}`} />
+                {canModerate && songRequests.length > 0 && (
+                  <span className="absolute -top-1 -right-1 min-w-[15px] h-[15px] px-1 rounded-full bg-amber-400 text-[#120824] text-[8.5px] font-black flex items-center justify-center shadow">
+                    {songRequests.length}
+                  </span>
+                )}
+                <Music className={`w-3.5 h-3.5 ${effectiveRoomMusicPlaying ? 'animate-bounce text-white' : 'text-[#EC4899]'}`} />
                 <span className="text-[8px] font-black truncate max-w-full mt-0.5">
-                  {isMusicPlaying ? 'Music On' : 'Music'}
+                  {effectiveRoomMusicPlaying ? 'Music On' : 'Music'}
                 </span>
-              </button>}
+              </button>
 
               {/* 2. Microphone ON / OFF Toggle — Host & Seated Users only */}
               {canUseSpeakerMic && <button
@@ -4325,74 +4748,28 @@ export const PartyRoomsScreen: React.FC = () => {
             MODALS: Music Player, Virtual Gifts Drawer, Seat Actions, More
            ===================================================================== */}
 
-        {/* Music Player & Playlist Modal — Host & Moderator only */}
-        {showMusicModal && canModerate && (
-          <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4">
-            <div className="w-full max-w-sm rounded-3xl bg-[#170E2C] border border-[#A855F7]/30 p-5 shadow-2xl">
-              <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/20">
-                <div className="flex items-center gap-2">
-                  <Disc3 className={`w-5 h-5 text-[#EC4899] ${isMusicPlaying ? 'animate-spin-slow' : ''}`} />
-                  <span className="text-sm font-bold text-white">Party Room Music Hub</span>
-                </div>
-                <button onClick={() => setShowMusicModal(false)} className="text-zinc-400 hover:text-white cursor-pointer">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {/* Master Play/Pause */}
-              <div className="mt-4 p-3.5 rounded-2xl bg-gradient-to-r from-[#7928CA]/30 via-[#EC4899]/20 to-[#7928CA]/30 border border-[#A855F7]/30 flex items-center justify-between">
-                <div>
-                  <div className="text-xs font-bold text-white">{currentTrack.title}</div>
-                  <div className="text-[10px] text-zinc-400">{currentTrack.artist}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleToggleRoomMusic}
-                  className="w-10 h-10 rounded-full bg-gradient-to-tr from-[#7928CA] to-[#EC4899] flex items-center justify-center text-white shadow-md cursor-pointer hover:scale-105 transition-transform"
-                >
-                  {isMusicPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white ml-0.5" />}
-                </button>
-              </div>
-
-              {/* Playlist Tracks */}
-              <div className="mt-4 space-y-2 max-h-48 overflow-y-auto">
-                <div className="text-[11px] font-bold text-zinc-400 uppercase tracking-wider mb-1">
-                  Playlist
-                </div>
-                {PLAYLIST_TRACKS.map((t, idx) => {
-                  const isCurrent = idx === currentTrackIndex;
-                  return (
-                    <div
-                      key={t.id}
-                      onClick={() => handleSelectMusicTrack(idx)}
-                      className={`p-2.5 rounded-xl border flex items-center justify-between cursor-pointer transition-all ${
-                        isCurrent
-                          ? 'bg-[#7928CA]/30 border-[#EC4899] text-white'
-                          : 'bg-[#120824] border-white/5 text-zinc-300 hover:border-white/20'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="text-xs font-mono text-[#C084FC]">0{idx + 1}</span>
-                        <div className="min-w-0">
-                          <div className="text-xs font-bold truncate">{t.title}</div>
-                          <div className="text-[10px] text-zinc-400">{t.artist}</div>
-                        </div>
-                      </div>
-                      <span className="text-[10px] font-mono text-zinc-400">{t.duration}</span>
-                    </div>
-                  );
-                })}
-              </div>
-
-              <button
-                onClick={() => setShowMusicModal(false)}
-                className="mt-4 w-full h-10 rounded-xl bg-zinc-800 text-zinc-300 text-xs font-bold hover:text-white cursor-pointer"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        )}
+        {/* Synchronized Free-Tier Party Music Search & Background DJ Modal — All Room Participants */}
+        <PartyMusicPlayerModal
+          isOpen={showMusicModal}
+          onClose={() => setShowMusicModal(false)}
+          canControlRoomMusic={canModerate}
+          isRoomMusicPlaying={effectiveRoomMusicPlaying}
+          currentTrack={activeMusicTrack}
+          musicQueue={musicQueue}
+          musicLoop={musicLoop}
+          musicUpdatedBy={musicUpdatedBy}
+          songRequests={songRequests}
+          isSpeakerOn={isSpeakerOn}
+          onPlayTrackForRoom={handlePlayTrackForRoom}
+          onToggleRoomPlayPause={handleToggleRoomMusic}
+          onStopRoomMusic={handleStopRoomMusic}
+          onSkipNext={handleSkipNextMusic}
+          onToggleLoop={handleToggleMusicLoop}
+          onAddToQueue={handleAddToMusicQueue}
+          onRemoveFromQueue={handleRemoveFromMusicQueue}
+          onRequestTrack={handleRequestMusicTrack}
+          onDismissRequest={handleDismissMusicRequest}
+        />
 
         {/* Ultra-Fast Isolated Virtual Gifts Drawer Modal (60fps GPU scroll, zero PullToRefresh interference) */}
         <FastGiftDrawer
@@ -5439,26 +5816,26 @@ export const PartyRoomsScreen: React.FC = () => {
     const isSpeaking = Boolean(seat.isSpeaking);
 
     const circleSize = {
-      lg: 'w-[48px] h-[48px] sm:w-[56px] sm:h-[56px]',
-      md: 'w-[42px] h-[42px] sm:w-[48px] sm:h-[48px]',
-      sm: 'w-[36px] h-[36px] sm:w-[42px] sm:h-[42px]',
-      xs: 'w-[32px] h-[32px] sm:w-[38px] sm:h-[38px]',
+      lg: 'w-[62px] h-[62px] sm:w-[68px] sm:h-[68px]',
+      md: 'w-[56px] h-[56px] sm:w-[62px] sm:h-[62px]',
+      sm: 'w-[50px] h-[50px] sm:w-[56px] sm:h-[56px]',
+      xs: 'w-[46px] h-[46px] sm:w-[52px] sm:h-[52px]',
     }[sizeVariant];
 
     const labelMaxWidth = {
-      lg: 'max-w-[66px]',
-      md: 'max-w-[60px]',
-      sm: 'max-w-[54px]',
-      xs: 'max-w-[50px]',
+      lg: 'max-w-[74px]',
+      md: 'max-w-[68px]',
+      sm: 'max-w-[62px]',
+      xs: 'max-w-[58px]',
     }[sizeVariant];
 
-    const isCompact = sizeVariant === 'xs' || sizeVariant === 'sm';
+    const isCompact = sizeVariant === 'xs';
 
     return (
       <div
         key={seat.seatIndex}
         onClick={() => handleSeatClick(seat)}
-        className="flex flex-col items-center gap-0.5 cursor-pointer group transition-transform active:scale-95 pt-1"
+        className="flex flex-col items-center gap-1 cursor-pointer group transition-transform active:scale-92"
       >
         <div className="relative">
           {/* Speaking Soundwave Pulsing Waves */}
@@ -5469,7 +5846,7 @@ export const PartyRoomsScreen: React.FC = () => {
             </>
           )}
 
-          {/* Synchronized Animated Seat Theme Frame around Unobstructed Circular Seat Aperture */}
+          {/* Translucent Glass-Orb Circular Seat Button */}
           <AnimatedSeatThemeFrame
             theme={seatTheme}
             sizeClass={circleSize}
@@ -5495,15 +5872,15 @@ export const PartyRoomsScreen: React.FC = () => {
 
           {/* Moderator Badge on Seat */}
           {isOccupied && seat.user && moderatorIds.includes(seat.user.id) && (
-            <div className="absolute -top-1 -left-1 w-3.5 h-3.5 rounded-full bg-cyan-600 border border-white flex items-center justify-center shadow-sm z-30" title="Room Moderator">
-              <ShieldCheck className="w-2 h-2 text-white" />
+            <div className="absolute -top-0.5 -left-0.5 w-4 h-4 rounded-full bg-cyan-600 border border-white flex items-center justify-center shadow-sm z-30" title="Room Moderator">
+              <ShieldCheck className="w-2.5 h-2.5 text-white" />
             </div>
           )}
 
           {/* Microphone Status Indicator on Seat */}
           {isOccupied && (
             <div
-              className={`absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 sm:w-4 sm:h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md z-30 ${
+              className={`absolute -bottom-0.5 -right-0.5 w-4 h-4 rounded-full flex items-center justify-center border border-white/30 shadow-md z-30 ${
                 seat.isMuted
                   ? seat.isHostMuted
                     ? 'bg-rose-700 text-white ring-1 ring-amber-400'
@@ -5515,24 +5892,30 @@ export const PartyRoomsScreen: React.FC = () => {
               {seat.isHostMuted ? (
                 <Lock className="w-2 h-2 text-amber-300" />
               ) : seat.isMuted ? (
-                <MicOff className="w-2 h-2 sm:w-2.5 sm:h-2.5" />
+                <MicOff className="w-2.5 h-2.5" />
               ) : (
-                <Mic className="w-2 h-2 sm:w-2.5 sm:h-2.5" />
+                <Mic className="w-2.5 h-2.5" />
               )}
             </div>
           )}
         </div>
 
-        {/* Username / Placeholder Label */}
+        {/* Clean Unboxed Seat Number (matches reference) or Occupied Username */}
         <span
-          className={`${isCompact ? 'text-[7.5px]' : 'text-[8.5px] sm:text-[9.5px]'} font-bold text-zinc-200 truncate text-center leading-tight mt-2 ${labelMaxWidth}`}
+          className={`${
+            isCompact ? 'text-[10.5px]' : 'text-[11.5px] sm:text-[12px]'
+          } font-semibold text-white/90 truncate text-center leading-tight tabular-nums drop-shadow-[0_1px_3px_rgba(0,0,0,0.9)] ${labelMaxWidth}`}
         >
-          {isOccupied ? (isMe ? 'You' : seat.user!.displayName.split(' ')[0]) : seat.isLocked ? 'Locked' : `Seat ${seat.seatIndex + 1}`}
+          {isOccupied
+            ? isMe
+              ? 'You'
+              : seat.user!.displayName.split(' ')[0]
+            : `${seat.seatIndex + 1}`}
         </span>
 
-        {/* Gift Coin Value Pill */}
-        {(!isCompact || (seat.receivedCoins || 0) > 0 || isOccupied) && (
-          <div className="flex items-center gap-0.5 px-1 py-0 rounded-full bg-black/45 border border-white/10 text-amber-300 text-[7px] font-bold leading-tight">
+        {/* Gift Coin Value Pill (shown cleanly only when occupied or coins received) */}
+        {(isOccupied || (seat.receivedCoins || 0) > 0) && (
+          <div className="flex items-center gap-0.5 px-1.5 py-0 rounded-full bg-black/45 border border-white/10 text-amber-300 text-[7.5px] font-bold leading-tight">
             <span>🎁</span>
             <span>{seat.receivedCoins ? (seat.receivedCoins > 999 ? `${(seat.receivedCoins / 1000).toFixed(1)}k` : seat.receivedCoins) : '0'}</span>
           </div>
@@ -6222,8 +6605,8 @@ export const PartyRoomsScreen: React.FC = () => {
                       activeViewers: 1,
                       isHostPresent: true,
                       backgroundTheme: isValidPartyBackgroundTheme(roomBackground) ? roomBackground : 'royal_castle',
-                      seatTheme: isValidPartySeatTheme(seatTheme) ? seatTheme : 'royal_gold_diya',
-                      isMusicPlaying: true,
+                      seatTheme: isValidPartySeatTheme(seatTheme) ? seatTheme : 'diamond_ice_blue',
+                      isMusicPlaying: false,
                       musicTrackIndex: 0,
                       level: finalLevel,
                       isActive: true,
