@@ -10,7 +10,6 @@ import {
 import { resolvePlayableGiftUrl } from '../../services/giftAnimationEngine';
 import {
   cacheMediaUrlAfterPlayback,
-  downloadMediaUrlToCache,
   getCachedGiftMediaUrlSync,
   resolveCachedGiftMediaUrl,
 } from '../../services/giftMediaCache';
@@ -40,8 +39,10 @@ interface UniversalGiftPlayerProps {
   layer: 'background' | 'foreground' | 'both';
   /** Optional override for live previewing display mode or opacity in Admin Manager */
   overrideConfig?: Partial<AdvancedGiftConfig>;
-  /** Keep sound muted in silent previews */
+  /** Keep sound muted in silent previews or when live voice (Agora/WebRTC) must stay uninterrupted */
   forceMuted?: boolean;
+  /** Concurrent playback lane (0, 1, 2) so 2-3 simultaneous gifts render & stack sender capsules cleanly */
+  slotIndex?: number;
   /** If true, keeps playing continuously (Admin preview mode) */
   previewLoopOverride?: boolean;
   onComplete?: (eventId: string) => void;
@@ -232,6 +233,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   layer,
   overrideConfig,
   forceMuted = false,
+  slotIndex = 0,
   previewLoopOverride = false,
   onComplete,
   onDurationDetected,
@@ -302,17 +304,15 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
   const lastVideoTimeRef = useRef<number>(0);
   const stallRecoveryAttemptsRef = useRef<number>(0);
 
-  // Buffer-first local Blob URL resolution:
-  // 1. Synchronous memory Blob URL -> instant (<10ms), zero network, zero mid-video stalls.
-  // 2. IndexedDB cached Blob -> resolves in <15ms offline, zero network.
-  // 3. Uncached video on slow/weak internet -> downloads complete WebM Blob into memory/IndexedDB
-  //    BEFORE rendering the <video>, guaranteeing 100% smooth full-duration playback (8s/10s/12s+)
-  //    with zero freezing halfway! Falls back to direct remote URL only if CORS blocks fetch().
+  // Instant local-cache-first + immediate progressive streaming:
+  // 1. Synchronous memory Blob URL -> instant (<10ms), zero network traffic.
+  // 2. Quick IndexedDB lookup (<15ms) -> instant local Blob URL if previously cached.
+  // 3. Uncached video -> starts streaming <video src={remoteMediaUrl}> IMMEDIATELY on first keyframe
+  //    (no multi-second wait to fetch the entire file first on normal/weak 3G/4G!), then caches
+  //    quietly in the background AFTER playback finishes so future plays are 0-byte instant.
   const [resolvedPlayableUrl, setResolvedPlayableUrl] = useState<string>(() => {
     if (!remoteMediaUrl) return '';
-    const cachedSync = getCachedGiftMediaUrlSync(remoteMediaUrl);
-    if (cachedSync) return cachedSync;
-    return isVideoFormat ? '' : remoteMediaUrl;
+    return getCachedGiftMediaUrlSync(remoteMediaUrl) || '';
   });
 
   useEffect(() => {
@@ -331,49 +331,27 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     }
 
     let cancelled = false;
-    setResolvedPlayableUrl('');
     lastProgressAtRef.current = Date.now();
     onProgressRef.current?.(event.id, 0, Math.max(10_000, config?.durationMs || 10_000));
 
-    // Keep parent heartbeat alive while downloading on slow 2G/3G networks
-    const bufferHeartbeat = window.setInterval(() => {
-      if (cancelled) return;
-      lastProgressAtRef.current = Date.now();
-      onProgressRef.current?.(event.id, 0, Math.max(10_000, config?.durationMs || 10_000));
-    }, 1500);
-
     (async () => {
       try {
-        // Step 1: Fast IndexedDB check (<15ms, offline-ready)
+        // Fast IndexedDB check (<15ms, 0 network bytes). If not cached yet, stream remote URL immediately!
         const idbResult = await resolveCachedGiftMediaUrl(remoteMediaUrl, {
           giftId: event.gift.id || config?.id || 'gift',
           autoCache: false,
         });
         if (cancelled) return;
-        if (idbResult.fromCache && idbResult.playableUrl) {
-          setResolvedPlayableUrl(idbResult.playableUrl);
-          return;
-        }
-
-        // Step 2: Download complete WebM into local Blob so weak internet NEVER stalls mid-animation
-        const blobUrl = await downloadMediaUrlToCache(
-          remoteMediaUrl,
-          event.gift.id || config?.id || 'gift'
-        );
-        if (cancelled) return;
-        setResolvedPlayableUrl(blobUrl || remoteMediaUrl);
+        setResolvedPlayableUrl(idbResult.playableUrl || remoteMediaUrl);
       } catch {
         if (!cancelled) {
           setResolvedPlayableUrl(remoteMediaUrl);
         }
-      } finally {
-        window.clearInterval(bufferHeartbeat);
       }
     })();
 
     return () => {
       cancelled = true;
-      window.clearInterval(bufferHeartbeat);
     };
   }, [event?.id, remoteMediaUrl, isVideoFormat]);
 
@@ -899,10 +877,13 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
     );
   };
 
+  const capsuleTopPx = 112 + Math.max(0, slotIndex) * 52;
+
   return (
     <>
-      {/* Optional ambient particles for Semi-Transparent (Mode 2) & Overlay/Background (Mode 3) */}
-      {shouldRenderAnimationOnThisLayer &&
+      {/* Optional ambient particles for primary slot only (saves mobile GPU during 2-3 concurrent gifts) */}
+      {slotIndex === 0 &&
+        shouldRenderAnimationOnThisLayer &&
         (displayMode === 'semi_transparent' || displayMode === 'overlay_background') &&
         config.enableParticles !== false && (
           <GiftParticlesLayer active={phase === 'visible' && !isWaitingMedia} />
@@ -918,6 +899,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
             willChange: 'opacity, transform',
           }}
           data-gift-layer={layer}
+          data-gift-slot={slotIndex}
           data-gift-mode={displayMode}
           data-gift-format={effectiveFormat}
           data-gift-feather={shouldFeatherEdges ? 'true' : 'false'}
@@ -925,7 +907,7 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
           <div
             className="relative w-full h-full flex items-center justify-center transition-[opacity,transform,filter] duration-300 ease-out"
             style={{
-              opacity: animatedOpacity,
+              opacity: slotIndex > 0 ? Math.min(animatedOpacity, 0.78) : animatedOpacity,
               transform: `scale(${animatedScale}) translateZ(0)`,
               filter: animatedBlurPx > 0 ? `blur(${animatedBlurPx}px)` : undefined,
               transformOrigin: 'center center',
@@ -964,11 +946,12 @@ export const UniversalGiftPlayer: React.FC<UniversalGiftPlayerProps> = ({
         </div>
       )}
 
-      {/* Non-Blocking Gift Notification Capsule (shows sender + gift thumbnail + coins cleanly) */}
+      {/* Non-Blocking Gift Notification Capsule (staggered vertically by slotIndex for concurrent multi-user gifts) */}
       {shouldRenderSenderCapsule && (
         <div
           data-keep-dark="true"
-          className={`absolute top-28 left-3 z-[36] pointer-events-none transition-all duration-300 ${
+          style={{ top: `${capsuleTopPx}px` }}
+          className={`absolute left-3 z-[36] pointer-events-none transition-all duration-300 ${
             phase === 'visible' ? 'opacity-100 translate-x-0' : 'opacity-0 -translate-x-4'
           }`}
         >

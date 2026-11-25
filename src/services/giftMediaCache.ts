@@ -41,14 +41,26 @@ let dbPromise: Promise<IDBDatabase | null> | null = null;
 let indexHydrated = false;
 let indexHydratePromise: Promise<void> | null = null;
 
+let notifyScheduled = false;
+
 function notifyListeners(): void {
-  listeners.forEach((cb) => {
-    try {
-      cb();
-    } catch {
-      // ignore subscriber errors
-    }
-  });
+  if (notifyScheduled) return;
+  notifyScheduled = true;
+  const flush = () => {
+    notifyScheduled = false;
+    listeners.forEach((cb) => {
+      try {
+        cb();
+      } catch {
+        // ignore subscriber errors
+      }
+    });
+  };
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(flush);
+  } else {
+    setTimeout(flush, 16);
+  }
 }
 
 function isCacheableUrl(url: string | undefined | null): url is string {
@@ -463,51 +475,31 @@ function getGiftPrewarmPriority(gift: Gift): number {
 }
 
 /**
- * Pre-fetches critical gift animation assets (Supercar, Rocket, Dragon, Crown SFX + thumbnails,
- * bundled public/assets/gifts media, and prioritized catalog WebM/SVGA animations) ahead of playback
- * so high-latency or flaky networks never cause frame hitches or premature animation truncation.
+ * Lightweight zero-bandwidth hydration of already-cached gift media + instant built-in SVG thumbnails.
+ * NEVER eagerly downloads megabytes of WebM/MP3 files on app boot or room entry, so weak/normal
+ * mobile internet stays 100% free for Agora Party Voice, WebSocket chat, and instant gift playback.
+ * Individual WebM gifts stream immediately when sent and cache on-demand after playback finishes.
  */
-export async function prefetchCriticalGiftAssets(catalogGifts: Gift[] = []): Promise<void> {
+export async function prefetchCriticalGiftAssets(_catalogGifts: Gift[] = []): Promise<void> {
   if (typeof window === 'undefined') return;
 
   await hydrateGiftMediaCacheIndex();
 
-  // 1. Pre-fetch critical SFX & visual thumbnails for Supercar, Rocket, Dragon, Crown once per session
   if (!criticalAssetsPrefetched) {
     if (!criticalAssetsPrefetchPromise) {
       criticalAssetsPrefetchPromise = (async () => {
         try {
-          const [{ virtualGiftDatabase }, { audioManager }] = await Promise.all([
-            import('./virtual-gift-database'),
-            import('./audioManager'),
-          ]);
-
-          // Priority SFX decode for Supercar, Rocket, Dragon, Crown first, then all remaining SFX
-          void audioManager
-            .preloadGiftSfx(['car', 'rocket', 'dragon', 'crown', 'yacht', 'ring'])
-            .then(() => virtualGiftDatabase.preloadAllGiftAudio())
-            .catch(() => {});
-
-          // Decode built-in SVG/data-URI thumbnails so showcase banners paint in 0ms
+          const { virtualGiftDatabase } = await import('./virtual-gift-database');
+          // Decode built-in inline SVG/data-URI thumbnails (0 network bytes) so showcase banners paint in 0ms
           const builtinGifts = virtualGiftDatabase.getAllGifts();
           await Promise.allSettled(
-            builtinGifts.map((g) => prefetchAndDecodeImage(g.thumbnailUrl))
+            builtinGifts
+              .filter((g) => g.thumbnailUrl && g.thumbnailUrl.startsWith('data:'))
+              .map((g) => prefetchAndDecodeImage(g.thumbnailUrl))
           );
-
-          // Pre-warm bundled local public/assets/gifts assets into IndexedDB + memory Blobs
-          if (typeof navigator === 'undefined' || navigator.onLine !== false) {
-            const weakNet = isWeakNetworkConnection();
-            for (const item of BUNDLED_CRITICAL_GIFT_MEDIA) {
-              if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
-              if (!memoryObjectUrls.has(item.url) && !downloadingUrls.has(item.url)) {
-                await downloadMediaUrlToCache(item.url, item.id);
-                await new Promise((r) => setTimeout(r, weakNet ? 300 : 80));
-              }
-            }
-          }
           criticalAssetsPrefetched = true;
         } catch {
-          // Non-fatal; retryable on next entry
+          // Non-fatal
         } finally {
           criticalAssetsPrefetchPromise = null;
         }
@@ -515,30 +507,23 @@ export async function prefetchCriticalGiftAssets(catalogGifts: Gift[] = []): Pro
     }
     await criticalAssetsPrefetchPromise;
   }
-
-  // 2. Also pre-warm any published catalog animated gifts, prioritizing Supercar/Rocket/Dragon/Crown
-  if (catalogGifts.length > 0) {
-    void prewarmGiftAnimationsInBackground(catalogGifts, 16);
-  }
 }
 
 /**
- * Quietly pre-warms published animated gifts (WebM/SVGA/MP4) into persistent IndexedDB
- * + in-memory Blob URLs one-by-one when a user enters a Live Stream or Party Room,
- * prioritizing Supercar, Rocket, Dragon, and Crown showcase gifts first so playback begins
- * immediately in <30ms and runs 100% from local device memory with zero network stalls.
+ * Optional low-priority background pre-warm — only runs when explicitly invoked on fast WiFi/4G+,
+ * never on weak/metered cellular connections so voice & animations never stall.
  */
 export async function prewarmGiftAnimationsInBackground(
   gifts: Gift[],
-  maxPreload = 16
+  maxPreload = 4
 ): Promise<void> {
   if (typeof window === 'undefined' || backgroundPrewarmActive) return;
+  if (isWeakNetworkConnection()) return;
   backgroundPrewarmActive = true;
   try {
     await hydrateGiftMediaCacheIndex();
     if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
 
-    const weakNet = isWeakNetworkConnection();
     const candidates = [...gifts]
       .sort((a, b) => {
         const prioDiff = getGiftPrewarmPriority(a) - getGiftPrewarmPriority(b);
@@ -553,9 +538,9 @@ export async function prewarmGiftAnimationsInBackground(
 
     for (const gift of candidates) {
       if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
+      if (isWeakNetworkConnection()) break;
       await downloadGiftToLocalCache(gift);
-      // Pace gently (longer yield on 2G/3G so voice & live video stay crisp)
-      await new Promise((r) => setTimeout(r, weakNet ? 650 : 180));
+      await new Promise((r) => setTimeout(r, 800));
     }
   } finally {
     backgroundPrewarmActive = false;
@@ -564,14 +549,17 @@ export async function prewarmGiftAnimationsInBackground(
 
 /**
  * Saves an uncached gift animation to local IndexedDB AFTER playback finishes,
- * avoiding bandwidth competition with the active streaming <video> element.
+ * avoiding bandwidth competition with active voice or streaming <video> elements.
+ * Skips silently on weak/offline connections to protect voice quality.
  */
 export function cacheMediaUrlAfterPlayback(remoteUrl: string, giftId: string): void {
   if (!isCacheableUrl(remoteUrl)) return;
+  if (isWeakNetworkConnection()) return;
   if (cachedUrls.has(remoteUrl) || memoryObjectUrls.has(remoteUrl) || downloadingUrls.has(remoteUrl)) return;
   window.setTimeout(() => {
+    if (isWeakNetworkConnection()) return;
     void downloadMediaUrlToCache(remoteUrl, giftId);
-  }, 250);
+  }, 1200);
 }
 
 export function isGiftAnimationCached(gift: Gift): boolean {

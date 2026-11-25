@@ -31,14 +31,14 @@ export const OfflineIndicator: React.FC = () => {
       className="fixed bottom-20 left-1/2 -translate-x-1/2 z-[65] pointer-events-none px-3 w-full max-w-sm flex justify-center"
     >
       {!isOnline ? (
-        <div className="flex items-center gap-2 rounded-2xl border border-amber-400/35 bg-[#1D1308]/95 backdrop-blur-xl px-3.5 py-2 text-xs font-semibold text-amber-100 shadow-2xl shadow-black/60">
+        <div className="flex items-center gap-2 rounded-full border border-amber-400/35 bg-[#1D1308]/95 px-3.5 py-1.5 text-[11px] font-semibold text-amber-100 shadow-xl">
           <WifiOff className="w-3.5 h-3.5 text-amber-400 shrink-0 animate-pulse" />
-          <span>Offline Mode — Showing cached UI &amp; profiles</span>
+          <span>Reconnecting…</span>
         </div>
       ) : (
-        <div className="flex items-center gap-2 rounded-2xl border border-emerald-400/35 bg-[#081F15]/95 backdrop-blur-xl px-3.5 py-2 text-xs font-semibold text-emerald-100 shadow-2xl shadow-black/60">
+        <div className="flex items-center gap-2 rounded-full border border-emerald-400/35 bg-[#081F15]/95 px-3.5 py-1.5 text-[11px] font-semibold text-emerald-100 shadow-xl">
           <Wifi className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-          <span>Back online — Live sync restored</span>
+          <span>Connected</span>
         </div>
       )}
     </div>

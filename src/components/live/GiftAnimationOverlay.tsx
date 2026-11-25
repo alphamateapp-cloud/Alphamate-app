@@ -3,7 +3,6 @@ import { Gift } from '../../types';
 import { Sparkles, Flame, Volume2, VolumeX, Crown } from 'lucide-react';
 import { audioManager } from '../../services/audioManager';
 import { virtualGiftDatabase } from '../../services/virtual-gift-database';
-import { prefetchCriticalGiftAssets } from '../../services/giftMediaCache';
 import { UniversalGiftPlayer } from './UniversalGiftPlayer';
 
 const PRIMARY_CSS_SHOWCASE_TYPES = new Set(['car', 'rocket', 'dragon', 'crown', 'yacht', 'ring']);
@@ -29,7 +28,7 @@ export interface ActiveGiftEvent {
 
 interface GiftAnimationOverlayProps {
   currentEvent: ActiveGiftEvent | null;
-  onComplete: () => void;
+  onComplete: (eventId?: string) => void;
   /**
    * 7-Layer Live Room Rendering selector:
    * - 'background': Layer 2 (z-[5]) BEHIND Host & Guest Seats (for overlay_background mode)
@@ -37,14 +36,20 @@ interface GiftAnimationOverlayProps {
    * - 'both': default single-container fallback (Moments / standalone)
    */
   layer?: 'background' | 'foreground' | 'both';
+  /** Concurrent playback lane (0, 1, 2) so 2-3 simultaneous users' gifts render without overlapping capsules */
+  slotIndex?: number;
+  /** Keeps HTML5 <video> muted so live Party Voice / WebRTC audio never loses Android AudioFocus */
+  preserveVoiceAudio?: boolean;
   onDurationDetected?: (eventId: string, durationMs: number) => void;
   onProgress?: (eventId: string, currentTimeMs: number, durationMs: number) => void;
 }
 
-export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
+export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = React.memo(({
   currentEvent,
   onComplete,
   layer = 'both',
+  slotIndex = 0,
+  preserveVoiceAudio = false,
   onDurationDetected,
   onProgress,
 }) => {
@@ -69,21 +74,13 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   const handleUniversalGiftComplete = useCallback((finishedId: string) => {
     completedIdsRef.current.add(finishedId);
     setCompletedEventId(finishedId);
-    onCompleteRef.current();
+    onCompleteRef.current(finishedId);
   }, []);
 
   const resolvedGift = useMemo(
     () => (currentEvent ? virtualGiftDatabase.resolveGiftMetadata(currentEvent.gift) : null),
     [currentEvent?.id]
   );
-
-  useEffect(() => {
-    void virtualGiftDatabase.preloadAllGiftAudio();
-    void prefetchCriticalGiftAssets();
-    return () => {
-      audioManager.stopAll();
-    };
-  }, []);
 
   useEffect(() => {
     return audioManager.subscribeMute(setIsMuted);
@@ -136,15 +133,17 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
     setIsExiting(false);
     onProgressRef.current?.(eventId, 0, durationMs);
 
-    // Play mapped gift SFX safely (never block animation playback if WebView audio throws)
-    try {
-      Promise.resolve(
-        virtualGiftDatabase.playGiftAudio(meta, {
-          comboCount: currentEvent.comboCount,
-        })
-      ).catch(() => {});
-    } catch {
-      // Ignore WebView audio playback errors
+    // Play mapped gift SFX safely (skip when preserving active Party Voice so WebView never steals audio focus)
+    if (!preserveVoiceAudio) {
+      try {
+        Promise.resolve(
+          virtualGiftDatabase.playGiftAudio(meta, {
+            comboCount: currentEvent.comboCount,
+          })
+        ).catch(() => {});
+      } catch {
+        // Ignore WebView audio playback errors
+      }
     }
 
     // Screen shake only for heavy/epic non-banner gifts
@@ -178,7 +177,7 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       setCompletedEventId(eventId);
       setIsExiting(false);
       setShakeScreen(false);
-      onCompleteRef.current();
+      onCompleteRef.current(eventId);
     };
 
     const triggerNaturalComplete = (targetId: string, withChromeFade = true) => {
@@ -289,6 +288,8 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       <UniversalGiftPlayer
         event={currentEvent}
         layer={layer}
+        slotIndex={slotIndex}
+        forceMuted={preserveVoiceAudio}
         onComplete={handleUniversalGiftComplete}
         onDurationDetected={onDurationDetected}
         onProgress={onProgress}
@@ -332,10 +333,12 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
   // Clean top strip notification banner ONLY — appears & auto-disappears in ~2s!
   // =========================================================================
   if (isSmallBannerOnly) {
+    const bannerTopPx = 64 + Math.max(0, slotIndex) * 56;
     return (
       <div
         key={currentEvent.id}
-        className={`fixed top-16 inset-x-0 z-[55] pointer-events-none px-3 sm:px-6 transition-all duration-300 ${
+        style={{ top: `${bannerTopPx}px` }}
+        className={`fixed inset-x-0 z-[55] pointer-events-none px-3 sm:px-6 transition-all duration-300 ${
           isExiting ? 'opacity-0 -translate-y-2 scale-95' : 'opacity-100 translate-y-0 scale-100'
         }`}
       >
@@ -407,29 +410,34 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
         isExiting ? 'opacity-0' : 'opacity-100'
       } ${shakeClassName}`}
     >
-      {/* Sound Mute/Unmute Float Toggle */}
-      <div className="absolute top-24 right-4 z-50 pointer-events-auto">
-        <button
-          onClick={handleToggleMute}
-          title={isMuted ? 'Unmute Gift SFX' : 'Mute Gift SFX'}
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/20 text-white text-xs font-semibold hover:bg-black/80 transition-all cursor-pointer shadow-lg"
-        >
-          {isMuted ? (
-            <>
-              <VolumeX className="w-3.5 h-3.5 text-zinc-400" />
-              <span className="text-[10px] text-zinc-300">SFX Off</span>
-            </>
-          ) : (
-            <>
-              <Volume2 className="w-3.5 h-3.5 text-amber-400" />
-              <span className="text-[10px] text-amber-300 font-bold">SFX On</span>
-            </>
-          )}
-        </button>
-      </div>
+      {/* Sound Mute/Unmute Float Toggle (hidden when preserving live Party Voice) */}
+      {!preserveVoiceAudio && slotIndex === 0 && (
+        <div className="absolute top-24 right-4 z-50 pointer-events-auto">
+          <button
+            onClick={handleToggleMute}
+            title={isMuted ? 'Unmute Gift SFX' : 'Mute Gift SFX'}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/60 backdrop-blur-md border border-white/20 text-white text-xs font-semibold hover:bg-black/80 transition-all cursor-pointer shadow-lg"
+          >
+            {isMuted ? (
+              <>
+                <VolumeX className="w-3.5 h-3.5 text-zinc-400" />
+                <span className="text-[10px] text-zinc-300">SFX Off</span>
+              </>
+            ) : (
+              <>
+                <Volume2 className="w-3.5 h-3.5 text-amber-400" />
+                <span className="text-[10px] text-amber-300 font-bold">SFX On</span>
+              </>
+            )}
+          </button>
+        </div>
+      )}
 
       {/* 1. TOP VIP SENDER CAPSULE BANNER */}
-      <div className="pt-16 px-3 sm:px-6 w-full max-w-lg mx-auto">
+      <div
+        className="px-3 sm:px-6 w-full max-w-lg mx-auto"
+        style={{ paddingTop: `${64 + Math.max(0, slotIndex) * 68}px` }}
+      >
         <div className="relative rounded-2xl p-[2px] bg-gradient-to-r from-amber-400 via-[#EC4899] to-[#7928CA] shadow-[0_0_30px_rgba(236,72,153,0.55)] animate-slide-up">
           <div className="rounded-[14px] bg-[#120B24]/95 backdrop-blur-xl px-3.5 py-2.5 flex items-center justify-between gap-3">
             <div className="flex items-center gap-2.5 min-w-0">
@@ -751,4 +759,4 @@ export const GiftAnimationOverlay: React.FC<GiftAnimationOverlayProps> = ({
       <div className="h-24 w-full pointer-events-none" />
     </div>
   );
-};
+});

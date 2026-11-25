@@ -10,6 +10,7 @@ import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
 import agoraTokenPkg from 'agora-token';
 import { registerGiftMediaRoutes } from './server-gift-media.js';
+import { registerGeminiRoutes } from './server-gemini.js';
 
 const { RtcTokenBuilder, RtcRole } = agoraTokenPkg;
 
@@ -3638,6 +3639,9 @@ export function createApiApp() {
 
   // Advanced Gift Animation Engine (Admin Upload, FFprobe Analysis, FFmpeg WebM Conversion & Validation)
   registerGiftMediaRoutes(app, { requireFirebaseAuth, requireAdmin });
+
+  // Server-side Gemini Chatbot & Live/Party Welcome Routes
+  registerGeminiRoutes(app);
 
   // Ensure unmatched /api/* endpoints return JSON 404 instead of falling through to SPA HTML
   app.use('/api', (_req, res) => {

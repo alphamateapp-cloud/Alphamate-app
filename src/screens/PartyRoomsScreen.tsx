@@ -39,7 +39,8 @@ import { VIRTUAL_GIFTS } from '../data/mockData';
 import { copyToClipboard } from '../utils/clipboard';
 import { uploadPartyRoomCover } from '../services/chatService';
 import { sendPartyRoomMessage, subscribeToPartyRoomMessages } from '../services/partyChatService';
-import { realtimeSocket, RealtimeViewerProfile } from '../services/realtimeSocket';
+import { RealtimeViewerProfile } from '../services/realtimeSocket';
+import { partyRoomDataService } from '../services/partyRoomDataService';
 import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
 import {
@@ -47,8 +48,19 @@ import {
   VoiceFilterPresetId,
 } from '../services/audioFilter';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
-import { GiftCacheBadge, GiftCacheBar, GiftIconImage } from '../components/live/GiftBoxMedia';
-import { prefetchCriticalGiftAssets } from '../services/giftMediaCache';
+import { FastGiftDrawer } from '../components/live/FastGiftDrawer';
+import { hydrateGiftMediaCacheIndex } from '../services/giftMediaCache';
+import {
+  GEMINI_ASSISTANT_AVATAR,
+  GEMINI_ASSISTANT_NAME,
+  GEMINI_ASSISTANT_USER_ID,
+  hasWelcomedInSession,
+  isBotMentionMessage,
+  markWelcomedInSession,
+  requestGeminiChat,
+  requestGeminiWelcome,
+  stripBotMention,
+} from '../services/geminiChatService';
 import {
   Radio,
   Mic,
@@ -131,6 +143,8 @@ interface ChatItem {
   giftIcon?: string;
   giftCoins?: number;
   timestamp?: string;
+  isAiBot?: boolean;
+  createdAtMs?: number;
 }
 
 const PLAYLIST_TRACKS = [
@@ -354,12 +368,13 @@ export const PartyRoomsScreen: React.FC = () => {
     audioFilter.getPreset()
   );
   const [partyGivers, setPartyGivers] = useState<PartyLeaderboardEntry[]>([]);
-  const [activePartyGiftAnimation, setActivePartyGiftAnimation] = useState<ActiveGiftEvent | null>(null);
+  const MAX_CONCURRENT_PARTY_GIFTS = 3;
+  const [activePartyGiftAnimations, setActivePartyGiftAnimations] = useState<ActiveGiftEvent[]>([]);
   const partyGiftQueueRef = useRef<ActiveGiftEvent[]>([]);
   const seenPartyGiftEventIdsRef = useRef<Set<string>>(new Set());
   const partyMessagesHydratedRef = useRef<boolean>(false);
-  const partyDetectedGiftDurationRef = useRef<{ eventId: string; durationMs: number } | null>(null);
-  const partyLastGiftHeartbeatRef = useRef<{ eventId: string; at: number } | null>(null);
+  const partyGiftStartedAtRef = useRef<Map<string, number>>(new Map());
+  const partyGiftHeartbeatsRef = useRef<Map<string, number>>(new Map());
   const lastPartyResetKeyRef = useRef<{ roomId: string; sessionId: string }>({ roomId: '', sessionId: '' });
   const [activeVipEntry, setActiveVipEntry] = useState<VipEntryEvent | null>(null);
   const vipEntryQueueRef = useRef<VipEntryEvent[]>([]);
@@ -408,114 +423,105 @@ export const PartyRoomsScreen: React.FC = () => {
   }, []);
 
   const enqueuePartyGiftAnimation = useCallback((incoming: ActiveGiftEvent) => {
-    setActivePartyGiftAnimation((current) => {
-      if (!current) return incoming;
-      partyGiftQueueRef.current = enqueueByPriority(partyGiftQueueRef.current, incoming);
+    setActivePartyGiftAnimations((current) => {
+      if (current.some((item) => item.id === incoming.id)) return current;
+      if (current.length < MAX_CONCURRENT_PARTY_GIFTS) {
+        const now = Date.now();
+        partyGiftStartedAtRef.current.set(incoming.id, now);
+        partyGiftHeartbeatsRef.current.set(incoming.id, now);
+        return [...current, incoming];
+      }
+      if (!partyGiftQueueRef.current.some((item) => item.id === incoming.id)) {
+        partyGiftQueueRef.current = enqueueByPriority(partyGiftQueueRef.current, incoming);
+      }
       return current;
     });
   }, []);
 
-  const handlePartyGiftOverlayComplete = useCallback(() => {
-    partyDetectedGiftDurationRef.current = null;
-    partyLastGiftHeartbeatRef.current = null;
-    const nextQueued = partyGiftQueueRef.current.shift() || null;
-    setActivePartyGiftAnimation(nextQueued);
+  const handlePartyGiftOverlayComplete = useCallback((completedEventId?: string) => {
+    setActivePartyGiftAnimations((current) => {
+      const targetId = completedEventId || current[0]?.id;
+      if (!targetId) return current;
+      partyGiftStartedAtRef.current.delete(targetId);
+      partyGiftHeartbeatsRef.current.delete(targetId);
+      const remaining = current.filter((item) => item.id !== targetId);
+      while (remaining.length < MAX_CONCURRENT_PARTY_GIFTS && partyGiftQueueRef.current.length > 0) {
+        const nextQueued = partyGiftQueueRef.current.shift();
+        if (nextQueued && !remaining.some((item) => item.id === nextQueued.id)) {
+          const now = Date.now();
+          partyGiftStartedAtRef.current.set(nextQueued.id, now);
+          partyGiftHeartbeatsRef.current.set(nextQueued.id, now);
+          remaining.push(nextQueued);
+        }
+      }
+      return remaining;
+    });
   }, []);
 
-  const handlePartyGiftDurationDetected = useCallback((eventId: string, durationMs: number) => {
-    if (!Number.isFinite(durationMs) || durationMs <= 0) return;
-    const current = partyDetectedGiftDurationRef.current;
-    if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
-      partyDetectedGiftDurationRef.current = { eventId, durationMs };
-    }
-    partyLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
+  const handlePartyGiftDurationDetected = useCallback((eventId: string, _durationMs: number) => {
+    partyGiftHeartbeatsRef.current.set(eventId, Date.now());
   }, []);
 
   const handlePartyGiftPlaybackProgress = useCallback(
-    (eventId: string, _currentTimeMs: number, durationMs: number) => {
-      partyLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
-      if (Number.isFinite(durationMs) && durationMs > 0) {
-        const current = partyDetectedGiftDurationRef.current;
-        if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
-          partyDetectedGiftDurationRef.current = { eventId, durationMs };
-        }
-      }
+    (eventId: string, _currentTimeMs: number, _durationMs: number) => {
+      partyGiftHeartbeatsRef.current.set(eventId, Date.now());
     },
     []
   );
 
-  // Quietly pre-fetch critical gift assets (Supercar/Rocket/Dragon/Crown SFX & thumbnails) +
-  // published animated gift media into IndexedDB + blob URLs on room entry so gift playback
-  // starts immediately (<30ms) and runs to 100% completion regardless of network latency.
+  // Hydrate already-cached gift blobs from IndexedDB (0 network bytes — never competes with Party Voice)
   useEffect(() => {
     if (!activePartyRoom?.id) return;
-    void prefetchCriticalGiftAssets(publishedCatalogGifts);
-  }, [activePartyRoom?.id, publishedCatalogGifts]);
+    void hydrateGiftMediaCacheIndex();
+  }, [activePartyRoom?.id]);
 
   useEffect(() => {
     return audioFilter.subscribe(setActiveVoiceFilter);
   }, []);
 
-  // Parent-side inactivity fail-safe:
-  // - For advanced video/animated gifts, NEVER cuts off an animation on a fixed wall-clock timer
-  //   (8s, 10s, 12s, 20s+ play to natural onEnded even after slow-network pre-buffering).
-  // - For CSS showcase gifts (Supercar, Rocket, Dragon, Crown), respects onProgress heartbeats
-  //   from GiftAnimationOverlay so natural `onAnimationEnd` always completes without truncation.
-  // - Only intervenes if playback heartbeats go completely silent or hit the hard safety ceiling.
+  // Per-event inactivity fail-safe for up to 3 concurrent party gifts:
+  // - Never truncates actively playing/buffering 8s/10s/12s+ animations.
+  // - Cleans up only if an individual gift's heartbeats go completely silent or hit the hard ceiling.
   useEffect(() => {
-    if (!activePartyGiftAnimation) return;
-    const coins = Number(
-      activePartyGiftAnimation.gift?.costInCoins ?? activePartyGiftAnimation.gift?.coins ?? 0
-    );
-    const advConfig = activePartyGiftAnimation.gift?.advancedConfig;
-    const startedAt = Date.now();
-    const eventId = activePartyGiftAnimation.id;
-    partyLastGiftHeartbeatRef.current = { eventId, at: startedAt };
-    let cleared = false;
+    if (activePartyGiftAnimations.length === 0) return;
 
-    const legacyHardCeilingMs = coins <= 100 ? 5000 : 16_000;
-    const legacyInactivityLimitMs = coins <= 100 ? 4000 : 6000;
-    const ADV_INACTIVITY_LIMIT_MS = 45_000;
-    const ADV_HARD_CEILING_MS = 180_000;
-
-    const isStuckOrExpired = () => {
+    const pruneExpired = () => {
       const now = Date.now();
-      const hb = partyLastGiftHeartbeatRef.current;
-      const lastActiveAt = hb && hb.eventId === eventId ? hb.at : startedAt;
-      if (!advConfig) {
-        if (now - startedAt >= legacyHardCeilingMs) return true;
-        return now - lastActiveAt >= legacyInactivityLimitMs;
+      const expiredIds: string[] = [];
+      for (const item of activePartyGiftAnimations) {
+        const startedAt = partyGiftStartedAtRef.current.get(item.id) || item.timestamp || now;
+        const lastActiveAt = partyGiftHeartbeatsRef.current.get(item.id) || startedAt;
+        const coinsVal = Number(item.gift?.costInCoins ?? item.gift?.coins ?? 0);
+        const isAdv = Boolean(item.gift?.advancedConfig);
+        if (!isAdv) {
+          const hardCeiling = coinsVal <= 100 ? 5000 : 16_000;
+          const inactivityLimit = coinsVal <= 100 ? 4000 : 6500;
+          if (now - startedAt >= hardCeiling || now - lastActiveAt >= inactivityLimit) {
+            expiredIds.push(item.id);
+          }
+        } else {
+          if (now - startedAt >= 180_000 || now - lastActiveAt >= 45_000) {
+            expiredIds.push(item.id);
+          }
+        }
       }
-      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
-      return now - lastActiveAt >= ADV_INACTIVITY_LIMIT_MS;
+      if (expiredIds.length > 0) {
+        expiredIds.forEach((id) => handlePartyGiftOverlayComplete(id));
+      }
     };
 
-    const clearIfExpired = () => {
-      if (cleared) return;
-      if (isStuckOrExpired()) {
-        cleared = true;
-        partyDetectedGiftDurationRef.current = null;
-        partyLastGiftHeartbeatRef.current = null;
-        const nextQueued = partyGiftQueueRef.current.shift() || null;
-        setActivePartyGiftAnimation((prev) => (prev?.id === eventId ? nextQueued : prev));
-      }
-    };
-
-    const failSafePoll = setInterval(() => clearIfExpired(), 1000);
-    const onResume = () => clearIfExpired();
-
-    window.addEventListener('focus', onResume);
-    window.addEventListener('pageshow', onResume);
-    document.addEventListener('visibilitychange', onResume);
+    const failSafePoll = setInterval(pruneExpired, 1500);
+    window.addEventListener('focus', pruneExpired);
+    window.addEventListener('pageshow', pruneExpired);
+    document.addEventListener('visibilitychange', pruneExpired);
 
     return () => {
-      cleared = true;
       clearInterval(failSafePoll);
-      window.removeEventListener('focus', onResume);
-      window.removeEventListener('pageshow', onResume);
-      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('focus', pruneExpired);
+      window.removeEventListener('pageshow', pruneExpired);
+      document.removeEventListener('visibilitychange', pruneExpired);
     };
-  }, [activePartyGiftAnimation?.id]);
+  }, [activePartyGiftAnimations, handlePartyGiftOverlayComplete]);
 
   // Reset party gift overlay, chat, hearts, PK & givers whenever entering, switching sessions, or leaving a Party Room
   // (Ignores non-breaking sessionId hydration from '' -> 'ps_...' on slow networks so active gifts are never wiped mid-play!)
@@ -538,11 +544,11 @@ export const PartyRoomsScreen: React.FC = () => {
     seenPartyBannerIdsRef.current.clear();
     seenPartyGiftEventIdsRef.current.clear();
     partyMessagesHydratedRef.current = false;
-    partyDetectedGiftDurationRef.current = null;
-    partyLastGiftHeartbeatRef.current = null;
+    partyGiftStartedAtRef.current.clear();
+    partyGiftHeartbeatsRef.current.clear();
     partyGiftQueueRef.current = [];
     lastSyncedViewerCountRef.current = -1;
-    setActivePartyGiftAnimation(null);
+    setActivePartyGiftAnimations([]);
     setActiveVipEntry(null);
     vipEntryQueueRef.current = [];
     vipEntryNotifiedRef.current.clear();
@@ -568,7 +574,7 @@ export const PartyRoomsScreen: React.FC = () => {
     audioManager.stopAll();
     return () => {
       if (!activePartyRoom?.id) {
-        setActivePartyGiftAnimation(null);
+        setActivePartyGiftAnimations([]);
         clearActiveGiftBanner();
         audioManager.stopAll();
       }
@@ -1448,6 +1454,7 @@ export const PartyRoomsScreen: React.FC = () => {
   };
 
   const handleCommentUserClick = (sender: ChatItem['sender']) => {
+    if (sender.id === GEMINI_ASSISTANT_USER_ID) return;
     const isTargetHost =
       sender.isHost ||
       (activePartyRoom &&
@@ -1549,6 +1556,10 @@ export const PartyRoomsScreen: React.FC = () => {
 
   // Chat Feed with system, host, room and gift messages
   const [chatItems, setChatItems] = useState<ChatItem[]>([]);
+  const [askAiMode, setAskAiMode] = useState(false);
+  const [aiBotReplying, setAiBotReplying] = useState(false);
+  const seenPartyWelcomeIdsRef = useRef<Set<string>>(new Set());
+  const lastPartyRemoteWelcomeAtRef = useRef<number>(0);
 
   // 16-Seat Normal Guest Roster ready for real users
   const defaultGuestSeats: PartySeat[] = useMemo(() => {
@@ -1864,27 +1875,38 @@ export const PartyRoomsScreen: React.FC = () => {
           }
           console.warn('[Party Voice] Agora event notice:', err);
         },
-        onConnectionStateChange: (connState, meta) => {
+        onConnectionStateChange: (connState) => {
           if (cancelled) return;
           if (connState === 'connected') {
             voiceHasConnectedRef.current = true;
             voiceReconnectAttemptRef.current = 0;
+            if (voiceReconnectTimerRef.current) {
+              clearTimeout(voiceReconnectTimerRef.current);
+              voiceReconnectTimerRef.current = null;
+            }
             setPartyVoiceReconnecting(null);
             setPartyVoiceError(null);
           } else if (connState === 'connecting') {
-            setPartyVoiceReconnecting('Connecting Party Voice…');
+            // Only show status pill before initial connection; never spam once connected
+            if (!voiceHasConnectedRef.current) {
+              setPartyVoiceReconnecting('Connecting…');
+            }
             setPartyVoiceError(null);
           } else if (connState === 'reconnecting') {
-            const attemptSuffix = meta?.attempt ? ` (${meta.attempt}/${meta.maxAttempts || 5})` : '';
-            setPartyVoiceReconnecting(`Reconnecting Party Voice…${attemptSuffix}`);
+            setPartyVoiceReconnecting('Reconnecting…');
             setPartyVoiceError(null);
           } else if (connState === 'failed' || connState === 'disconnected') {
-            setPartyVoiceReconnecting(null);
-            setPartyVoiceError(
-              meta?.reason
-                ? `Party voice disconnected (${meta.reason}). Tap Retry to reconnect.`
-                : 'Party voice connection interrupted. Tap Retry to reconnect.'
-            );
+            // Keep clean auto-reconnecting silently instead of spamming red error banners at top of room
+            setPartyVoiceError(null);
+            setPartyVoiceReconnecting('Reconnecting…');
+            if (!voiceReconnectTimerRef.current) {
+              voiceReconnectTimerRef.current = setTimeout(() => {
+                voiceReconnectTimerRef.current = null;
+                if (!cancelled && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+                  setPartyVoiceRetryToken((prev) => prev + 1);
+                }
+              }, 3500);
+            }
           }
         },
         onSpeakingChange: (localSpeakingNow, remoteSpeakingSet) => {
@@ -1991,24 +2013,26 @@ export const PartyRoomsScreen: React.FC = () => {
             error?.code === 'AGORA_TOKEN_FAILED' ||
             (typeof error?.status === 'number' && error.status >= 500));
 
-        if (isRetryableStartup && startupAutoRetryCountRef.current < 2) {
+        if (isRetryableStartup && startupAutoRetryCountRef.current < 4) {
           startupAutoRetryCountRef.current += 1;
-          console.warn(
-            `[Party Voice] Startup retry ${startupAutoRetryCountRef.current}/2:`,
-            error?.message || error
-          );
-          setPartyVoiceReconnecting(`Reconnecting Party Voice… (${startupAutoRetryCountRef.current}/2)`);
+          setPartyVoiceReconnecting('Reconnecting…');
           startupRetryTimerRef.current = setTimeout(() => {
             startupRetryTimerRef.current = null;
             if (!cancelled) {
               setPartyVoiceRetryToken((prev) => prev + 1);
             }
-          }, 1800 * startupAutoRetryCountRef.current);
+          }, Math.min(8000, 1800 * startupAutoRetryCountRef.current));
           return;
         }
 
         console.warn('[Party Voice] Unable to start Agora session:', error?.message || error);
-        setPartyVoiceError(error?.message || 'Unable to connect Party Voice. Tap Retry.');
+        setPartyVoiceReconnecting('Reconnecting…');
+        startupRetryTimerRef.current = setTimeout(() => {
+          startupRetryTimerRef.current = null;
+          if (!cancelled && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+            setPartyVoiceRetryToken((prev) => prev + 1);
+          }
+        }, 5000);
       });
 
     const roomSessionId = activePartyRoom?.sessionId || undefined;
@@ -2025,8 +2049,57 @@ export const PartyRoomsScreen: React.FC = () => {
       isHost: isUserHost,
       joinedAtMs: Date.now(),
     };
-    realtimeSocket.joinRoom('party', roomId, wsJoinProfile, 0, roomSessionId);
+    partyRoomDataService.joinPartyRoom(roomId, wsJoinProfile, 0, roomSessionId);
     wsViewersSeededRef.current = false;
+    seenPartyWelcomeIdsRef.current = new Set([effectiveUserId]);
+
+    const postPartyAiWelcome = (targetName: string, targetUid: string, isSelf: boolean, vipTier = 0) => {
+      const welcomeKey = `party:${roomId}:${roomSessionId || 'live'}:${targetUid}`;
+      if (hasWelcomedInSession(welcomeKey)) return;
+      if (!isSelf) {
+        const now = Date.now();
+        if (now - lastPartyRemoteWelcomeAtRef.current < 8000) return;
+        lastPartyRemoteWelcomeAtRef.current = now;
+      }
+      markWelcomedInSession(welcomeKey);
+      requestGeminiWelcome({
+        userName: targetName || 'Guest',
+        roomType: 'party',
+        roomTitle: activePartyRoom.title || '',
+        hostName: activePartyRoom.host?.displayName || '',
+        isSelf,
+        vipTier,
+      })
+        .then(({ text }) => {
+          if (cancelled || !text) return;
+          const nowMs = Date.now();
+          setChatItems((prev) => [
+            ...prev.slice(-149),
+            {
+              id: `ai_party_welcome_${roomId}_${targetUid}_${nowMs}`,
+              sender: {
+                id: GEMINI_ASSISTANT_USER_ID,
+                displayName: GEMINI_ASSISTANT_NAME,
+                avatar: GEMINI_ASSISTANT_AVATAR,
+                vipTier: 0,
+                level: 0,
+                isHost: false,
+              },
+              text,
+              type: 'system',
+              timestamp: new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              isAiBot: true,
+              createdAtMs: nowMs,
+            },
+          ]);
+        })
+        .catch((err) => {
+          console.warn('[Gemini Party Welcome]', err?.message || err);
+        });
+    };
+
+    // Welcome the current user automatically on entering the Party Room
+    postPartyAiWelcome(currentUser.displayName || 'Guest', effectiveUserId, true, currentUser.vipTier ?? 0);
 
     // Announce high-tier self arrival locally and to peers inside the room
     const selfVipTier = Number(currentUser.vipTier || 0);
@@ -2043,8 +2116,7 @@ export const PartyRoomsScreen: React.FC = () => {
         isHost: isUserHost,
         timestamp: joinTs,
       });
-      realtimeSocket.sendRoomSignal('party', roomId, {
-        type: 'vip_entry',
+      partyRoomDataService.enqueueVipEntrySignal(roomId, {
         userId: effectiveUserId,
         displayName: currentUser.displayName || 'VIP Member',
         avatar: safeImageSrc(currentUser.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
@@ -2055,24 +2127,107 @@ export const PartyRoomsScreen: React.FC = () => {
       });
     }
 
-    const unsubWsPartyRoom = realtimeSocket.onRoomEvent('party', roomId, (ev) => {
+    const unsubWsPartyRoom = partyRoomDataService.subscribeRoomBatch(roomId, (events) => {
       if (cancelled) return;
-      if (roomSessionId && ev.roomSessionId && ev.roomSessionId !== roomSessionId) return;
-      if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
-        const viewers = Array.isArray(ev.viewers) ? ev.viewers : [];
-        setWsPartyViewers(viewers);
+      let latestViewers: RealtimeViewerProfile[] | null = null;
+      let sawStateInit = false;
+
+      for (const ev of events) {
+        if (roomSessionId && ev.roomSessionId && ev.roomSessionId !== roomSessionId) continue;
+
+        if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
+          latestViewers = Array.isArray(ev.viewers) ? ev.viewers : [];
+          if (ev.type === 'room:state_init') {
+            sawStateInit = true;
+          }
+        } else if (
+          ev.type === 'room:signal' &&
+          ev.roomId === roomId &&
+          ev.signal?.type === 'vip_entry' &&
+          ev.senderId !== effectiveUserId
+        ) {
+          const sig = ev.signal;
+          const sigVipTier = Number(sig.vipTier || 0);
+          const sigUserId = String(sig.userId || ev.senderId || '');
+          if (sigUserId && sigVipTier >= VIP_ENTRY_MIN_TIER) {
+            const localNow = Date.now();
+            enqueueVipEntry({
+              id: `vip_sig_${roomId}_${sigUserId}_${localNow}`,
+              roomId,
+              userId: sigUserId,
+              displayName: String(sig.displayName || 'VIP Guest'),
+              avatar: safeImageSrc(sig.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
+              vipTier: sigVipTier,
+              level: Number(sig.level || 0),
+              isHost: Boolean(sig.isHost),
+              timestamp: localNow,
+            });
+          }
+        } else if (
+          ev.type === 'room:signal' &&
+          ev.roomId === roomId &&
+          ev.signal?.type === 'gift_combo' &&
+          ev.senderId !== effectiveUserId
+        ) {
+          const sig = ev.signal;
+          const localNow = Date.now();
+          const wsEventId =
+            String(sig.eventId || '').trim() || `party_ws_gift_${roomId}_${ev.senderId}_${localNow}`;
+          if (Array.isArray(sig.mergedEventIds)) {
+            sig.mergedEventIds.forEach((mid: unknown) => {
+              const cleanMid = String(mid || '').trim();
+              if (cleanMid) seenPartyGiftEventIdsRef.current.add(cleanMid);
+            });
+          }
+          // Live WebSocket room signals are never replayed from history — never drop due to device clock skew!
+          if (sig.gift && !seenPartyGiftEventIdsRef.current.has(wsEventId)) {
+            seenPartyGiftEventIdsRef.current.add(wsEventId);
+            const incomingGift = sig.gift as Gift;
+            const resolvedGift =
+              publishedCatalogGiftsRef.current.find(
+                (g) =>
+                  (incomingGift?.id && g.id === incomingGift.id) ||
+                  (incomingGift?.name && g.name.toLowerCase() === incomingGift.name.toLowerCase())
+              ) || incomingGift;
+            enqueuePartyGiftAnimation({
+              id: wsEventId,
+              gift: resolvedGift,
+              senderName: String(sig.senderName || 'Guest'),
+              senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
+              senderVipTier: Number(sig.senderVipTier || 1),
+              recipientName: String(sig.recipientName || activePartyRoom.host.displayName || 'Host'),
+              comboCount: Number(sig.comboCount || 1),
+              quantity: Number(sig.quantity || 1),
+              timestamp: localNow,
+              roomId,
+            });
+          }
+        }
+      }
+
+      if (latestViewers !== null) {
+        setWsPartyViewers(latestViewers);
         const now = Date.now();
-        if (ev.type === 'room:state_init' || !wsViewersSeededRef.current) {
+        if (sawStateInit || !wsViewersSeededRef.current) {
           wsViewersSeededRef.current = true;
-          viewers.forEach((v) => {
+          latestViewers.forEach((v) => {
             if (v?.id) {
               vipEntryNotifiedRef.current.set(v.id, now);
+              seenPartyWelcomeIdsRef.current.add(v.id);
             }
           });
         } else {
-          viewers.forEach((v) => {
+          let welcomedRemoteInBatch = false;
+          latestViewers.forEach((v) => {
             if (!v?.id || v.id === effectiveUserId) return;
             const viewerVipTier = Number(v.vipTier || 0);
+            if (!seenPartyWelcomeIdsRef.current.has(v.id)) {
+              seenPartyWelcomeIdsRef.current.add(v.id);
+              if (!welcomedRemoteInBatch) {
+                welcomedRemoteInBatch = true;
+                postPartyAiWelcome(v.displayName || 'Guest', v.id, false, viewerVipTier);
+              }
+            }
             if (viewerVipTier >= VIP_ENTRY_MIN_TIER) {
               enqueueVipEntry({
                 id: `vip_ws_viewer_${roomId}_${v.id}_${now}`,
@@ -2088,76 +2243,11 @@ export const PartyRoomsScreen: React.FC = () => {
             }
           });
         }
-      } else if (
-        ev.type === 'room:signal' &&
-        ev.roomId === roomId &&
-        ev.signal?.type === 'vip_entry' &&
-        ev.senderId !== effectiveUserId
-      ) {
-        const sig = ev.signal;
-        const sigTs = Number(sig.timestamp || ev.ts || Date.now());
-        const sigVipTier = Number(sig.vipTier || 0);
-        const sigUserId = String(sig.userId || ev.senderId || '');
-        if (
-          sigUserId &&
-          sigVipTier >= VIP_ENTRY_MIN_TIER &&
-          Math.abs(Date.now() - sigTs) < 12_000
-        ) {
-          enqueueVipEntry({
-            id: `vip_sig_${roomId}_${sigUserId}_${sigTs}`,
-            roomId,
-            userId: sigUserId,
-            displayName: String(sig.displayName || 'VIP Guest'),
-            avatar: safeImageSrc(sig.avatar, DEFAULT_AVATAR_URL) || DEFAULT_AVATAR_URL,
-            vipTier: sigVipTier,
-            level: Number(sig.level || 0),
-            isHost: Boolean(sig.isHost),
-            timestamp: sigTs,
-          });
-        }
-      } else if (
-        ev.type === 'room:signal' &&
-        ev.roomId === roomId &&
-        ev.signal?.type === 'gift_combo' &&
-        ev.senderId !== effectiveUserId
-      ) {
-        const sig = ev.signal;
-        const sigTs = Number(sig.timestamp || ev.ts || Date.now());
-        const now = Date.now();
-        const wsEventId =
-          String(sig.eventId || '').trim() || `party_ws_gift_${roomId}_${sigTs}`;
-        if (
-          sig.gift &&
-          !seenPartyGiftEventIdsRef.current.has(wsEventId) &&
-          sigTs >= partyJoinedAtRef.current - 2500 &&
-          Math.abs(now - sigTs) < 15000
-        ) {
-          seenPartyGiftEventIdsRef.current.add(wsEventId);
-          const incomingGift = sig.gift as Gift;
-          const resolvedGift =
-            publishedCatalogGiftsRef.current.find(
-              (g) =>
-                (incomingGift?.id && g.id === incomingGift.id) ||
-                (incomingGift?.name && g.name.toLowerCase() === incomingGift.name.toLowerCase())
-            ) || incomingGift;
-          enqueuePartyGiftAnimation({
-            id: wsEventId,
-            gift: resolvedGift,
-            senderName: String(sig.senderName || 'Guest'),
-            senderAvatar: sig.senderAvatar ? String(sig.senderAvatar) : undefined,
-            senderVipTier: Number(sig.senderVipTier || 1),
-            recipientName: String(sig.recipientName || activePartyRoom.host.displayName || 'Host'),
-            comboCount: Number(sig.comboCount || 1),
-            quantity: Number(sig.quantity || 1),
-            timestamp: sigTs,
-            roomId,
-          });
-        }
       }
     });
 
     const handlePageHide = () => {
-      realtimeSocket.leaveRoom('party', roomId);
+      partyRoomDataService.leavePartyRoom(roomId);
       agoraPartyEngine.stopPartyVoice(roomId, true).catch(() => {});
     };
     const handleNetworkOnline = () => {
@@ -2178,7 +2268,7 @@ export const PartyRoomsScreen: React.FC = () => {
     return () => {
       cancelled = true;
       unsubWsPartyRoom();
-      realtimeSocket.leaveRoom('party', roomId);
+      partyRoomDataService.leavePartyRoom(roomId);
       if (startupRetryTimerRef.current) {
         clearTimeout(startupRetryTimerRef.current);
         startupRetryTimerRef.current = null;
@@ -2517,8 +2607,8 @@ export const PartyRoomsScreen: React.FC = () => {
         ...(isHost ? { isHostPresent: true } : {}),
       };
       updatePartyRoomFields(activePartyRoom.id, patch).catch(() => {});
-      // Announce ONLY presence/viewer count fields (never spread stale seats)
-      realtimeSocket.announcePartyRoom({
+      // Announce ONLY presence/viewer count fields (batched & deduplicated via partyRoomDataService)
+      partyRoomDataService.enqueueRoomAnnounce({
         id: activePartyRoom.id,
         activeViewers: realCount,
         ...(isHost ? { isHostPresent: true } : {}),
@@ -2539,7 +2629,7 @@ export const PartyRoomsScreen: React.FC = () => {
       currentRoomId,
       (messages) => {
         if (unsubscribed) return;
-        const mapped: ChatItem[] = messages.map((message: any) => ({
+        const mapped: ChatItem[] = messages.map((message: any, idx: number) => ({
           id: message.id,
           sender: {
             ...message.sender,
@@ -2553,8 +2643,17 @@ export const PartyRoomsScreen: React.FC = () => {
           timestamp: message.createdAt?.toDate
             ? message.createdAt.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
             : 'Just now',
+          createdAtMs: message.createdAt?.toMillis
+            ? message.createdAt.toMillis()
+            : partyJoinedAtRef.current + idx,
         }));
-        setChatItems(mapped);
+        setChatItems((prev) => {
+          const localAi = prev.filter((item) => item.isAiBot);
+          if (localAi.length === 0) return mapped;
+          return [...mapped, ...localAi]
+            .sort((a, b) => (a.createdAtMs ?? 0) - (b.createdAtMs ?? 0))
+            .slice(-150);
+        });
 
         // Reliable room-wide gift animation sync via Firestore (deduplicated against WebSocket & local sender):
         // Initial snapshot marks historical gifts as seen so joining mid-session never replays old gifts.
@@ -2573,7 +2672,8 @@ export const PartyRoomsScreen: React.FC = () => {
             const createdMs = message.createdAt?.toMillis
               ? message.createdAt.toMillis()
               : Date.now();
-            if (createdMs < partyJoinedAtRef.current - 5000) {
+            // Generous 2-minute tolerance for device clock skew (initial snapshot already marked history seen)
+            if (createdMs < partyJoinedAtRef.current - 120_000) {
               seenPartyGiftEventIdsRef.current.add(msgEventId);
               return;
             }
@@ -2727,10 +2827,13 @@ export const PartyRoomsScreen: React.FC = () => {
   // Send Chat Comment
   const handleSendChat = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!activePartyRoom || !inputChat.trim()) return;
+    const rawText = inputChat.trim();
+    if (!activePartyRoom || !rawText) return;
 
+    const shouldAskAi = askAiMode || isBotMentionMessage(rawText);
     const isHost = activePartyRoom.host?.id === currentUser.id;
-    const msgId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const nowMs = Date.now();
+    const msgId = `chat_${nowMs}_${Math.random().toString(36).slice(2, 7)}`;
 
     const newMsg: ChatItem = {
       id: msgId,
@@ -2742,10 +2845,16 @@ export const PartyRoomsScreen: React.FC = () => {
         level: currentUser.level ?? 0,
         isHost,
       },
-      text: inputChat.trim(),
+      text: rawText,
       type: isHost ? 'host' : 'room',
       timestamp: 'Just now',
+      createdAtMs: nowMs,
     };
+
+    const recentHistory = chatItems.slice(-10).map((item) => ({
+      role: (item.isAiBot ? 'model' : 'user') as 'user' | 'model',
+      text: item.isAiBot ? item.text : `${item.sender.displayName}: ${item.text}`,
+    }));
 
     setChatItems((prev) => [...prev.slice(-149), newMsg]);
     setInputChat('');
@@ -2759,6 +2868,50 @@ export const PartyRoomsScreen: React.FC = () => {
       },
       activePartyRoom.sessionId
     ).catch((error) => showToast(error instanceof Error ? error.message : 'Message could not be sent.'));
+
+    if (shouldAskAi && !aiBotReplying) {
+      const cleanPrompt = stripBotMention(rawText);
+      const targetRoomId = activePartyRoom.id;
+      setAiBotReplying(true);
+      requestGeminiChat({
+        message: cleanPrompt,
+        history: recentHistory,
+        mode: 'party',
+        context: {
+          userName: currentUser.displayName || 'Guest',
+          roomTitle: activePartyRoom.title || '',
+          hostName: activePartyRoom.host?.displayName || '',
+        },
+      })
+        .then(({ reply }) => {
+          const replyMs = Date.now();
+          setChatItems((prev) => [
+            ...prev.slice(-149),
+            {
+              id: `ai_party_reply_${targetRoomId}_${replyMs}`,
+              sender: {
+                id: GEMINI_ASSISTANT_USER_ID,
+                displayName: GEMINI_ASSISTANT_NAME,
+                avatar: GEMINI_ASSISTANT_AVATAR,
+                vipTier: 0,
+                level: 0,
+                isHost: false,
+              },
+              text: reply,
+              type: 'system',
+              timestamp: new Date(replyMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+              isAiBot: true,
+              createdAtMs: replyMs,
+            },
+          ]);
+        })
+        .catch((err) => {
+          showToast(err instanceof Error ? err.message : 'Alpha AI could not reply right now.');
+        })
+        .finally(() => {
+          setAiBotReplying(false);
+        });
+    }
   };
 
   // Send Virtual Gift (strictly validated and scoped to this activePartyRoom.id)
@@ -2791,11 +2944,9 @@ export const PartyRoomsScreen: React.FC = () => {
     seenPartyGiftEventIdsRef.current.add(giftEventId);
     spawnHeart();
 
-    // Broadcast gift animation signal ONLY to participants inside this Party Room (instant path)
-    realtimeSocket.sendRoomSignal('party', activePartyRoom.id, {
-      type: 'gift_combo',
+    // Broadcast gift animation signal ONLY to participants inside this Party Room (batched & compacted)
+    partyRoomDataService.enqueueGiftSignal(activePartyRoom.id, {
       eventId: giftEventId,
-      roomId: activePartyRoom.id,
       gift: selectedGift,
       senderName: currentUser.displayName,
       senderAvatar: currentUser.avatar,
@@ -3095,18 +3246,21 @@ export const PartyRoomsScreen: React.FC = () => {
           hostAvatar={getHdImageUrl(activePartyRoom.coverImageUrl || activePartyRoom.host.avatar)}
         />
 
-        {/* LAYER 2 (z-[5]): Background Gift Animation Layer for Mode 3 (Overlay/Background behind Host & Seats) */}
-        <GiftAnimationOverlay
-          layer="background"
-          currentEvent={
-            activePartyGiftAnimation && activePartyGiftAnimation.roomId === activePartyRoom.id
-              ? activePartyGiftAnimation
-              : null
-          }
-          onComplete={handlePartyGiftOverlayComplete}
-          onDurationDetected={handlePartyGiftDurationDetected}
-          onProgress={handlePartyGiftPlaybackProgress}
-        />
+        {/* LAYER 2 (z-[5]): Background Gift Animation Layers (up to 3 concurrent multi-user gifts, voice-safe) */}
+        {activePartyGiftAnimations
+          .filter((ev) => ev.roomId === activePartyRoom.id)
+          .map((giftEv, idx) => (
+            <GiftAnimationOverlay
+              key={`party_bg_${giftEv.id}`}
+              layer="background"
+              slotIndex={idx}
+              preserveVoiceAudio={true}
+              currentEvent={giftEv}
+              onComplete={handlePartyGiftOverlayComplete}
+              onDurationDetected={handlePartyGiftDurationDetected}
+              onProgress={handlePartyGiftPlaybackProgress}
+            />
+          ))}
 
         {/* Toast Alert Feedback */}
         {toastMessage && (
@@ -3132,18 +3286,21 @@ export const PartyRoomsScreen: React.FC = () => {
           ))}
         </div>
 
-        {/* LAYER 5 (z-[35]): Foreground Gift Animation Layer for Mode 1 (Transparent) & Mode 2 (Semi-Transparent) */}
-        <GiftAnimationOverlay
-          layer="foreground"
-          currentEvent={
-            activePartyGiftAnimation && activePartyGiftAnimation.roomId === activePartyRoom.id
-              ? activePartyGiftAnimation
-              : null
-          }
-          onComplete={handlePartyGiftOverlayComplete}
-          onDurationDetected={handlePartyGiftDurationDetected}
-          onProgress={handlePartyGiftPlaybackProgress}
-        />
+        {/* LAYER 5 (z-[35]): Foreground Gift Animation Layers (up to 3 concurrent multi-user gifts, voice-safe) */}
+        {activePartyGiftAnimations
+          .filter((ev) => ev.roomId === activePartyRoom.id)
+          .map((giftEv, idx) => (
+            <GiftAnimationOverlay
+              key={`party_fg_${giftEv.id}`}
+              layer="foreground"
+              slotIndex={idx}
+              preserveVoiceAudio={true}
+              currentEvent={giftEv}
+              onComplete={handlePartyGiftOverlayComplete}
+              onDurationDetected={handlePartyGiftDurationDetected}
+              onProgress={handlePartyGiftPlaybackProgress}
+            />
+          ))}
 
         {/* =====================================================================
             2. TRANSPARENT ROOM HEADER & CONTROLS (Layer 7 z-[45] — Zero Top Black Shade)
@@ -3449,34 +3606,26 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         )}
 
-        {/* Non-blocking Party Voice Reconnecting Status */}
+        {/* Subtle Non-Blocking Reconnecting Pill (only shown when actually offline/reconnecting) */}
         {partyVoiceReconnecting && !partyVoiceError && (
-          <div className="relative z-30 mx-3 mt-1 px-3 py-1.5 rounded-xl bg-amber-950/85 border border-amber-500/35 text-amber-200 text-[10px] flex items-center justify-between gap-2">
-            <span className="truncate">{partyVoiceReconnecting}</span>
+          <div className="relative z-30 mt-0.5 flex justify-center pointer-events-none">
+            <div className="px-3 py-0.5 rounded-full bg-amber-950/85 border border-amber-500/35 text-amber-200 text-[10px] font-semibold flex items-center gap-1.5 shadow">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+              <span>{partyVoiceReconnecting}</span>
+            </div>
           </div>
         )}
 
-        {/* Party Voice Error Notice (only shown after automatic reconnect exhausts or permanent error) */}
+        {/* Permanent Non-Retryable Notice (e.g., Microphone Permission Disabled) */}
         {partyVoiceError && (
-          <div className="relative z-30 mx-3 mt-1 px-3 py-2 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[10px] flex items-start justify-between gap-2">
+          <div className="relative z-30 mx-3 mt-1 px-3 py-1.5 rounded-xl bg-rose-950/90 border border-rose-500/40 text-rose-200 text-[10px] flex items-center justify-between gap-2">
             <span className="leading-snug break-words">{partyVoiceError}</span>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => {
-                  setPartyVoiceError(null);
-                  setPartyVoiceRetryToken((prev) => prev + 1);
-                }}
-                className="text-amber-300 hover:text-white font-bold cursor-pointer"
-              >
-                Retry
-              </button>
-              <button
-                onClick={() => setPartyVoiceError(null)}
-                className="text-rose-300 hover:text-white font-bold cursor-pointer"
-              >
-                Dismiss
-              </button>
-            </div>
+            <button
+              onClick={() => setPartyVoiceError(null)}
+              className="text-rose-300 hover:text-white font-bold cursor-pointer shrink-0"
+            >
+              Dismiss
+            </button>
           </div>
         )}
 
@@ -3864,12 +4013,16 @@ export const PartyRoomsScreen: React.FC = () => {
               <div
                 key={item.id}
                 onClick={() => handleCommentUserClick(item.sender)}
-                className="flex items-start gap-1.5 text-xs text-zinc-200 leading-snug animate-fadeIn cursor-pointer hover:bg-white/10 px-2 py-1 rounded-2xl bg-black/40 backdrop-blur-md border border-white/5 transition-all w-fit max-w-full"
-                title="Tap to view profile & actions"
+                className={`flex items-start gap-1.5 text-xs leading-snug animate-fadeIn px-2 py-1 rounded-2xl backdrop-blur-md border transition-all w-fit max-w-full ${
+                  item.isAiBot
+                    ? 'bg-indigo-950/75 border-indigo-400/45 text-indigo-50 cursor-default'
+                    : 'text-zinc-200 cursor-pointer hover:bg-white/10 bg-black/40 border-white/5'
+                }`}
+                title={item.isAiBot ? 'Alpha AI Party Assistant' : 'Tap to view profile & actions'}
               >
                 {/* User Avatar */}
                 <img
-                  src={safeImageSrc(item.sender.avatar, DEFAULT_AVATAR_URL)}
+                  src={item.isAiBot ? GEMINI_ASSISTANT_AVATAR : safeImageSrc(item.sender.avatar, DEFAULT_AVATAR_URL)}
                   alt={item.sender.displayName}
                   className="w-5 h-5 rounded-full object-cover shrink-0 mt-0.5 border border-white/15"
                 />
@@ -3891,15 +4044,23 @@ export const PartyRoomsScreen: React.FC = () => {
                     )}
 
                     {/* Level Badge */}
-                    <LevelBadgeIcon level={item.sender.level ?? 0} size="xs" />
+                    {!item.isAiBot && <LevelBadgeIcon level={item.sender.level ?? 0} size="xs" />}
 
                     {/* User display name */}
-                    <span className="font-bold text-[#C084FC] text-[10.5px] shrink-0">
+                    <span
+                      className={`font-bold text-[10.5px] shrink-0 ${
+                        item.isAiBot ? 'text-indigo-200' : 'text-[#C084FC]'
+                      }`}
+                    >
                       {item.sender.displayName}:
                     </span>
 
                     {/* Message content */}
-                    {item.type === 'gift' ? (
+                    {item.isAiBot ? (
+                      <span className="text-white text-[10.5px] break-words">
+                        {item.text}
+                      </span>
+                    ) : item.type === 'gift' ? (
                       <span className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded-lg bg-gradient-to-r from-[#7928CA]/40 to-[#EC4899]/40 border border-[#EC4899]/40 text-amber-300 font-bold text-[10px]">
                         <span>{item.giftIcon}</span>
                         <span>{item.text}</span>
@@ -3927,14 +4088,26 @@ export const PartyRoomsScreen: React.FC = () => {
 
           {/* Unified Bottom Controls Bar (No Hard Divider Lines) */}
           <div className="flex flex-col gap-2">
-            {/* Upper row: Comment input field + Send button */}
+            {/* Upper row: Comment input field + AI toggle + Send button */}
             <form onSubmit={handleSendChat} className="w-full flex items-center relative">
+              <button
+                type="button"
+                onClick={() => setAskAiMode((v) => !v)}
+                className={`absolute left-1 h-6 sm:h-7 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                  askAiMode
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-white/10 text-zinc-300 hover:bg-white/20'
+                }`}
+                title="Toggle Ask Alpha AI mode (or type @ai)"
+              >
+                AI
+              </button>
               <input
                 type="text"
-                placeholder="Say something nice..."
+                placeholder={askAiMode ? 'Ask Alpha AI in party chat...' : 'Say something nice (or @ai)...'}
                 value={inputChat}
                 onChange={(e) => setInputChat(e.target.value)}
-                className="w-full h-8 sm:h-9 pl-3.5 pr-9 rounded-full bg-black/55 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#EC4899]"
+                className="w-full h-8 sm:h-9 pl-10 pr-9 rounded-full bg-black/55 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#EC4899]"
               />
               <button
                 type="submit"
@@ -4194,98 +4367,18 @@ export const PartyRoomsScreen: React.FC = () => {
           </div>
         )}
 
-        {/* Virtual Gifts Drawer Modal */}
-        {showGiftDrawer && (
-          <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex flex-col justify-end">
-            <div className="w-full max-w-md mx-auto rounded-t-3xl bg-[#160E2C] border-t border-[#A855F7]/30 p-4 shadow-2xl animate-slide-up">
-              <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/15">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-white">Party Room Virtual Gifts</span>
-                  <span className="text-xs text-amber-400 font-bold">💰 {coins.toLocaleString()} Coins</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setCurrentScreen('wallet')}
-                    className="px-2.5 py-0.5 rounded-full bg-[#7928CA] text-white text-[10px] font-bold hover:bg-[#A855F7]"
-                  >
-                    + Recharge
-                  </button>
-                  <button onClick={() => setShowGiftDrawer(false)} className="text-zinc-400 hover:text-white cursor-pointer">
-                    <X className="w-5 h-5" />
-                  </button>
-                </div>
-              </div>
-
-              {/* On-device Gift Animation Cache Bar */}
-              <GiftCacheBar gifts={publishedCatalogGifts} />
-
-              {/* Gift Grid (Published Multi-Format Advanced Gifts + Standard Virtual Gifts) */}
-              <div className="grid grid-cols-4 gap-2.5 py-3.5 max-h-60 overflow-y-auto">
-                {publishedCatalogGifts.map((g) => {
-                  const isSelected = selectedGift.id === g.id;
-                  const isTestGift = Boolean(g.isTestGift || g.advancedConfig?.isTestGift);
-                  const isAdvanced = Boolean(g.advancedConfig);
-                  return (
-                    <div
-                      key={g.id}
-                      onClick={() => setSelectedGift(g)}
-                      className={`relative rounded-2xl p-2.5 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
-                        isSelected
-                          ? 'bg-gradient-to-b from-[#7928CA]/40 to-[#EC4899]/30 border-2 border-[#EC4899] shadow-lg shadow-[#EC4899]/20 scale-105'
-                          : isTestGift
-                          ? 'bg-gradient-to-b from-cyan-950/70 to-[#1D1438] border border-cyan-400/45 hover:border-cyan-300'
-                          : 'bg-[#1D1438] border border-white/5 hover:border-white/20'
-                      }`}
-                    >
-                      {isTestGift && (
-                        <span className="absolute -top-1.5 -right-1 px-1.5 rounded bg-gradient-to-r from-cyan-500 to-blue-600 text-[7px] font-black text-white shadow">
-                          TEST
-                        </span>
-                      )}
-                      {!isTestGift && isAdvanced && (
-                        <span className="absolute -top-1.5 -left-1 px-1 rounded bg-emerald-600/90 text-[6.5px] font-black text-white uppercase shadow">
-                          {g.advancedConfig?.format}
-                        </span>
-                      )}
-                      <GiftIconImage
-                        gift={g}
-                        className="w-10 h-10 object-contain mb-1 drop-shadow"
-                        emojiClassName="text-2xl mb-1"
-                      />
-                      <span className="text-[10px] font-bold text-white truncate max-w-full">{g.name}</span>
-                      <span className="text-[10px] text-amber-400 font-semibold mt-0.5">
-                        {(g.costInCoins ?? g.coins).toLocaleString()}
-                      </span>
-                      <GiftCacheBadge gift={g} />
-                    </div>
-                  );
-                })}
-              </div>
-
-              {/* Selected Gift Footer */}
-              <div className="flex items-center justify-between pt-2 border-t border-[#A855F7]/15">
-                <div className="flex items-center gap-2 min-w-0">
-                  <GiftIconImage
-                    gift={selectedGift}
-                    className="w-8 h-8 object-contain rounded-lg shrink-0"
-                    emojiClassName="text-xl shrink-0"
-                  />
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white truncate">{selectedGift.name}</div>
-                    <div className="text-[10px] text-zinc-400 truncate">{selectedGift.description}</div>
-                  </div>
-                </div>
-
-                <button
-                  onClick={handleSendSelectedGift}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-bold text-xs shadow-lg shadow-[#7928CA]/50 hover:brightness-110 active:scale-95 transition-all cursor-pointer"
-                >
-                  Send ({(selectedGift.costInCoins ?? selectedGift.coins).toLocaleString()} 💰)
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {/* Ultra-Fast Isolated Virtual Gifts Drawer Modal (60fps GPU scroll, zero PullToRefresh interference) */}
+        <FastGiftDrawer
+          isOpen={showGiftDrawer}
+          mode="party"
+          gifts={publishedCatalogGifts}
+          selectedGift={selectedGift}
+          coins={coins}
+          onSelectGift={setSelectedGift}
+          onSend={handleSendSelectedGift}
+          onClose={() => setShowGiftDrawer(false)}
+          onRecharge={() => setCurrentScreen('wallet')}
+        />
 
         {/* User Action Sheet Modal for Guest Seats, Host, Viewers & Comments */}
         {selectedUserForActionSheet && (

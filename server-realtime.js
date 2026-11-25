@@ -4,6 +4,14 @@ const LIVE_TTL_MS = 120_000;
 const PARTY_TTL_MS = 12 * 60 * 60_000;
 const HEARTBEAT_INTERVAL_MS = 25_000;
 const HOST_DISCONNECT_LIVE_GRACE_MS = 6_000;
+const ROOM_BATCH_WINDOW_MS = 55;
+const ROOM_BATCH_MAX_EVENTS = 24;
+const MAX_INCOMING_BATCH_EVENTS = 50;
+const MAX_HEART_BATCH_COUNT = 25;
+const ROOM_REPLAY_BUFFER_SIZE = 120;
+const ROOM_REPLAY_MAX_AGE_MS = 60_000;
+const ROOM_RECONNECT_REPLAY_AGE_MS = 20_000;
+const MAX_SYNC_RESPONSE_EVENTS = 60;
 
 function isValidId(value) {
   return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value);
@@ -41,14 +49,16 @@ function sanitizeViewerProfile(uid, profile = {}) {
 }
 
 export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseIdToken }) {
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 128 * 1024 });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
 
   // Server-authoritative state stores
   const activeLiveStreams = new Map(); // streamId -> { data, updatedAtMs }
   const activePartyRooms = new Map(); // roomId -> { data, updatedAtMs }
-  const rooms = new Map(); // `${roomType}:${roomId}` -> { viewers: Map<uid, { profile, sockets: Set<ws> }>, heartCount: number }
+  const rooms = new Map(); // `${roomType}:${roomId}` -> { viewers, heartCount, sessionId, seq, eventLog }
   const authenticatedClients = new Set();
   const pendingLiveHostDisconnectTimers = new Map(); // streamId -> Timeout
+  // Per-room broadcast batching queues: roomKey -> { timer: Timeout | null, items: Array<{ event, excludeWs }> }
+  const roomBroadcastQueues = new Map();
 
   function clearHostDisconnectTimer(streamId) {
     const t = pendingLiveHostDisconnectTimers.get(streamId);
@@ -56,6 +66,16 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
       clearTimeout(t);
       pendingLiveHostDisconnectTimers.delete(streamId);
     }
+  }
+
+  function clearRoomBroadcastQueue(roomKey) {
+    const q = roomBroadcastQueues.get(roomKey);
+    if (!q) return;
+    if (q.timer) {
+      clearTimeout(q.timer);
+      q.timer = null;
+    }
+    roomBroadcastQueues.delete(roomKey);
   }
 
   function hasAnyOpenSocketForUid(uid) {
@@ -74,6 +94,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
       if (existingId !== keepStreamId && entry.data?.host?.id === hostUid) {
         clearHostDisconnectTimer(existingId);
         activeLiveStreams.delete(existingId);
+        clearRoomBroadcastQueue(`live:${existingId}`);
         rooms.delete(`live:${existingId}`);
         broadcastAll({ type: 'live:remove', streamId: existingId });
       }
@@ -85,6 +106,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     for (const [existingId, entry] of Array.from(activePartyRooms.entries())) {
       if (existingId !== keepRoomId && entry.data?.host?.id === hostUid) {
         activePartyRooms.delete(existingId);
+        clearRoomBroadcastQueue(`party:${existingId}`);
         rooms.delete(`party:${existingId}`);
         broadcastAll({ type: 'party:remove', roomId: existingId });
       }
@@ -98,10 +120,28 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         viewers: new Map(),
         heartCount: 0,
         sessionId: undefined,
+        seq: 0,
+        eventLog: [], // Array<{ seq: number, event: object, excludeUid: string | null, recordedAtMs: number }>
       };
       rooms.set(roomKey, room);
     }
     return room;
+  }
+
+  function appendRoomEventLog(room, seq, event, excludeUid = null) {
+    const now = Date.now();
+    room.eventLog.push({
+      seq,
+      event,
+      excludeUid: excludeUid || null,
+      recordedAtMs: now,
+    });
+    if (room.eventLog.length > ROOM_REPLAY_BUFFER_SIZE) {
+      room.eventLog.splice(0, room.eventLog.length - ROOM_REPLAY_BUFFER_SIZE);
+    }
+    while (room.eventLog.length > 0 && now - room.eventLog[0].recordedAtMs > ROOM_REPLAY_MAX_AGE_MS) {
+      room.eventLog.shift();
+    }
   }
 
   function getRoomViewerList(roomKey) {
@@ -134,6 +174,177 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
           // ignore
         }
       }
+    }
+  }
+
+  function flushRoomBroadcastQueue(roomKey) {
+    const queue = roomBroadcastQueues.get(roomKey);
+    if (!queue) return;
+    if (queue.timer) {
+      clearTimeout(queue.timer);
+      queue.timer = null;
+    }
+    roomBroadcastQueues.delete(roomKey);
+    if (!queue.items.length) return;
+
+    const sepIdx = roomKey.indexOf(':');
+    const roomType = sepIdx > 0 ? roomKey.slice(0, sepIdx) : 'party';
+    const roomId = sepIdx > 0 ? roomKey.slice(sepIdx + 1) : roomKey;
+    const room = getOrCreateRoom(roomKey);
+
+    // Assign contiguous monotonic sequence numbers AFTER batch coalescing is finalized
+    const sequencedItems = queue.items.map((item) => {
+      room.seq += 1;
+      const seq = room.seq;
+      const sequencedEvent = {
+        ...item.event,
+        ...(room.sessionId && !item.event.roomSessionId ? { roomSessionId: room.sessionId } : {}),
+        seq,
+      };
+      appendRoomEventLog(room, seq, sequencedEvent, item.excludeWs?.uid || null);
+      return {
+        event: sequencedEvent,
+        excludeWs: item.excludeWs || null,
+      };
+    });
+
+    // Fast-path when only 1 event is queued: avoid unnecessary room:batch wrapper overhead
+    if (sequencedItems.length === 1) {
+      const only = sequencedItems[0];
+      broadcastToRoom(roomKey, only.event, only.excludeWs);
+      // Send lightweight sequence ack to excluded sender so their sequence tracker stays contiguous
+      if (
+        only.excludeWs &&
+        only.excludeWs.supportsSequencing &&
+        only.excludeWs.readyState === 1 &&
+        only.excludeWs.joinedRooms?.has(roomKey)
+      ) {
+        safeJsonSend(only.excludeWs, {
+          type: 'room:ack',
+          roomType,
+          roomId,
+          ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
+          seq: only.event.seq,
+        });
+      }
+      return;
+    }
+
+    // Pre-serialize common full-batch packet for clients with no excluded items
+    let sharedBatchRaw = null;
+    const allExcludedSet = new Set();
+    for (const item of sequencedItems) {
+      if (item.excludeWs) allExcludedSet.add(item.excludeWs);
+    }
+
+    for (const client of authenticatedClients) {
+      if (client.readyState !== 1 || !client.joinedRooms?.has(roomKey)) continue;
+
+      if (client.supportsBatching) {
+        if (!allExcludedSet.has(client)) {
+          if (!sharedBatchRaw) {
+            sharedBatchRaw = JSON.stringify({
+              type: 'room:batch',
+              roomType,
+              roomId,
+              events: sequencedItems.map((item) => item.event),
+            });
+          }
+          try {
+            client.send(sharedBatchRaw);
+          } catch {
+            // ignore
+          }
+        } else {
+          const filtered = [];
+          for (const item of sequencedItems) {
+            if (item.excludeWs !== client) {
+              filtered.push(item.event);
+            } else if (client.supportsSequencing) {
+              // Lightweight sequence ack keeps the sender's sequence window contiguous without echoing full payload
+              filtered.push({
+                type: 'room:ack',
+                roomType,
+                roomId,
+                ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
+                seq: item.event.seq,
+              });
+            }
+          }
+          if (filtered.length === 1) {
+            safeJsonSend(client, filtered[0]);
+          } else if (filtered.length > 1) {
+            safeJsonSend(client, {
+              type: 'room:batch',
+              roomType,
+              roomId,
+              events: filtered,
+            });
+          }
+        }
+      } else {
+        // Legacy client fallback: send each event individually
+        for (const item of sequencedItems) {
+          if (item.excludeWs === client) continue;
+          safeJsonSend(client, item.event);
+        }
+      }
+    }
+  }
+
+  function enqueueRoomBroadcast(roomKey, event, excludeWs = null) {
+    let queue = roomBroadcastQueues.get(roomKey);
+    if (!queue) {
+      queue = { timer: null, items: [] };
+      roomBroadcastQueues.set(roomKey, queue);
+    }
+
+    // Coalesce redundant viewer snapshots within the same batch window
+    if (event.type === 'room:viewers') {
+      const existingViewerIdx = queue.items.findIndex(
+        (item) => item.event.type === 'room:viewers' && item.excludeWs === excludeWs
+      );
+      if (existingViewerIdx !== -1) {
+        queue.items[existingViewerIdx] = { event, excludeWs };
+      } else {
+        queue.items.push({ event, excludeWs });
+      }
+    } else if (event.type === 'room:heart') {
+      // Coalesce consecutive heart taps from the same sender in the same batch window
+      const existingHeartIdx = queue.items.findIndex(
+        (item) =>
+          item.event.type === 'room:heart' &&
+          item.event.senderId === event.senderId &&
+          item.event.roomSessionId === event.roomSessionId &&
+          item.excludeWs === excludeWs
+      );
+      if (existingHeartIdx !== -1) {
+        const prev = queue.items[existingHeartIdx].event;
+        const prevCount = Math.max(1, Number(prev.count) || 1);
+        const nextCount = Math.max(1, Number(event.count) || 1);
+        queue.items[existingHeartIdx] = {
+          event: {
+            ...event,
+            count: Math.min(MAX_HEART_BATCH_COUNT, prevCount + nextCount),
+          },
+          excludeWs,
+        };
+      } else {
+        queue.items.push({ event, excludeWs });
+      }
+    } else {
+      queue.items.push({ event, excludeWs });
+    }
+
+    if (queue.items.length >= ROOM_BATCH_MAX_EVENTS) {
+      flushRoomBroadcastQueue(roomKey);
+      return;
+    }
+
+    if (!queue.timer) {
+      queue.timer = setTimeout(() => {
+        flushRoomBroadcastQueue(roomKey);
+      }, ROOM_BATCH_WINDOW_MS);
     }
   }
 
@@ -195,7 +406,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         const [roomType, roomId] = roomKey.split(':');
         const viewers = getRoomViewerList(roomKey);
         const count = viewers.length;
-        broadcastToRoom(roomKey, {
+        enqueueRoomBroadcast(roomKey, {
           type: 'room:viewers',
           roomType,
           roomId,
@@ -231,6 +442,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     }
 
     if (room.viewers.size === 0 && room.heartCount === 0) {
+      clearRoomBroadcastQueue(roomKey);
       rooms.delete(roomKey);
     }
   }
@@ -261,6 +473,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     },
     removePartyRoom(roomId) {
       if (!isValidId(roomId)) return;
+      clearRoomBroadcastQueue(`party:${roomId}`);
       rooms.delete(`party:${roomId}`);
       if (activePartyRooms.delete(roomId)) {
         broadcastAll({ type: 'party:remove', roomId });
@@ -284,6 +497,12 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
       safeJsonSend(ws, {
         type: 'auth:ok',
         uid: user.uid,
+        capabilities: {
+          batching: true,
+          sequencing: true,
+          maxBatchSize: MAX_INCOMING_BATCH_EVENTS,
+          replayBufferSize: ROOM_REPLAY_BUFFER_SIZE,
+        },
         liveStreams: snap.liveStreams,
         partyRooms: snap.partyRooms,
       });
@@ -293,35 +512,8 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     }
   }
 
-  function handleMessage(ws, raw) {
-    let msg;
-    try {
-      msg = JSON.parse(String(raw));
-    } catch {
-      return;
-    }
+  function handleAuthedMessage(ws, msg) {
     if (!msg || typeof msg.type !== 'string') return;
-
-    if (msg.type === 'ping') {
-      safeJsonSend(ws, { type: 'pong', ts: Date.now() });
-      return;
-    }
-
-    if (!ws.isAuthed) {
-      if (msg.type === 'auth' && typeof msg.token === 'string') {
-        authenticateSocket(ws, msg.token).then((ok) => {
-          if (!ok) {
-            try {
-              ws.close(4001, 'Unauthorized');
-            } catch {
-              // ignore
-            }
-          }
-        });
-      }
-      return;
-    }
-
     const uid = ws.uid;
 
     switch (msg.type) {
@@ -365,6 +557,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         if (existing && existing.host?.id && existing.host.id !== uid) return;
         clearHostDisconnectTimer(streamId);
         activeLiveStreams.delete(streamId);
+        clearRoomBroadcastQueue(`live:${streamId}`);
         rooms.delete(`live:${streamId}`);
         broadcastAll({ type: 'live:remove', streamId });
         break;
@@ -381,6 +574,8 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
           const roomState = getOrCreateRoom(`party:${room.id}`);
           if (roomState.sessionId && roomState.sessionId !== incomingSessionId) {
             roomState.heartCount = 0;
+            roomState.seq = 0;
+            roomState.eventLog = [];
           }
           roomState.sessionId = incomingSessionId;
         }
@@ -436,6 +631,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         const existing = activePartyRooms.get(roomId)?.data;
         if (existing && existing.host?.id && existing.host.id !== uid) return;
         activePartyRooms.delete(roomId);
+        clearRoomBroadcastQueue(`party:${roomId}`);
         rooms.delete(`party:${roomId}`);
         broadcastAll({ type: 'party:remove', roomId });
         break;
@@ -454,6 +650,8 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         let sessionWasReset = false;
         if (incomingSessionId && room.sessionId !== incomingSessionId) {
           room.heartCount = 0;
+          room.seq = 0;
+          room.eventLog = [];
           room.sessionId = incomingSessionId;
           sessionWasReset = true;
         }
@@ -479,17 +677,44 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         const viewers = getRoomViewerList(roomKey);
         const count = viewers.length;
 
+        // If reconnecting with a known lastSeq in the same session, include recent missed events
+        const clientLastSeq = Number(msg.lastSeq);
+        let replayEvents;
+        if (
+          !sessionWasReset &&
+          Number.isFinite(clientLastSeq) &&
+          clientLastSeq >= 0 &&
+          clientLastSeq < room.seq &&
+          room.eventLog.length > 0
+        ) {
+          const now = Date.now();
+          const missed = [];
+          for (const entry of room.eventLog) {
+            if (entry.seq <= clientLastSeq) continue;
+            if (now - entry.recordedAtMs > ROOM_RECONNECT_REPLAY_AGE_MS) continue;
+            if (entry.excludeUid && entry.excludeUid === uid) continue;
+            if (entry.event.type === 'room:viewers') continue; // latest viewers already in room:state_init
+            missed.push(entry.event);
+            if (missed.length >= MAX_SYNC_RESPONSE_EVENTS) break;
+          }
+          if (missed.length > 0) {
+            replayEvents = missed;
+          }
+        }
+
         safeJsonSend(ws, {
           type: 'room:state_init',
           roomType,
           roomId,
           ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
+          seq: room.seq,
           heartCount: room.heartCount,
           viewers,
           count,
+          ...(replayEvents ? { replayEvents } : {}),
         });
 
-        broadcastToRoom(roomKey, {
+        enqueueRoomBroadcast(roomKey, {
           type: 'room:viewers',
           roomType,
           roomId,
@@ -500,6 +725,82 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         if (roomType === 'party') {
           syncPartyDiscoveryPresence(roomId, viewers);
         }
+        break;
+      }
+
+      case 'room:sync_request': {
+        const roomType = msg.roomType === 'live' || msg.roomType === 'party' ? msg.roomType : null;
+        const roomId = msg.roomId;
+        if (!roomType || !isValidId(roomId)) return;
+        const roomKey = `${roomType}:${roomId}`;
+        if (!ws.joinedRooms?.has(roomKey)) return;
+
+        // Flush any currently buffered items so replay range reflects latest server state
+        flushRoomBroadcastQueue(roomKey);
+
+        const room = rooms.get(roomKey);
+        if (!room) return;
+
+        const incomingSessionId =
+          roomType === 'party' && typeof msg.roomSessionId === 'string' && isValidId(msg.roomSessionId)
+            ? msg.roomSessionId
+            : undefined;
+        const sessionMismatch = Boolean(incomingSessionId && room.sessionId && incomingSessionId !== room.sessionId);
+
+        const fromSeq = Math.max(1, Math.floor(Number(msg.fromSeq) || 1));
+        const rawToSeq = Number(msg.toSeq);
+        const toSeq = Number.isFinite(rawToSeq) && rawToSeq >= fromSeq ? Math.min(room.seq, Math.floor(rawToSeq)) : room.seq;
+
+        const now = Date.now();
+        while (room.eventLog.length > 0 && now - room.eventLog[0].recordedAtMs > ROOM_REPLAY_MAX_AGE_MS) {
+          room.eventLog.shift();
+        }
+
+        const earliestBufferedSeq = room.eventLog.length > 0 ? room.eventLog[0].seq : room.seq + 1;
+        const snapshotRequired =
+          sessionMismatch ||
+          fromSeq > room.seq ||
+          (toSeq >= fromSeq && fromSeq < earliestBufferedSeq) ||
+          toSeq - fromSeq + 1 > MAX_SYNC_RESPONSE_EVENTS;
+
+        const recoveredEvents = [];
+        if (!sessionMismatch) {
+          for (const entry of room.eventLog) {
+            if (entry.seq < fromSeq || entry.seq > toSeq) continue;
+            if (entry.excludeUid && entry.excludeUid === uid) {
+              recoveredEvents.push({
+                type: 'room:ack',
+                roomType,
+                roomId,
+                ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
+                seq: entry.seq,
+              });
+            } else {
+              recoveredEvents.push(entry.event);
+            }
+            if (recoveredEvents.length >= MAX_SYNC_RESPONSE_EVENTS) break;
+          }
+        }
+
+        const viewers = snapshotRequired ? getRoomViewerList(roomKey) : undefined;
+        safeJsonSend(ws, {
+          type: 'room:sync_response',
+          roomType,
+          roomId,
+          ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
+          fromSeq,
+          toSeq,
+          currentSeq: room.seq,
+          snapshotRequired,
+          ...(snapshotRequired
+            ? {
+                heartCount: room.heartCount,
+                viewers,
+                count: viewers ? viewers.length : 0,
+              }
+            : {}),
+          events: recoveredEvents,
+        });
         break;
       }
 
@@ -524,7 +825,12 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         if (incomingSessionId && room.sessionId && incomingSessionId !== room.sessionId) {
           break;
         }
-        room.heartCount += 1;
+        const rawCount = Number(msg.count);
+        const delta =
+          Number.isFinite(rawCount) && rawCount > 1
+            ? Math.min(MAX_HEART_BATCH_COUNT, Math.floor(rawCount))
+            : 1;
+        room.heartCount += delta;
         const eventPayload = {
           type: 'room:heart',
           roomType,
@@ -532,10 +838,11 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
           ...(room.sessionId ? { roomSessionId: room.sessionId } : {}),
           senderId: uid,
           heartCount: room.heartCount,
+          count: delta,
           eventId: `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
           createdAtMs: Date.now(),
         };
-        broadcastToRoom(roomKey, eventPayload);
+        enqueueRoomBroadcast(roomKey, eventPayload);
         break;
       }
 
@@ -544,7 +851,7 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         const roomId = msg.roomId;
         if (!roomType || !isValidId(roomId) || !msg.signal || typeof msg.signal !== 'object') return;
         const roomKey = `${roomType}:${roomId}`;
-        broadcastToRoom(
+        enqueueRoomBroadcast(
           roomKey,
           {
             type: 'room:signal',
@@ -564,11 +871,56 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     }
   }
 
-  wss.on('connection', (ws, _req, initialToken) => {
+  function handleMessage(ws, raw) {
+    let msg;
+    try {
+      msg = JSON.parse(String(raw));
+    } catch {
+      return;
+    }
+    if (!msg || typeof msg.type !== 'string') return;
+
+    if (msg.type === 'ping') {
+      safeJsonSend(ws, { type: 'pong', ts: Date.now() });
+      return;
+    }
+
+    if (!ws.isAuthed) {
+      if (msg.type === 'auth' && typeof msg.token === 'string') {
+        authenticateSocket(ws, msg.token).then((ok) => {
+          if (!ok) {
+            try {
+              ws.close(4001, 'Unauthorized');
+            } catch {
+              // ignore
+            }
+          }
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'ws:batch' && Array.isArray(msg.events)) {
+      const limit = Math.min(msg.events.length, MAX_INCOMING_BATCH_EVENTS);
+      for (let i = 0; i < limit; i += 1) {
+        const subEvent = msg.events[i];
+        if (subEvent && typeof subEvent === 'object' && subEvent.type !== 'ws:batch') {
+          handleAuthedMessage(ws, subEvent);
+        }
+      }
+      return;
+    }
+
+    handleAuthedMessage(ws, msg);
+  }
+
+  wss.on('connection', (ws, _req, initialToken, supportsBatching = false, supportsSequencing = false) => {
     ws.isAlive = true;
     ws.isAuthed = false;
     ws.uid = null;
     ws.joinedRooms = new Set();
+    ws.supportsBatching = Boolean(supportsBatching);
+    ws.supportsSequencing = Boolean(supportsSequencing);
 
     ws.on('pong', () => {
       ws.isAlive = true;
@@ -615,8 +967,10 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
         return; // Let other handlers (if any) ignore or handle
       }
       const token = url.searchParams.get('token') || '';
+      const supportsBatching = url.searchParams.get('batch') === '1';
+      const supportsSequencing = url.searchParams.get('seq') === '1';
       wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit('connection', ws, request, token);
+        wss.emit('connection', ws, request, token, supportsBatching, supportsSequencing);
       });
     } catch {
       socket.destroy();
@@ -643,7 +997,12 @@ export function attachRealtimeWebSocketServer(httpServer, { app, verifyFirebaseI
     }
   }, HEARTBEAT_INTERVAL_MS);
 
-  wss.on('close', () => clearInterval(pingInterval));
+  wss.on('close', () => {
+    clearInterval(pingInterval);
+    for (const roomKey of Array.from(roomBroadcastQueues.keys())) {
+      clearRoomBroadcastQueue(roomKey);
+    }
+  });
 
   return { wss, registry };
 }

@@ -63,7 +63,7 @@ import { User } from '../types';
 import { UserActionSheetModal } from '../components/live/UserActionSheetModal';
 import { RoomViewersModal } from '../components/live/RoomViewersModal';
 import { GiftAnimationOverlay, ActiveGiftEvent } from '../components/live/GiftAnimationOverlay';
-import { GiftCacheBadge, GiftCacheBar, GiftIconImage } from '../components/live/GiftBoxMedia';
+import { FastGiftDrawer } from '../components/live/FastGiftDrawer';
 import { LiveGiftComboCounter, LiveGiftComboState } from '../components/live/LiveGiftComboCounter';
 import { TopGiversLeaderboard, SessionGiver } from '../components/live/TopGiversLeaderboard';
 import { LuckyDrawModal } from '../components/live/LuckyDrawModal';
@@ -71,7 +71,18 @@ import { sendLiveHeart, subscribeToLiveHeartCount, subscribeToLiveHeartEvents } 
 import { DEFAULT_AVATAR_URL, getHdImageUrl, safeImageSrc } from '../utils/imageHd';
 import { audioManager } from '../services/audioManager';
 import { enqueueByPriority } from '../services/giftAnimationEngine';
-import { prefetchCriticalGiftAssets } from '../services/giftMediaCache';
+import { hydrateGiftMediaCacheIndex } from '../services/giftMediaCache';
+import {
+  GEMINI_ASSISTANT_AVATAR,
+  GEMINI_ASSISTANT_NAME,
+  GEMINI_ASSISTANT_USER_ID,
+  hasWelcomedInSession,
+  isBotMentionMessage,
+  markWelcomedInSession,
+  requestGeminiChat,
+  requestGeminiWelcome,
+  stripBotMention,
+} from '../services/geminiChatService';
 
 const GIFT_COMBO_WINDOW_MS = 4200;
 
@@ -165,9 +176,16 @@ export const LiveStreamScreen: React.FC = () => {
       level?: number;
       isGiftHighlight?: boolean;
       isEntryNotice?: boolean;
+      isAiBot?: boolean;
+      createdAtMs?: number;
     }>
   >([]);
   const [inputComment, setInputComment] = useState('');
+  const [askAiMode, setAskAiMode] = useState(false);
+  const [aiBotReplying, setAiBotReplying] = useState(false);
+  const seenLiveViewerIdsRef = useRef<Set<string>>(new Set());
+  const liveViewersSeededRef = useRef<boolean>(false);
+  const lastLiveRemoteWelcomeAtRef = useRef<number>(0);
   const [showGiftDrawer, setShowGiftDrawer] = useState(false);
   const [showLuckyDrawModal, setShowLuckyDrawModal] = useState(false);
   const [selectedGift, setSelectedGift] = useState<Gift>(() => publishedCatalogGifts[0] || VIRTUAL_GIFTS[0]);
@@ -179,13 +197,14 @@ export const LiveStreamScreen: React.FC = () => {
     setSelectedGift((current) => publishedCatalogGifts.find((gift) => gift.id === current.id) || publishedCatalogGifts[0]);
   }, [publishedCatalogGifts]);
 
-  // Spectacular Visual Gift Animation, Priority Queue & Rapid-Combo states (strictly scoped per streamId)
-  const [activeGiftAnimation, setActiveGiftAnimation] = useState<ActiveGiftEvent | null>(null);
+  // Spectacular Visual Gift Animation, Concurrent Multi-User Slots (up to 3 simultaneous) & Rapid-Combo states
+  const MAX_CONCURRENT_LIVE_GIFTS = 3;
+  const [activeGiftAnimations, setActiveGiftAnimations] = useState<ActiveGiftEvent[]>([]);
   const giftQueueRef = useRef<ActiveGiftEvent[]>([]);
   const seenLiveGiftEventIdsRef = useRef<Set<string>>(new Set());
   const liveMessagesHydratedRef = useRef<boolean>(false);
-  const liveDetectedGiftDurationRef = useRef<{ eventId: string; durationMs: number } | null>(null);
-  const liveLastGiftHeartbeatRef = useRef<{ eventId: string; at: number } | null>(null);
+  const liveGiftStartedAtRef = useRef<Map<string, number>>(new Map());
+  const liveGiftHeartbeatsRef = useRef<Map<string, number>>(new Map());
   const [activeGiftCombo, setActiveGiftCombo] = useState<LiveGiftComboState | null>(null);
   const [comboRemainingMs, setComboRemainingMs] = useState<number>(0);
   const [giftQuantityMultiplier, setGiftQuantityMultiplier] = useState<number>(1);
@@ -200,59 +219,72 @@ export const LiveStreamScreen: React.FC = () => {
   } | null>(null);
 
   const enqueueLiveGiftAnimation = useCallback((incoming: ActiveGiftEvent) => {
-    setActiveGiftAnimation((current) => {
-      if (!current) {
-        return incoming;
+    setActiveGiftAnimations((current) => {
+      if (current.some((item) => item.id === incoming.id)) return current;
+      // If same non-advanced gift combo rapidly stacked by same sender, refresh that slot smoothly
+      const sameComboIdx = current.findIndex(
+        (item) =>
+          item.gift.id === incoming.gift.id &&
+          item.senderName === incoming.senderName &&
+          !incoming.gift.advancedConfig
+      );
+      if (sameComboIdx >= 0) {
+        const next = [...current];
+        const now = Date.now();
+        liveGiftStartedAtRef.current.set(incoming.id, now);
+        liveGiftHeartbeatsRef.current.set(incoming.id, now);
+        next[sameComboIdx] = incoming;
+        return next;
       }
-      // If same gift combo rapidly stacked by same sender, refresh combo smoothly; otherwise priority-queue
-      if (
-        current.gift.id === incoming.gift.id &&
-        current.senderName === incoming.senderName &&
-        !incoming.gift.advancedConfig
-      ) {
-        return incoming;
+      if (current.length < MAX_CONCURRENT_LIVE_GIFTS) {
+        const now = Date.now();
+        liveGiftStartedAtRef.current.set(incoming.id, now);
+        liveGiftHeartbeatsRef.current.set(incoming.id, now);
+        return [...current, incoming];
       }
-      giftQueueRef.current = enqueueByPriority(giftQueueRef.current, incoming);
+      if (!giftQueueRef.current.some((item) => item.id === incoming.id)) {
+        giftQueueRef.current = enqueueByPriority(giftQueueRef.current, incoming);
+      }
       return current;
     });
   }, []);
 
-  const handleGiftOverlayComplete = useCallback(() => {
-    liveDetectedGiftDurationRef.current = null;
-    liveLastGiftHeartbeatRef.current = null;
-    const nextQueued = giftQueueRef.current.shift() || null;
-    setActiveGiftAnimation(nextQueued);
+  const handleGiftOverlayComplete = useCallback((completedEventId?: string) => {
+    setActiveGiftAnimations((current) => {
+      const targetId = completedEventId || current[0]?.id;
+      if (!targetId) return current;
+      liveGiftStartedAtRef.current.delete(targetId);
+      liveGiftHeartbeatsRef.current.delete(targetId);
+      const remaining = current.filter((item) => item.id !== targetId);
+      while (remaining.length < MAX_CONCURRENT_LIVE_GIFTS && giftQueueRef.current.length > 0) {
+        const nextQueued = giftQueueRef.current.shift();
+        if (nextQueued && !remaining.some((item) => item.id === nextQueued.id)) {
+          const now = Date.now();
+          liveGiftStartedAtRef.current.set(nextQueued.id, now);
+          liveGiftHeartbeatsRef.current.set(nextQueued.id, now);
+          remaining.push(nextQueued);
+        }
+      }
+      return remaining;
+    });
   }, []);
 
-  const handleLiveGiftDurationDetected = useCallback((eventId: string, durationMs: number) => {
-    if (!Number.isFinite(durationMs) || durationMs <= 0) return;
-    const current = liveDetectedGiftDurationRef.current;
-    if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
-      liveDetectedGiftDurationRef.current = { eventId, durationMs };
-    }
-    liveLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
+  const handleLiveGiftDurationDetected = useCallback((eventId: string, _durationMs: number) => {
+    liveGiftHeartbeatsRef.current.set(eventId, Date.now());
   }, []);
 
   const handleLiveGiftPlaybackProgress = useCallback(
-    (eventId: string, _currentTimeMs: number, durationMs: number) => {
-      liveLastGiftHeartbeatRef.current = { eventId, at: Date.now() };
-      if (Number.isFinite(durationMs) && durationMs > 0) {
-        const current = liveDetectedGiftDurationRef.current;
-        if (!current || current.eventId !== eventId || durationMs > current.durationMs) {
-          liveDetectedGiftDurationRef.current = { eventId, durationMs };
-        }
-      }
+    (eventId: string, _currentTimeMs: number, _durationMs: number) => {
+      liveGiftHeartbeatsRef.current.set(eventId, Date.now());
     },
     []
   );
 
-  // Quietly pre-fetch critical gift assets (Supercar/Rocket/Dragon/Crown SFX & thumbnails) +
-  // published animated gift media into IndexedDB + blob URLs on broadcast entry so gift
-  // animations launch immediately (<30ms) and run to 100% completion regardless of network latency.
+  // Hydrate already-cached gift blobs from IndexedDB (0 network bytes — protects live stream bandwidth)
   useEffect(() => {
     if (!activeStream?.id) return;
-    void prefetchCriticalGiftAssets(publishedCatalogGifts);
-  }, [activeStream?.id, publishedCatalogGifts]);
+    void hydrateGiftMediaCacheIndex();
+  }, [activeStream?.id]);
 
   // Top Givers Leaderboard State for Current Broadcast Session
   const [sessionGivers, setSessionGivers] = useState<SessionGiver[]>([]);
@@ -441,7 +473,9 @@ export const LiveStreamScreen: React.FC = () => {
     text: string;
     vipLevel?: number;
     level?: number;
+    isAiBot?: boolean;
   }) => {
+    if (comment.isAiBot || comment.senderId === GEMINI_ASSISTANT_USER_ID) return;
     const isTargetHost =
       Boolean(activeStream) &&
       ((comment.senderId && comment.senderId === activeStream?.host?.id) ||
@@ -615,13 +649,74 @@ export const LiveStreamScreen: React.FC = () => {
     realtimeSocket.joinRoom('live', streamId, profile, totalHeartCount);
     joinLiveStreamViewer(streamId, profile).catch(() => {});
 
+    let cancelled = false;
+    seenLiveViewerIdsRef.current = new Set([uid]);
+    liveViewersSeededRef.current = false;
+
+    const postLiveAiWelcome = (targetName: string, targetUid: string, isSelf: boolean, vipTier = 0) => {
+      const welcomeKey = `live:${streamId}:${targetUid}`;
+      if (hasWelcomedInSession(welcomeKey)) return;
+      if (!isSelf) {
+        const now = Date.now();
+        if (now - lastLiveRemoteWelcomeAtRef.current < 8000) return;
+        lastLiveRemoteWelcomeAtRef.current = now;
+      }
+      markWelcomedInSession(welcomeKey);
+      requestGeminiWelcome({
+        userName: targetName || 'Friend',
+        roomType: 'live',
+        roomTitle: activeStream.title || '',
+        hostName: activeStream.host?.displayName || '',
+        isSelf,
+        vipTier,
+      })
+        .then(({ text }) => {
+          if (cancelled || !text) return;
+          const nowMs = Date.now();
+          setComments((prev) => [
+            ...prev.slice(-149),
+            {
+              id: `ai_welcome_${streamId}_${targetUid}_${nowMs}`,
+              senderId: GEMINI_ASSISTANT_USER_ID,
+              user: GEMINI_ASSISTANT_NAME,
+              avatar: GEMINI_ASSISTANT_AVATAR,
+              text,
+              vipLevel: 0,
+              level: 0,
+              isAiBot: true,
+              createdAtMs: nowMs,
+            },
+          ]);
+        })
+        .catch((err) => {
+          console.warn('[Gemini Live Welcome]', err?.message || err);
+        });
+    };
+
+    // Welcome the current user automatically on entering the Live Stream
+    postLiveAiWelcome(currentUser.displayName || 'Friend', uid, true, currentUser.vipTier ?? 0);
+
     const heartbeatTimer = setInterval(() => {
       joinLiveStreamViewer(streamId, profile).catch(() => {});
     }, 25_000);
 
     const unsubWsRoom = realtimeSocket.onRoomEvent('live', streamId, (ev) => {
       if (ev.type === 'room:state_init' || ev.type === 'room:viewers') {
-        setWsViewers(Array.isArray(ev.viewers) ? ev.viewers : []);
+        const incomingViewers = Array.isArray(ev.viewers) ? ev.viewers : [];
+        setWsViewers(incomingViewers);
+        if (ev.type === 'room:state_init' || !liveViewersSeededRef.current) {
+          liveViewersSeededRef.current = true;
+          incomingViewers.forEach((v) => {
+            if (v?.id) seenLiveViewerIdsRef.current.add(v.id);
+          });
+        } else {
+          for (const v of incomingViewers) {
+            if (!v?.id || v.id === uid || seenLiveViewerIdsRef.current.has(v.id)) continue;
+            seenLiveViewerIdsRef.current.add(v.id);
+            postLiveAiWelcome(v.displayName || 'Viewer', v.id, false, Number(v.vipTier || 0));
+            break;
+          }
+        }
       } else if (ev.type === 'room:signal' && ev.signal?.type === 'stream_ended' && !isHost) {
         setIsBroadcastEnded(true);
       } else if (
@@ -631,17 +726,11 @@ export const LiveStreamScreen: React.FC = () => {
         ev.senderId !== (auth.currentUser?.uid || currentUser.id)
       ) {
         const sig = ev.signal;
-        const sigTs = Number(sig.timestamp || ev.ts || Date.now());
-        const now = Date.now();
+        const localNow = Date.now();
         const wsEventId =
-          String(sig.eventId || '').trim() || `ws_gift_${streamId}_${sigTs}`;
-        // Only show fresh gift signals that occurred during this live broadcast session (exact-once)
-        if (
-          sig.gift &&
-          !seenLiveGiftEventIdsRef.current.has(wsEventId) &&
-          sigTs >= streamJoinedAtRef.current - 2500 &&
-          Math.abs(now - sigTs) < 15000
-        ) {
+          String(sig.eventId || '').trim() || `ws_gift_${streamId}_${ev.senderId}_${localNow}`;
+        // Live WebSocket room signals are never replayed from history — immune to device clock skew!
+        if (sig.gift && !seenLiveGiftEventIdsRef.current.has(wsEventId)) {
           seenLiveGiftEventIdsRef.current.add(wsEventId);
           const incomingGift = sig.gift as Gift;
           const resolvedGift =
@@ -659,7 +748,7 @@ export const LiveStreamScreen: React.FC = () => {
             recipientName: String(sig.recipientName || activeStream.host.displayName || 'Host'),
             comboCount: Number(sig.comboCount || 1),
             quantity: Number(sig.quantity || 1),
-            timestamp: sigTs,
+            timestamp: localNow,
             streamId,
           });
         }
@@ -676,6 +765,7 @@ export const LiveStreamScreen: React.FC = () => {
     window.addEventListener('pagehide', handleLeavePage);
 
     return () => {
+      cancelled = true;
       clearInterval(heartbeatTimer);
       window.removeEventListener('pagehide', handleLeavePage);
       unsubWsRoom();
@@ -1174,19 +1264,27 @@ export const LiveStreamScreen: React.FC = () => {
     liveMessagesHydratedRef.current = false;
     const unsubscribe = subscribeToLiveStreamMessages(currentStreamId, (remoteComments) => {
       if (remoteComments && remoteComments.length > 0) {
-        setComments(
-          remoteComments.map((rc: any) => ({
-            id: rc.id,
-            senderId: rc.senderId,
-            user: rc.user || 'Viewer',
-            avatar: rc.avatar,
-            text: rc.text || '',
-            vipLevel: rc.vipLevel ?? 0,
-            level: rc.level ?? 0,
-            isGiftHighlight: rc.isGiftHighlight,
-            isEntryNotice: rc.isEntryNotice,
-          }))
-        );
+        const mappedRemote = remoteComments.map((rc: any, idx: number) => ({
+          id: rc.id,
+          senderId: rc.senderId,
+          user: rc.user || 'Viewer',
+          avatar: rc.avatar,
+          text: rc.text || '',
+          vipLevel: rc.vipLevel ?? 0,
+          level: rc.level ?? 0,
+          isGiftHighlight: rc.isGiftHighlight,
+          isEntryNotice: rc.isEntryNotice,
+          createdAtMs: Number(
+            rc.sentAtMs || (rc.createdAt?.toMillis ? rc.createdAt.toMillis() : streamJoinedAtRef.current + idx)
+          ),
+        }));
+        setComments((prev) => {
+          const localAi = prev.filter((c) => c.isAiBot);
+          if (localAi.length === 0) return mappedRemote;
+          return [...mappedRemote, ...localAi]
+            .sort((a, b) => (a.createdAtMs ?? 0) - (b.createdAtMs ?? 0))
+            .slice(-150);
+        });
 
         // Reliable room-wide gift animation sync for Host & ALL Viewers in THIS broadcast
         // (deduplicated against WebSocket & local sender; initial snapshot never replays old history)
@@ -1206,7 +1304,7 @@ export const LiveStreamScreen: React.FC = () => {
             const sentMs = Number(
               rc.sentAtMs || (rc.createdAt?.toMillis ? rc.createdAt.toMillis() : Date.now())
             );
-            if (sentMs < streamJoinedAtRef.current - 5000) {
+            if (sentMs < streamJoinedAtRef.current - 120_000) {
               seenLiveGiftEventIdsRef.current.add(eventKey);
               return;
             }
@@ -1250,20 +1348,29 @@ export const LiveStreamScreen: React.FC = () => {
 
   const handleSendComment = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputComment.trim() || !activeStream?.id) return;
+    const rawText = inputComment.trim();
+    if (!rawText || !activeStream?.id) return;
 
+    const shouldAskAi = askAiMode || isBotMentionMessage(rawText);
     const uid = auth.currentUser?.uid || currentUser.id;
+    const nowMs = Date.now();
     const newComment = {
-      id: String(Date.now()),
+      id: String(nowMs),
       senderId: uid,
       user: currentUser.displayName,
       avatar: currentUser.avatar,
-      text: inputComment.trim(),
+      text: rawText,
       vipLevel: currentUser.vipTier ?? 0,
       level: currentUser.level ?? 0,
+      createdAtMs: nowMs,
     };
 
-    setComments((prev) => [...prev, newComment]);
+    const recentHistory = comments.slice(-10).map((c) => ({
+      role: (c.isAiBot ? 'model' : 'user') as 'user' | 'model',
+      text: c.isAiBot ? c.text : `${c.user}: ${c.text}`,
+    }));
+
+    setComments((prev) => [...prev.slice(-149), newComment]);
     setInputComment('');
 
     sendLiveStreamMessage(activeStream.id, {
@@ -1274,6 +1381,45 @@ export const LiveStreamScreen: React.FC = () => {
       level: currentUser.level ?? 0,
       senderId: uid,
     }).catch((err) => console.warn('Failed to send live comment:', err));
+
+    if (shouldAskAi && !aiBotReplying) {
+      const cleanPrompt = stripBotMention(rawText);
+      const currentStreamId = activeStream.id;
+      setAiBotReplying(true);
+      requestGeminiChat({
+        message: cleanPrompt,
+        history: recentHistory,
+        mode: 'live',
+        context: {
+          userName: currentUser.displayName || 'Viewer',
+          roomTitle: activeStream.title || '',
+          hostName: activeStream.host?.displayName || '',
+        },
+      })
+        .then(({ reply }) => {
+          const replyMs = Date.now();
+          setComments((prev) => [
+            ...prev.slice(-149),
+            {
+              id: `ai_reply_${currentStreamId}_${replyMs}`,
+              senderId: GEMINI_ASSISTANT_USER_ID,
+              user: GEMINI_ASSISTANT_NAME,
+              avatar: GEMINI_ASSISTANT_AVATAR,
+              text: reply,
+              vipLevel: 0,
+              level: 0,
+              isAiBot: true,
+              createdAtMs: replyMs,
+            },
+          ]);
+        })
+        .catch((err) => {
+          showToast(err instanceof Error ? err.message : 'Alpha AI could not reply right now.');
+        })
+        .finally(() => {
+          setAiBotReplying(false);
+        });
+    }
   };
 
   // Reset all gift animations, banners, and active gift combos when entering, switching, or leaving streams
@@ -1281,20 +1427,22 @@ export const LiveStreamScreen: React.FC = () => {
     streamJoinedAtRef.current = Date.now();
     seenLiveGiftEventIdsRef.current.clear();
     liveMessagesHydratedRef.current = false;
-    liveDetectedGiftDurationRef.current = null;
+    liveGiftStartedAtRef.current.clear();
+    liveGiftHeartbeatsRef.current.clear();
     giftQueueRef.current = [];
     comboTrackingRef.current = null;
-    setActiveGiftAnimation(null);
+    setActiveGiftAnimations([]);
     setActiveGiftCombo(null);
     setComboRemainingMs(0);
     clearActiveGiftBanner();
     audioManager.stopAll();
 
     return () => {
-      liveDetectedGiftDurationRef.current = null;
+      liveGiftStartedAtRef.current.clear();
+      liveGiftHeartbeatsRef.current.clear();
       giftQueueRef.current = [];
       comboTrackingRef.current = null;
-      setActiveGiftAnimation(null);
+      setActiveGiftAnimations([]);
       setActiveGiftCombo(null);
       setComboRemainingMs(0);
       clearActiveGiftBanner();
@@ -1302,66 +1450,47 @@ export const LiveStreamScreen: React.FC = () => {
     };
   }, [activeStream?.id, clearActiveGiftBanner]);
 
-  // Parent-side inactivity fail-safe:
-  // - For advanced video/animated gifts, NEVER cuts off an animation on a fixed wall-clock timer
-  //   (8s, 10s, 12s, 20s+ play to natural onEnded even after slow-network pre-buffering).
-  // - For CSS showcase gifts (Supercar, Rocket, Dragon, Crown), respects onProgress heartbeats
-  //   from GiftAnimationOverlay so natural `onAnimationEnd` always completes without truncation.
-  // - Only intervenes if playback heartbeats go completely silent or hit the hard safety ceiling.
+  // Per-event inactivity fail-safe for up to 3 concurrent live gifts:
   useEffect(() => {
-    if (!activeGiftAnimation) return;
-    const coins = Number(
-      activeGiftAnimation.gift?.costInCoins ?? activeGiftAnimation.gift?.coins ?? 0
-    );
-    const advConfig = activeGiftAnimation.gift?.advancedConfig;
-    const startedAt = Date.now();
-    const eventId = activeGiftAnimation.id;
-    liveLastGiftHeartbeatRef.current = { eventId, at: startedAt };
-    let cleared = false;
+    if (activeGiftAnimations.length === 0) return;
 
-    const legacyHardCeilingMs = coins <= 100 ? 5000 : 16_000;
-    const legacyInactivityLimitMs = coins <= 100 ? 4000 : 6000;
-    const ADV_INACTIVITY_LIMIT_MS = 45_000;
-    const ADV_HARD_CEILING_MS = 180_000;
-
-    const isStuckOrExpired = () => {
+    const pruneExpired = () => {
       const now = Date.now();
-      const hb = liveLastGiftHeartbeatRef.current;
-      const lastActiveAt = hb && hb.eventId === eventId ? hb.at : startedAt;
-      if (!advConfig) {
-        if (now - startedAt >= legacyHardCeilingMs) return true;
-        return now - lastActiveAt >= legacyInactivityLimitMs;
+      const expiredIds: string[] = [];
+      for (const item of activeGiftAnimations) {
+        const startedAt = liveGiftStartedAtRef.current.get(item.id) || item.timestamp || now;
+        const lastActiveAt = liveGiftHeartbeatsRef.current.get(item.id) || startedAt;
+        const coinsVal = Number(item.gift?.costInCoins ?? item.gift?.coins ?? 0);
+        const isAdv = Boolean(item.gift?.advancedConfig);
+        if (!isAdv) {
+          const hardCeiling = coinsVal <= 100 ? 5000 : 16_000;
+          const inactivityLimit = coinsVal <= 100 ? 4000 : 6500;
+          if (now - startedAt >= hardCeiling || now - lastActiveAt >= inactivityLimit) {
+            expiredIds.push(item.id);
+          }
+        } else {
+          if (now - startedAt >= 180_000 || now - lastActiveAt >= 45_000) {
+            expiredIds.push(item.id);
+          }
+        }
       }
-      if (now - startedAt >= ADV_HARD_CEILING_MS) return true;
-      return now - lastActiveAt >= ADV_INACTIVITY_LIMIT_MS;
+      if (expiredIds.length > 0) {
+        expiredIds.forEach((id) => handleGiftOverlayComplete(id));
+      }
     };
 
-    const clearIfExpired = () => {
-      if (cleared) return;
-      if (isStuckOrExpired()) {
-        cleared = true;
-        liveDetectedGiftDurationRef.current = null;
-        liveLastGiftHeartbeatRef.current = null;
-        const nextQueued = giftQueueRef.current.shift() || null;
-        setActiveGiftAnimation((prev) => (prev?.id === eventId ? nextQueued : prev));
-      }
-    };
-
-    const failSafePoll = setInterval(() => clearIfExpired(), 1000);
-    const onResume = () => clearIfExpired();
-
-    window.addEventListener('focus', onResume);
-    window.addEventListener('pageshow', onResume);
-    document.addEventListener('visibilitychange', onResume);
+    const failSafePoll = setInterval(pruneExpired, 1500);
+    window.addEventListener('focus', pruneExpired);
+    window.addEventListener('pageshow', pruneExpired);
+    document.addEventListener('visibilitychange', pruneExpired);
 
     return () => {
-      cleared = true;
       clearInterval(failSafePoll);
-      window.removeEventListener('focus', onResume);
-      window.removeEventListener('pageshow', onResume);
-      document.removeEventListener('visibilitychange', onResume);
+      window.removeEventListener('focus', pruneExpired);
+      window.removeEventListener('pageshow', pruneExpired);
+      document.removeEventListener('visibilitychange', pruneExpired);
     };
-  }, [activeGiftAnimation?.id]);
+  }, [activeGiftAnimations, handleGiftOverlayComplete]);
 
   // Smooth rapid-combo countdown timer that auto-resets when window expires
   useEffect(() => {
@@ -1741,18 +1870,21 @@ export const LiveStreamScreen: React.FC = () => {
         )}
       </div>
 
-      {/* LAYER 2 (z-[5]): Background Gift Animation Layer for Mode 3 (Overlay/Background behind Host/UI) */}
-      <GiftAnimationOverlay
-        layer="background"
-        currentEvent={
-          activeGiftAnimation && activeGiftAnimation.streamId === activeStream.id
-            ? activeGiftAnimation
-            : null
-        }
-        onComplete={handleGiftOverlayComplete}
-        onDurationDetected={handleLiveGiftDurationDetected}
-        onProgress={handleLiveGiftPlaybackProgress}
-      />
+      {/* LAYER 2 (z-[5]): Background Gift Animation Layers (up to 3 concurrent multi-user gifts, voice-safe) */}
+      {activeGiftAnimations
+        .filter((ev) => ev.streamId === activeStream.id)
+        .map((giftEv, idx) => (
+          <GiftAnimationOverlay
+            key={`live_bg_${giftEv.id}`}
+            layer="background"
+            slotIndex={idx}
+            preserveVoiceAudio={true}
+            currentEvent={giftEv}
+            onComplete={handleGiftOverlayComplete}
+            onDurationDetected={handleLiveGiftDurationDetected}
+            onProgress={handleLiveGiftPlaybackProgress}
+          />
+        ))}
 
       {/* Floating Microphone Muted Indicator (Host or Viewer perspective) */}
       {!isMicActive && (
@@ -1832,18 +1964,21 @@ export const LiveStreamScreen: React.FC = () => {
         ))}
       </div>
 
-      {/* LAYER 5 (z-[35]): Foreground Gift Animation Layer for Mode 1 (Transparent) & Mode 2 (Semi-Transparent) */}
-      <GiftAnimationOverlay
-        layer="foreground"
-        currentEvent={
-          activeGiftAnimation && activeGiftAnimation.streamId === activeStream.id
-            ? activeGiftAnimation
-            : null
-        }
-        onComplete={handleGiftOverlayComplete}
-        onDurationDetected={handleLiveGiftDurationDetected}
-        onProgress={handleLiveGiftPlaybackProgress}
-      />
+      {/* LAYER 5 (z-[35]): Foreground Gift Animation Layers (up to 3 concurrent multi-user gifts, voice-safe) */}
+      {activeGiftAnimations
+        .filter((ev) => ev.streamId === activeStream.id)
+        .map((giftEv, idx) => (
+          <GiftAnimationOverlay
+            key={`live_fg_${giftEv.id}`}
+            layer="foreground"
+            slotIndex={idx}
+            preserveVoiceAudio={true}
+            currentEvent={giftEv}
+            onComplete={handleGiftOverlayComplete}
+            onDurationDetected={handleLiveGiftDurationDetected}
+            onProgress={handleLiveGiftPlaybackProgress}
+          />
+        ))}
 
       {/* Interactive Rapid-Succession Gift Combo Counter HUD */}
       {!showGiftDrawer && !isBroadcastEnded && (
@@ -2047,21 +2182,30 @@ export const LiveStreamScreen: React.FC = () => {
             <div
               key={msg.id}
               onClick={() => handleCommentClick(msg)}
-              className={`inline-flex items-center gap-1.5 max-w-[95%] px-2.5 py-1 rounded-xl backdrop-blur-md border text-[11px] text-white shadow-sm cursor-pointer transition-all ${
-                msg.isGiftHighlight
-                  ? 'bg-gradient-to-r from-amber-500/25 via-pink-500/20 to-purple-600/30 border-amber-400/60 shadow-[0_0_12px_rgba(251,191,36,0.3)] animate-pulse'
+              className={`inline-flex items-center gap-1.5 max-w-[95%] px-2.5 py-1 rounded-xl backdrop-blur-md border text-[11px] text-white shadow-sm transition-all ${
+                msg.isAiBot
+                  ? 'bg-indigo-950/75 border-indigo-400/45 text-indigo-50 cursor-default'
+                  : msg.isGiftHighlight
+                  ? 'bg-gradient-to-r from-amber-500/25 via-pink-500/20 to-purple-600/30 border-amber-400/60 shadow-[0_0_12px_rgba(251,191,36,0.3)] animate-pulse cursor-pointer'
                   : msg.isEntryNotice
-                  ? 'bg-gradient-to-r from-purple-950/70 to-pink-950/60 border-purple-400/40 text-amber-200'
-                  : 'bg-black/55 border-white/5 hover:border-[#A855F7]/40 hover:bg-black/75'
+                  ? 'bg-gradient-to-r from-purple-950/70 to-pink-950/60 border-purple-400/40 text-amber-200 cursor-pointer'
+                  : 'bg-black/55 border-white/5 hover:border-[#A855F7]/40 hover:bg-black/75 cursor-pointer'
               }`}
-              title="Tap to view user profile & controls"
+              title={msg.isAiBot ? 'Alpha AI Live Assistant' : 'Tap to view user profile & controls'}
             >
-              {/* Level Badge Icon */}
-              <LevelBadgeIcon
-                level={msg.level ?? 0}
-                size="xs"
-                className="shrink-0"
-              />
+              {msg.isAiBot ? (
+                <img
+                  src={GEMINI_ASSISTANT_AVATAR}
+                  alt={GEMINI_ASSISTANT_NAME}
+                  className="w-4 h-4 rounded-full shrink-0 border border-indigo-300/50"
+                />
+              ) : (
+                <LevelBadgeIcon
+                  level={msg.level ?? 0}
+                  size="xs"
+                  className="shrink-0"
+                />
+              )}
 
               {msg.isGiftHighlight ? (
                 <span className="px-1 py-0.2 rounded bg-gradient-to-r from-amber-400 to-pink-500 text-black text-[8px] font-black uppercase shadow">
@@ -2075,7 +2219,9 @@ export const LiveStreamScreen: React.FC = () => {
 
               <span
                 className={`font-black shrink-0 ${
-                  msg.isGiftHighlight
+                  msg.isAiBot
+                    ? 'text-indigo-200'
+                    : msg.isGiftHighlight
                     ? 'text-amber-300'
                     : msg.isEntryNotice
                     ? 'text-amber-200'
@@ -2086,7 +2232,11 @@ export const LiveStreamScreen: React.FC = () => {
               </span>
               <span
                 className={`break-words ${
-                  msg.isGiftHighlight ? 'text-white font-semibold' : 'text-zinc-200'
+                  msg.isAiBot
+                    ? 'text-white'
+                    : msg.isGiftHighlight
+                    ? 'text-white font-semibold'
+                    : 'text-zinc-200'
                 }`}
               >
                 {msg.text}
@@ -2130,12 +2280,24 @@ export const LiveStreamScreen: React.FC = () => {
 
             {/* 2. Send Comment */}
             <form onSubmit={handleSendComment} className="flex-1 flex items-center relative">
+              <button
+                type="button"
+                onClick={() => setAskAiMode((v) => !v)}
+                className={`absolute left-1 h-6.5 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                  askAiMode
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-white/10 text-zinc-300 hover:bg-white/20'
+                }`}
+                title="Toggle Ask Alpha AI mode (or type @ai)"
+              >
+                AI
+              </button>
               <input
                 type="text"
-                placeholder="Say something nice..."
+                placeholder={askAiMode ? 'Ask Alpha AI in live chat...' : 'Say something nice (or @ai)...'}
                 value={inputComment}
                 onChange={(e) => setInputComment(e.target.value)}
-                className="w-full h-8.5 pl-3 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+                className="w-full h-8.5 pl-10 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
               />
               <button
                 type="submit"
@@ -2172,12 +2334,24 @@ export const LiveStreamScreen: React.FC = () => {
           <div className="flex flex-col gap-1.5">
             {/* Top row: Comment input */}
             <form onSubmit={handleSendComment} className="w-full flex items-center relative">
+              <button
+                type="button"
+                onClick={() => setAskAiMode((v) => !v)}
+                className={`absolute left-1 h-6 px-2 rounded-full text-[10px] font-bold transition-colors cursor-pointer ${
+                  askAiMode
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-white/10 text-zinc-300 hover:bg-white/20'
+                }`}
+                title="Toggle Ask Alpha AI mode (or type @ai)"
+              >
+                AI
+              </button>
               <input
                 type="text"
-                placeholder="Chat with your audience as Host..."
+                placeholder={askAiMode ? 'Ask Alpha AI in live chat...' : 'Chat with audience (or type @ai)...'}
                 value={inputComment}
                 onChange={(e) => setInputComment(e.target.value)}
-                className="w-full h-8 pl-3 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
+                className="w-full h-8 pl-10 pr-8 rounded-full bg-black/60 backdrop-blur-md border border-white/15 text-white placeholder-zinc-400 text-xs focus:outline-none focus:border-[#A855F7]"
               />
               <button
                 type="submit"
@@ -2265,207 +2439,28 @@ export const LiveStreamScreen: React.FC = () => {
         )}
       </div>
 
-      {/* Virtual Gifts Drawer Modal with Multipliers and Rapid Combos */}
-      {showGiftDrawer && (
-        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex flex-col justify-end animate-fade-in">
-          <div className="w-full max-w-md mx-auto rounded-t-3xl bg-[#140C26] border-t border-[#A855F7]/30 p-4 pb-6 shadow-2xl animate-slide-up">
-            {/* Drawer Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-[#A855F7]/20">
-              <div className="flex items-center gap-2">
-                <GiftIcon className="w-4 h-4 text-amber-400" />
-                <span className="text-sm font-black text-white">Send Virtual Gift</span>
-                {giftRecipientUser ? (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-900/60 border border-purple-500/40 text-purple-200 truncate max-w-[110px]">
-                    To: {giftRecipientUser.displayName}
-                  </span>
-                ) : (
-                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300">
-                    To Host 👑
-                  </span>
-                )}
-              </div>
-
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-1 px-2.5 py-1 rounded-full bg-black/60 border border-amber-400/30">
-                  <span className="text-xs text-amber-400 font-black">
-                    💰 {coins.toLocaleString()}
-                  </span>
-                </div>
-                <button
-                  onClick={() => {
-                    setShowGiftDrawer(false);
-                    setShowLuckyDrawModal(true);
-                  }}
-                  className="px-2.5 py-1 rounded-full bg-gradient-to-r from-amber-400 to-[#EC4899] text-black font-black text-[10px] hover:brightness-110 active:scale-95 transition-all cursor-pointer shadow flex items-center gap-1"
-                >
-                  <Sparkles className="w-3 h-3 text-amber-950" />
-                  <span>Lucky Draw</span>
-                </button>
-                <button
-                  onClick={() => setCurrentScreen('wallet')}
-                  className="px-2 py-1 rounded-full bg-white/10 hover:bg-white/20 border border-white/15 text-zinc-200 text-[10px] font-bold active:scale-95 transition-all cursor-pointer shadow"
-                >
-                  + Recharge
-                </button>
-                <button
-                  onClick={() => {
-                    setShowGiftDrawer(false);
-                    setGiftRecipientUser(null);
-                  }}
-                  className="w-7 h-7 rounded-full bg-white/10 hover:bg-white/20 text-zinc-300 hover:text-white flex items-center justify-center cursor-pointer transition-all ml-1"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            {/* On-device Gift Animation Cache Bar */}
-            <GiftCacheBar gifts={publishedCatalogGifts} />
-
-            {/* Gift Grid (Published Multi-Format Advanced Gifts + Standard Virtual Gifts) */}
-            <div className="grid grid-cols-4 gap-2 py-3.5 max-h-64 overflow-y-auto">
-              {publishedCatalogGifts.map((g) => {
-                const isSelected = selectedGift.id === g.id;
-                const isTestGift = Boolean(g.isTestGift || g.advancedConfig?.isTestGift);
-                const isAdvanced = Boolean(g.advancedConfig);
-                const isMythic = !isTestGift && g.coins >= 19999;
-                const isEpic = !isTestGift && g.coins >= 1999 && !isMythic;
-                return (
-                  <div
-                    key={g.id}
-                    onClick={() => setSelectedGift(g)}
-                    className={`relative rounded-2xl p-2.5 flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
-                      isSelected
-                        ? 'bg-gradient-to-b from-[#7928CA]/50 to-[#EC4899]/40 border-2 border-[#EC4899] shadow-[0_0_20px_rgba(236,72,153,0.4)] scale-105'
-                        : isTestGift
-                        ? 'bg-gradient-to-b from-cyan-950/70 to-[#1C1236] border border-cyan-400/45 hover:border-cyan-300'
-                        : 'bg-[#1C1236] border border-white/5 hover:border-white/20'
-                    }`}
-                  >
-                    {isTestGift && (
-                      <span className="absolute -top-1.5 -right-1 px-1.5 rounded bg-gradient-to-r from-cyan-500 to-blue-600 text-[7px] font-black text-white shadow">
-                        TEST
-                      </span>
-                    )}
-                    {!isTestGift && isAdvanced && (
-                      <span className="absolute -top-1.5 -left-1 px-1 rounded bg-emerald-600/90 text-[6.5px] font-black text-white uppercase shadow">
-                        {g.advancedConfig?.format}
-                      </span>
-                    )}
-                    {isMythic && (
-                      <span className="absolute -top-1.5 -right-1 px-1 rounded bg-gradient-to-r from-red-600 to-amber-500 text-[7px] font-black text-white shadow">
-                        MYTHIC
-                      </span>
-                    )}
-                    {isEpic && (
-                      <span className="absolute -top-1.5 -right-1 px-1 rounded bg-gradient-to-r from-purple-600 to-pink-500 text-[7px] font-black text-white shadow">
-                        VIP
-                      </span>
-                    )}
-                    <GiftIconImage
-                      gift={g}
-                      className="w-10 h-10 object-contain mb-1 drop-shadow"
-                      emojiClassName="text-2xl mb-1 drop-shadow"
-                    />
-                    <span className="text-[10.5px] font-bold text-white truncate max-w-full">
-                      {g.name}
-                    </span>
-                    <span className="text-[10px] text-amber-300 font-extrabold mt-0.5 flex items-center gap-0.5">
-                      <span>{(g.costInCoins ?? g.coins).toLocaleString()}</span>
-                      <span className="text-[9px]">💰</span>
-                    </span>
-                    <GiftCacheBadge gift={g} />
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Quantity Multiplier Selector Bar */}
-            <div className="pt-2 pb-2.5 border-t border-[#A855F7]/15 flex items-center justify-between gap-1.5">
-              <span className="text-[11px] font-bold text-zinc-400 shrink-0">Quantity:</span>
-              <div className="flex items-center gap-1 overflow-x-auto py-0.5">
-                {[1, 5, 10, 66, 99, 188, 520].map((num) => {
-                  const isActive = giftQuantityMultiplier === num;
-                  return (
-                    <button
-                      key={num}
-                      onClick={() => setGiftQuantityMultiplier(num)}
-                      className={`px-2 py-0.5 rounded-lg text-[10px] font-black transition-all cursor-pointer shrink-0 ${
-                        isActive
-                          ? 'bg-gradient-to-r from-amber-400 to-pink-500 text-black shadow-md'
-                          : 'bg-[#221642] text-zinc-300 hover:text-white border border-white/5'
-                      }`}
-                    >
-                      x{num}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* Selected Gift Footer with Send & Combo Button */}
-            <div className="flex items-center justify-between pt-2 border-t border-[#A855F7]/15 gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <GiftIconImage
-                  gift={selectedGift}
-                  className="w-8 h-8 object-contain shrink-0 rounded-lg drop-shadow"
-                  emojiClassName="text-2xl shrink-0 drop-shadow"
-                />
-                <div className="min-w-0">
-                  <div className="text-xs font-black text-white truncate">
-                    {selectedGift.name}
-                    {giftQuantityMultiplier > 1 && (
-                      <span className="ml-1 text-pink-400">x{giftQuantityMultiplier}</span>
-                    )}
-                  </div>
-                  <div className="text-[10px] text-amber-300 font-bold">
-                    Total: {((selectedGift.costInCoins ?? selectedGift.coins) * giftQuantityMultiplier).toLocaleString()} Coins
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                {activeGiftCombo &&
-                  activeGiftCombo.gift.id === selectedGift.id &&
-                  comboRemainingMs > 0 && (
-                    <div
-                      key={`drawer-combo-${selectedGift.id}-${activeGiftCombo.comboCount}`}
-                      className="animate-combo-pop relative overflow-hidden flex flex-col px-2.5 py-1 rounded-xl bg-gradient-to-r from-red-600/90 via-amber-500/85 to-purple-600/90 border border-yellow-300/60 shadow-[0_0_16px_rgba(245,158,11,0.5)]"
-                    >
-                      <div className="flex items-center gap-1 text-white text-[11px] font-black italic tracking-tight">
-                        <Flame className="w-3.5 h-3.5 text-yellow-200 fill-current animate-pulse" />
-                        <span>COMBO x{activeGiftCombo.comboCount}</span>
-                      </div>
-                      <div className="mt-0.5 h-1 w-full rounded-full bg-black/40 overflow-hidden">
-                        <div
-                          className="h-full bg-yellow-200 transition-[width] duration-100 ease-linear"
-                          style={{
-                            width: `${Math.max(0, Math.min(100, (comboRemainingMs / GIFT_COMBO_WINDOW_MS) * 100))}%`,
-                          }}
-                        />
-                      </div>
-                    </div>
-                  )}
-                <button
-                  onClick={() => handleSendSelectedGift()}
-                  className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#7928CA] via-[#9333EA] to-[#EC4899] text-white font-black text-xs shadow-lg shadow-[#7928CA]/50 hover:brightness-110 active:scale-90 transition-all cursor-pointer flex items-center gap-1.5 shrink-0"
-                >
-                  <span>
-                    {activeGiftCombo &&
-                    activeGiftCombo.gift.id === selectedGift.id &&
-                    comboRemainingMs > 0
-                      ? `Combo x${activeGiftCombo.comboCount + 1}`
-                      : 'Send'}
-                  </span>
-                  <span className="text-[10px] opacity-90">
-                    ({(selectedGift.coins * giftQuantityMultiplier).toLocaleString()} 💰)
-                  </span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Ultra-Fast Isolated Virtual Gifts Drawer Modal (60fps GPU scroll, zero PullToRefresh interference) */}
+      <FastGiftDrawer
+        isOpen={showGiftDrawer}
+        mode="live"
+        gifts={publishedCatalogGifts}
+        selectedGift={selectedGift}
+        coins={coins}
+        recipientLabel={giftRecipientUser ? `To: ${giftRecipientUser.displayName}` : 'To Host 👑'}
+        quantityMultiplier={giftQuantityMultiplier}
+        onSelectGift={setSelectedGift}
+        onSelectQuantity={setGiftQuantityMultiplier}
+        onSend={() => handleSendSelectedGift()}
+        onClose={() => {
+          setShowGiftDrawer(false);
+          setGiftRecipientUser(null);
+        }}
+        onRecharge={() => setCurrentScreen('wallet')}
+        onOpenLuckyDraw={() => {
+          setShowGiftDrawer(false);
+          setShowLuckyDrawModal(true);
+        }}
+      />
 
       {/* Share Broadcast Modal */}
       {showShareModal && (

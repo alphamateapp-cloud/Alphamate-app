@@ -55,7 +55,22 @@ import {
   UserPlus,
   UserCheck,
   Eye,
+  RotateCcw,
 } from 'lucide-react';
+import {
+  GEMINI_ASSISTANT_AVATAR,
+  GEMINI_ASSISTANT_CONVERSATION_ID,
+  GEMINI_ASSISTANT_HANDLE,
+  GEMINI_ASSISTANT_NAME,
+  GEMINI_ASSISTANT_PUBLIC_ID,
+  GEMINI_ASSISTANT_USER_ID,
+  GeminiInboxMessage,
+  clearInboxBotHistory,
+  loadInboxBotHistory,
+  requestGeminiChat,
+  requestGeminiWelcome,
+  saveInboxBotHistory,
+} from '../services/geminiChatService';
 
 type LocalMessage = ChatMessage & {
   replyTo?: string;
@@ -175,6 +190,12 @@ export const ChatScreen: React.FC = () => {
   const [foundUsers, setFoundUsers] = useState<User[]>([]);
   const [userSearchLoading, setUserSearchLoading] = useState(false);
   const [groupInvites, setGroupInvites] = useState<any[]>([]);
+  const [geminiInboxMessages, setGeminiInboxMessages] = useState<GeminiInboxMessage[]>(() =>
+    loadInboxBotHistory(currentUser.id)
+  );
+  const [geminiReplying, setGeminiReplying] = useState(false);
+  const [geminiWelcoming, setGeminiWelcoming] = useState(false);
+  const [geminiError, setGeminiError] = useState<string | null>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
@@ -182,6 +203,64 @@ export const ChatScreen: React.FC = () => {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLElement>(null);
   const messageInputRef = useRef<HTMLInputElement>(null);
+  const geminiWelcomedUserRef = useRef<string | null>(null);
+  const geminiLastFailedPromptRef = useRef<string | null>(null);
+
+  // Sync per-user persisted Gemini Inbox history when signed-in user switches
+  useEffect(() => {
+    const stored = loadInboxBotHistory(currentUser.id);
+    setGeminiInboxMessages(stored);
+    setGeminiError(null);
+  }, [currentUser.id]);
+
+  // Automatically welcome every user in their Inbox when their Alpha AI thread is empty
+  useEffect(() => {
+    if (!currentUser.id) return;
+    if (geminiInboxMessages.length > 0) {
+      geminiWelcomedUserRef.current = currentUser.id;
+      return;
+    }
+    if (geminiWelcomedUserRef.current === currentUser.id) return;
+    geminiWelcomedUserRef.current = currentUser.id;
+
+    let cancelled = false;
+    setGeminiWelcoming(true);
+    requestGeminiWelcome({
+      userName: currentUser.displayName || 'Friend',
+      roomType: 'inbox',
+      isSelf: true,
+      vipTier: currentUser.vipTier ?? 0,
+    })
+      .then(({ text, model }) => {
+        if (cancelled) return;
+        const welcomeEntry: GeminiInboxMessage = {
+          id: `gemini_welcome_${Date.now()}`,
+          role: 'model',
+          text,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          createdAtMs: Date.now(),
+          model,
+          isWelcome: true,
+        };
+        setGeminiInboxMessages((prev) => {
+          if (prev.length > 0) return prev;
+          const next = [welcomeEntry];
+          saveInboxBotHistory(currentUser.id, next);
+          return next;
+        });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn('[Gemini Inbox Welcome]', err?.message || err);
+      })
+      .finally(() => {
+        if (!cancelled) setGeminiWelcoming(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser.id, currentUser.displayName, currentUser.vipTier, geminiInboxMessages.length]);
 
   const directoryUsers = useMemo(
     () => (realUsers.length > 0 ? realUsers : registeredUsers).filter((u) => u.id && u.id !== currentUser.id),
@@ -361,9 +440,11 @@ export const ChatScreen: React.FC = () => {
     });
   }, [firebaseChats, sentRequests]);
 
+  const isGeminiConversation = activeConversation?.id === GEMINI_ASSISTANT_CONVERSATION_ID;
+
   // Resolve whether activeConversation is an approved Firestore chat, an incoming pending request, or a new/outgoing request
   const approvedActiveChat = useMemo(() => {
-    if (!activeConversation) return undefined;
+    if (!activeConversation || isGeminiConversation) return undefined;
     if (activeConversation.isGroup) {
       return firebaseChats.find((c) => c.id === activeConversation.id);
     }
@@ -371,24 +452,24 @@ export const ChatScreen: React.FC = () => {
     return firebaseChats.find(
       (c) => c.id === activeConversation.id || (!c.isGroup && partnerId && c.user?.id === partnerId)
     );
-  }, [activeConversation, firebaseChats]);
+  }, [activeConversation, isGeminiConversation, firebaseChats]);
 
   const effectiveApprovedChatId = approvedActiveChat?.id || null;
   const isApprovedFirestoreChat = Boolean(effectiveApprovedChatId);
 
   const activeIncomingRequest = useMemo(() => {
-    if (!activeConversation || activeConversation.isGroup || isApprovedFirestoreChat) return undefined;
+    if (!activeConversation || activeConversation.isGroup || isApprovedFirestoreChat || isGeminiConversation) return undefined;
     const partnerId = activeConversation.user?.id;
     if (!partnerId) return undefined;
     return requests.find((r) => r.user.id === partnerId || r.senderId === partnerId);
-  }, [activeConversation, isApprovedFirestoreChat, requests]);
+  }, [activeConversation, isApprovedFirestoreChat, isGeminiConversation, requests]);
 
   const activeOutgoingRequest = useMemo(() => {
-    if (!activeConversation || activeConversation.isGroup || isApprovedFirestoreChat) return undefined;
+    if (!activeConversation || activeConversation.isGroup || isApprovedFirestoreChat || isGeminiConversation) return undefined;
     const partnerId = activeConversation.user?.id;
     if (!partnerId) return undefined;
     return sentRequests.find((r) => r.recipientId === partnerId || r.user.id === partnerId);
-  }, [activeConversation, isApprovedFirestoreChat, sentRequests]);
+  }, [activeConversation, isApprovedFirestoreChat, isGeminiConversation, sentRequests]);
 
   // Real-time Firestore messages listener ONLY when the chat is actually approved/created in `chats`
   useEffect(() => {
@@ -448,6 +529,18 @@ export const ChatScreen: React.FC = () => {
   // Compute displayed messages for active conversation
   const activeDisplayedMessages = useMemo<LocalMessage[]>(() => {
     if (!activeConversation) return [];
+    if (isGeminiConversation) {
+      return geminiInboxMessages.map((m) => ({
+        id: m.id,
+        senderId: m.role === 'user' ? currentUser.id : GEMINI_ASSISTANT_USER_ID,
+        senderName: m.role === 'user' ? currentUser.displayName : GEMINI_ASSISTANT_NAME,
+        senderAvatar: m.role === 'user' ? currentUser.avatar || FALLBACK_AVATAR : GEMINI_ASSISTANT_AVATAR,
+        text: m.text,
+        timestamp: m.timestamp,
+        isRead: true,
+        isMe: m.role === 'user',
+      }));
+    }
     if (isApprovedFirestoreChat) {
       return firebaseMessages;
     }
@@ -465,6 +558,11 @@ export const ChatScreen: React.FC = () => {
     return (activeConversation.messages || []) as LocalMessage[];
   }, [
     activeConversation,
+    isGeminiConversation,
+    geminiInboxMessages,
+    currentUser.id,
+    currentUser.displayName,
+    currentUser.avatar,
     isApprovedFirestoreChat,
     firebaseMessages,
     activeIncomingRequest,
@@ -474,7 +572,39 @@ export const ChatScreen: React.FC = () => {
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [activeDisplayedMessages.length, activeConversation?.id]);
+  }, [activeDisplayedMessages.length, activeConversation?.id, geminiReplying]);
+
+  // Pinned Gemini Assistant conversation present in every user's Inbox
+  const geminiAssistantConversation = useMemo<Conversation>(() => {
+    const latest = geminiInboxMessages[geminiInboxMessages.length - 1];
+    return {
+      id: GEMINI_ASSISTANT_CONVERSATION_ID,
+      user: {
+        id: GEMINI_ASSISTANT_USER_ID,
+        uniqueId: GEMINI_ASSISTANT_PUBLIC_ID,
+        username: GEMINI_ASSISTANT_HANDLE,
+        displayName: GEMINI_ASSISTANT_NAME,
+        avatar: GEMINI_ASSISTANT_AVATAR,
+        bio: 'Built-in Alpha Mate Gemini Assistant',
+        followersCount: 0,
+        followingCount: 0,
+        likesCount: 0,
+        level: 99,
+        xp: 0,
+        nextLevelXp: 1000,
+        vipTier: 0,
+        coins: 0,
+        diamonds: 0,
+        isVerified: true,
+      },
+      lastMessage: latest?.text || (geminiWelcoming ? 'Preparing your welcome...' : 'Ask anything · Multi-turn Gemini chat'),
+      lastTimestamp: latest?.timestamp || 'Now',
+      unreadCount: 0,
+      isGroup: false,
+      requestStatus: 'connected',
+      messages: [],
+    };
+  }, [geminiInboxMessages, geminiWelcoming]);
 
   // Outgoing pending requests converted to Conversation items for the sender's Chats tab
   const outgoingPendingConversations = useMemo<Conversation[]>(() => {
@@ -495,16 +625,18 @@ export const ChatScreen: React.FC = () => {
 
   const allConversations = useMemo(
     () => [
+      geminiAssistantConversation,
       ...firebaseChats,
       ...outgoingPendingConversations,
       ...localGroups.filter((g) => !firebaseChats.some((f) => f.id === g.id)),
       ...conversations.filter(
         (c) =>
+          c.id !== GEMINI_ASSISTANT_CONVERSATION_ID &&
           !firebaseChats.some((f) => f.id === c.id || (!f.isGroup && !c.isGroup && f.user?.id === c.user?.id)) &&
           !outgoingPendingConversations.some((p) => p.user?.id === c.user?.id)
       ),
     ],
-    [firebaseChats, outgoingPendingConversations, localGroups, conversations]
+    [geminiAssistantConversation, firebaseChats, outgoingPendingConversations, localGroups, conversations]
   );
 
   const filtered = allConversations.filter((c) => {
@@ -711,8 +843,89 @@ export const ChatScreen: React.FC = () => {
     }
   };
 
+  const sendToGeminiInbox = async (promptText: string, skipAppendUser = false) => {
+    const cleanPrompt = promptText.trim();
+    if (!cleanPrompt || geminiReplying) return;
+
+    const nowMs = Date.now();
+    const timeLabel = new Date(nowMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const historySnapshot = geminiInboxMessages.map((m) => ({
+      role: m.role,
+      text: m.text,
+    }));
+
+    if (!skipAppendUser) {
+      const userEntry: GeminiInboxMessage = {
+        id: `gemini_user_${nowMs}`,
+        role: 'user',
+        text: cleanPrompt,
+        timestamp: timeLabel,
+        createdAtMs: nowMs,
+      };
+      setGeminiInboxMessages((prev) => {
+        const next = [...prev, userEntry];
+        saveInboxBotHistory(currentUser.id, next);
+        return next;
+      });
+    }
+
+    setGeminiReplying(true);
+    setGeminiError(null);
+    geminiLastFailedPromptRef.current = null;
+
+    try {
+      const { reply, model } = await requestGeminiChat({
+        message: cleanPrompt,
+        history: historySnapshot,
+        mode: 'inbox',
+        context: {
+          userName: currentUser.displayName || 'Friend',
+        },
+      });
+      const replyMs = Date.now();
+      const botEntry: GeminiInboxMessage = {
+        id: `gemini_bot_${replyMs}`,
+        role: 'model',
+        text: reply,
+        timestamp: new Date(replyMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        createdAtMs: replyMs,
+        model,
+      };
+      setGeminiInboxMessages((prev) => {
+        const next = [...prev, botEntry];
+        saveInboxBotHistory(currentUser.id, next);
+        return next;
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unable to get a reply from Alpha AI.';
+      setGeminiError(msg);
+      geminiLastFailedPromptRef.current = cleanPrompt;
+    } finally {
+      setGeminiReplying(false);
+    }
+  };
+
+  const handleResetGeminiInbox = () => {
+    clearInboxBotHistory(currentUser.id);
+    setGeminiInboxMessages([]);
+    setGeminiError(null);
+    geminiLastFailedPromptRef.current = null;
+    geminiWelcomedUserRef.current = null;
+    showToast('Alpha AI chat history cleared.');
+  };
+
   const send = async (text = draft, mediaUrl?: string, kind: LocalMessage['kind'] = 'text') => {
     if (!activeConversation || (!text.trim() && !mediaUrl) || sendingRequest) return;
+
+    if (isGeminiConversation) {
+      const promptText = text.trim();
+      if (!promptText || geminiReplying) return;
+      setDraft('');
+      setReplyTo(null);
+      setShowEmoji(false);
+      await sendToGeminiInbox(promptText, false);
+      return;
+    }
 
     if (editMessage) {
       if (auth.currentUser?.uid === currentUser.id && effectiveApprovedChatId) {
@@ -960,7 +1173,7 @@ export const ChatScreen: React.FC = () => {
     const partnerHandle = partner?.username ? `@${partner.username.replace(/^@/, '')}` : '';
     const partnerPublicId = partner?.uniqueId || (partner?.id ? partner.id.slice(0, 10) : '');
     const isDirectFirebase =
-      !activeConversation.isGroup && auth.currentUser?.uid === currentUser.id && Boolean(partner?.id);
+      !activeConversation.isGroup && !isGeminiConversation && auth.currentUser?.uid === currentUser.id && Boolean(partner?.id);
 
     return (
       <div className="relative flex h-full flex-1 min-h-0 w-full flex-col overflow-hidden bg-[#090510] text-white">
@@ -976,11 +1189,11 @@ export const ChatScreen: React.FC = () => {
             </button>
             <div
               onClick={() => {
-                if (!activeConversation.isGroup && partner?.id) {
+                if (!activeConversation.isGroup && !isGeminiConversation && partner?.id) {
                   openPublicUserProfile(partner);
                 }
               }}
-              className="relative cursor-pointer shrink-0"
+              className={`relative shrink-0 ${isGeminiConversation ? '' : 'cursor-pointer'}`}
             >
               <img
                 src={
@@ -992,7 +1205,7 @@ export const ChatScreen: React.FC = () => {
                 referrerPolicy="no-referrer"
                 className="h-10 w-10 rounded-full border border-fuchsia-400/60 object-cover bg-[#1F1235]"
               />
-              {!activeConversation.isGroup && (
+              {!activeConversation.isGroup && !isGeminiConversation && (
                 <i
                   className={`absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full border-2 border-[#130922] ${
                     isApprovedFirestoreChat ? 'bg-emerald-400' : 'bg-amber-400'
@@ -1002,11 +1215,11 @@ export const ChatScreen: React.FC = () => {
             </div>
             <div
               onClick={() => {
-                if (!activeConversation.isGroup && partner?.id) {
+                if (!activeConversation.isGroup && !isGeminiConversation && partner?.id) {
                   openPublicUserProfile(partner);
                 }
               }}
-              className="min-w-0 flex-1 cursor-pointer"
+              className={`min-w-0 flex-1 ${isGeminiConversation ? '' : 'cursor-pointer'}`}
             >
               <div className="flex items-center gap-1.5">
                 <span className="truncate text-[15px] font-bold">
@@ -1014,7 +1227,9 @@ export const ChatScreen: React.FC = () => {
                 </span>
               </div>
               <div className="truncate text-[11px] text-zinc-300">
-                {activeConversation.isGroup ? (
+                {isGeminiConversation ? (
+                  <span className="text-purple-200">Gemini Assistant · Multi-turn Inbox Chat</span>
+                ) : activeConversation.isGroup ? (
                   <span className="text-emerald-400">{`${activeConversation.groupMembers?.length || 1} members`}</span>
                 ) : (
                   <>
@@ -1035,30 +1250,45 @@ export const ChatScreen: React.FC = () => {
                 )}
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => setCallState('voice')}
-              className="rounded-full p-2 text-emerald-300 hover:bg-emerald-400/10 cursor-pointer shrink-0"
-              title="Voice call"
-            >
-              <Phone size={18} />
-            </button>
-            <button
-              type="button"
-              onClick={() => setCallState('video')}
-              className="rounded-full p-2 text-fuchsia-300 hover:bg-fuchsia-400/10 cursor-pointer shrink-0"
-              title="Video call"
-            >
-              <Video size={19} />
-            </button>
-            <RefreshScopeButton scope="chat" compact className="w-8 h-8 shrink-0" title="Refresh chat messages" />
-            <button
-              type="button"
-              onClick={() => setShowAttach((v) => !v)}
-              className="rounded-full p-1.5 text-zinc-300 cursor-pointer shrink-0"
-            >
-              <MoreVertical size={19} />
-            </button>
+            {isGeminiConversation ? (
+              <button
+                type="button"
+                onClick={handleResetGeminiInbox}
+                disabled={geminiReplying}
+                className="flex items-center gap-1.5 rounded-xl border border-purple-400/25 bg-white/5 px-3 py-2 text-xs font-semibold text-purple-200 hover:bg-white/10 cursor-pointer disabled:opacity-50 shrink-0"
+                title="Reset conversation history"
+              >
+                <RotateCcw size={14} />
+                <span>Clear</span>
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setCallState('voice')}
+                  className="rounded-full p-2 text-emerald-300 hover:bg-emerald-400/10 cursor-pointer shrink-0"
+                  title="Voice call"
+                >
+                  <Phone size={18} />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCallState('video')}
+                  className="rounded-full p-2 text-fuchsia-300 hover:bg-fuchsia-400/10 cursor-pointer shrink-0"
+                  title="Video call"
+                >
+                  <Video size={19} />
+                </button>
+                <RefreshScopeButton scope="chat" compact className="w-8 h-8 shrink-0" title="Refresh chat messages" />
+                <button
+                  type="button"
+                  onClick={() => setShowAttach((v) => !v)}
+                  className="rounded-full p-1.5 text-zinc-300 cursor-pointer shrink-0"
+                >
+                  <MoreVertical size={19} />
+                </button>
+              </>
+            )}
           </div>
         </header>
 
@@ -1091,15 +1321,17 @@ export const ChatScreen: React.FC = () => {
             onRefresh={() => refreshScope('chat')}
           />
 
-          <div className="mx-auto w-fit rounded-full border border-white/10 bg-black/25 px-3 py-1 text-[10px] text-zinc-300">
-            {isApprovedFirestoreChat
-              ? 'Connected · Real-Time Chat Active'
-              : activeIncomingRequest
-              ? 'Chat Request · Approve to connect'
-              : activeOutgoingRequest
-              ? 'Request Pending · Stored in Recipient Requests'
-              : 'Direct Message · Send a message request'}
-          </div>
+          {!isGeminiConversation && (
+            <div className="mx-auto w-fit rounded-full border border-white/10 bg-black/25 px-3 py-1 text-[10px] text-zinc-300">
+              {isApprovedFirestoreChat
+                ? 'Connected · Real-Time Chat Active'
+                : activeIncomingRequest
+                ? 'Chat Request · Approve to connect'
+                : activeOutgoingRequest
+                ? 'Request Pending · Stored in Recipient Requests'
+                : 'Direct Message · Send a message request'}
+            </div>
+          )}
 
           {/* Status Banner for Unapproved Direct Chats */}
           {isDirectFirebase && !isApprovedFirestoreChat && !activeIncomingRequest && (
@@ -1120,9 +1352,11 @@ export const ChatScreen: React.FC = () => {
             </div>
           )}
 
-          {messages.length === 0 && (
+          {messages.length === 0 && !geminiWelcoming && (
             <div className="text-center py-8 text-xs text-zinc-400">
-              Type your message below and tap Send to start chatting!
+              {isGeminiConversation
+                ? 'Say hello or ask Alpha AI anything in Hindi, Urdu, or English.'
+                : 'Type your message below and tap Send to start chatting!'}
             </div>
           )}
 
@@ -1138,10 +1372,10 @@ export const ChatScreen: React.FC = () => {
                   type="button"
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    if (!msg.pendingApproval) setMenuMessage(msg);
+                    if (!msg.pendingApproval && !isGeminiConversation) setMenuMessage(msg);
                   }}
                   onClick={() => {
-                    if (!msg.pendingApproval) setMenuMessage(msg);
+                    if (!msg.pendingApproval && !isGeminiConversation) setMenuMessage(msg);
                   }}
                   className={`rounded-2xl px-3.5 py-2.5 text-left text-[13px] leading-relaxed shadow-lg ${
                     msg.isMe
@@ -1160,7 +1394,7 @@ export const ChatScreen: React.FC = () => {
                         className="mb-2 max-h-52 rounded-xl object-cover"
                       />
                     ))}
-                  {msg.text && <span className="break-words">{msg.text}</span>}
+                  {msg.text && <span className="break-words whitespace-pre-wrap">{msg.text}</span>}
                   {msg.edited && <span className="ml-2 text-[9px] opacity-70">edited</span>}
                 </button>
                 <div className="mt-1 flex items-center gap-1 px-1 text-[10px] text-zinc-500">
@@ -1177,6 +1411,51 @@ export const ChatScreen: React.FC = () => {
               </div>
             </div>
           ))}
+
+          {isGeminiConversation && (geminiReplying || geminiWelcoming) && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl rounded-bl-sm border border-purple-400/20 bg-[#211332] px-4 py-2.5 text-xs text-purple-200">
+                {geminiWelcoming ? 'Alpha AI is welcoming you...' : 'Alpha AI is typing...'}
+              </div>
+            </div>
+          )}
+
+          {isGeminiConversation && geminiError && (
+            <div className="mx-auto max-w-sm rounded-2xl border border-rose-400/30 bg-rose-950/40 px-3.5 py-2.5 text-xs text-rose-200 flex items-center justify-between gap-3">
+              <span className="leading-snug">{geminiError}</span>
+              {geminiLastFailedPromptRef.current && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const lastPrompt = geminiLastFailedPromptRef.current;
+                    if (lastPrompt) void sendToGeminiInbox(lastPrompt, true);
+                  }}
+                  className="shrink-0 rounded-lg bg-rose-500/25 border border-rose-400/40 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-rose-500/40 cursor-pointer"
+                >
+                  Retry
+                </button>
+              )}
+            </div>
+          )}
+
+          {isGeminiConversation && messages.length <= 1 && !geminiReplying && (
+            <div className="flex flex-wrap gap-2 pt-2">
+              {[
+                'Party Room kaise join karein?',
+                'Live stream me audience kaise badhayein?',
+                'Ek pyari si welcome shayari sunao',
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  type="button"
+                  onClick={() => void sendToGeminiInbox(prompt, false)}
+                  className="rounded-xl border border-purple-400/25 bg-[#1b102c] px-3 py-2 text-left text-xs text-purple-100 hover:bg-purple-500/20 cursor-pointer transition-colors"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </div>
+          )}
           <div ref={chatEndRef} />
         </main>
 
@@ -1373,17 +1652,19 @@ export const ChatScreen: React.FC = () => {
           onClick={() => messageInputRef.current?.focus()}
           className="flex shrink-0 items-center gap-2 border-t border-purple-400/25 bg-[#10091d] px-3 py-2.5 pb-3"
         >
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowAttach((v) => !v);
-            }}
-            className="rounded-full bg-purple-500/15 p-2.5 text-purple-200 cursor-pointer shrink-0"
-            title="Attach media"
-          >
-            <Plus size={19} />
-          </button>
+          {!isGeminiConversation && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowAttach((v) => !v);
+              }}
+              className="rounded-full bg-purple-500/15 p-2.5 text-purple-200 cursor-pointer shrink-0"
+              title="Attach media"
+            >
+              <Plus size={19} />
+            </button>
+          )}
           <button
             type="button"
             onClick={(e) => {
@@ -1404,7 +1685,9 @@ export const ChatScreen: React.FC = () => {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={
-              isApprovedFirestoreChat
+              isGeminiConversation
+                ? 'Ask Alpha AI anything...'
+                : isApprovedFirestoreChat
                 ? `Message ${activeConversation.isGroup ? activeConversation.groupName : partner?.displayName || ''}...`
                 : activeIncomingRequest
                 ? 'Write a reply to approve & chat...'
@@ -1412,7 +1695,7 @@ export const ChatScreen: React.FC = () => {
             }
             className="h-11 min-w-0 flex-1 rounded-full border border-purple-400/30 bg-[#21152f] px-4 text-sm text-white outline-none placeholder:text-zinc-400 focus:border-fuchsia-400"
           />
-          {!draft.trim() && isApprovedFirestoreChat && (
+          {!draft.trim() && isApprovedFirestoreChat && !isGeminiConversation && (
             <button
               type="button"
               onClick={(e) => {
@@ -1427,7 +1710,7 @@ export const ChatScreen: React.FC = () => {
           )}
           <button
             type="submit"
-            disabled={!draft.trim() || sendingRequest}
+            disabled={!draft.trim() || sendingRequest || (isGeminiConversation && geminiReplying)}
             aria-label="Send message"
             className="rounded-full bg-gradient-to-r from-purple-600 to-pink-500 p-3 text-white shadow-md cursor-pointer disabled:opacity-45 shrink-0"
           >

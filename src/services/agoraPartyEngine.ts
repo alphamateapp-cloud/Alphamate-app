@@ -425,7 +425,7 @@ class AgoraPartyEngine {
       } else if (localChanged) {
         this.emitSpeakingSnapshot();
       }
-    }, 180);
+    }, 240);
   }
 
   private clearReconnectTimer() {
@@ -764,7 +764,7 @@ class AgoraPartyEngine {
 
         if (changed) {
           this.emitParticipants();
-        } else {
+        } else if (this.isLocalSpeaking(now) !== this.lastEmittedLocalSpeaking) {
           this.emitSpeakingSnapshot();
         }
       }),
@@ -1001,7 +1001,7 @@ class AgoraPartyEngine {
       }
       if (changed) {
         this.emitParticipants();
-      } else {
+      } else if (this.isLocalSpeaking(now) !== this.lastEmittedLocalSpeaking) {
         this.emitSpeakingSnapshot();
       }
     });

@@ -53,28 +53,62 @@ public class AgoraPartyPlugin extends Plugin {
         synchronized (engineLock) {
             currentEngine = engine;
         }
-        if (focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
-            focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
-            mutedForAudioFocus = true;
-            if (currentEngine != null && isPublishing && !userMuted) {
-                try {
-                    currentEngine.muteLocalAudioStream(true);
-                } catch (Exception ignored) {}
+        AudioManager am = getAudioManager();
+        boolean isPhoneCallActive = false;
+        if (am != null) {
+            try {
+                int mode = am.getMode();
+                isPhoneCallActive =
+                    mode == AudioManager.MODE_IN_CALL ||
+                    mode == AudioManager.MODE_RINGTONE;
+            } catch (Exception ignored) {}
+        }
+
+        if (focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+            // Only pause mic during a real incoming/active phone call; ignore internal WebView media focus churn
+            // (e.g., gift animations playing inside our own app must NEVER mute Party Voice).
+            if (isPhoneCallActive) {
+                mutedForAudioFocus = true;
+                if (currentEngine != null && isPublishing && !userMuted) {
+                    try {
+                        currentEngine.muteLocalAudioStream(true);
+                    } catch (Exception ignored) {}
+                }
             }
             JSObject data = new JSObject();
-            data.put("focused", false);
-            data.put("reason", "transient");
+            data.put("focused", !isPhoneCallActive);
+            data.put("reason", isPhoneCallActive ? "phone_call" : "transient_ignored");
+            notifyListeners("audioFocusChanged", data);
+        } else if (focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
+            // Never mute Party Voice on duckable sounds or UI effects.
+            JSObject data = new JSObject();
+            data.put("focused", true);
+            data.put("reason", "duck_ignored");
             notifyListeners("audioFocusChanged", data);
         } else if (focusChange == AudioManager.AUDIOFOCUS_LOSS) {
-            mutedForAudioFocus = true;
-            if (currentEngine != null && isPublishing && !userMuted) {
+            // Internal WebView <video> / AudioContext playback can trigger AUDIOFOCUS_LOSS inside the same app.
+            // Never permanently mute Party Voice when the user is still inside our active room;
+            // only pause if an actual telephony call took over.
+            if (isPhoneCallActive) {
+                mutedForAudioFocus = true;
+                if (currentEngine != null && isPublishing && !userMuted) {
+                    try {
+                        currentEngine.muteLocalAudioStream(true);
+                    } catch (Exception ignored) {}
+                }
+            } else if (currentEngine != null) {
+                // Re-assert voice audio routing so WebView media cannot silence remote Party speakers.
+                mutedForAudioFocus = false;
                 try {
-                    currentEngine.muteLocalAudioStream(true);
+                    if (isPublishing && !userMuted) {
+                        currentEngine.muteLocalAudioStream(false);
+                    }
+                    applyOptimalAudioRoute(currentEngine);
                 } catch (Exception ignored) {}
             }
             JSObject data = new JSObject();
-            data.put("focused", false);
-            data.put("reason", "permanent");
+            data.put("focused", !isPhoneCallActive);
+            data.put("reason", isPhoneCallActive ? "phone_call" : "in_app_preserved");
             notifyListeners("audioFocusChanged", data);
         } else if (focusChange == AudioManager.AUDIOFOCUS_GAIN) {
             boolean wasInterrupted = mutedForAudioFocus;
@@ -303,6 +337,7 @@ public class AgoraPartyPlugin extends Plugin {
                     audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                         .setAudioAttributes(attrs)
                         .setAcceptsDelayedFocusGain(true)
+                        .setWillPauseWhenDucked(false)
                         .setOnAudioFocusChangeListener(focusChangeListener)
                         .build();
                 }
@@ -536,11 +571,18 @@ public class AgoraPartyPlugin extends Plugin {
         }
         boolean muted = call.getBoolean("muted", true);
         userMuted = muted;
+        if (!muted) {
+            mutedForAudioFocus = false;
+            requestPartyAudioFocus();
+        }
         boolean effectiveMuted = muted || mutedForAudioFocus;
         int result = currentEngine.muteLocalAudioStream(effectiveMuted);
         if (result != 0) {
             call.reject("Unable to change microphone state: " + result);
             return;
+        }
+        if (!muted) {
+            applyOptimalAudioRoute(currentEngine);
         }
         JSObject out = new JSObject();
         out.put("muted", muted);

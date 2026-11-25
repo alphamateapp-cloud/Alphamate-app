@@ -109,7 +109,7 @@ export default defineConfig(() => {
             // Never cache real-time voice/video tokens, auth OTPs, uploads, or live rooms API
             {
               urlPattern: ({url}) =>
-                /^\/api\/(agora|sfu|webrtc|auth|account|reels\/upload|realtime|admin)/.test(url.pathname),
+                /^\/api\/(agora|sfu|webrtc|auth|account|reels\/upload|realtime|admin|gemini)/.test(url.pathname),
               handler: 'NetworkOnly',
             },
             // Service Worker cached user profile snippets (served instantly offline and on cold boot)

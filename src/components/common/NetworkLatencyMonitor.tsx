@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { WifiOff, X } from 'lucide-react';
+import { WifiOff } from 'lucide-react';
 import { p2pStreamingEngine } from '../../services/webrtcService';
 import { agoraPartyEngine } from '../../services/agoraPartyEngine';
 
@@ -35,9 +35,9 @@ function classifyTier(params: {
     isOffline ||
     normState === 'failed' ||
     normState === 'disconnected' ||
-    txQuality >= 4 ||
-    (packetLossPct !== null && packetLossPct >= 6) ||
-    (rttMs !== null && rttMs > 380)
+    txQuality >= 5 ||
+    (packetLossPct !== null && packetLossPct >= 10) ||
+    (rttMs !== null && rttMs > 650)
   ) {
     return 'poor';
   }
@@ -45,9 +45,9 @@ function classifyTier(params: {
   if (
     normState === 'reconnecting' ||
     normState === 'connecting' ||
-    txQuality === 3 ||
-    (packetLossPct !== null && packetLossPct >= 2) ||
-    (rttMs !== null && rttMs > 160)
+    txQuality === 4 ||
+    (packetLossPct !== null && packetLossPct >= 4) ||
+    (rttMs !== null && rttMs > 280)
   ) {
     return 'fair';
   }
@@ -90,42 +90,12 @@ export const NetworkLatencyMonitor: React.FC<NetworkLatencyMonitorProps> = ({
   });
 
   const [showPopover, setShowPopover] = useState(false);
-  const [alertTier, setAlertTier] = useState<'fair' | 'poor' | null>(null);
-
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const consecutiveUnstableRef = useRef<number>(0);
-  const lastDismissedAtRef = useRef<number>(0);
-  const lastDismissedTierRef = useRef<'fair' | 'poor' | null>(null);
 
   useEffect(() => {
     if (!enabled || !sessionId) return;
 
     let cancelled = false;
-    let activeAbort: AbortController | null = null;
-
-    const measureFallbackRtt = async (): Promise<number | null> => {
-      if (typeof navigator !== 'undefined' && navigator.onLine === false) return null;
-      const base = agoraPartyEngine.getResolvedApiBase();
-      const targetUrl = `${base}/api/health`;
-      const controller = new AbortController();
-      activeAbort = controller;
-      const timer = setTimeout(() => controller.abort(), 3800);
-      const started = performance.now();
-      try {
-        const res = await fetch(targetUrl, {
-          method: 'GET',
-          cache: 'no-store',
-          signal: controller.signal,
-        });
-        if (!res.ok && res.status >= 500) return null;
-        return Math.max(1, Math.round(performance.now() - started));
-      } catch {
-        return null;
-      } finally {
-        clearTimeout(timer);
-        if (activeAbort === controller) activeAbort = null;
-      }
-    };
 
     const sampleNow = async () => {
       if (cancelled) return;
@@ -148,10 +118,7 @@ export const NetworkLatencyMonitor: React.FC<NetworkLatencyMonitorProps> = ({
         connectionState = stats.connectionState;
       }
 
-      if (rttMs === null && !isOffline) {
-        rttMs = await measureFallbackRtt();
-        if (cancelled) return;
-      }
+      if (cancelled) return;
 
       const tier = classifyTier({
         rttMs,
@@ -161,31 +128,26 @@ export const NetworkLatencyMonitor: React.FC<NetworkLatencyMonitorProps> = ({
         isOffline,
       });
 
-      setSnapshot({
-        rttMs,
-        packetLossPct,
-        txQuality,
-        connectionState,
-        tier,
-        isOffline,
-      });
-
-      if (tier === 'good') {
-        consecutiveUnstableRef.current = 0;
-        setAlertTier(null);
-      } else {
-        consecutiveUnstableRef.current += 1;
-        const requiredSamples = isOffline ? 1 : 2;
-        if (consecutiveUnstableRef.current >= requiredSamples) {
-          const now = Date.now();
-          const inCooldown =
-            now - lastDismissedAtRef.current < 45_000 &&
-            !(tier === 'poor' && lastDismissedTierRef.current === 'fair');
-          if (!inCooldown) {
-            setAlertTier(tier);
-          }
+      setSnapshot((prev) => {
+        if (
+          prev.rttMs === rttMs &&
+          prev.packetLossPct === packetLossPct &&
+          prev.txQuality === txQuality &&
+          prev.connectionState === connectionState &&
+          prev.tier === tier &&
+          prev.isOffline === isOffline
+        ) {
+          return prev;
         }
-      }
+        return {
+          rttMs,
+          packetLossPct,
+          txQuality,
+          connectionState,
+          tier,
+          isOffline,
+        };
+      });
     };
 
     const handleOnlineChange = () => {
@@ -195,14 +157,14 @@ export const NetworkLatencyMonitor: React.FC<NetworkLatencyMonitorProps> = ({
     window.addEventListener('online', handleOnlineChange);
     window.addEventListener('offline', handleOnlineChange);
     void sampleNow();
+    // Poll gently every 8s (no redundant HTTP /api/health requests competing with live voice)
     const timer = setInterval(() => {
       void sampleNow();
-    }, 3000);
+    }, 8000);
 
     return () => {
       cancelled = true;
       clearInterval(timer);
-      if (activeAbort) activeAbort.abort();
       window.removeEventListener('online', handleOnlineChange);
       window.removeEventListener('offline', handleOnlineChange);
     };
@@ -346,50 +308,6 @@ export const NetworkLatencyMonitor: React.FC<NetworkLatencyMonitorProps> = ({
           </div>
         )}
       </div>
-
-      {/* Unobtrusive Stability Alert Toast (only on sustained yellow/red connection issues) */}
-      {alertTier && (
-        <div
-          role="status"
-          aria-live="polite"
-          className="fixed top-[max(5.5rem,calc(var(--app-safe-top,0px)+5rem))] left-1/2 -translate-x-1/2 w-[calc(100%-2rem)] max-w-xs z-[65] pointer-events-auto animate-fade-in"
-        >
-          <div
-            className={`flex items-center justify-between gap-2 px-3 py-2 rounded-2xl backdrop-blur-md shadow-xl border text-[10px] ${
-              alertTier === 'poor'
-                ? 'bg-rose-950/90 border-rose-500/45 text-rose-100'
-                : 'bg-amber-950/90 border-amber-400/45 text-amber-100'
-            }`}
-          >
-            <div className="flex items-center gap-2 min-w-0">
-              <span
-                className={`w-2 h-2 rounded-full shrink-0 ${
-                  alertTier === 'poor' ? 'bg-rose-400 animate-ping' : 'bg-amber-400'
-                }`}
-              />
-              <span className="font-semibold leading-snug truncate">
-                {snapshot.isOffline
-                  ? 'Connection lost — attempting to reconnect…'
-                  : alertTier === 'poor'
-                    ? `Unstable connection (${rttDisplay}) — check signal`
-                    : `High network delay (${rttDisplay})`}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => {
-                lastDismissedAtRef.current = Date.now();
-                lastDismissedTierRef.current = alertTier;
-                setAlertTier(null);
-              }}
-              aria-label="Dismiss network alert"
-              className="w-5 h-5 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center shrink-0 cursor-pointer"
-            >
-              <X className="w-3 h-3" />
-            </button>
-          </div>
-        </div>
-      )}
     </>
   );
 };

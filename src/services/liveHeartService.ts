@@ -20,6 +20,7 @@ import {
   OperationType,
 } from './firebase';
 import { realtimeSocket } from './realtimeSocket';
+import { partyRoomDataService } from './partyRoomDataService';
 
 export type LiveRoomType = 'live' | 'party';
 
@@ -61,7 +62,7 @@ function resolveHeartRefs(type: LiveRoomType, id: string, sessionId?: string) {
 
 /**
  * Send a heart reaction to a Solo Live stream or Party Room.
- * Emits immediately over WebSocket for <50ms cross-device delivery AND persists to Firestore when quota permits.
+ * Emits over WebSocket (batched for Party Rooms to eliminate cascade overhead) AND persists to Firestore when quota permits.
  */
 export async function sendLiveHeart(type: LiveRoomType, id: string, sessionId?: string): Promise<void> {
   if (!id) return;
@@ -70,8 +71,12 @@ export async function sendLiveHeart(type: LiveRoomType, id: string, sessionId?: 
 
   const { statsRef, statsPath, eventsColRef, eventsPath, cleanSession } = resolveHeartRefs(type, id, sessionId);
 
-  // 1. Instant WebSocket broadcast for sub-50ms counter & animation sync
-  realtimeSocket.sendHeartTap(type, id, cleanSession);
+  // 1. Instant WebSocket broadcast (batched into single packet during Party Room cascades)
+  if (type === 'party') {
+    partyRoomDataService.enqueueHeartTap(id, cleanSession);
+  } else {
+    realtimeSocket.sendHeartTap(type, id, cleanSession);
+  }
 
   if (isFirestoreQuotaExceeded()) return;
 
@@ -155,7 +160,8 @@ export function subscribeToLiveHeartCount(
       wsCount = Number(event.heartCount) || 0;
       emitMax();
     } else if (event.type === 'room:heart') {
-      wsCount = Math.max(wsCount + 1, Number(event.heartCount) || 0);
+      const delta = Math.max(1, Number(event.count) || 1);
+      wsCount = Math.max(wsCount + delta, Number(event.heartCount) || 0);
       emitMax();
     }
   });
@@ -190,11 +196,14 @@ export function subscribeToLiveHeartEvents(
     if (cleanSession && event.roomSessionId && event.roomSessionId !== cleanSession) return;
     if (event.type === 'room:heart') {
       recentWsTimestamps.set(event.senderId, Date.now());
-      onEvent({
-        id: event.eventId,
-        senderId: event.senderId,
-        createdAt: event.createdAtMs,
-      });
+      const visualBurst = Math.min(4, Math.max(1, Number(event.count) || 1));
+      for (let i = 0; i < visualBurst; i += 1) {
+        onEvent({
+          id: i === 0 ? event.eventId : `${event.eventId}_${i}`,
+          senderId: event.senderId,
+          createdAt: event.createdAtMs,
+        });
+      }
     }
   });
 
